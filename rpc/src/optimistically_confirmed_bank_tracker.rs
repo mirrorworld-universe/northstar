@@ -104,6 +104,9 @@ impl OptimisticallyConfirmedBankTracker {
         slot_notification_subscribers: Option<Arc<RwLock<Vec<SlotNotificationSender>>>>,
         prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
         dependency_tracker: Option<Arc<DependencyTracker>>,
+
+        // Sonic:
+        sender: BankNotificationSender,
     ) -> Self {
         let mut pending_optimistically_confirmed_banks = HashSet::new();
         let mut last_notified_confirmed_slot: Slot = 0;
@@ -128,6 +131,7 @@ impl OptimisticallyConfirmedBankTracker {
                     &slot_notification_subscribers,
                     prioritization_fee_cache.as_deref(),
                     &dependency_tracker,
+                    &sender,
                 ) {
                     break;
                 }
@@ -149,10 +153,13 @@ impl OptimisticallyConfirmedBankTracker {
         slot_notification_subscribers: &Option<Arc<RwLock<Vec<SlotNotificationSender>>>>,
         prioritization_fee_cache: Option<&PrioritizationFeeCache>,
         dependency_tracker: &Option<Arc<DependencyTracker>>,
+
+        // Sonic:
+        sender: &BankNotificationSender,
     ) -> Result<(), RecvTimeoutError> {
         let notification = receiver.recv_timeout(Duration::from_secs(1))?;
         Self::process_notification(
-            notification,
+            notification.clone(),
             bank_forks,
             optimistically_confirmed_bank,
             subscriptions,
@@ -164,6 +171,10 @@ impl OptimisticallyConfirmedBankTracker {
             prioritization_fee_cache,
             dependency_tracker,
         );
+
+        // Sonic: TODO: can it be processed by northstar before optimistic confirmed bank tracker?
+        let _ = sender.send(notification);
+
         Ok(())
     }
 

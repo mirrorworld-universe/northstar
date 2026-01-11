@@ -34,6 +34,7 @@ pub mod forwarding_stage;
 pub mod gen_keys;
 mod mock_alpenglow_consensus;
 pub mod next_leader;
+pub mod northstar_service;
 pub mod optimistic_confirmation_verifier;
 pub mod repair;
 pub mod replay_stage;

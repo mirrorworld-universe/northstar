@@ -140,6 +140,9 @@ members = [
     "wen-restart",
     "xdp",
     "xdp-ebpf",
+
+    # Sonic:
+    "northstar",
 ]
 
 exclude = [
@@ -642,6 +645,9 @@ winreg = "0.55"
 x509-parser = "0.17.0"
 zeroize = { version = "1.8", default-features = false }
 zstd = "0.13.3"
+
+# Sonic
+northstar = { path = "northstar" }
 
 [profile.release-with-debug]
 inherits = "release"

@@ -81,6 +81,9 @@ pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
         delay_leader_block_for_pending_fork: config.delay_leader_block_for_pending_fork,
         retransmit_xdp: config.retransmit_xdp.clone(),
         repair_handler_type: config.repair_handler_type.clone(),
+
+        // Sonic:
+        portal: None,
     }
 }
 
