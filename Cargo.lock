@@ -4899,6 +4899,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61807f77802ff30975e01f4f071c8ba10c022052f98b3294119f3e615d13e5be"
 
 [[package]]
+name = "northstar"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "log",
+ "parking_lot 0.12.3",
+ "solana-account",
+ "solana-clock",
+ "solana-hash 3.1.0",
+ "solana-ledger",
+ "solana-pubkey 4.0.0",
+ "solana-rpc",
+ "solana-runtime",
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "num"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8206,6 +8223,7 @@ dependencies = [
  "log",
  "lru",
  "min-max-heap",
+ "northstar",
  "num_cpus",
  "num_enum",
  "prio-graph",

@@ -584,6 +584,8 @@ pub fn execute(
         wen_restart_coordinator: value_t!(matches, "wen_restart_coordinator", Pubkey).ok(),
         turbine_disabled: Arc::<AtomicBool>::default(),
         retransmit_xdp,
+        // Sonic: Portal pubkey for ephemeral rollup
+        portal: run_args.portal,
         broadcast_stage_type: BroadcastStageType::Standard,
         block_verification_method: value_t_or_exit!(
             matches,

@@ -418,6 +418,8 @@ pub struct ValidatorConfig {
     pub delay_leader_block_for_pending_fork: bool,
     pub retransmit_xdp: Option<XdpConfig>,
     pub repair_handler_type: RepairHandlerType,
+    // Sonic: Portal pubkey for ephemeral rollup
+    pub portal: Option<Pubkey>,
 }
 
 impl ValidatorConfig {
@@ -500,6 +502,8 @@ impl ValidatorConfig {
             delay_leader_block_for_pending_fork: false,
             retransmit_xdp: None,
             repair_handler_type: RepairHandlerType::default(),
+            // Sonic: Portal pubkey for ephemeral rollup
+            portal: None,
         }
     }
 
@@ -658,6 +662,8 @@ pub struct Validator {
     pubsub_service: Option<PubSubService>,
     rpc_completed_slots_service: Option<JoinHandle<()>>,
     optimistically_confirmed_bank_tracker: Option<OptimisticallyConfirmedBankTracker>,
+    #[allow(dead_code)]
+    northstar_service: Option<crate::northstar_service::NorthStarService>,
     transaction_status_service: Option<TransactionStatusService>,
     entry_notifier_service: Option<EntryNotifierService>,
     system_monitor_service: Option<SystemMonitorService>,
@@ -1219,6 +1225,7 @@ impl Validator {
             rpc_completed_slots_service,
             optimistically_confirmed_bank_tracker,
             bank_notification_sender,
+            northstar_service,
         ) = if let Some((rpc_addr, rpc_pubsub_addr)) = config.rpc_addrs {
             assert_eq!(
                 node.info.rpc().map(|addr| socket_addr_space.check(&addr)),
@@ -1332,6 +1339,9 @@ impl Validator {
                     None
                 };
 
+            let (bank_notifications_for_northstar_sender, bank_notifications_for_northstar_recv) =
+                unbounded();
+
             let dependency_tracker = transaction_status_sender
                 .is_some()
                 .then_some(dependency_tracker);
@@ -1345,12 +1355,25 @@ impl Validator {
                     confirmed_bank_subscribers,
                     prioritization_fee_cache.clone(),
                     dependency_tracker.clone(),
+                    bank_notifications_for_northstar_sender,
                 ));
             let bank_notification_sender_config = Some(BankNotificationSenderConfig {
                 sender: bank_notification_sender,
                 should_send_parents: geyser_plugin_service.is_some(),
                 dependency_tracker,
             });
+            // Sonic: Create NorthStar service if portal is provided
+            let northstar_service_opt = if let Some(portal_program_id) = config.portal {
+                Some(crate::northstar_service::NorthStarService::new(
+                    bank_forks.clone(),
+                    bank_notifications_for_northstar_recv,
+                    northstar::ManagerConfig { portal_program_id },
+                    exit.clone(),
+                ))
+            } else {
+                None
+            };
+
             (
                 Some(json_rpc_service),
                 Some(rpc_subscriptions),
@@ -1360,9 +1383,10 @@ impl Validator {
                 rpc_completed_slots_service,
                 optimistically_confirmed_bank_tracker,
                 bank_notification_sender_config,
+                northstar_service_opt,
             )
         } else {
-            (None, None, None, None, None, None, None, None)
+            (None, None, None, None, None, None, None, None, None)
         };
 
         let ip_echo_server = match node.sockets.ip_echo {
@@ -1816,6 +1840,7 @@ impl Validator {
             pubsub_service,
             rpc_completed_slots_service,
             optimistically_confirmed_bank_tracker,
+            northstar_service,
             transaction_status_service,
             entry_notifier_service,
             system_monitor_service,
@@ -2039,6 +2064,10 @@ impl Validator {
 
         if let Some(geyser_plugin_service) = self.geyser_plugin_service {
             geyser_plugin_service.join().expect("geyser_plugin_service");
+        }
+
+        if let Some(northstar_service) = self.northstar_service {
+            northstar_service.join().expect("northstar_service")
         }
     }
 }

@@ -71,6 +71,8 @@ pub struct RunArgs {
     pub entrypoints: Vec<SocketAddr>,
     pub known_validators: Option<HashSet<Pubkey>>,
     pub socket_addr_space: SocketAddrSpace,
+    // Sonic: Portal pubkey for ephemeral rollup
+    pub portal: Option<Pubkey>,
     pub rpc_bootstrap_config: RpcBootstrapConfig,
     pub blockstore_options: BlockstoreOptions,
     pub json_rpc_config: JsonRpcConfig,
@@ -135,6 +137,12 @@ impl FromClapArgMatches for RunArgs {
 
         let socket_addr_space = SocketAddrSpace::new(matches.is_present("allow_private_addr"));
 
+        // Sonic: Extract portal pubkey from CLI arguments
+        let portal = {
+            use solana_clap_utils::input_parsers::pubkey_of;
+            pubkey_of(matches, "portal")
+        };
+
         Ok(RunArgs {
             identity_keypair,
             ledger_path,
@@ -142,6 +150,8 @@ impl FromClapArgMatches for RunArgs {
             entrypoints,
             known_validators,
             socket_addr_space,
+            // Sonic: Portal for ephemeral rollup
+            portal,
             rpc_bootstrap_config: RpcBootstrapConfig::from_clap_arg_match(matches)?,
             blockstore_options: BlockstoreOptions::from_clap_arg_match(matches)?,
             json_rpc_config: JsonRpcConfig::from_clap_arg_match(matches)?,
@@ -665,6 +675,15 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .multiple(true)
             .takes_value(true)
             .help("Log when transactions are processed which reference a given key."),
+    )
+    // Sonic: Portal for ephemeral rollup
+    .arg(
+        Arg::with_name("portal")
+            .long("portal")
+            .validator(is_pubkey)
+            .value_name("PUBKEY")
+            .takes_value(true)
+            .help("Portal pubkey for fetching ephemeral rollup events"),
     )
     .arg(
         Arg::with_name("repair_validators")
@@ -1356,6 +1375,8 @@ mod tests {
                 entrypoints,
                 known_validators,
                 socket_addr_space: SocketAddrSpace::Global,
+                // Sonic: Initialize portal to None
+                portal: None,
                 rpc_bootstrap_config: RpcBootstrapConfig::default(),
                 blockstore_options: BlockstoreOptions::default(),
                 json_rpc_config,
@@ -1380,6 +1401,8 @@ mod tests {
                 known_validators: self.known_validators.clone(),
                 socket_addr_space: self.socket_addr_space,
                 ledger_path: self.ledger_path.clone(),
+                // Sonic:
+                portal: self.portal,
                 rpc_bootstrap_config: self.rpc_bootstrap_config.clone(),
                 blockstore_options: self.blockstore_options.clone(),
                 json_rpc_config: self.json_rpc_config.clone(),
