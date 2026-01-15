@@ -4214,6 +4214,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "northstar"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "log",
+ "parking_lot 0.12.5",
+ "solana-account",
+ "solana-clock",
+ "solana-hash 3.1.0",
+ "solana-pubkey 4.0.0",
+ "solana-rpc",
+ "solana-runtime",
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "num"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6892,6 +6908,7 @@ dependencies = [
  "log",
  "lru",
  "min-max-heap",
+ "northstar",
  "num_cpus",
  "num_enum",
  "prio-graph",
@@ -8332,7 +8349,7 @@ version = "4.0.0-alpha.0"
 dependencies = [
  "crossbeam-channel",
  "futures-util",
- "http 0.2.12",
+ "http 1.3.1",
  "log",
  "semver",
  "serde",
@@ -9070,7 +9087,7 @@ dependencies = [
  "flate2",
  "futures 0.3.31",
  "goauth",
- "http 0.2.12",
+ "http 1.3.1",
  "hyper 0.14.32",
  "hyper-proxy",
  "log",
