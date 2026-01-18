@@ -138,10 +138,7 @@ impl FromClapArgMatches for RunArgs {
         let socket_addr_space = SocketAddrSpace::new(matches.is_present("allow_private_addr"));
 
         // Sonic: Extract portal pubkey from CLI arguments
-        let portal = {
-            use solana_clap_utils::input_parsers::pubkey_of;
-            pubkey_of(matches, "portal")
-        };
+        let portal = solana_clap_utils::input_parsers::pubkey_of(matches, "portal");
 
         Ok(RunArgs {
             identity_keypair,
