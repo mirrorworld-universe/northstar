@@ -1,6 +1,7 @@
 use {
     crossbeam_channel::RecvTimeoutError,
     log::*,
+    northstar::EphemeralRollupSettings,
     solana_rpc::optimistically_confirmed_bank_tracker::{
         BankNotification, BankNotificationReceiver,
     },
@@ -30,7 +31,7 @@ impl NorthStarService {
         exit: Arc<AtomicBool>,
     ) -> Self {
         // Sonic: Initialize NorthStar manager
-        let mut manager = northstar::Manager::new(cfg);
+        let mut manager = northstar::Manager::new(cfg, bank_forks);
 
         let thread_hdl = Builder::new()
             .name("solNorthStar".to_string())
@@ -47,7 +48,7 @@ impl NorthStarService {
                             Err(RecvTimeoutError::Timeout) => continue,
                         };
 
-                    Self::process_notification(&mut manager, bank_forks.clone(), notification);
+                    Self::process_notification(&mut manager, notification);
                 }
 
                 debug!("NorthStar service shutting down");
@@ -57,11 +58,7 @@ impl NorthStarService {
         Self { thread_hdl }
     }
 
-    fn process_notification(
-        manager: &mut northstar::Manager,
-        bank_forks: Arc<std::sync::RwLock<BankForks>>,
-        notification: BankNotification,
-    ) {
+    fn process_notification(manager: &mut northstar::Manager, notification: BankNotification) {
         match notification {
             BankNotification::Frozen(_bank) => {}
             BankNotification::NewRootBank(_bank) => {}
@@ -69,8 +66,14 @@ impl NorthStarService {
             BankNotification::OptimisticallyConfirmed(slot) => {
                 // TODO: new root slots
                 debug!("optimistically confirmed {slot:?}");
-                let bank = bank_forks.read().unwrap().get(slot).unwrap();
-                manager.create_ephemeral_fork_from_root(bank).unwrap();
+                manager
+                    .create_ephemeral_fork_from_root(
+                        slot,
+                        EphemeralRollupSettings {
+                            delegated_addresses: vec![],
+                        },
+                    )
+                    .unwrap();
             }
         }
     }

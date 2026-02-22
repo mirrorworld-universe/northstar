@@ -1367,7 +1367,10 @@ impl Validator {
                 crate::northstar_service::NorthStarService::new(
                     bank_forks.clone(),
                     bank_notifications_for_northstar_recv,
-                    northstar::ManagerConfig { portal_program_id },
+                    northstar::ManagerConfig {
+                        portal_program_id,
+                        manager_account: todo!("Add our validator address"),
+                    },
                     exit.clone(),
                 )
             });
