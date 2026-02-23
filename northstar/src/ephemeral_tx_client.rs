@@ -1,9 +1,8 @@
 use {
-    arc_swap::ArcSwap,
     log::{debug, warn},
     solana_keypair::Keypair,
     solana_quic_definitions::NotifyKeyUpdate,
-    solana_runtime::bank::Bank,
+    solana_runtime::{bank::Bank, bank_forks::BankForks},
     solana_send_transaction_service::{
         send_transaction_service_stats::SendTransactionServiceStats,
         transaction_client::TransactionClient,
@@ -11,30 +10,31 @@ use {
     solana_svm::transaction_processor::ExecutionRecordingConfig,
     solana_svm_timings::ExecuteTimings,
     solana_transaction::versioned::VersionedTransaction,
-    std::{error::Error, sync::Arc},
+    std::{
+        error::Error,
+        sync::{Arc, RwLock},
+    },
 };
 
 pub struct EphemeralTransactionClient {
-    bank: ArcSwap<Bank>,
+    bank_forks: Arc<RwLock<BankForks>>,
 }
 
 impl Clone for EphemeralTransactionClient {
     fn clone(&self) -> Self {
         Self {
-            bank: ArcSwap::new(self.bank.load().clone()),
+            bank_forks: Arc::clone(&self.bank_forks),
         }
     }
 }
 
 impl EphemeralTransactionClient {
-    pub fn new(bank: Arc<Bank>) -> Self {
-        Self {
-            bank: ArcSwap::new(bank),
-        }
+    pub fn new(bank_forks: Arc<RwLock<BankForks>>) -> Self {
+        Self { bank_forks }
     }
 
-    pub fn set_bank(&self, bank: Arc<Bank>) {
-        self.bank.store(bank);
+    pub fn bank(&self) -> Arc<Bank> {
+        self.bank_forks.read().unwrap().working_bank()
     }
 }
 
@@ -44,7 +44,7 @@ impl TransactionClient for EphemeralTransactionClient {
         wire_transactions: Vec<Vec<u8>>,
         _stats: &SendTransactionServiceStats,
     ) {
-        let bank = self.bank.load();
+        let bank = self.bank();
         for wire_tx in wire_transactions {
             let tx = match bincode::deserialize(&wire_tx) {
                 Ok(tx) => tx,

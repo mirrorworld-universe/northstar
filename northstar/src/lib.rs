@@ -11,6 +11,7 @@ use {
 
 pub mod ephemeral_runtime;
 pub mod ephemeral_tx_client;
+pub mod slot_advancer;
 
 pub use crate::ephemeral_runtime::EphemeralRuntime;
 

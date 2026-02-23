@@ -1,5 +1,8 @@
 use {
-    crate::{ephemeral_tx_client::EphemeralTransactionClient, EphemeralRollupSettings},
+    crate::{
+        ephemeral_tx_client::EphemeralTransactionClient, slot_advancer::SlotAdvancer,
+        EphemeralRollupSettings,
+    },
     log::info,
     solana_gossip::cluster_info::ClusterInfo,
     solana_ledger::{blockstore::Blockstore, leader_schedule_cache::LeaderScheduleCache},
@@ -20,13 +23,13 @@ use {
             atomic::{AtomicBool, AtomicU64, Ordering},
             Arc, RwLock,
         },
+        time::Duration,
     },
     tempfile::TempDir,
     tokio::runtime::Runtime as TokioRuntime,
 };
 
 pub struct EphemeralRuntime {
-    bank: Arc<Bank>,
     bank_forks: Arc<RwLock<BankForks>>,
     tx_client: EphemeralTransactionClient,
     rpc_service: JsonRpcService,
@@ -35,6 +38,7 @@ pub struct EphemeralRuntime {
     _ledger_dir: TempDir,
     exit: Arc<AtomicBool>,
     runtime: Arc<TokioRuntime>,
+    slot_advancer: Option<SlotAdvancer>,
 }
 
 impl EphemeralRuntime {
@@ -47,15 +51,15 @@ impl EphemeralRuntime {
         let ephemeral_slot = parent_bank.slot().saturating_add(1);
         let bank = Bank::new_from_parent(parent_bank, &Pubkey::default(), ephemeral_slot);
         let bank_forks = BankForks::new_rw_arc(bank);
-        let bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
+        let initial_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
 
-        let tx_client = EphemeralTransactionClient::new(Arc::clone(&bank));
+        let tx_client = EphemeralTransactionClient::new(bank_forks.clone());
 
         let ledger_dir = TempDir::new().map_err(|e| e.to_string())?;
         let ledger_path = ledger_dir.path().to_path_buf();
         let blockstore = Arc::new(Blockstore::open(&ledger_path).map_err(|e| e.to_string())?);
 
-        let slot = bank.slot();
+        let slot = initial_bank.slot();
         let block_commitment_cache = Arc::new(RwLock::new(BlockCommitmentCache::new(
             std::collections::HashMap::new(),
             0,
@@ -68,7 +72,7 @@ impl EphemeralRuntime {
         )));
 
         let optimistically_confirmed_bank = Arc::new(RwLock::new(OptimisticallyConfirmedBank {
-            bank: Arc::clone(&bank),
+            bank: Arc::clone(&initial_bank),
         }));
 
         let leader_schedule_cache = Arc::new(LeaderScheduleCache::default());
@@ -77,7 +81,7 @@ impl EphemeralRuntime {
 
         let max_complete_transaction_status_slot = Arc::new(AtomicU64::default());
 
-        let genesis_hash = bank.hash();
+        let genesis_hash = initial_bank.hash();
 
         let validator_exit = Arc::new(RwLock::new(solana_validator_exit::Exit::default()));
         let exit = Arc::new(AtomicBool::new(false));
@@ -106,7 +110,7 @@ impl EphemeralRuntime {
             rpc_config,
             None,
             bank_forks.clone(),
-            block_commitment_cache,
+            block_commitment_cache.clone(),
             blockstore,
             cluster_info,
             genesis_hash,
@@ -127,11 +131,19 @@ impl EphemeralRuntime {
         info!(
             "EphemeralRuntime started on port {} with slot {}",
             rpc_port,
-            bank.slot()
+            initial_bank.slot()
+        );
+
+        let slot_advancer = SlotAdvancer::new(
+            bank_forks.clone(),
+            block_commitment_cache.clone(),
+            initial_bank,
+            Duration::from_millis(400),
+            Pubkey::default(),
+            exit.clone(),
         );
 
         Ok(Self {
-            bank,
             bank_forks,
             tx_client,
             rpc_service,
@@ -140,6 +152,7 @@ impl EphemeralRuntime {
             _ledger_dir: ledger_dir,
             exit,
             runtime,
+            slot_advancer: Some(slot_advancer),
         })
     }
 
@@ -148,12 +161,15 @@ impl EphemeralRuntime {
     }
 
     pub fn bank(&self) -> Arc<Bank> {
-        self.bank.clone()
+        self.bank_forks.read().unwrap().working_bank()
     }
 
     pub fn shutdown(&mut self) {
         info!("Shutting down EphemeralRuntime on port {}", self.rpc_port);
         self.exit.store(true, Ordering::Relaxed);
+        if let Some(advancer) = self.slot_advancer.take() {
+            advancer.join();
+        }
         self.rpc_service.exit();
         info!("EphemeralRuntime shutdown complete");
     }
@@ -399,6 +415,151 @@ mod tests {
 
         assert_eq!(parent_bank.get_balance(&sender_pubkey), sender_before);
         assert_eq!(parent_bank.get_balance(&receiver_pubkey), receiver_before);
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_blockhash_changes_over_time() {
+        agave_logger::setup();
+        let (_, mut runtime) = create_runtime();
+        let rpc_client = rpc_client(&runtime);
+
+        let hash1 = rpc_client.get_latest_blockhash().unwrap();
+
+        std::thread::sleep(Duration::from_secs(1));
+
+        let hash2 = rpc_client.get_latest_blockhash().unwrap();
+        assert_ne!(hash1, hash2, "Blockhash should change over time");
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_transactions_work_after_blockhash_refresh() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        let sender_keypair = Keypair::new();
+        let sender_pubkey = sender_keypair.pubkey();
+        let receiver_pubkey = Pubkey::new_unique();
+        let sender_initial = 100_000_000_000u64;
+        let transfer_amount = 10_000_000_000u64;
+        fund_account(&parent_bank, &sender_pubkey, sender_initial);
+        parent_bank.freeze();
+
+        let cluster_info = create_test_cluster_info();
+        let settings = EphemeralRollupSettings {
+            delegated_addresses: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            cluster_info,
+            settings,
+            find_free_port(),
+        )
+        .unwrap();
+        let rpc_client = rpc_client(&runtime);
+
+        std::thread::sleep(Duration::from_secs(1));
+
+        let blockhash = rpc_client.get_latest_blockhash().unwrap();
+        let instruction = transfer(&sender_pubkey, &receiver_pubkey, transfer_amount);
+        let tx = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&sender_pubkey),
+            &[&sender_keypair],
+            blockhash,
+        );
+
+        let config = RpcSendTransactionConfig {
+            skip_preflight: true,
+            ..Default::default()
+        };
+        rpc_client
+            .send_transaction_with_config(&tx, config)
+            .unwrap();
+
+        std::thread::sleep(Duration::from_millis(500));
+
+        let receiver_balance = rpc_client.get_balance(&receiver_pubkey).unwrap();
+        assert_eq!(receiver_balance, transfer_amount);
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_old_blockhash_eventually_rejected() {
+        agave_logger::setup();
+        let (_, mut runtime) = create_runtime();
+        let rpc_client = rpc_client(&runtime);
+
+        let old_blockhash = rpc_client.get_latest_blockhash().unwrap();
+
+        std::thread::sleep(Duration::from_secs(3));
+
+        let result = rpc_client.send_transaction(&Transaction::new_unsigned(
+            Message::new_with_blockhash(&[], None, &old_blockhash),
+        ));
+
+        assert!(result.is_err(), "Old blockhash should be rejected");
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_transactions_during_slot_transition() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        let sender_keypair = Keypair::new();
+        let sender_pubkey = sender_keypair.pubkey();
+        let receiver_pubkey = Pubkey::new_unique();
+        let sender_initial = 1_000_000_000_000u64;
+        fund_account(&parent_bank, &sender_pubkey, sender_initial);
+        parent_bank.freeze();
+
+        let cluster_info = create_test_cluster_info();
+        let settings = EphemeralRollupSettings {
+            delegated_addresses: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            cluster_info,
+            settings,
+            find_free_port(),
+        )
+        .unwrap();
+        let rpc_client = rpc_client(&runtime);
+
+        std::thread::sleep(Duration::from_millis(500));
+
+        let mut results = Vec::new();
+        for _ in 0..100 {
+            let blockhash = rpc_client.get_latest_blockhash().unwrap();
+            let instruction = transfer(&sender_pubkey, &receiver_pubkey, 1_000_000u64);
+            let tx = Transaction::new_signed_with_payer(
+                &[instruction],
+                Some(&sender_pubkey),
+                &[&sender_keypair],
+                blockhash,
+            );
+
+            let config = RpcSendTransactionConfig {
+                skip_preflight: true,
+                ..Default::default()
+            };
+            results.push(rpc_client.send_transaction_with_config(&tx, config));
+        }
+
+        std::thread::sleep(Duration::from_millis(500));
+
+        let successes = results.iter().filter(|r| r.is_ok()).count();
+        assert!(
+            successes > 50,
+            "Most transactions should succeed during slot transitions, got {}",
+            successes
+        );
 
         runtime.shutdown();
     }
