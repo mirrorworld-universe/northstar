@@ -1,6 +1,8 @@
 use {
     log::*,
     solana_clock::Slot,
+    solana_gossip::cluster_info::ClusterInfo,
+    solana_keypair::Keypair,
     solana_pubkey::Pubkey,
     solana_runtime::{bank::Bank, bank_forks::BankForks},
     std::sync::{Arc, RwLock},
@@ -10,8 +12,13 @@ use {
 pub mod ephemeral_runtime;
 pub mod ephemeral_tx_client;
 
+pub use crate::ephemeral_runtime::EphemeralRuntime;
+
 #[derive(Error, Debug)]
-pub enum NorthStarError {}
+pub enum NorthStarError {
+    #[error("Failed to create ephemeral runtime: {0}")]
+    RuntimeCreationFailed(String),
+}
 
 pub type Result<T> = std::result::Result<T, NorthStarError>;
 
@@ -32,8 +39,8 @@ pub struct ManagerConfig {
     // TODO: Configure this from genesis or parameter
     pub portal_program_id: Pubkey,
 
-    /// Manager account pubkey
-    pub manager_account: Pubkey,
+    /// Manager account keypair (for signing transactions in ephemeral rollups)
+    pub manager_account: Arc<Keypair>,
 }
 
 /// Metadata about an ephemeral fork
@@ -44,13 +51,37 @@ pub struct EphemeralForkMetadata {}
 pub struct Manager {
     config: ManagerConfig,
     bank_forks: Arc<RwLock<BankForks>>,
+    /// Active ephemeral runtime, if one is running
+    active_runtime: Option<EphemeralRuntime>,
 }
 
 impl Manager {
     /// Create a new NorthStar Manager
     pub fn new(config: ManagerConfig, bank_forks: Arc<RwLock<BankForks>>) -> Self {
         info!("Initializing NorthStar Manager with config: {config:?}");
-        Self { config, bank_forks }
+        Self {
+            config,
+            bank_forks,
+            active_runtime: None,
+        }
+    }
+
+    /// Check if an ephemeral runtime is currently active
+    pub fn has_active_runtime(&self) -> bool {
+        self.active_runtime.is_some()
+    }
+
+    /// Get the RPC port of the active runtime, if any
+    pub fn active_runtime_port(&self) -> Option<u16> {
+        self.active_runtime.as_ref().map(|r| r.rpc_port())
+    }
+
+    /// Shutdown the active ephemeral runtime, if any
+    pub fn shutdown_active_runtime(&mut self) {
+        if let Some(mut runtime) = self.active_runtime.take() {
+            info!("Shutting down ephemeral rollup");
+            runtime.shutdown();
+        }
     }
 
     pub fn get_l1_events(&self, slot: Slot) -> Vec<L1Event> {
@@ -72,27 +103,30 @@ impl Manager {
         }
     }
 
-    /// Create an ephemeral fork from the root bank
+    /// Create and store an EphemeralRuntime from the root bank
     ///
-    /// This is the main entry point when a new root is detected.
-    /// It creates a virtual fork bank for rollup simulation.
-    pub fn create_ephemeral_fork_from_root(
-        &self,
-        from: Slot,
-        EphemeralRollupSettings {
-            delegated_addresses,
-        }: EphemeralRollupSettings,
-    ) -> Result<EphemeralForkMetadata> {
-        let parent = self.bank_forks.read().unwrap().get(from).unwrap();
-        let bank = Bank::new_from_parent(parent, &self.config.manager_account, from + 1);
-        // TODO: execute some transactions
-        // bank.load_execute_and_commit_transactions(
-        //     batch,
-        //     max_age,
-        //     recording_config,
-        //     timings,
-        //     log_messages_bytes_limit,
-        // );
-        Ok(todo!())
+    /// This creates a fully functional ephemeral rollup with its own RPC server.
+    /// The runtime is stored in the Manager and can be accessed via active_runtime_port().
+    pub fn create_ephemeral_runtime(
+        &mut self,
+        root_bank: Arc<Bank>,
+        cluster_info: Arc<ClusterInfo>,
+        settings: EphemeralRollupSettings,
+        rpc_port: u16,
+    ) -> Result<()> {
+        if self.active_runtime.is_some() {
+            info!("Ephemeral runtime already active, skipping creation");
+            return Ok(());
+        }
+
+        let runtime =
+            EphemeralRuntime::new(root_bank, cluster_info, settings, rpc_port).map_err(|e| {
+                error!("Failed to create ephemeral runtime: {}", e);
+                NorthStarError::RuntimeCreationFailed(e)
+            })?;
+
+        info!("Ephemeral rollup started on port {}", rpc_port);
+        self.active_runtime = Some(runtime);
+        Ok(())
     }
 }

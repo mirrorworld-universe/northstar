@@ -586,6 +586,8 @@ pub fn execute(
         retransmit_xdp,
         // Sonic: Portal pubkey for ephemeral rollup
         portal: run_args.portal,
+        // Sonic: Ephemeral RPC port for rollup server
+        ephemeral_rpc_port: run_args.ephemeral_rpc_port,
         broadcast_stage_type: BroadcastStageType::Standard,
         block_verification_method: value_t_or_exit!(
             matches,

@@ -420,6 +420,8 @@ pub struct ValidatorConfig {
     pub repair_handler_type: RepairHandlerType,
     // Sonic: Portal pubkey for ephemeral rollup
     pub portal: Option<Pubkey>,
+    // Sonic: Ephemeral RPC port for rollup server
+    pub ephemeral_rpc_port: u16,
 }
 
 impl ValidatorConfig {
@@ -504,6 +506,8 @@ impl ValidatorConfig {
             repair_handler_type: RepairHandlerType::default(),
             // Sonic: Portal pubkey for ephemeral rollup
             portal: None,
+            // Sonic: Default ephemeral RPC port
+            ephemeral_rpc_port: 8910,
         }
     }
 
@@ -1369,7 +1373,12 @@ impl Validator {
                     bank_notifications_for_northstar_recv,
                     northstar::ManagerConfig {
                         portal_program_id,
-                        manager_account: todo!("Add our validator address"),
+                        manager_account: identity_keypair.clone(),
+                    },
+                    cluster_info.clone(),
+                    crate::northstar_service::NorthStarServiceConfig {
+                        ephemeral_rpc_port: config.ephemeral_rpc_port,
+                        slot_duration: Duration::from_millis(400),
                     },
                     exit.clone(),
                 )
