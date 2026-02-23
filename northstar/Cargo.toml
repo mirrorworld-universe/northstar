@@ -14,14 +14,29 @@ solana-clock.workspace = true
 solana-genesis-config.workspace = true
 solana-hash.workspace = true
 solana-keypair.workspace = true
+solana-message.workspace = true
 solana-pubkey = { workspace = true, default-features = false }
 solana-quic-definitions.workspace = true
 solana-rpc = { workspace = true, features = ["agave-unstable-api"] }
 solana-runtime = { workspace = true, features = ["agave-unstable-api", "dev-context-only-utils"] }
+solana-sdk-ids.workspace = true
+solana-signer.workspace = true
+solana-system-interface.workspace = true
 solana-send-transaction-service.workspace = true
 solana-svm-timings.workspace = true
 solana-svm.workspace = true
 solana-transaction.workspace = true
+solana-ledger.workspace = true
+solana-gossip.workspace = true
+solana-validator-exit.workspace = true
+solana-rpc-client.workspace = true
+solana-rpc-client-types.workspace = true
+solana-time-utils.workspace = true
+solana-net-utils.workspace = true
+
+tempfile.workspace = true
+tokio.workspace = true
+agave-logger.workspace = true
 
 [dev-dependencies]
 solana-ledger = { workspace = true, features = ["agave-unstable-api"] }

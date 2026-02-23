@@ -4902,24 +4902,37 @@ checksum = "61807f77802ff30975e01f4f071c8ba10c022052f98b3294119f3e615d13e5be"
 name = "northstar"
 version = "0.1.0"
 dependencies = [
+ "agave-logger",
  "arc-swap",
  "bincode",
  "log",
  "solana-account",
  "solana-clock",
  "solana-genesis-config",
+ "solana-gossip",
  "solana-hash 3.1.0",
  "solana-keypair",
  "solana-ledger",
+ "solana-message",
+ "solana-net-utils",
  "solana-pubkey 4.0.0",
  "solana-quic-definitions",
  "solana-rpc",
+ "solana-rpc-client",
+ "solana-rpc-client-types",
  "solana-runtime",
+ "solana-sdk-ids",
  "solana-send-transaction-service",
+ "solana-signer",
  "solana-svm",
  "solana-svm-timings",
+ "solana-system-interface 3.0.0",
+ "solana-time-utils",
  "solana-transaction",
+ "solana-validator-exit",
+ "tempfile",
  "thiserror 2.0.17",
+ "tokio",
 ]
 
 [[package]]
