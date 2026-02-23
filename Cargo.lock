@@ -4902,16 +4902,23 @@ checksum = "61807f77802ff30975e01f4f071c8ba10c022052f98b3294119f3e615d13e5be"
 name = "northstar"
 version = "0.1.0"
 dependencies = [
- "crossbeam-channel",
+ "arc-swap",
+ "bincode",
  "log",
- "parking_lot 0.12.3",
  "solana-account",
  "solana-clock",
+ "solana-genesis-config",
  "solana-hash 3.1.0",
+ "solana-keypair",
  "solana-ledger",
  "solana-pubkey 4.0.0",
+ "solana-quic-definitions",
  "solana-rpc",
  "solana-runtime",
+ "solana-send-transaction-service",
+ "solana-svm",
+ "solana-svm-timings",
+ "solana-transaction",
  "thiserror 2.0.17",
 ]
 

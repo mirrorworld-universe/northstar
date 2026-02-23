@@ -7,6 +7,8 @@ use {
     thiserror::Error,
 };
 
+pub mod ephemeral_tx_client;
+
 #[derive(Error, Debug)]
 pub enum NorthStarError {}
 
