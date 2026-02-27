@@ -79,6 +79,8 @@ impl SlotAdvancer {
             );
 
             for _ in 0..ticks_remaining {
+                // Ephemeral rollup: PoH is not verified externally, so we
+                // use random tick hashes to drive slot advancement.
                 let hash = Hash::new_unique();
                 let scheduler = RwLock::new(SchedulerStatus::Unavailable);
                 current_bank.register_tick(&hash, &scheduler);

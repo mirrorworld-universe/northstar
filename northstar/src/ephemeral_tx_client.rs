@@ -69,13 +69,18 @@ impl EphemeralTransactionClient {
         tx: VersionedTransaction,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let batch = bank.prepare_entry_batch(vec![tx])?;
-        let _results = bank.load_execute_and_commit_transactions(
+        let results = bank.load_execute_and_commit_transactions(
             &batch,
-            usize::MAX,
+            usize::MAX, // TODO: Use appropriate age limit for ephemeral rollup
             ExecutionRecordingConfig::default(),
             &mut ExecuteTimings::default(),
             None,
         );
+        for (tx_idx, result) in results.0.iter().enumerate() {
+            if let Err(e) = result {
+                debug!("Tx {tx_idx} failed: {e}");
+            }
+        }
         Ok(())
     }
 }

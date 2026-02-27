@@ -86,7 +86,10 @@ impl Manager {
     }
 
     pub fn get_l1_events(&self, slot: Slot) -> Vec<L1Event> {
-        let bank = self.bank_forks.read().unwrap().get(slot).unwrap();
+        let Some(bank) = self.bank_forks.read().unwrap().get(slot) else {
+            debug!("Slot {} not found in bank_forks, skipping", slot);
+            return vec![];
+        };
         let logs = bank
             .transaction_log_collector
             .read()
