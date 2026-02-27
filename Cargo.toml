@@ -143,6 +143,7 @@ members = [
 
     # Sonic:
     "northstar",
+    "northstar/programs/portal",
 ]
 
 exclude = [
