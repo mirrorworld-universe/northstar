@@ -63,30 +63,48 @@ impl NorthStarService {
                             Err(RecvTimeoutError::Timeout) => continue,
                         };
 
-                    // Only process OptimisticallyConfirmed notifications
-                    if let BankNotification::OptimisticallyConfirmed(slot) = notification {
+                    // Only process Frozen notifications
+                    if let BankNotification::Frozen(bank) = notification {
                         // Check if we already have an active runtime
                         if manager.has_active_runtime() {
                             continue;
                         }
 
                         // Check for L1 events from the portal program
-                        let l1_events = manager.get_l1_events(slot);
+                        let l1_events = manager.get_l1_events(&bank);
                         if l1_events.is_empty() {
-                            debug!("No L1 events at slot {}, skipping runtime creation", slot);
+                            debug!(
+                                "No L1 events at slot {}, skipping runtime creation",
+                                bank.slot()
+                            );
                             continue;
                         }
 
                         // Found L1 events, create ephemeral runtime
                         info!(
                             "Creating ephemeral runtime at slot {} due to L1 events",
-                            slot
+                            bank.slot()
                         );
 
                         // For now, use the first event's settings
                         // TODO: Handle multiple events or different event types
                         let settings = match &l1_events[0] {
-                            L1Event::CreateEphemeralRollup(s) => s.clone(),
+                            L1Event::SessionOpened {
+                                session_pda,
+                                owner,
+                                grid_id,
+                                ttl_slots,
+                                fee_cap,
+                            } => northstar::EphemeralRollupSettings {
+                                session_pda: *session_pda,
+                                owner: *owner,
+                                grid_id: *grid_id,
+                                ttl_slots: *ttl_slots,
+                                fee_cap: *fee_cap,
+                                delegated_accounts: vec![],
+                            },
+                            // Skip other event types for now - we only create runtimes on SessionOpened
+                            _ => continue,
                         };
 
                         let root_bank = bank_forks.read().unwrap().root_bank();
@@ -185,6 +203,9 @@ mod tests {
             slot_duration: Duration::from_millis(400),
         };
 
+        // Get the bank for notifications BEFORE moving bank_forks
+        let bank_for_test = bank_forks.read().unwrap().root_bank();
+
         let _service = NorthStarService::new(
             bank_forks,
             receiver,
@@ -200,9 +221,9 @@ mod tests {
         // Give the service time to start
         std::thread::sleep(Duration::from_millis(100));
 
-        // Send an OptimisticallyConfirmed notification
+        // Send a Frozen notification (need to wrap bank in Arc)
         sender
-            .send((BankNotification::OptimisticallyConfirmed(0), None))
+            .send((BankNotification::Frozen(bank_for_test), None))
             .unwrap();
 
         // Wait for runtime to start (it needs L1 events, which won't exist in this test)
@@ -232,6 +253,9 @@ mod tests {
             slot_duration: Duration::from_millis(400),
         };
 
+        // Get a reference to the frozen bank for sending notifications BEFORE moving bank_forks
+        let bank_for_notifications = bank_forks.read().unwrap().root_bank();
+
         let _service = NorthStarService::new(
             bank_forks,
             receiver,
@@ -246,10 +270,13 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(100));
 
-        // Send multiple notifications
+        // Send multiple Frozen notifications
         for _ in 0..3 {
             sender
-                .send((BankNotification::OptimisticallyConfirmed(0), None))
+                .send((
+                    BankNotification::Frozen(bank_for_notifications.clone()),
+                    None,
+                ))
                 .unwrap();
             std::thread::sleep(Duration::from_millis(50));
         }

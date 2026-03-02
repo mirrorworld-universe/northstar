@@ -1,6 +1,6 @@
 use {
     log::*,
-    solana_clock::Slot,
+    solana_account::ReadableAccount,
     solana_gossip::cluster_info::ClusterInfo,
     solana_keypair::Keypair,
     solana_pubkey::Pubkey,
@@ -14,7 +14,10 @@ pub mod ephemeral_tx_client;
 pub mod portal_state;
 pub mod slot_advancer;
 
-pub use crate::ephemeral_runtime::EphemeralRuntime;
+pub use crate::{
+    ephemeral_runtime::EphemeralRuntime,
+    portal_state::{try_parse_portal_account, PortalAccount},
+};
 
 #[derive(Error, Debug)]
 pub enum NorthStarError {
@@ -122,22 +125,181 @@ impl Manager {
         }
     }
 
-    pub fn get_l1_events(&self, slot: Slot) -> Vec<L1Event> {
-        let Some(bank) = self.bank_forks.read().unwrap().get(slot) else {
-            debug!("Slot {} not found in bank_forks, skipping", slot);
-            return vec![];
-        };
-        let logs = bank
-            .transaction_log_collector
-            .read()
-            .unwrap()
-            .get_logs_for_address(Some(&self.config.portal_program_id))
-            .unwrap_or_default();
+    pub fn get_l1_events(&self, bank: &Bank) -> Vec<L1Event> {
+        let modified =
+            bank.get_program_accounts_modified_since_parent(&self.config.portal_program_id);
 
-        // TODO: parse logs properly into typed L1Event variants
-        // This will be implemented in TASK_020
-        let _ = logs;
-        vec![]
+        let mut events = Vec::new();
+
+        for (pubkey, account) in &modified {
+            let data = account.data();
+            if data.is_empty() || data.iter().all(|b| *b == 0) {
+                // Account was zeroed — determine type from previous state
+                self.handle_zeroed_account(bank, pubkey, &mut events);
+                continue;
+            }
+
+            match try_parse_portal_account(data) {
+                Some(PortalAccount::Session(session)) => {
+                    // Check if this is a new session (didn't exist in parent)
+                    if self.is_new_in_slot(bank, pubkey) {
+                        events.push(L1Event::SessionOpened {
+                            session_pda: *pubkey,
+                            owner: session.owner,
+                            grid_id: session.grid_id,
+                            ttl_slots: session.ttl_slots,
+                            fee_cap: session.fee_cap,
+                        });
+                    }
+                }
+                Some(PortalAccount::DelegationRecord(record)) => {
+                    if self.is_new_in_slot(bank, pubkey) {
+                        // Find the delegated account by scanning
+                        if let Some(delegated) = self.find_delegated_account(bank, pubkey, &record)
+                        {
+                            events.push(L1Event::AccountDelegated {
+                                delegation_record_pda: *pubkey,
+                                delegated_account: delegated,
+                                owner_program: record.owner_program,
+                                grid_id: record.grid_id,
+                            });
+                        }
+                    }
+                }
+                Some(PortalAccount::FeeVault(vault)) => {
+                    events.push(L1Event::FeeDeposited {
+                        fee_vault_pda: *pubkey,
+                        amount: vault.balance,
+                    });
+                }
+                None => {
+                    // Unrecognized — log and skip
+                    debug!("Unrecognized portal account at {pubkey}");
+                }
+            }
+        }
+
+        events
+    }
+
+    /// Check if an account existed in the parent bank
+    fn is_new_in_slot(&self, bank: &Bank, pubkey: &Pubkey) -> bool {
+        match bank.parent() {
+            Some(parent) => parent.get_account(pubkey).is_none(),
+            None => true, // No parent means genesis — everything is new
+        }
+    }
+
+    /// For a newly created DelegationRecord PDA, find which account was delegated
+    /// by scanning all modifications in the slot
+    fn find_delegated_account(
+        &self,
+        bank: &Bank,
+        delegation_record_pda: &Pubkey,
+        _record: &portal_state::DelegationRecord,
+    ) -> Option<Pubkey> {
+        // Get all accounts modified in this slot
+        let all_modified = bank.get_all_accounts_modified_since_parent();
+
+        for (pubkey, account) in &all_modified {
+            // Skip the delegation record itself
+            if pubkey == delegation_record_pda {
+                continue;
+            }
+            // Check if this account is now owned by the portal program
+            if account.owner() != &self.config.portal_program_id {
+                continue;
+            }
+            // Verify PDA derivation matches
+            let (expected_pda, _) = Pubkey::find_program_address(
+                &[b"delegation", pubkey.as_ref()],
+                &self.config.portal_program_id,
+            );
+            if &expected_pda == delegation_record_pda {
+                return Some(*pubkey);
+            }
+        }
+
+        warn!(
+            "Could not find delegated account for delegation record {}",
+            delegation_record_pda
+        );
+        None
+    }
+
+    /// Find accounts whose owner changed FROM the portal program (undelegation)
+    fn find_undelegated_account(
+        &self,
+        bank: &Bank,
+        delegation_record_pda: &Pubkey,
+    ) -> Option<Pubkey> {
+        let parent = bank.parent()?;
+        let all_modified = bank.get_all_accounts_modified_since_parent();
+
+        for (pubkey, account) in &all_modified {
+            if pubkey == delegation_record_pda {
+                continue;
+            }
+            // Account is now NOT owned by portal, but was before
+            if account.owner() == &self.config.portal_program_id {
+                continue;
+            }
+            // Check parent — was it owned by portal?
+            if let Some(prev) = parent.get_account(pubkey) {
+                if prev.owner() != &self.config.portal_program_id {
+                    continue;
+                }
+                // Verify PDA derivation
+                let (expected_pda, _) = Pubkey::find_program_address(
+                    &[b"delegation", pubkey.as_ref()],
+                    &self.config.portal_program_id,
+                );
+                if &expected_pda == delegation_record_pda {
+                    return Some(*pubkey);
+                }
+            }
+        }
+
+        warn!(
+            "Could not find undelegated account for delegation record {}",
+            delegation_record_pda
+        );
+        None
+    }
+
+    /// When an account's data is zeroed, determine what type it was from the parent bank
+    fn handle_zeroed_account(&self, bank: &Bank, pubkey: &Pubkey, events: &mut Vec<L1Event>) {
+        let parent = match bank.parent() {
+            Some(p) => p,
+            None => return,
+        };
+
+        let prev_account = match parent.get_account(pubkey) {
+            Some(a) => a,
+            None => return,
+        };
+
+        let prev_data = prev_account.data();
+        match try_parse_portal_account(prev_data) {
+            Some(PortalAccount::Session(session)) => {
+                events.push(L1Event::SessionClosed {
+                    session_pda: *pubkey,
+                    owner: session.owner,
+                    grid_id: session.grid_id,
+                });
+            }
+            Some(PortalAccount::DelegationRecord(_record)) => {
+                // Find the delegated account that was undelegated
+                // by scanning for accounts whose owner changed FROM portal
+                if let Some(delegated) = self.find_undelegated_account(bank, pubkey) {
+                    events.push(L1Event::AccountUndelegated {
+                        delegation_record_pda: *pubkey,
+                        delegated_account: delegated,
+                    });
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Create and store an EphemeralRuntime from the root bank
