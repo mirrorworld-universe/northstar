@@ -5,11 +5,8 @@ use {
     solana_gossip::cluster_info::ClusterInfo,
     solana_keypair::Keypair,
     solana_pubkey::Pubkey,
-    solana_runtime::{bank::Bank, bank_forks::BankForks},
-    std::{
-        net::SocketAddr,
-        sync::{Arc, RwLock},
-    },
+    solana_runtime::bank::Bank,
+    std::{net::SocketAddr, sync::Arc},
     thiserror::Error,
 };
 
@@ -91,18 +88,16 @@ pub struct EphemeralForkMetadata {}
 /// Main manager for ephemeral rollup forks
 pub struct Manager {
     config: ManagerConfig,
-    bank_forks: Arc<RwLock<BankForks>>,
     /// Active ephemeral runtime, if one is running
     active_runtime: Option<EphemeralRuntime>,
 }
 
 impl Manager {
     /// Create a new NorthStar Manager
-    pub fn new(config: ManagerConfig, bank_forks: Arc<RwLock<BankForks>>) -> Self {
+    pub fn new(config: ManagerConfig) -> Self {
         info!("Initializing NorthStar Manager with config: {config:?}");
         Self {
             config,
-            bank_forks,
             active_runtime: None,
         }
     }
@@ -492,7 +487,7 @@ mod portal_e2e_tests {
             portal_program_id: program_id,
             manager_account: Arc::new(Keypair::new()),
         };
-        let manager = Manager::new(manager_config, Arc::clone(&bank_forks));
+        let manager = Manager::new(manager_config);
 
         let events = manager.get_l1_events(&bank_ref);
 
@@ -632,7 +627,7 @@ mod portal_e2e_tests {
             portal_program_id: program_id,
             manager_account: Arc::new(Keypair::new()),
         };
-        let manager = Manager::new(manager_config, Arc::clone(&bank_forks));
+        let manager = Manager::new(manager_config);
 
         let events = manager.get_l1_events(&bank_ref);
 
@@ -765,7 +760,7 @@ mod portal_e2e_tests {
             portal_program_id: program_id,
             manager_account: Arc::new(Keypair::new()),
         };
-        let manager = Manager::new(manager_config, Arc::clone(&bank_forks));
+        let manager = Manager::new(manager_config);
 
         let events = manager.get_l1_events(&bank_ref);
 
@@ -955,7 +950,7 @@ mod portal_e2e_tests {
             portal_program_id: program_id,
             manager_account: Arc::new(Keypair::new()),
         };
-        let manager = Manager::new(manager_config, Arc::clone(&bank_forks));
+        let manager = Manager::new(manager_config);
 
         let events = manager.get_l1_events(&bank_ref);
 
@@ -1031,7 +1026,7 @@ mod portal_e2e_tests {
             portal_program_id: program_id,
             manager_account: Arc::new(Keypair::new()),
         };
-        let manager = Manager::new(manager_config, Arc::clone(&bank_forks));
+        let manager = Manager::new(manager_config);
 
         let events = manager.get_l1_events(&bank_ref);
 

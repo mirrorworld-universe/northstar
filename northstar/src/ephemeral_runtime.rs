@@ -33,19 +33,20 @@ use {
 
 pub struct EphemeralRuntime {
     bank_forks: Arc<RwLock<BankForks>>,
-    tx_client: EphemeralTransactionClient,
     rpc_service: JsonRpcService,
-    settings: EphemeralRollupSettings,
     rpc_addr: SocketAddr,
-    _ledger_dir: TempDir,
     exit: Arc<AtomicBool>,
-    runtime: Arc<TokioRuntime>,
     slot_advancer: Option<SlotAdvancer>,
     /// Snapshot of delegated account state at ER creation time.
     /// Used for settlement diff computation (future task).
     initial_account_snapshots: HashMap<Pubkey, AccountSharedData>,
     /// Set of delegated account pubkeys for fast lookup.
     delegated_accounts: HashSet<Pubkey>,
+
+    _tx_client: EphemeralTransactionClient,
+    _settings: EphemeralRollupSettings,
+    _ledger_dir: TempDir,
+    _runtime: Arc<TokioRuntime>,
 }
 
 impl EphemeralRuntime {
@@ -180,16 +181,17 @@ impl EphemeralRuntime {
 
         Ok(Self {
             bank_forks,
-            tx_client,
             rpc_service,
-            settings,
             rpc_addr,
-            _ledger_dir: ledger_dir,
             exit,
-            runtime,
             slot_advancer: Some(slot_advancer),
             initial_account_snapshots,
             delegated_accounts,
+
+            _settings: settings,
+            _tx_client: tx_client,
+            _ledger_dir: ledger_dir,
+            _runtime: runtime,
         })
     }
 

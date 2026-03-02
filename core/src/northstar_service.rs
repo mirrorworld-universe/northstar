@@ -44,7 +44,7 @@ impl NorthStarService {
         exit: Arc<AtomicBool>,
     ) -> Self {
         // Sonic: Initialize NorthStar manager
-        let mut manager = northstar::Manager::new(cfg, bank_forks.clone());
+        let mut manager = northstar::Manager::new(cfg);
 
         let thread_hdl = Builder::new()
             .name("solNorthStar".to_string())
