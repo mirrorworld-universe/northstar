@@ -11,7 +11,7 @@ pub enum PortalAccount {
     DelegationRecord(DelegationRecord),
 }
 
-pub fn try_parse_portal_account(data: &[u8]) -> Option<PortalAccount> {
+pub fn try_parse_raw_portal_account(data: &[u8]) -> Option<PortalAccount> {
     if data.is_empty() {
         return None;
     }
