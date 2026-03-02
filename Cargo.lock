@@ -4914,6 +4914,7 @@ dependencies = [
  "agave-logger",
  "arc-swap",
  "bincode",
+ "borsh",
  "log",
  "solana-account",
  "solana-clock",

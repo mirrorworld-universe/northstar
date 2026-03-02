@@ -11,6 +11,7 @@ use {
 
 pub mod ephemeral_runtime;
 pub mod ephemeral_tx_client;
+pub mod portal_state;
 pub mod slot_advancer;
 
 pub use crate::ephemeral_runtime::EphemeralRuntime;
@@ -25,12 +26,48 @@ pub type Result<T> = std::result::Result<T, NorthStarError>;
 
 #[derive(Debug, Clone)]
 pub struct EphemeralRollupSettings {
-    pub delegated_addresses: Vec<Pubkey>,
+    pub session_pda: Pubkey,
+    pub owner: Pubkey,
+    pub grid_id: u64,
+    pub ttl_slots: u64,
+    pub fee_cap: u64,
+    pub delegated_accounts: Vec<Pubkey>,
 }
 
+/// Events detected on L1 that are relevant to ephemeral rollups.
+///
+/// These events are emitted when the NorthStar service scans portal
+/// program accounts and detects state changes.
 #[derive(Debug, Clone)]
 pub enum L1Event {
-    CreateEphemeralRollup(EphemeralRollupSettings),
+    /// A new Session PDA was created on L1
+    SessionOpened {
+        session_pda: Pubkey,
+        owner: Pubkey,
+        grid_id: u64,
+        ttl_slots: u64,
+        fee_cap: u64,
+    },
+    /// A Session PDA was closed on L1
+    SessionClosed {
+        session_pda: Pubkey,
+        owner: Pubkey,
+        grid_id: u64,
+    },
+    /// An account was delegated to the portal program
+    AccountDelegated {
+        delegation_record_pda: Pubkey,
+        delegated_account: Pubkey,
+        owner_program: Pubkey,
+        grid_id: u64,
+    },
+    /// An account was undelegated (returned to original owner)
+    AccountUndelegated {
+        delegation_record_pda: Pubkey,
+        delegated_account: Pubkey,
+    },
+    /// A fee deposit was made
+    FeeDeposited { fee_vault_pda: Pubkey, amount: u64 },
 }
 
 /// Configuration for NorthStar Manager
@@ -97,14 +134,10 @@ impl Manager {
             .get_logs_for_address(Some(&self.config.portal_program_id))
             .unwrap_or_default();
 
-        // TODO: parse logs properly
-        if logs.is_empty() {
-            vec![]
-        } else {
-            vec![L1Event::CreateEphemeralRollup(EphemeralRollupSettings {
-                delegated_addresses: vec![],
-            })]
-        }
+        // TODO: parse logs properly into typed L1Event variants
+        // This will be implemented in TASK_020
+        let _ = logs;
+        vec![]
     }
 
     /// Create and store an EphemeralRuntime from the root bank

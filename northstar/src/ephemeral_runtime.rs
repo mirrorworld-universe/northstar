@@ -235,7 +235,12 @@ mod tests {
         let parent_bank = Arc::new(create_test_bank());
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
-            delegated_addresses: vec![],
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            delegated_accounts: vec![],
         };
         let runtime = EphemeralRuntime::new(
             parent_bank.clone(),
@@ -291,7 +296,12 @@ mod tests {
 
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
-            delegated_addresses: vec![],
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            delegated_accounts: vec![],
         };
         let mut runtime = EphemeralRuntime::new(
             Arc::new(parent_bank),
@@ -325,7 +335,12 @@ mod tests {
 
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
-            delegated_addresses: vec![],
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            delegated_accounts: vec![],
         };
         let mut runtime = EphemeralRuntime::new(
             Arc::new(parent_bank),
@@ -381,7 +396,12 @@ mod tests {
 
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
-            delegated_addresses: vec![],
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            delegated_accounts: vec![],
         };
         let mut runtime = EphemeralRuntime::new(
             parent_bank.clone(),
@@ -450,7 +470,12 @@ mod tests {
 
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
-            delegated_addresses: vec![],
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            delegated_accounts: vec![],
         };
         let mut runtime = EphemeralRuntime::new(
             Arc::new(parent_bank),
@@ -521,7 +546,12 @@ mod tests {
 
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
-            delegated_addresses: vec![],
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            delegated_accounts: vec![],
         };
         let mut runtime = EphemeralRuntime::new(
             Arc::new(parent_bank),
