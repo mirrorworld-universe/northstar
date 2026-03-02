@@ -859,7 +859,7 @@ mod portal_e2e_tests {
 
         // Verify delegated account is tracked
         assert!(
-            runtime.delegated_accounts().contains(&delegated_account),
+            runtime.delegated_accounts().contains(delegated_account),
             "Delegated account should be in runtime's delegated set"
         );
 
@@ -890,7 +890,7 @@ mod portal_e2e_tests {
         std::thread::sleep(Duration::from_secs(2));
         let rpc_client = RpcClient::new(format!("http://127.0.0.1:{}", runtime.rpc_port()));
         let rpc_account = rpc_client
-            .get_account_data(&delegated_account)
+            .get_account_data(delegated_account)
             .expect("Delegated account should be readable via RPC");
         eprintln!(
             "DEBUG: RPC account data length: {}, first few bytes: {:?}",

@@ -64,59 +64,61 @@ impl NorthStarService {
                         };
 
                     // Only process Frozen notifications
-                    if let BankNotification::Frozen(bank) = notification {
-                        // Check if we already have an active runtime
-                        if manager.has_active_runtime() {
-                            continue;
-                        }
+                    let BankNotification::Frozen(bank) = notification else {
+                        continue;
+                    };
 
-                        // Check for L1 events from the portal program
-                        let l1_events = manager.get_l1_events(&bank);
-                        if l1_events.is_empty() {
-                            debug!(
-                                "No L1 events at slot {}, skipping runtime creation",
-                                bank.slot()
-                            );
-                            continue;
-                        }
+                    // Check if we already have an active runtime
+                    if manager.has_active_runtime() {
+                        continue;
+                    }
 
-                        // Found L1 events, create ephemeral runtime
-                        info!(
-                            "Creating ephemeral runtime at slot {} due to L1 events",
+                    // Check for L1 events from the portal program
+                    let l1_events = manager.get_l1_events(&bank);
+                    if l1_events.is_empty() {
+                        debug!(
+                            "No L1 events at slot {}, skipping runtime creation",
                             bank.slot()
                         );
+                        continue;
+                    }
 
-                        // For now, use the first event's settings
-                        // TODO: Handle multiple events or different event types
-                        let settings = match &l1_events[0] {
-                            L1Event::SessionOpened {
-                                session_pda,
-                                owner,
-                                grid_id,
-                                ttl_slots,
-                                fee_cap,
-                            } => northstar::EphemeralRollupSettings {
-                                session_pda: *session_pda,
-                                owner: *owner,
-                                grid_id: *grid_id,
-                                ttl_slots: *ttl_slots,
-                                fee_cap: *fee_cap,
-                                delegated_accounts: vec![],
-                            },
-                            // Skip other event types for now - we only create runtimes on SessionOpened
-                            _ => continue,
-                        };
+                    // Found L1 events, create ephemeral runtime
+                    info!(
+                        "Creating ephemeral runtime at slot {} due to L1 events",
+                        bank.slot()
+                    );
 
-                        let root_bank = bank_forks.read().unwrap().root_bank();
+                    // For now, use the first event's settings
+                    // TODO: Handle multiple events or different event types
+                    let settings = match l1_events[0] {
+                        L1Event::SessionOpened {
+                            session_pda,
+                            owner,
+                            grid_id,
+                            ttl_slots,
+                            fee_cap,
+                        } => northstar::EphemeralRollupSettings {
+                            session_pda,
+                            owner,
+                            grid_id,
+                            ttl_slots,
+                            fee_cap,
+                            delegated_accounts: vec![],
+                        },
+                        // Skip other event types for now - we only create runtimes on SessionOpened
+                        _ => continue,
+                    };
 
-                        if let Err(e) = manager.create_ephemeral_runtime(
-                            root_bank,
-                            cluster_info.clone(),
-                            settings,
-                            config.ephemeral_rpc_port,
-                        ) {
-                            error!("Failed to create ephemeral runtime: {}", e);
-                        }
+                    let root_bank = bank_forks.read().unwrap().root_bank();
+
+                    if let Err(e) = manager.create_ephemeral_runtime(
+                        root_bank,
+                        cluster_info.clone(),
+                        settings,
+                        config.ephemeral_rpc_port,
+                    ) {
+                        error!("Failed to create ephemeral runtime: {}", e);
                     }
                 }
 
