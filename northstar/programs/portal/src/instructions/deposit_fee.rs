@@ -10,7 +10,7 @@ use {
 pub fn process_deposit_fee(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
-    data: &[u8],
+    lamports: u64,
 ) -> ProgramResult {
     if accounts.len() < 3 {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -24,12 +24,6 @@ pub fn process_deposit_fee(
         return Err(PortalError::Unauthorized.into());
     }
 
-    if data.len() < 9 {
-        return Err(ProgramError::InvalidInstructionData);
-    }
-
-    let amount = u64::from_le_bytes(data[1..9].try_into().unwrap());
-
     let owner_key = *owner.key();
     let (expected_fee_vault_key, _) = find_fee_vault_pda(program_id, &owner_key);
 
@@ -37,10 +31,8 @@ pub fn process_deposit_fee(
         return Err(PortalError::InvalidPdaSeeds.into());
     }
 
-    let vault_data = fee_vault.try_borrow_data()?;
-    let vault_state =
-        FeeVault::try_from_slice(&vault_data).map_err(|_| PortalError::InvalidAccountData)?;
-    drop(vault_data);
+    let vault_state = FeeVault::try_from_slice(&fee_vault.try_borrow_data()?)
+        .map_err(|_| PortalError::InvalidAccountData)?;
 
     if !vault_state.is_valid() {
         return Err(PortalError::InvalidAccountData.into());
@@ -53,14 +45,14 @@ pub fn process_deposit_fee(
     Transfer {
         from: owner,
         to: fee_vault,
-        lamports: amount,
+        lamports,
     }
     .invoke()?;
 
     let mut vault_state = vault_state;
     vault_state.balance = vault_state
         .balance
-        .checked_add(amount)
+        .checked_add(lamports)
         .ok_or(PortalError::ArithmeticOverflow)?;
 
     let mut fee_vault_data = fee_vault.try_borrow_mut_data()?;

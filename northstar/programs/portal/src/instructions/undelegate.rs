@@ -7,11 +7,7 @@ use {
     pinocchio_system::instructions::Assign,
 };
 
-pub fn process_undelegate(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo],
-    _data: &[u8],
-) -> ProgramResult {
+pub fn process_undelegate(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     if accounts.len() < 5 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
@@ -33,8 +29,7 @@ pub fn process_undelegate(
         return Err(PortalError::InvalidPdaSeeds.into());
     }
 
-    let delegation_data = delegation_record.try_borrow_data()?;
-    let delegation_state = DelegationRecord::try_from_slice(&delegation_data)
+    let delegation_state = DelegationRecord::try_from_slice(&delegation_record.try_borrow_data()?)
         .map_err(|_| PortalError::InvalidAccountData)?;
 
     if !delegation_state.is_valid() {
@@ -62,12 +57,10 @@ pub fn process_undelegate(
         *authority_lamports = authority_lamports
             .checked_add(delegation_record_lamports)
             .ok_or(PortalError::ArithmeticOverflow)?;
-        let mut delegation_record_lamports_mut = delegation_record.try_borrow_mut_lamports()?;
-        *delegation_record_lamports_mut = 0;
+        *delegation_record.try_borrow_mut_lamports()? = 0;
     }
 
-    let mut delegation_record_data = delegation_record.try_borrow_mut_data()?;
-    delegation_record_data.fill(0);
+    delegation_record.try_borrow_mut_data()?.fill(0);
 
     pinocchio_log::log!("Account undelegated");
 

@@ -28,34 +28,27 @@ pub unsafe extern "C" fn entrypoint(input: *mut u8) -> u64 {
 
     let (program_id, count, instruction_data) = deserialize(input, &mut accounts_arr);
 
-    if instruction_data.is_empty() {
-        return pinocchio::program_error::ProgramError::InvalidInstructionData.into();
-    }
-
     let accounts = core::slice::from_raw_parts(accounts_arr.as_ptr() as *const AccountInfo, count);
 
-    let discriminator = instruction_data[0];
-    let instruction = match PortalInstruction::try_from(discriminator) {
+    let instruction = match borsh::from_slice(instruction_data) {
         Ok(inst) => inst,
-        Err(()) => return pinocchio::program_error::ProgramError::InvalidInstructionData.into(),
+        Err(_) => return pinocchio::program_error::ProgramError::InvalidInstructionData.into(),
     };
 
     let result = match instruction {
-        PortalInstruction::OpenSession => {
-            instructions::process_open_session(program_id, accounts, instruction_data)
+        PortalInstruction::OpenSession(open_session) => {
+            instructions::process_open_session(program_id, accounts, open_session)
         }
-        PortalInstruction::CloseSession => {
-            instructions::process_close_session(program_id, accounts, instruction_data)
+        PortalInstruction::CloseSession { grid_id } => {
+            instructions::process_close_session(program_id, accounts, grid_id)
         }
-        PortalInstruction::DepositFee => {
-            instructions::process_deposit_fee(program_id, accounts, instruction_data)
+        PortalInstruction::DepositFee { lamports } => {
+            instructions::process_deposit_fee(program_id, accounts, lamports)
         }
-        PortalInstruction::Delegate => {
-            instructions::process_delegate(program_id, accounts, instruction_data)
+        PortalInstruction::Delegate { grid_id } => {
+            instructions::process_delegate(program_id, accounts, grid_id)
         }
-        PortalInstruction::Undelegate => {
-            instructions::process_undelegate(program_id, accounts, instruction_data)
-        }
+        PortalInstruction::Undelegate => instructions::process_undelegate(program_id, accounts),
     };
 
     match result {

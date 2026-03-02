@@ -4916,6 +4916,7 @@ dependencies = [
  "bincode",
  "borsh",
  "log",
+ "northstar-portal",
  "solana-account",
  "solana-clock",
  "solana-genesis-config",

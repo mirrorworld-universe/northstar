@@ -649,6 +649,7 @@ zstd = "0.13.3"
 
 # Sonic
 northstar = { path = "northstar" }
+northstar-portal.path = "northstar/programs/portal"
 
 [profile.release-with-debug]
 inherits = "release"

@@ -19,7 +19,7 @@ use {
 pub fn process_delegate(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
-    data: &[u8],
+    grid_id: u64,
 ) -> ProgramResult {
     if accounts.len() < 5 {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -34,12 +34,6 @@ pub fn process_delegate(
     if !payer.is_signer() {
         return Err(PortalError::Unauthorized.into());
     }
-
-    if data.len() < 9 {
-        return Err(ProgramError::InvalidInstructionData);
-    }
-
-    let grid_id = u64::from_le_bytes(data[1..9].try_into().unwrap());
 
     if delegated_account.owner() != program_id {
         return Err(PortalError::InvalidAccountData.into());
@@ -60,12 +54,12 @@ pub fn process_delegate(
     let lamports = rent.minimum_balance(DelegationRecord::LEN);
 
     let bump_bytes = [bump];
-    let seeds: [Seed; 3] = [
+    let seeds = &[
         Seed::from(DelegationRecord::SEED_PREFIX),
         Seed::from(delegated_key.as_ref()),
         Seed::from(bump_bytes.as_ref()),
     ];
-    let signer = Signer::from(&seeds);
+    let signer = Signer::from(seeds);
 
     CreateAccount {
         from: payer,

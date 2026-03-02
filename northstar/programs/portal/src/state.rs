@@ -1,4 +1,7 @@
-use borsh::{BorshDeserialize, BorshSerialize};
+use {
+    borsh::{BorshDeserialize, BorshSerialize},
+    pinocchio::pubkey::Pubkey,
+};
 
 pub const SESSION_DISCRIMINATOR: u8 = 1;
 pub const FEE_VAULT_DISCRIMINATOR: u8 = 2;
@@ -7,7 +10,7 @@ pub const DELEGATION_RECORD_DISCRIMINATOR: u8 = 3;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Session {
     pub discriminator: u8,
-    pub owner: [u8; 32],
+    pub owner: Pubkey,
     pub grid_id: u64,
     pub ttl_slots: u64,
     pub fee_cap: u64,
@@ -52,7 +55,7 @@ impl FeeVault {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct DelegationRecord {
     pub discriminator: u8,
-    pub owner_program: [u8; 32],
+    pub owner_program: Pubkey,
     pub grid_id: u64,
     pub bump: u8,
 }

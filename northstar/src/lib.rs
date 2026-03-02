@@ -131,21 +131,21 @@ impl Manager {
 
         let mut events = Vec::new();
 
-        for (pubkey, account) in &modified {
+        for (pubkey, account) in modified {
             let data = account.data();
             if data.is_empty() || data.iter().all(|b| *b == 0) {
                 // Account was zeroed — determine type from previous state
-                self.handle_zeroed_account(bank, pubkey, &mut events);
+                self.handle_zeroed_account(bank, &pubkey, &mut events);
                 continue;
             }
 
             match try_parse_portal_account(data) {
                 Some(PortalAccount::Session(session)) => {
                     // Check if this is a new session (didn't exist in parent)
-                    if self.is_new_in_slot(bank, pubkey) {
+                    if self.is_new_in_slot(bank, &pubkey) {
                         events.push(L1Event::SessionOpened {
-                            session_pda: *pubkey,
-                            owner: session.owner,
+                            session_pda: pubkey,
+                            owner: session.owner.into(),
                             grid_id: session.grid_id,
                             ttl_slots: session.ttl_slots,
                             fee_cap: session.fee_cap,
@@ -153,14 +153,14 @@ impl Manager {
                     }
                 }
                 Some(PortalAccount::DelegationRecord(record)) => {
-                    if self.is_new_in_slot(bank, pubkey) {
+                    if self.is_new_in_slot(bank, &pubkey) {
                         // Find the delegated account by scanning
-                        if let Some(delegated) = self.find_delegated_account(bank, pubkey, &record)
+                        if let Some(delegated) = self.find_delegated_account(bank, &pubkey, &record)
                         {
                             events.push(L1Event::AccountDelegated {
-                                delegation_record_pda: *pubkey,
+                                delegation_record_pda: pubkey,
                                 delegated_account: delegated,
-                                owner_program: record.owner_program,
+                                owner_program: record.owner_program.into(),
                                 grid_id: record.grid_id,
                             });
                         }
@@ -168,7 +168,7 @@ impl Manager {
                 }
                 Some(PortalAccount::FeeVault(vault)) => {
                     events.push(L1Event::FeeDeposited {
-                        fee_vault_pda: *pubkey,
+                        fee_vault_pda: pubkey,
                         amount: vault.balance,
                     });
                 }
@@ -184,10 +184,9 @@ impl Manager {
 
     /// Check if an account existed in the parent bank
     fn is_new_in_slot(&self, bank: &Bank, pubkey: &Pubkey) -> bool {
-        match bank.parent() {
-            Some(parent) => parent.get_account(pubkey).is_none(),
-            None => true, // No parent means genesis — everything is new
-        }
+        bank.parent()
+            .map(|parent| parent.get_account(pubkey).is_none())
+            .unwrap_or(true)
     }
 
     /// For a newly created DelegationRecord PDA, find which account was delegated
@@ -196,7 +195,7 @@ impl Manager {
         &self,
         bank: &Bank,
         delegation_record_pda: &Pubkey,
-        _record: &portal_state::DelegationRecord,
+        _record: &northstar_portal::DelegationRecord,
     ) -> Option<Pubkey> {
         // Get all accounts modified in this slot
         let all_modified = bank.get_all_accounts_modified_since_parent();
@@ -284,7 +283,7 @@ impl Manager {
             Some(PortalAccount::Session(session)) => {
                 events.push(L1Event::SessionClosed {
                     session_pda: *pubkey,
-                    owner: session.owner,
+                    owner: session.owner.into(),
                     grid_id: session.grid_id,
                 });
             }
@@ -341,6 +340,7 @@ mod portal_e2e_tests {
     use {
         super::*,
         agave_logger::setup,
+        northstar_portal::{OpenSession, PortalInstruction},
         solana_account::AccountSharedData,
         solana_genesis_config::GenesisConfig,
         solana_gossip::contact_info::ContactInfo,
@@ -375,24 +375,27 @@ mod portal_e2e_tests {
     }
 
     fn build_open_session_ix(
-        program_id: &Pubkey,
-        owner: &Pubkey,
-        session_pda: &Pubkey,
-        fee_vault_pda: &Pubkey,
+        program_id: Pubkey,
+        owner: Pubkey,
+        session_pda: Pubkey,
+        fee_vault_pda: Pubkey,
         grid_id: u64,
         ttl_slots: u64,
         fee_cap: u64,
     ) -> Instruction {
-        let mut data = vec![0u8]; // discriminator
-        data.extend_from_slice(&grid_id.to_le_bytes());
-        data.extend_from_slice(&ttl_slots.to_le_bytes());
-        data.extend_from_slice(&fee_cap.to_le_bytes());
+        let ix = PortalInstruction::OpenSession(OpenSession {
+            grid_id,
+            ttl_slots,
+            fee_cap,
+            owner: *owner.as_array(),
+        });
+        let data = borsh::to_vec(&ix).unwrap();
         Instruction {
-            program_id: *program_id,
+            program_id,
             accounts: vec![
-                AccountMeta::new(*owner, true),
-                AccountMeta::new(*session_pda, false),
-                AccountMeta::new(*fee_vault_pda, false),
+                AccountMeta::new(owner, true),
+                AccountMeta::new(session_pda, false),
+                AccountMeta::new(fee_vault_pda, false),
                 AccountMeta::new_readonly(system_program::id(), false),
             ],
             data,
@@ -400,18 +403,18 @@ mod portal_e2e_tests {
     }
 
     fn build_deposit_fee_ix(
-        program_id: &Pubkey,
-        owner: &Pubkey,
-        fee_vault_pda: &Pubkey,
-        amount: u64,
+        program_id: Pubkey,
+        owner: Pubkey,
+        fee_vault_pda: Pubkey,
+        lamports: u64,
     ) -> Instruction {
-        let mut data = vec![2u8]; // discriminator
-        data.extend_from_slice(&amount.to_le_bytes());
+        let ix = PortalInstruction::DepositFee { lamports };
+        let data = borsh::to_vec(&ix).unwrap();
         Instruction {
-            program_id: *program_id,
+            program_id,
             accounts: vec![
-                AccountMeta::new(*owner, true),
-                AccountMeta::new(*fee_vault_pda, false),
+                AccountMeta::new(owner, true),
+                AccountMeta::new(fee_vault_pda, false),
                 AccountMeta::new_readonly(system_program::id(), false),
             ],
             data,
@@ -419,22 +422,22 @@ mod portal_e2e_tests {
     }
 
     fn build_delegate_ix(
-        program_id: &Pubkey,
-        payer: &Pubkey,
-        delegated_account: &Pubkey,
-        owner_program: &Pubkey,
-        delegation_record_pda: &Pubkey,
+        program_id: Pubkey,
+        payer: Pubkey,
+        delegated_account: Pubkey,
+        owner_program: Pubkey,
+        delegation_record_pda: Pubkey,
         grid_id: u64,
     ) -> Instruction {
-        let mut data = vec![3u8]; // discriminator
-        data.extend_from_slice(&grid_id.to_le_bytes());
+        let ix = PortalInstruction::Delegate { grid_id };
+        let data = borsh::to_vec(&ix).unwrap();
         Instruction {
-            program_id: *program_id,
+            program_id,
             accounts: vec![
-                AccountMeta::new(*payer, true),
-                AccountMeta::new(*delegated_account, false),
-                AccountMeta::new_readonly(*owner_program, false),
-                AccountMeta::new(*delegation_record_pda, false),
+                AccountMeta::new(payer, true),
+                AccountMeta::new(delegated_account, false),
+                AccountMeta::new_readonly(owner_program, false),
+                AccountMeta::new(delegation_record_pda, false),
                 AccountMeta::new_readonly(system_program::id(), false),
             ],
             data,
@@ -499,10 +502,10 @@ mod portal_e2e_tests {
 
         // Execute OpenSession transaction
         let open_session_ix = build_open_session_ix(
-            &program_id,
-            &owner_pubkey,
-            &session_pda,
-            &fee_vault_pda,
+            program_id,
+            owner_pubkey,
+            session_pda,
+            fee_vault_pda,
             grid_id,
             ttl_slots,
             fee_cap,
@@ -621,10 +624,10 @@ mod portal_e2e_tests {
 
         // Execute OpenSession first
         let open_session_ix = build_open_session_ix(
-            &program_id,
-            &owner_pubkey,
-            &session_pda,
-            &fee_vault_pda,
+            program_id,
+            owner_pubkey,
+            session_pda,
+            fee_vault_pda,
             grid_id,
             1000,
             5_000_000_000,
@@ -641,11 +644,11 @@ mod portal_e2e_tests {
 
         // Execute Delegate instruction
         let delegate_ix = build_delegate_ix(
-            &program_id,
-            &owner_pubkey,
-            &delegated_account,
-            &owner_program,
-            &delegation_record_pda,
+            program_id,
+            owner_pubkey,
+            delegated_account,
+            owner_program,
+            delegation_record_pda,
             grid_id,
         );
 
@@ -752,10 +755,10 @@ mod portal_e2e_tests {
 
         // Execute OpenSession
         let open_session_ix = build_open_session_ix(
-            &program_id,
-            &owner_pubkey,
-            &session_pda,
-            &fee_vault_pda,
+            program_id,
+            owner_pubkey,
+            session_pda,
+            fee_vault_pda,
             grid_id,
             ttl_slots,
             fee_cap,
@@ -772,11 +775,11 @@ mod portal_e2e_tests {
 
         // Execute Delegate instruction
         let delegate_ix = build_delegate_ix(
-            &program_id,
-            &owner_pubkey,
-            &delegated_account,
-            &Pubkey::new_unique(),
-            &delegation_record_pda,
+            program_id,
+            owner_pubkey,
+            delegated_account,
+            Pubkey::new_unique(),
+            delegation_record_pda,
             grid_id,
         );
 
@@ -949,10 +952,10 @@ mod portal_e2e_tests {
 
         // Execute OpenSession first
         let open_session_ix = build_open_session_ix(
-            &program_id,
-            &owner_pubkey,
-            &session_pda,
-            &fee_vault_pda,
+            program_id,
+            owner_pubkey,
+            session_pda,
+            fee_vault_pda,
             grid_id,
             1000,
             5_000_000_000,
@@ -970,7 +973,7 @@ mod portal_e2e_tests {
         // Execute DepositFee
         let deposit_amount = 2_000_000_000u64; // 2 SOL
         let deposit_fee_ix =
-            build_deposit_fee_ix(&program_id, &owner_pubkey, &fee_vault_pda, deposit_amount);
+            build_deposit_fee_ix(program_id, owner_pubkey, fee_vault_pda, deposit_amount);
 
         let blockhash = child_bank.last_blockhash();
         let tx = Transaction::new_signed_with_payer(

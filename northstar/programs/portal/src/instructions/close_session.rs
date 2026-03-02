@@ -17,7 +17,7 @@ use {
 pub fn process_close_session(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
-    data: &[u8],
+    grid_id: u64,
 ) -> ProgramResult {
     if accounts.len() < 4 {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -31,12 +31,6 @@ pub fn process_close_session(
     if !owner.is_signer() {
         return Err(PortalError::Unauthorized.into());
     }
-
-    if data.len() < 9 {
-        return Err(ProgramError::InvalidInstructionData);
-    }
-
-    let grid_id = u64::from_le_bytes(data[1..9].try_into().unwrap());
 
     let owner_key = *owner.key();
     let (expected_session_key, _) = find_session_pda(program_id, &owner_key, grid_id);
@@ -70,40 +64,26 @@ pub fn process_close_session(
     }
 
     // Transfer all lamports from fee_vault and session back to owner
-    let fee_vault_lamports = fee_vault.lamports();
-    let session_lamports = session.lamports();
-
-    if fee_vault_lamports > 0 {
+    if fee_vault.lamports() > 0 {
         let mut owner_lamports = owner.try_borrow_mut_lamports()?;
         *owner_lamports = owner_lamports
-            .checked_add(fee_vault_lamports)
+            .checked_add(fee_vault.lamports())
             .ok_or(PortalError::ArithmeticOverflow)?;
     }
-    {
-        let mut fee_vault_lamports_mut = fee_vault.try_borrow_mut_lamports()?;
-        *fee_vault_lamports_mut = 0;
-    }
+    *fee_vault.try_borrow_mut_lamports()? = 0;
 
-    if session_lamports > 0 {
+    if session.lamports() > 0 {
         let mut owner_lamports = owner.try_borrow_mut_lamports()?;
         *owner_lamports = owner_lamports
-            .checked_add(session_lamports)
+            .checked_add(session.lamports())
             .ok_or(PortalError::ArithmeticOverflow)?;
     }
-    {
-        let mut session_lamports_mut = session.try_borrow_mut_lamports()?;
-        *session_lamports_mut = 0;
-    }
+
+    *session.try_borrow_mut_lamports()? = 0;
 
     // Zero account data
-    {
-        let mut fee_vault_data = fee_vault.try_borrow_mut_data()?;
-        fee_vault_data.fill(0);
-    }
-    {
-        let mut session_data_mut = session.try_borrow_mut_data()?;
-        session_data_mut.fill(0);
-    }
+    fee_vault.try_borrow_mut_data()?.fill(0);
+    session.try_borrow_mut_data()?.fill(0);
 
     pinocchio_log::log!("Session closed");
 

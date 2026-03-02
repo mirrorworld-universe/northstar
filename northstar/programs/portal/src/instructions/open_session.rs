@@ -3,6 +3,7 @@ use {
         error::PortalError,
         pda::{find_fee_vault_pda, find_session_pda},
         state::{FeeVault, Session, FEE_VAULT_DISCRIMINATOR, SESSION_DISCRIMINATOR},
+        OpenSession,
     },
     borsh::BorshSerialize,
     pinocchio::{
@@ -19,7 +20,12 @@ use {
 pub fn process_open_session(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
-    data: &[u8],
+    OpenSession {
+        grid_id,
+        ttl_slots,
+        fee_cap,
+        owner: owner_key,
+    }: OpenSession,
 ) -> ProgramResult {
     if accounts.len() < 4 {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -34,15 +40,6 @@ pub fn process_open_session(
         return Err(PortalError::Unauthorized.into());
     }
 
-    if data.len() < 25 {
-        return Err(ProgramError::InvalidInstructionData);
-    }
-
-    let grid_id = u64::from_le_bytes(data[1..9].try_into().unwrap());
-    let ttl_slots = u64::from_le_bytes(data[9..17].try_into().unwrap());
-    let fee_cap = u64::from_le_bytes(data[17..25].try_into().unwrap());
-
-    let owner_key = *owner.key();
     let (expected_session_key, session_bump) = find_session_pda(program_id, &owner_key, grid_id);
     let (expected_fee_vault_key, fee_vault_bump) = find_fee_vault_pda(program_id, &owner_key);
 
@@ -63,13 +60,13 @@ pub fn process_open_session(
     // Create Session PDA
     let grid_id_bytes = grid_id.to_le_bytes();
     let session_bump_bytes = [session_bump];
-    let session_seeds: [Seed; 4] = [
+    let session_seeds = &[
         Seed::from(Session::SEED_PREFIX),
         Seed::from(owner_key.as_ref()),
         Seed::from(grid_id_bytes.as_ref()),
         Seed::from(session_bump_bytes.as_ref()),
     ];
-    let session_signer = Signer::from(&session_seeds);
+    let session_signer = Signer::from(session_seeds);
 
     CreateAccount {
         from: owner,
@@ -82,12 +79,12 @@ pub fn process_open_session(
 
     // Create FeeVault PDA
     let fee_vault_bump_bytes = [fee_vault_bump];
-    let fee_vault_seeds: [Seed; 3] = [
+    let fee_vault_seeds = &[
         Seed::from(FeeVault::SEED_PREFIX),
         Seed::from(owner_key.as_ref()),
         Seed::from(fee_vault_bump_bytes.as_ref()),
     ];
-    let fee_vault_signer = Signer::from(&fee_vault_seeds);
+    let fee_vault_signer = Signer::from(fee_vault_seeds);
 
     CreateAccount {
         from: owner,

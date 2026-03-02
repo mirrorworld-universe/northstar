@@ -2,7 +2,10 @@
 
 use {
     borsh::BorshDeserialize,
-    northstar_portal::{FeeVault, Session, FEE_VAULT_DISCRIMINATOR, SESSION_DISCRIMINATOR},
+    northstar_portal::{
+        FeeVault, OpenSession, PortalInstruction, Session, FEE_VAULT_DISCRIMINATOR,
+        SESSION_DISCRIMINATOR,
+    },
     solana_instruction::{AccountMeta, Instruction},
     solana_keypair::Keypair,
     solana_program_test::{BanksClient, ProgramTest, ProgramTestContext},
@@ -30,10 +33,13 @@ fn build_open_session_ix(
     ttl_slots: u64,
     fee_cap: u64,
 ) -> Instruction {
-    let mut data = vec![0u8];
-    data.extend_from_slice(&grid_id.to_le_bytes());
-    data.extend_from_slice(&ttl_slots.to_le_bytes());
-    data.extend_from_slice(&fee_cap.to_le_bytes());
+    let ix = PortalInstruction::OpenSession(OpenSession {
+        owner: *owner.as_array(),
+        grid_id,
+        ttl_slots,
+        fee_cap,
+    });
+    let data = borsh::to_vec(&ix).unwrap();
 
     Instruction {
         program_id: *program_id,
@@ -54,8 +60,8 @@ fn build_close_session_ix(
     fee_vault_pda: &Pubkey,
     grid_id: u64,
 ) -> Instruction {
-    let mut data = vec![1u8];
-    data.extend_from_slice(&grid_id.to_le_bytes());
+    let ix = PortalInstruction::CloseSession { grid_id };
+    let data = borsh::to_vec(&ix).unwrap();
 
     Instruction {
         program_id: *program_id,
@@ -73,10 +79,10 @@ fn build_deposit_fee_ix(
     program_id: &Pubkey,
     owner: &Pubkey,
     fee_vault_pda: &Pubkey,
-    amount: u64,
+    lamports: u64,
 ) -> Instruction {
-    let mut data = vec![2u8];
-    data.extend_from_slice(&amount.to_le_bytes());
+    let ix = PortalInstruction::DepositFee { lamports };
+    let data = borsh::to_vec(&ix).unwrap();
 
     Instruction {
         program_id: *program_id,
