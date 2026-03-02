@@ -318,11 +318,17 @@ impl Manager {
             return Ok(());
         }
 
-        let runtime =
-            EphemeralRuntime::new(root_bank, cluster_info, settings, rpc_port).map_err(|e| {
-                error!("Failed to create ephemeral runtime: {}", e);
-                NorthStarError::RuntimeCreationFailed(e)
-            })?;
+        let runtime = EphemeralRuntime::new(
+            root_bank,
+            cluster_info,
+            settings,
+            rpc_port,
+            self.config.portal_program_id,
+        )
+        .map_err(|e| {
+            error!("Failed to create ephemeral runtime: {}", e);
+            NorthStarError::RuntimeCreationFailed(e)
+        })?;
 
         info!("Ephemeral rollup started on port {}", rpc_port);
         self.active_runtime = Some(runtime);
