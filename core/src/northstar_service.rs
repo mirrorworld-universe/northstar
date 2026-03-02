@@ -8,6 +8,7 @@ use {
     },
     solana_runtime::bank_forks::BankForks,
     std::{
+        net::SocketAddr,
         sync::{
             atomic::{AtomicBool, Ordering},
             Arc,
@@ -21,7 +22,7 @@ use {
 #[derive(Debug, Clone)]
 pub struct NorthStarServiceConfig {
     /// Port for the ephemeral rollup RPC server
-    pub ephemeral_rpc_port: u16,
+    pub listen_addr: SocketAddr,
     /// Duration for each slot in the ephemeral rollup
     pub slot_duration: Duration,
 }
@@ -116,7 +117,7 @@ impl NorthStarService {
                         root_bank,
                         cluster_info.clone(),
                         settings,
-                        config.ephemeral_rpc_port,
+                        config.listen_addr,
                     ) {
                         error!("Failed to create ephemeral runtime: {}", e);
                     }
@@ -170,9 +171,9 @@ mod tests {
         ))
     }
 
-    fn find_free_port() -> u16 {
+    fn find_free_addr() -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap().port()
+        listener.local_addr().unwrap()
     }
 
     fn create_test_bank_forks(
@@ -201,7 +202,7 @@ mod tests {
 
         let exit = Arc::new(AtomicBool::new(false));
         let config = NorthStarServiceConfig {
-            ephemeral_rpc_port: find_free_port(),
+            listen_addr: find_free_addr(),
             slot_duration: Duration::from_millis(400),
         };
 
@@ -251,7 +252,7 @@ mod tests {
 
         let exit = Arc::new(AtomicBool::new(false));
         let config = NorthStarServiceConfig {
-            ephemeral_rpc_port: find_free_port(),
+            listen_addr: find_free_addr(),
             slot_duration: Duration::from_millis(400),
         };
 
@@ -303,9 +304,8 @@ mod tests {
         let (_sender, receiver) = unbounded();
 
         let exit = Arc::new(AtomicBool::new(false));
-        let test_port = find_free_port();
         let config = NorthStarServiceConfig {
-            ephemeral_rpc_port: test_port,
+            listen_addr: find_free_addr(),
             slot_duration: Duration::from_millis(400),
         };
 

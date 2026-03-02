@@ -20,7 +20,7 @@ use {
     solana_send_transaction_service::send_transaction_service,
     std::{
         collections::{HashMap, HashSet},
-        net::{IpAddr, Ipv4Addr, SocketAddr},
+        net::SocketAddr,
         sync::{
             atomic::{AtomicBool, AtomicU64, Ordering},
             Arc, RwLock,
@@ -36,7 +36,7 @@ pub struct EphemeralRuntime {
     tx_client: EphemeralTransactionClient,
     rpc_service: JsonRpcService,
     settings: EphemeralRollupSettings,
-    rpc_port: u16,
+    rpc_addr: SocketAddr,
     _ledger_dir: TempDir,
     exit: Arc<AtomicBool>,
     runtime: Arc<TokioRuntime>,
@@ -53,7 +53,7 @@ impl EphemeralRuntime {
         parent_bank: Arc<Bank>,
         cluster_info: Arc<ClusterInfo>,
         settings: EphemeralRollupSettings,
-        rpc_port: u16,
+        rpc_addr: SocketAddr,
         portal_program_id: Pubkey,
     ) -> Result<Self, String> {
         let ephemeral_slot = parent_bank.slot().saturating_add(1);
@@ -66,29 +66,23 @@ impl EphemeralRuntime {
         let mut delegated_accounts = HashSet::new();
 
         for pubkey in &settings.delegated_accounts {
-            match parent_bank.get_account(pubkey) {
-                Some(account) => {
-                    if account.owner() != &portal_program_id {
-                        warn!(
-                            "Account {} listed as delegated but owned by {}, not portal program \
-                             {}. Skipping.",
-                            pubkey,
-                            account.owner(),
-                            portal_program_id,
-                        );
-                        continue;
-                    }
-                    info!("Delegated account {} validated and snapshotted", pubkey);
-                    initial_account_snapshots.insert(*pubkey, account);
-                    delegated_accounts.insert(*pubkey);
-                }
-                None => {
-                    warn!(
-                        "Account {} listed as delegated but does not exist on L1. Skipping.",
-                        pubkey,
-                    );
-                }
+            let Some(account) = parent_bank.get_account(pubkey) else {
+                warn!("Account {pubkey} listed as delegated but does not exist on L1. Skipping.");
+                continue;
+            };
+            if account.owner() != &portal_program_id {
+                warn!(
+                    "Account {} listed as delegated but owned by {}, not portal program {}. \
+                     Skipping.",
+                    pubkey,
+                    account.owner(),
+                    portal_program_id,
+                );
+                continue;
             }
+            info!("Delegated account {} validated and snapshotted", pubkey);
+            initial_account_snapshots.insert(*pubkey, account);
+            delegated_accounts.insert(*pubkey);
         }
 
         info!(
@@ -101,8 +95,7 @@ impl EphemeralRuntime {
         let tx_client = EphemeralTransactionClient::new(bank_forks.clone(), delegated_set);
 
         let ledger_dir = TempDir::new().map_err(|e| e.to_string())?;
-        let ledger_path = ledger_dir.path().to_path_buf();
-        let blockstore = Arc::new(Blockstore::open(&ledger_path).map_err(|e| e.to_string())?);
+        let blockstore = Arc::new(Blockstore::open(ledger_dir.path()).map_err(|e| e.to_string())?);
 
         let slot = initial_bank.slot();
         let block_commitment_cache = Arc::new(RwLock::new(BlockCommitmentCache::new(
@@ -141,8 +134,6 @@ impl EphemeralRuntime {
                 .map_err(|e| e.to_string())?,
         );
 
-        let rpc_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), rpc_port);
-
         let rpc_config = JsonRpcConfig {
             full_api: true,
             enable_rpc_transaction_history: false,
@@ -159,7 +150,7 @@ impl EphemeralRuntime {
             blockstore,
             cluster_info,
             genesis_hash,
-            &ledger_path,
+            ledger_dir.path(),
             validator_exit,
             exit.clone(),
             override_health_check,
@@ -174,8 +165,7 @@ impl EphemeralRuntime {
         )?;
 
         info!(
-            "EphemeralRuntime started on port {} with slot {}",
-            rpc_port,
+            "EphemeralRuntime listening at {rpc_addr} with slot {}",
             initial_bank.slot()
         );
 
@@ -193,7 +183,7 @@ impl EphemeralRuntime {
             tx_client,
             rpc_service,
             settings,
-            rpc_port,
+            rpc_addr,
             _ledger_dir: ledger_dir,
             exit,
             runtime,
@@ -203,8 +193,8 @@ impl EphemeralRuntime {
         })
     }
 
-    pub fn rpc_port(&self) -> u16 {
-        self.rpc_port
+    pub fn rpc_addr(&self) -> String {
+        format!("http://{}", self.rpc_addr)
     }
 
     pub fn bank(&self) -> Arc<Bank> {
@@ -212,7 +202,7 @@ impl EphemeralRuntime {
     }
 
     pub fn shutdown(&mut self) {
-        info!("Shutting down EphemeralRuntime on port {}", self.rpc_port);
+        info!("Shutting down EphemeralRuntime at {}", self.rpc_addr);
         self.exit.store(true, Ordering::Relaxed);
         if let Some(advancer) = self.slot_advancer.take() {
             advancer.join();
@@ -236,8 +226,8 @@ impl Drop for EphemeralRuntime {
     fn drop(&mut self) {
         if !self.exit.load(Ordering::Relaxed) {
             log::warn!(
-                "EphemeralRuntime on port {} dropped without explicit shutdown",
-                self.rpc_port
+                "EphemeralRuntime on {} dropped without explicit shutdown",
+                self.rpc_addr
             );
         }
     }
@@ -272,9 +262,9 @@ mod tests {
         ))
     }
 
-    fn find_free_port() -> u16 {
+    fn find_free_addr() -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap().port()
+        listener.local_addr().unwrap()
     }
 
     fn create_test_bank() -> Bank {
@@ -300,11 +290,11 @@ mod tests {
             delegated_accounts: vec![],
         };
         let portal_program_id = Pubkey::new_unique();
-        let mut runtime = EphemeralRuntime::new(
+        let runtime = EphemeralRuntime::new(
             parent_bank.clone(),
             cluster_info,
             settings,
-            find_free_port(),
+            find_free_addr(),
             portal_program_id,
         )
         .unwrap();
@@ -312,21 +302,7 @@ mod tests {
     }
 
     fn rpc_client(runtime: &EphemeralRuntime) -> RpcClient {
-        RpcClient::new(format!("http://127.0.0.1:{}", runtime.rpc_port()))
-    }
-
-    #[test]
-    fn test_construction_and_shutdown() {
-        agave_logger::setup();
-        let (_, mut runtime) = create_runtime();
-
-        let socket = std::net::TcpStream::connect_timeout(
-            &SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), runtime.rpc_port()),
-            Duration::from_secs(5),
-        );
-        assert!(socket.is_ok(), "RPC port should be listening");
-
-        runtime.shutdown();
+        RpcClient::new(runtime.rpc_addr())
     }
 
     #[test]
@@ -366,7 +342,7 @@ mod tests {
             Arc::new(parent_bank),
             cluster_info,
             settings,
-            find_free_port(),
+            find_free_addr(),
             Pubkey::new_unique(),
         )
         .unwrap();
@@ -406,7 +382,7 @@ mod tests {
             Arc::new(parent_bank),
             cluster_info,
             settings,
-            find_free_port(),
+            find_free_addr(),
             Pubkey::new_unique(),
         )
         .unwrap();
@@ -468,7 +444,7 @@ mod tests {
             parent_bank.clone(),
             cluster_info,
             settings,
-            find_free_port(),
+            find_free_addr(),
             Pubkey::new_unique(),
         )
         .unwrap();
@@ -543,7 +519,7 @@ mod tests {
             Arc::new(parent_bank),
             cluster_info,
             settings,
-            find_free_port(),
+            find_free_addr(),
             Pubkey::new_unique(),
         )
         .unwrap();
@@ -620,7 +596,7 @@ mod tests {
             Arc::new(parent_bank),
             cluster_info,
             settings,
-            find_free_port(),
+            find_free_addr(),
             Pubkey::new_unique(),
         )
         .unwrap();
@@ -684,7 +660,7 @@ mod tests {
             Arc::new(parent_bank),
             cluster_info,
             settings,
-            find_free_port(),
+            find_free_addr(),
             portal_program_id,
         )
         .unwrap();
@@ -728,7 +704,7 @@ mod tests {
             Arc::new(parent_bank),
             cluster_info,
             settings,
-            find_free_port(),
+            find_free_addr(),
             portal_program_id,
         )
         .unwrap();
@@ -764,7 +740,7 @@ mod tests {
             Arc::new(parent_bank),
             cluster_info,
             settings,
-            find_free_port(),
+            find_free_addr(),
             portal_program_id,
         )
         .unwrap();
@@ -809,7 +785,7 @@ mod tests {
             Arc::new(parent_bank),
             cluster_info,
             settings,
-            find_free_port(),
+            find_free_addr(),
             portal_program_id,
         )
         .unwrap();

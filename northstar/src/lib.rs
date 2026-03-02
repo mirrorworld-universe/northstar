@@ -6,7 +6,10 @@ use {
     solana_keypair::Keypair,
     solana_pubkey::Pubkey,
     solana_runtime::{bank::Bank, bank_forks::BankForks},
-    std::sync::{Arc, RwLock},
+    std::{
+        net::SocketAddr,
+        sync::{Arc, RwLock},
+    },
     thiserror::Error,
 };
 
@@ -110,8 +113,8 @@ impl Manager {
     }
 
     /// Get the RPC port of the active runtime, if any
-    pub fn active_runtime_port(&self) -> Option<u16> {
-        self.active_runtime.as_ref().map(|r| r.rpc_port())
+    pub fn active_runtime_addr(&self) -> Option<String> {
+        self.active_runtime.as_ref().map(|r| r.rpc_addr())
     }
 
     /// Shutdown the active ephemeral runtime, if any
@@ -267,7 +270,7 @@ impl Manager {
         root_bank: Arc<Bank>,
         cluster_info: Arc<ClusterInfo>,
         settings: EphemeralRollupSettings,
-        rpc_port: u16,
+        rpc_addr: SocketAddr,
     ) -> Result<()> {
         if self.active_runtime.is_some() {
             info!("Ephemeral runtime already active, skipping creation");
@@ -278,7 +281,7 @@ impl Manager {
             root_bank,
             cluster_info,
             settings,
-            rpc_port,
+            rpc_addr,
             self.config.portal_program_id,
         )
         .map_err(|e| {
@@ -286,7 +289,7 @@ impl Manager {
             NorthStarError::RuntimeCreationFailed(e)
         })?;
 
-        info!("Ephemeral rollup started on port {}", rpc_port);
+        info!("Ephemeral rollup started on {}", rpc_addr);
         self.active_runtime = Some(runtime);
         Ok(())
     }
@@ -412,9 +415,9 @@ mod portal_e2e_tests {
         ))
     }
 
-    fn find_free_port() -> u16 {
+    fn find_free_addr() -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap().port()
+        listener.local_addr().unwrap()
     }
 
     fn fund_account(bank: &Bank, pubkey: &Pubkey, lamports: u64) {
@@ -812,7 +815,7 @@ mod portal_e2e_tests {
             parent_bank,
             cluster_info,
             settings,
-            find_free_port(),
+            find_free_addr(),
             program_id,
         )
         .expect("Failed to create ephemeral runtime");
@@ -848,7 +851,7 @@ mod portal_e2e_tests {
 
         // Verify account is readable via RPC
         std::thread::sleep(Duration::from_secs(2));
-        let rpc_client = RpcClient::new(format!("http://127.0.0.1:{}", runtime.rpc_port()));
+        let rpc_client = RpcClient::new(runtime.rpc_addr());
         let rpc_account = rpc_client
             .get_account_data(delegated_account)
             .expect("Delegated account should be readable via RPC");

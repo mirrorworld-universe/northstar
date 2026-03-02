@@ -1377,7 +1377,10 @@ impl Validator {
                     },
                     cluster_info.clone(),
                     crate::northstar_service::NorthStarServiceConfig {
-                        ephemeral_rpc_port: config.ephemeral_rpc_port,
+                        listen_addr: format!("0.0.0.0:{}", config.ephemeral_rpc_port)
+                            .parse()
+                            .unwrap(),
+                        // TODO: extract to some constant or make a parameter within portal program
                         slot_duration: Duration::from_millis(400),
                     },
                     exit.clone(),
