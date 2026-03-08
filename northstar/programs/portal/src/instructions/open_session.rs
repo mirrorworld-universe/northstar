@@ -1,10 +1,5 @@
 use {
-    crate::{
-        error::PortalError,
-        pda::{find_fee_vault_pda, find_session_pda},
-        state::{FeeVault, Session, FEE_VAULT_DISCRIMINATOR, SESSION_DISCRIMINATOR},
-        OpenSession,
-    },
+    crate::{find_fee_vault_pda, find_session_pda, FeeVault, OpenSession, PortalError, Session},
     borsh::BorshSerialize,
     pinocchio::{
         account_info::AccountInfo,
@@ -24,7 +19,6 @@ pub fn process_open_session(
         grid_id,
         ttl_slots,
         fee_cap,
-        owner: owner_key,
     }: OpenSession,
 ) -> ProgramResult {
     if accounts.len() < 4 {
@@ -36,12 +30,14 @@ pub fn process_open_session(
     let fee_vault = &accounts[2];
     let _system_program = &accounts[3];
 
+    let owner_key = owner.key();
+
     if !owner.is_signer() {
         return Err(PortalError::Unauthorized.into());
     }
 
-    let (expected_session_key, session_bump) = find_session_pda(program_id, &owner_key, grid_id);
-    let (expected_fee_vault_key, fee_vault_bump) = find_fee_vault_pda(program_id, &owner_key);
+    let (expected_session_key, session_bump) = find_session_pda(program_id, owner_key, grid_id);
+    let (expected_fee_vault_key, fee_vault_bump) = find_fee_vault_pda(program_id, owner_key);
 
     if session.key() != &expected_session_key {
         return Err(PortalError::InvalidPdaSeeds.into());
@@ -62,7 +58,7 @@ pub fn process_open_session(
     let session_bump_bytes = [session_bump];
     let session_seeds = &[
         Seed::from(Session::SEED_PREFIX),
-        Seed::from(owner_key.as_ref()),
+        Seed::from(owner_key),
         Seed::from(grid_id_bytes.as_ref()),
         Seed::from(session_bump_bytes.as_ref()),
     ];
@@ -97,8 +93,8 @@ pub fn process_open_session(
 
     // Write Session state
     let session_state = Session {
-        discriminator: SESSION_DISCRIMINATOR,
-        owner: owner_key,
+        discriminator: Session::DISCRIMINATOR,
+        owner: *owner_key,
         grid_id,
         ttl_slots,
         fee_cap,
@@ -111,8 +107,8 @@ pub fn process_open_session(
 
     // Write FeeVault state
     let fee_vault_state = FeeVault {
-        discriminator: FEE_VAULT_DISCRIMINATOR,
-        authority: owner_key,
+        discriminator: FeeVault::DISCRIMINATOR,
+        authority: *owner_key,
         balance: 0,
         bump: fee_vault_bump,
     };

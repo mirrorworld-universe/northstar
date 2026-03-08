@@ -1,9 +1,5 @@
 use {
-    crate::{
-        error::PortalError,
-        pda::find_delegation_record_pda,
-        state::{DelegationRecord, DELEGATION_RECORD_DISCRIMINATOR},
-    },
+    crate::{error::PortalError, pda::find_delegation_record_pda, state::DelegationRecord},
     borsh::BorshSerialize,
     pinocchio::{
         account_info::AccountInfo,
@@ -71,7 +67,7 @@ pub fn process_delegate(
     .invoke_signed(&[signer])?;
 
     let delegation_state = DelegationRecord {
-        discriminator: DELEGATION_RECORD_DISCRIMINATOR,
+        discriminator: DelegationRecord::DISCRIMINATOR,
         owner_program: *owner_program.key(),
         grid_id,
         bump,

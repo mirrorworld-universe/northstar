@@ -3,10 +3,6 @@ use {
     pinocchio::pubkey::Pubkey,
 };
 
-pub const SESSION_DISCRIMINATOR: u8 = 1;
-pub const FEE_VAULT_DISCRIMINATOR: u8 = 2;
-pub const DELEGATION_RECORD_DISCRIMINATOR: u8 = 3;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Session {
     pub discriminator: u8,
@@ -22,6 +18,7 @@ pub struct Session {
 impl Session {
     pub const LEN: usize = 82;
     pub const SEED_PREFIX: &[u8] = b"session";
+    pub const DISCRIMINATOR: u8 = 1;
 
     #[inline]
     pub fn is_expired(&self, current_slot: u64) -> bool {
@@ -30,7 +27,7 @@ impl Session {
 
     #[inline]
     pub fn is_valid(&self) -> bool {
-        self.discriminator == SESSION_DISCRIMINATOR
+        self.discriminator == Self::DISCRIMINATOR
     }
 }
 
@@ -45,10 +42,11 @@ pub struct FeeVault {
 impl FeeVault {
     pub const LEN: usize = 42;
     pub const SEED_PREFIX: &[u8] = b"fee_vault";
+    pub const DISCRIMINATOR: u8 = 2;
 
     #[inline]
     pub fn is_valid(&self) -> bool {
-        self.discriminator == FEE_VAULT_DISCRIMINATOR
+        self.discriminator == Self::DISCRIMINATOR
     }
 }
 
@@ -63,10 +61,11 @@ pub struct DelegationRecord {
 impl DelegationRecord {
     pub const LEN: usize = 42;
     pub const SEED_PREFIX: &[u8] = b"delegation";
+    pub const DISCRIMINATOR: u8 = 3;
 
     #[inline]
     pub fn is_valid(&self) -> bool {
-        self.discriminator == DELEGATION_RECORD_DISCRIMINATOR
+        self.discriminator == Self::DISCRIMINATOR
     }
 }
 
@@ -77,7 +76,7 @@ mod tests {
     #[test]
     fn test_session_len() {
         let session = Session {
-            discriminator: SESSION_DISCRIMINATOR,
+            discriminator: Session::DISCRIMINATOR,
             owner: [0x42; 32],
             grid_id: 123,
             ttl_slots: 1000,
@@ -93,7 +92,7 @@ mod tests {
     #[test]
     fn test_fee_vault_len() {
         let vault = FeeVault {
-            discriminator: FEE_VAULT_DISCRIMINATOR,
+            discriminator: FeeVault::DISCRIMINATOR,
             authority: [0xAB; 32],
             balance: 1_000_000,
             bump: 128,
@@ -105,7 +104,7 @@ mod tests {
     #[test]
     fn test_delegation_record_len() {
         let record = DelegationRecord {
-            discriminator: DELEGATION_RECORD_DISCRIMINATOR,
+            discriminator: DelegationRecord::DISCRIMINATOR,
             owner_program: [0xDE; 32],
             grid_id: 456,
             bump: 77,
@@ -117,7 +116,7 @@ mod tests {
     #[test]
     fn test_session_is_expired() {
         let session = Session {
-            discriminator: SESSION_DISCRIMINATOR,
+            discriminator: Session::DISCRIMINATOR,
             owner: [0; 32],
             grid_id: 1,
             ttl_slots: 100,

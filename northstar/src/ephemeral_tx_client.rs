@@ -19,7 +19,7 @@ use {
 
 pub struct EphemeralTransactionClient {
     bank_forks: Arc<RwLock<BankForks>>,
-    /// Set of delegated account pubkeys for filtering (TASK_022).
+    /// Set of delegated account pubkeys for filtering
     delegated_accounts: Arc<HashSet<solana_pubkey::Pubkey>>,
 }
 

@@ -342,7 +342,6 @@ mod portal_e2e_tests {
             grid_id,
             ttl_slots,
             fee_cap,
-            owner: *owner.as_array(),
         });
         let data = borsh::to_vec(&ix).unwrap();
         Instruction {

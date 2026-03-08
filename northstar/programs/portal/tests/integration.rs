@@ -2,10 +2,7 @@
 
 use {
     borsh::BorshDeserialize,
-    northstar_portal::{
-        FeeVault, OpenSession, PortalInstruction, Session, FEE_VAULT_DISCRIMINATOR,
-        SESSION_DISCRIMINATOR,
-    },
+    northstar_portal::{FeeVault, OpenSession, PortalInstruction, Session},
     solana_instruction::{AccountMeta, Instruction},
     solana_keypair::Keypair,
     solana_program_test::{BanksClient, ProgramTest, ProgramTestContext},
@@ -34,7 +31,6 @@ fn build_open_session_ix(
     fee_cap: u64,
 ) -> Instruction {
     let ix = PortalInstruction::OpenSession(OpenSession {
-        owner: *owner.as_array(),
         grid_id,
         ttl_slots,
         fee_cap,
@@ -134,14 +130,14 @@ async fn test_full_lifecycle() {
 
     let session_data = get_account_data(banks, &session_pda).await.unwrap();
     let session = Session::try_from_slice(&session_data).unwrap();
-    assert_eq!(session.discriminator, SESSION_DISCRIMINATOR);
+    assert_eq!(session.discriminator, Session::DISCRIMINATOR);
     assert_eq!(session.grid_id, 1);
     assert_eq!(session.ttl_slots, 100);
     assert_eq!(session.fee_cap, 5_000_000_000);
 
     let vault_data = get_account_data(banks, &fee_vault_pda).await.unwrap();
     let vault = FeeVault::try_from_slice(&vault_data).unwrap();
-    assert_eq!(vault.discriminator, FEE_VAULT_DISCRIMINATOR);
+    assert_eq!(vault.discriminator, FeeVault::DISCRIMINATOR);
     assert_eq!(vault.balance, 0);
 
     let deposit_ix = build_deposit_fee_ix(

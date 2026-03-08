@@ -1,7 +1,4 @@
-use {
-    borsh::{BorshDeserialize, BorshSerialize},
-    pinocchio::pubkey::Pubkey,
-};
+use borsh::{BorshDeserialize, BorshSerialize};
 
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
 pub enum PortalInstruction {
@@ -17,5 +14,4 @@ pub struct OpenSession {
     pub grid_id: u64,
     pub ttl_slots: u64,
     pub fee_cap: u64,
-    pub owner: Pubkey,
 }

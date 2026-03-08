@@ -1,7 +1,4 @@
-use northstar_portal::{
-    DelegationRecord, FeeVault, Session, DELEGATION_RECORD_DISCRIMINATOR, FEE_VAULT_DISCRIMINATOR,
-    SESSION_DISCRIMINATOR,
-};
+use northstar_portal::{DelegationRecord, FeeVault, Session};
 
 /// Enum representing any portal program account type.
 #[derive(Debug, Clone)]
@@ -16,13 +13,13 @@ pub fn try_parse_raw_portal_account(data: &[u8]) -> Option<PortalAccount> {
         return None;
     }
     match data[0] {
-        SESSION_DISCRIMINATOR => borsh::from_slice::<Session>(data)
+        Session::DISCRIMINATOR => borsh::from_slice::<Session>(data)
             .ok()
             .map(PortalAccount::Session),
-        FEE_VAULT_DISCRIMINATOR => borsh::from_slice::<FeeVault>(data)
+        FeeVault::DISCRIMINATOR => borsh::from_slice::<FeeVault>(data)
             .ok()
             .map(PortalAccount::FeeVault),
-        DELEGATION_RECORD_DISCRIMINATOR => borsh::from_slice::<DelegationRecord>(data)
+        DelegationRecord::DISCRIMINATOR => borsh::from_slice::<DelegationRecord>(data)
             .ok()
             .map(PortalAccount::DelegationRecord),
         _ => None,
