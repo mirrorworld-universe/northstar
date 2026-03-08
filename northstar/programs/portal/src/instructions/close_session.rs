@@ -85,6 +85,9 @@ pub fn process_close_session(
     fee_vault.try_borrow_mut_data()?.fill(0);
     session.try_borrow_mut_data()?.fill(0);
 
+    fee_vault.close()?;
+    session.close()?;
+
     pinocchio_log::log!("Session closed");
 
     Ok(())

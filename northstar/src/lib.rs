@@ -213,11 +213,19 @@ impl Manager {
         delegation_record_pda: &Pubkey,
     ) -> Option<Pubkey> {
         let parent = bank.parent()?;
-        let undelegated_account = parent
+        let undelegated_account = bank
             .get_all_accounts_modified_since_parent()
             .into_iter()
             .filter(|(pubkey, _)| pubkey != delegation_record_pda)
-            .filter(|(_, account)| account.owner() == &self.config.portal_program_id)
+            .filter(|(pubkey, account)| {
+                // Check that account is not owned by portal now,
+                // but was owned a block ago
+                account.owner() != &self.config.portal_program_id
+                    && parent
+                        .get_account(pubkey)
+                        .map(|a| a.owner() == &self.config.portal_program_id)
+                        .unwrap_or_default()
+            })
             .find_map(|(pubkey, _)| {
                 // Verify PDA derivation
                 let (expected_pda, _) = Pubkey::find_program_address(
