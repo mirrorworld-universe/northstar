@@ -8,6 +8,7 @@ use {
     },
     solana_runtime::bank_forks::BankForks,
     std::{
+        net::SocketAddr,
         sync::{
             atomic::{AtomicBool, Ordering},
             Arc,
@@ -21,7 +22,7 @@ use {
 #[derive(Debug, Clone)]
 pub struct NorthStarServiceConfig {
     /// Port for the ephemeral rollup RPC server
-    pub ephemeral_rpc_port: u16,
+    pub listen_addr: SocketAddr,
     /// Duration for each slot in the ephemeral rollup
     pub slot_duration: Duration,
 }
@@ -43,7 +44,7 @@ impl NorthStarService {
         exit: Arc<AtomicBool>,
     ) -> Self {
         // Sonic: Initialize NorthStar manager
-        let mut manager = northstar::Manager::new(cfg, bank_forks.clone());
+        let mut manager = northstar::Manager::new(cfg);
 
         let thread_hdl = Builder::new()
             .name("solNorthStar".to_string())
@@ -63,42 +64,62 @@ impl NorthStarService {
                             Err(RecvTimeoutError::Timeout) => continue,
                         };
 
-                    // Only process OptimisticallyConfirmed notifications
-                    if let BankNotification::OptimisticallyConfirmed(slot) = notification {
-                        // Check if we already have an active runtime
-                        if manager.has_active_runtime() {
-                            continue;
-                        }
+                    // Only process Frozen notifications
+                    let BankNotification::Frozen(bank) = notification else {
+                        continue;
+                    };
 
-                        // Check for L1 events from the portal program
-                        let l1_events = manager.get_l1_events(slot);
-                        if l1_events.is_empty() {
-                            debug!("No L1 events at slot {}, skipping runtime creation", slot);
-                            continue;
-                        }
+                    // Check if we already have an active runtime
+                    if manager.has_active_runtime() {
+                        continue;
+                    }
 
-                        // Found L1 events, create ephemeral runtime
-                        info!(
-                            "Creating ephemeral runtime at slot {} due to L1 events",
-                            slot
+                    // Check for L1 events from the portal program
+                    let l1_events = manager.get_l1_events(&bank);
+                    if l1_events.is_empty() {
+                        debug!(
+                            "No L1 events at slot {}, skipping runtime creation",
+                            bank.slot()
                         );
+                        continue;
+                    }
 
-                        // For now, use the first event's settings
-                        // TODO: Handle multiple events or different event types
-                        let settings = match &l1_events[0] {
-                            L1Event::CreateEphemeralRollup(s) => s.clone(),
-                        };
+                    // Found L1 events, create ephemeral runtime
+                    info!(
+                        "Creating ephemeral runtime at slot {} due to L1 events",
+                        bank.slot()
+                    );
 
-                        let root_bank = bank_forks.read().unwrap().root_bank();
+                    // For now, use the first event's settings
+                    // TODO: Handle multiple events or different event types
+                    let settings = match l1_events[0] {
+                        L1Event::SessionOpened {
+                            session_pda,
+                            owner,
+                            grid_id,
+                            ttl_slots,
+                            fee_cap,
+                        } => northstar::EphemeralRollupSettings {
+                            session_pda,
+                            owner,
+                            grid_id,
+                            ttl_slots,
+                            fee_cap,
+                            delegated_accounts: vec![],
+                        },
+                        // Skip other event types for now - we only create runtimes on SessionOpened
+                        _ => continue,
+                    };
 
-                        if let Err(e) = manager.create_ephemeral_runtime(
-                            root_bank,
-                            cluster_info.clone(),
-                            settings,
-                            config.ephemeral_rpc_port,
-                        ) {
-                            error!("Failed to create ephemeral runtime: {}", e);
-                        }
+                    let root_bank = bank_forks.read().unwrap().root_bank();
+
+                    if let Err(e) = manager.create_ephemeral_runtime(
+                        root_bank,
+                        cluster_info.clone(),
+                        settings,
+                        config.listen_addr,
+                    ) {
+                        error!("Failed to create ephemeral runtime: {}", e);
                     }
                 }
 
@@ -150,9 +171,9 @@ mod tests {
         ))
     }
 
-    fn find_free_port() -> u16 {
+    fn find_free_addr() -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap().port()
+        listener.local_addr().unwrap()
     }
 
     fn create_test_bank_forks(
@@ -181,9 +202,12 @@ mod tests {
 
         let exit = Arc::new(AtomicBool::new(false));
         let config = NorthStarServiceConfig {
-            ephemeral_rpc_port: find_free_port(),
+            listen_addr: find_free_addr(),
             slot_duration: Duration::from_millis(400),
         };
+
+        // Get the bank for notifications BEFORE moving bank_forks
+        let bank_for_test = bank_forks.read().unwrap().root_bank();
 
         let _service = NorthStarService::new(
             bank_forks,
@@ -200,9 +224,9 @@ mod tests {
         // Give the service time to start
         std::thread::sleep(Duration::from_millis(100));
 
-        // Send an OptimisticallyConfirmed notification
+        // Send a Frozen notification (need to wrap bank in Arc)
         sender
-            .send((BankNotification::OptimisticallyConfirmed(0), None))
+            .send((BankNotification::Frozen(bank_for_test), None))
             .unwrap();
 
         // Wait for runtime to start (it needs L1 events, which won't exist in this test)
@@ -228,9 +252,12 @@ mod tests {
 
         let exit = Arc::new(AtomicBool::new(false));
         let config = NorthStarServiceConfig {
-            ephemeral_rpc_port: find_free_port(),
+            listen_addr: find_free_addr(),
             slot_duration: Duration::from_millis(400),
         };
+
+        // Get a reference to the frozen bank for sending notifications BEFORE moving bank_forks
+        let bank_for_notifications = bank_forks.read().unwrap().root_bank();
 
         let _service = NorthStarService::new(
             bank_forks,
@@ -246,10 +273,13 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(100));
 
-        // Send multiple notifications
+        // Send multiple Frozen notifications
         for _ in 0..3 {
             sender
-                .send((BankNotification::OptimisticallyConfirmed(0), None))
+                .send((
+                    BankNotification::Frozen(bank_for_notifications.clone()),
+                    None,
+                ))
                 .unwrap();
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -274,9 +304,8 @@ mod tests {
         let (_sender, receiver) = unbounded();
 
         let exit = Arc::new(AtomicBool::new(false));
-        let test_port = find_free_port();
         let config = NorthStarServiceConfig {
-            ephemeral_rpc_port: test_port,
+            listen_addr: find_free_addr(),
             slot_duration: Duration::from_millis(400),
         };
 

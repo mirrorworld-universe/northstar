@@ -143,7 +143,7 @@ impl SlotAdvancer {
 
 #[cfg(test)]
 mod tests {
-    use {super::*, std::net::TcpListener};
+    use super::*;
 
     fn create_test_bank() -> Bank {
         use solana_genesis_config::GenesisConfig;

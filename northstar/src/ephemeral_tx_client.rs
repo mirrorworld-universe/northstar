@@ -11,6 +11,7 @@ use {
     solana_svm_timings::ExecuteTimings,
     solana_transaction::versioned::VersionedTransaction,
     std::{
+        collections::HashSet,
         error::Error,
         sync::{Arc, RwLock},
     },
@@ -18,19 +19,28 @@ use {
 
 pub struct EphemeralTransactionClient {
     bank_forks: Arc<RwLock<BankForks>>,
+    /// Set of delegated account pubkeys for filtering
+    delegated_accounts: Arc<HashSet<solana_pubkey::Pubkey>>,
 }
 
 impl Clone for EphemeralTransactionClient {
     fn clone(&self) -> Self {
         Self {
             bank_forks: Arc::clone(&self.bank_forks),
+            delegated_accounts: Arc::clone(&self.delegated_accounts),
         }
     }
 }
 
 impl EphemeralTransactionClient {
-    pub fn new(bank_forks: Arc<RwLock<BankForks>>) -> Self {
-        Self { bank_forks }
+    pub fn new(
+        bank_forks: Arc<RwLock<BankForks>>,
+        delegated_accounts: Arc<HashSet<solana_pubkey::Pubkey>>,
+    ) -> Self {
+        Self {
+            bank_forks,
+            delegated_accounts,
+        }
     }
 
     pub fn bank(&self) -> Arc<Bank> {

@@ -4183,6 +4183,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "northstar"
+version = "0.1.0"
+dependencies = [
+ "agave-logger",
+ "arc-swap",
+ "bincode",
+ "log",
+ "solana-account",
+ "solana-clock",
+ "solana-genesis-config",
+ "solana-gossip",
+ "solana-hash 3.1.0",
+ "solana-keypair",
+ "solana-ledger",
+ "solana-message",
+ "solana-net-utils",
+ "solana-pubkey 4.0.0",
+ "solana-quic-definitions",
+ "solana-rpc",
+ "solana-rpc-client",
+ "solana-rpc-client-types",
+ "solana-runtime",
+ "solana-sdk-ids",
+ "solana-send-transaction-service",
+ "solana-signer",
+ "solana-svm",
+ "solana-svm-timings",
+ "solana-system-interface 3.0.0",
+ "solana-time-utils",
+ "solana-transaction",
+ "solana-validator-exit",
+ "tempfile",
+ "thiserror 2.0.17",
+ "tokio",
+]
+
+[[package]]
 name = "num"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6701,6 +6738,7 @@ dependencies = [
  "log",
  "lru",
  "min-max-heap",
+ "northstar",
  "num_cpus",
  "num_enum",
  "prio-graph",
