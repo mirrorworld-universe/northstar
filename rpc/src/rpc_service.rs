@@ -556,6 +556,62 @@ impl JsonRpcService {
         Ok(json_rpc_service)
     }
 
+    /// Sonic: Public constructor that accepts a custom TransactionClient,
+    /// used by ephemeral rollup RPC to bypass QUIC/TPU.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_client<
+        Client: TransactionClient
+            + NotifyKeyUpdate
+            + Clone
+            + std::marker::Send
+            + std::marker::Sync
+            + 'static,
+    >(
+        rpc_addr: SocketAddr,
+        config: JsonRpcConfig,
+        snapshot_config: Option<SnapshotConfig>,
+        bank_forks: Arc<RwLock<BankForks>>,
+        block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
+        blockstore: Arc<Blockstore>,
+        cluster_info: Arc<ClusterInfo>,
+        genesis_hash: Hash,
+        ledger_path: &Path,
+        validator_exit: Arc<RwLock<Exit>>,
+        exit: Arc<AtomicBool>,
+        override_health_check: Arc<AtomicBool>,
+        optimistically_confirmed_bank: Arc<RwLock<OptimisticallyConfirmedBank>>,
+        send_transaction_service_config: send_transaction_service::Config,
+        max_slots: Arc<MaxSlots>,
+        leader_schedule_cache: Arc<LeaderScheduleCache>,
+        client: Client,
+        max_complete_transaction_status_slot: Arc<AtomicU64>,
+        prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
+        runtime: Arc<TokioRuntime>,
+    ) -> Result<Self, String> {
+        Self::new(
+            rpc_addr,
+            config,
+            snapshot_config,
+            bank_forks,
+            block_commitment_cache,
+            blockstore,
+            cluster_info,
+            genesis_hash,
+            ledger_path,
+            validator_exit,
+            exit,
+            override_health_check,
+            optimistically_confirmed_bank,
+            send_transaction_service_config,
+            max_slots,
+            leader_schedule_cache,
+            client,
+            max_complete_transaction_status_slot,
+            prioritization_fee_cache,
+            runtime,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new<
         Client: TransactionClient
