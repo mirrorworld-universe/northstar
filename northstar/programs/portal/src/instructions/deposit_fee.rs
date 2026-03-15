@@ -1,5 +1,5 @@
 use {
-    crate::{error::PortalError, pda::find_fee_vault_pda, state::FeeVault},
+    crate::{error::PortalError, state::FeeVault},
     borsh::{BorshDeserialize, BorshSerialize},
     pinocchio::{
         account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, ProgramResult,
@@ -16,19 +16,17 @@ pub fn process_deposit_fee(
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
-    let owner = &accounts[0];
+    let depositor = &accounts[0];
     let fee_vault = &accounts[1];
     let _system_program = &accounts[2];
 
-    if !owner.is_signer() {
+    if !depositor.is_signer() {
         return Err(PortalError::Unauthorized.into());
     }
 
-    let owner_key = *owner.key();
-    let (expected_fee_vault_key, _) = find_fee_vault_pda(program_id, &owner_key);
-
-    if fee_vault.key() != &expected_fee_vault_key {
-        return Err(PortalError::InvalidPdaSeeds.into());
+    // Validate fee_vault is owned by portal program
+    if fee_vault.owner() != program_id {
+        return Err(PortalError::InvalidAccountData.into());
     }
 
     let vault_state = FeeVault::try_from_slice(&fee_vault.try_borrow_data()?)
@@ -38,12 +36,10 @@ pub fn process_deposit_fee(
         return Err(PortalError::InvalidAccountData.into());
     }
 
-    if vault_state.authority != owner_key {
-        return Err(PortalError::Unauthorized.into());
-    }
+    // NOTE: No authority check — anyone can deposit
 
     Transfer {
-        from: owner,
+        from: depositor,
         to: fee_vault,
         lamports,
     }

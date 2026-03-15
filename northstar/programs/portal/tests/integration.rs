@@ -73,7 +73,7 @@ fn build_close_session_ix(
 
 fn build_deposit_fee_ix(
     program_id: &Pubkey,
-    owner: &Pubkey,
+    depositor: &Pubkey,
     fee_vault_pda: &Pubkey,
     lamports: u64,
 ) -> Instruction {
@@ -83,7 +83,7 @@ fn build_deposit_fee_ix(
     Instruction {
         program_id: *program_id,
         accounts: vec![
-            AccountMeta::new(*owner, true),
+            AccountMeta::new(*depositor, true),
             AccountMeta::new(*fee_vault_pda, false),
             AccountMeta::new_readonly(system_program::id(), false),
         ],
@@ -290,8 +290,7 @@ async fn test_cannot_deposit_to_wrong_vault() {
         Transaction::new_signed_with_payer(&[open_ix], Some(&payer.pubkey()), &[payer], blockhash);
     banks.process_transaction(tx).await.unwrap();
 
-    let _user_b_fee_vault_pda = find_fee_vault_pda(&PORTAL_PROGRAM_ID, &user_b.pubkey()).0;
-
+    // Now user_b CAN deposit to payer's FeeVault (anyone can deposit to any valid vault)
     let deposit_ix = build_deposit_fee_ix(
         &PORTAL_PROGRAM_ID,
         &user_b.pubkey(),
@@ -307,7 +306,16 @@ async fn test_cannot_deposit_to_wrong_vault() {
         blockhash,
     );
     let result = banks.process_transaction(tx).await;
-    assert!(result.is_err());
+    assert!(
+        result.is_ok(),
+        "Third party deposit should succeed: {:?}",
+        result
+    );
+
+    // Verify the balance was updated
+    let vault_data = get_account_data(banks, &fee_vault_pda).await.unwrap();
+    let vault = FeeVault::try_from_slice(&vault_data).unwrap();
+    assert_eq!(vault.balance, 1_000_000_000);
 }
 
 #[tokio::test]
@@ -495,4 +503,129 @@ async fn test_independent_grid_sessions() {
     let session_data_2 = get_account_data(banks, &session_pda_2).await.unwrap();
     let session_2 = Session::try_from_slice(&session_data_2).unwrap();
     assert_eq!(session_2.grid_id, 1);
+}
+
+/// Test: Multiple users can deposit to the same FeeVault
+#[tokio::test]
+async fn test_anyone_can_deposit_to_vault() {
+    let mut context = setup().await;
+    let banks = &mut context.banks_client;
+    let payer = &context.payer;
+
+    let user_b = Keypair::new();
+    let user_c = Keypair::new();
+
+    // Fund users
+    let transfer_ix_1 = transfer(&payer.pubkey(), &user_b.pubkey(), 10_000_000_000);
+    let transfer_ix_2 = transfer(&payer.pubkey(), &user_c.pubkey(), 10_000_000_000);
+
+    let blockhash = banks.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[transfer_ix_1, transfer_ix_2],
+        Some(&payer.pubkey()),
+        &[payer],
+        blockhash,
+    );
+    banks.process_transaction(tx).await.unwrap();
+
+    // User A (payer) opens a session
+    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID, &payer.pubkey(), 1);
+    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID, &payer.pubkey());
+
+    let open_ix = build_open_session_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer.pubkey(),
+        &session_pda,
+        &fee_vault_pda,
+        1,
+        100,
+        5_000_000_000,
+    );
+
+    let blockhash = banks.get_latest_blockhash().await.unwrap();
+    let tx =
+        Transaction::new_signed_with_payer(&[open_ix], Some(&payer.pubkey()), &[payer], blockhash);
+    banks.process_transaction(tx).await.unwrap();
+
+    // User B deposits 1 SOL
+    let deposit_ix_b = build_deposit_fee_ix(
+        &PORTAL_PROGRAM_ID,
+        &user_b.pubkey(),
+        &fee_vault_pda,
+        1_000_000_000,
+    );
+
+    let blockhash = banks.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[deposit_ix_b],
+        Some(&user_b.pubkey()),
+        &[&user_b],
+        blockhash,
+    );
+    banks.process_transaction(tx).await.unwrap();
+
+    // Verify balance is 1 SOL
+    let vault_data = get_account_data(banks, &fee_vault_pda).await.unwrap();
+    let vault = FeeVault::try_from_slice(&vault_data).unwrap();
+    assert_eq!(vault.balance, 1_000_000_000);
+
+    // User C deposits 2 SOL
+    let deposit_ix_c = build_deposit_fee_ix(
+        &PORTAL_PROGRAM_ID,
+        &user_c.pubkey(),
+        &fee_vault_pda,
+        2_000_000_000,
+    );
+
+    let blockhash = banks.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[deposit_ix_c],
+        Some(&user_c.pubkey()),
+        &[&user_c],
+        blockhash,
+    );
+    banks.process_transaction(tx).await.unwrap();
+
+    // Verify balance is 3 SOL
+    let vault_data = get_account_data(banks, &fee_vault_pda).await.unwrap();
+    let vault = FeeVault::try_from_slice(&vault_data).unwrap();
+    assert_eq!(vault.balance, 3_000_000_000);
+}
+
+/// Test: Depositing to a non-portal-program-owned account fails
+#[tokio::test]
+async fn test_deposit_to_invalid_account_fails() {
+    let mut context = setup().await;
+    let banks = &mut context.banks_client;
+    let payer = &context.payer;
+
+    // Create a random account not owned by the portal program
+    let invalid_vault = Keypair::new();
+    let invalid_vault_pubkey = invalid_vault.pubkey();
+
+    // Create and fund the invalid account (owned by system program)
+    let fund_ix = transfer(&payer.pubkey(), &invalid_vault_pubkey, 1_000_000_000);
+
+    let blockhash = banks.get_latest_blockhash().await.unwrap();
+    let tx =
+        Transaction::new_signed_with_payer(&[fund_ix], Some(&payer.pubkey()), &[payer], blockhash);
+    banks.process_transaction(tx).await.unwrap();
+
+    // Try to deposit into the invalid account
+    let deposit_ix = build_deposit_fee_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer.pubkey(),
+        &invalid_vault_pubkey,
+        500_000_000,
+    );
+
+    let blockhash = banks.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[deposit_ix],
+        Some(&payer.pubkey()),
+        &[payer],
+        blockhash,
+    );
+    let result = banks.process_transaction(tx).await;
+    assert!(result.is_err(), "Deposit to invalid account should fail");
 }
