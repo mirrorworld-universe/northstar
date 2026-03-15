@@ -4,7 +4,7 @@ use {
         EphemeralRollupSettings,
     },
     log::{info, warn},
-    solana_account::{AccountSharedData, ReadableAccount},
+    solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
     solana_gossip::cluster_info::ClusterInfo,
     solana_ledger::{blockstore::Blockstore, leader_schedule_cache::LeaderScheduleCache},
     solana_pubkey::Pubkey,
@@ -42,6 +42,8 @@ pub struct EphemeralRuntime {
     initial_account_snapshots: HashMap<Pubkey, AccountSharedData>,
     /// Set of delegated account pubkeys for fast lookup.
     delegated_accounts: HashSet<Pubkey>,
+    /// Shared with EphemeralTransactionClient - tracks accounts that have been written to on this ER.
+    touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
 
     _tx_client: EphemeralTransactionClient,
     _settings: EphemeralRollupSettings,
@@ -93,7 +95,12 @@ impl EphemeralRuntime {
         );
 
         let delegated_set = Arc::new(delegated_accounts.clone());
-        let tx_client = EphemeralTransactionClient::new(bank_forks.clone(), delegated_set);
+        let touched_accounts = Arc::new(RwLock::new(HashSet::new()));
+        let tx_client = EphemeralTransactionClient::new(
+            bank_forks.clone(),
+            delegated_set,
+            touched_accounts.clone(),
+        );
 
         let ledger_dir = TempDir::new().map_err(|e| e.to_string())?;
         let blockstore = Arc::new(Blockstore::open(ledger_dir.path()).map_err(|e| e.to_string())?);
@@ -187,6 +194,7 @@ impl EphemeralRuntime {
             slot_advancer: Some(slot_advancer),
             initial_account_snapshots,
             delegated_accounts,
+            touched_accounts,
 
             _settings: settings,
             _tx_client: tx_client,
@@ -221,6 +229,28 @@ impl EphemeralRuntime {
     /// Returns the initial snapshot of a delegated account.
     pub fn initial_account_snapshot(&self, pubkey: &Pubkey) -> Option<&AccountSharedData> {
         self.initial_account_snapshots.get(pubkey)
+    }
+
+    /// Credit a deposit on the ephemeral bank. Called by NorthStarService
+    /// when a FeeDeposited event is detected on L1.
+    pub fn credit_deposit(&self, depositor: &Pubkey, lamports: u64) {
+        let bank = self.bank();
+        let mut account = bank.get_account(depositor).unwrap_or_default();
+        let new_balance = account.lamports().saturating_add(lamports);
+        account.set_lamports(new_balance);
+        // Ensure the account is owned by system program
+        if account.owner() == &Pubkey::default() {
+            account.set_owner(solana_sdk_ids::system_program::id());
+        }
+        bank.store_account(depositor, &account);
+
+        // Mark as touched so the balance isn't zeroed later
+        self.touched_accounts.write().unwrap().insert(*depositor);
+
+        info!(
+            "Credited {} lamports to {} on ER (new balance: {})",
+            lamports, depositor, new_balance
+        );
     }
 }
 

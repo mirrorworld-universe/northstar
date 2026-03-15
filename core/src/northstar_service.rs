@@ -69,13 +69,25 @@ impl NorthStarService {
                         continue;
                     };
 
-                    // Check if we already have an active runtime
+                    // Check for L1 events from the portal program
+                    let l1_events = manager.get_l1_events(&bank);
+
+                    // If there's an active runtime, forward deposits to it
                     if manager.has_active_runtime() {
+                        // Forward deposits to the running ER
+                        for event in &l1_events {
+                            if let L1Event::FeeDeposited {
+                                delta, depositor, ..
+                            } = event
+                            {
+                                if *delta > 0 {
+                                    manager.credit_deposit(depositor, *delta);
+                                }
+                            }
+                        }
                         continue;
                     }
 
-                    // Check for L1 events from the portal program
-                    let l1_events = manager.get_l1_events(&bank);
                     if l1_events.is_empty() {
                         debug!(
                             "No L1 events at slot {}, skipping runtime creation",
@@ -120,6 +132,19 @@ impl NorthStarService {
                         config.listen_addr,
                     ) {
                         error!("Failed to create ephemeral runtime: {}", e);
+                        continue;
+                    }
+
+                    // Credit initial deposits that were detected in the same slot
+                    for event in &l1_events {
+                        if let L1Event::FeeDeposited {
+                            delta, depositor, ..
+                        } = event
+                        {
+                            if *delta > 0 {
+                                manager.credit_deposit(depositor, *delta);
+                            }
+                        }
                     }
                 }
 
