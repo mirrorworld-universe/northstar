@@ -21,6 +21,7 @@ use {
 
 pub struct EphemeralTransactionClient {
     bank_forks: Arc<RwLock<BankForks>>,
+    // TODO: this can change actually with L1 event. Its better to merge it with touched_accounts
     /// Set of delegated account pubkeys for filtering
     delegated_accounts: Arc<HashSet<Pubkey>>,
     /// Accounts that have been written to on this ER.
@@ -62,38 +63,38 @@ impl TransactionClient for EphemeralTransactionClient {
         wire_transactions: Vec<Vec<u8>>,
         _stats: &SendTransactionServiceStats,
     ) {
+        // BUG: This should work around slot advancer, because it might change
+        // bank between transactions
         let bank = self.bank();
-        for wire_tx in wire_transactions {
-            let tx = match bincode::deserialize(&wire_tx) {
-                Ok(tx) => tx,
+        wire_transactions
+            .into_iter()
+            .filter_map(|wire_tx| match bincode::deserialize(&wire_tx) {
+                Ok(tx) => Some(tx),
                 Err(e) => {
                     warn!("Failed to deserialize tx: {e}");
-                    continue;
+                    None
                 }
-            };
+            })
+            .for_each(|tx| {
+                Self::zero_untouched_writable_accounts(
+                    &bank,
+                    &tx,
+                    &self.touched_accounts,
+                    &self.delegated_accounts,
+                );
 
-            // Zero untouched writable accounts before execution
-            Self::zero_untouched_writable_accounts(
-                &bank,
-                &tx,
-                &self.touched_accounts,
-                &self.delegated_accounts,
-            );
-
-            match Self::execute_transaction(&bank, tx.clone()) {
-                Ok(()) => {}
-                Err(e) => {
+                if let Err(e) = Self::execute_transaction(&bank, tx.clone()) {
                     debug!("Tx execution failed: {e}");
                 }
-            }
 
-            // Mark writable accounts as touched (even on failure, since the fee payer was debited)
-            Self::mark_writable_as_touched(&tx, &self.touched_accounts);
-        }
+                // Mark writable accounts as touched (even on failure, since the fee payer was debited)
+                Self::mark_writable_as_touched(&tx, &self.touched_accounts);
+            });
     }
 }
 
 impl EphemeralTransactionClient {
+    // TODO: Convert it to accept vector of transaction so we batch execution
     fn execute_transaction(
         bank: &Bank,
         tx: VersionedTransaction,
@@ -116,24 +117,14 @@ impl EphemeralTransactionClient {
 
     /// Check if a key is an infrastructure account (system program, sysvars, etc.)
     fn is_infrastructure_account(key: &Pubkey) -> bool {
-        use solana_sdk_ids::{
-            address_lookup_table, bpf_loader, bpf_loader_upgradeable, compute_budget, config,
-            stake, system_program, sysvar, vote,
-        };
-
-        system_program::check_id(key)
-            || sysvar::check_id(key)
-            || bpf_loader::check_id(key)
-            || bpf_loader_upgradeable::check_id(key)
-            || vote::check_id(key)
-            || stake::check_id(key)
-            || config::check_id(key)
-            || compute_budget::check_id(key)
-            || address_lookup_table::check_id(key)
+        agave_reserved_account_keys::ReservedAccountKeys::all_keys_iter()
+            .any(|reserved| reserved == key)
     }
 
     /// Zero the balance of untouched writable accounts before transaction execution.
     /// This prevents users from spending inherited L1 balances on the ER.
+    // XXX: this is very very suboptimal. This can accept multiple transactions
+    // We need to also mark zeroed accounts as touched
     fn zero_untouched_writable_accounts(
         bank: &Bank,
         tx: &VersionedTransaction,

@@ -234,6 +234,7 @@ impl EphemeralRuntime {
     /// Credit a deposit on the ephemeral bank. Called by NorthStarService
     /// when a FeeDeposited event is detected on L1.
     pub fn credit_deposit(&self, depositor: &Pubkey, lamports: u64) {
+        // TODO: make sure we do it between blocks or postpone a bit block creation
         let bank = self.bank();
         let mut account = bank.get_account(depositor).unwrap_or_default();
         let new_balance = account.lamports().saturating_add(lamports);
