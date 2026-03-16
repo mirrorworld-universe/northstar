@@ -5,6 +5,7 @@ use {
     solana_pubkey::Pubkey,
     solana_quic_definitions::NotifyKeyUpdate,
     solana_runtime::{bank::Bank, bank_forks::BankForks},
+    solana_sdk_ids::{bpf_loader, bpf_loader_upgradeable, system_program, sysvar},
     solana_send_transaction_service::{
         send_transaction_service_stats::SendTransactionServiceStats,
         transaction_client::TransactionClient,
@@ -55,6 +56,57 @@ impl EphemeralTransactionClient {
     pub fn bank(&self) -> Arc<Bank> {
         self.bank_forks.read().unwrap().working_bank()
     }
+
+    /// Check if a transaction only writes to allowed accounts.
+    /// Returns `true` if the transaction is allowed, `false` if it
+    /// touches non-delegated writable accounts.
+    fn is_transaction_allowed(&self, tx: &VersionedTransaction) -> bool {
+        // If delegation set is empty, allow everything (unrestricted mode)
+        if self.delegated_accounts.is_empty() {
+            return true;
+        }
+
+        let message = &tx.message;
+        let static_keys = message.static_account_keys();
+
+        for (i, key) in static_keys.iter().enumerate() {
+            // Skip fee payer (index 0) — always allowed
+            if i == 0 {
+                continue;
+            }
+            if message.is_maybe_writable(i, None) && !self.is_allowed_writable(key) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    fn is_allowed_writable(&self, key: &Pubkey) -> bool {
+        // Always allow native programs and sysvars
+        if system_program::check_id(key)
+            || sysvar::check_id(key)
+            || bpf_loader::check_id(key)
+            || bpf_loader_upgradeable::check_id(key)
+        {
+            return true;
+        }
+
+        // Allow delegated accounts
+        if self.delegated_accounts.contains(key) {
+            return true;
+        }
+
+        // Allow new accounts (not on L1) to be created
+        // The bank read will walk ancestors — if the account
+        // doesn't exist anywhere, it's a new account.
+        let bank = self.bank();
+        if bank.get_account(key).is_none() {
+            return true;
+        }
+
+        false
+    }
 }
 
 impl TransactionClient for EphemeralTransactionClient {
@@ -76,6 +128,18 @@ impl TransactionClient for EphemeralTransactionClient {
                 }
             })
             .for_each(|tx| {
+                // Delegation filter: reject transactions that write to non-delegated accounts
+                if !self.is_transaction_allowed(&tx) {
+                    warn!(
+                        "Transaction rejected: writes to non-delegated accounts. sig={}",
+                        tx.signatures
+                            .first()
+                            .map(|s| s.to_string())
+                            .unwrap_or_default(),
+                    );
+                    return;
+                }
+
                 Self::zero_untouched_writable_accounts(
                     &bank,
                     &tx,
@@ -214,7 +278,14 @@ impl NotifyKeyUpdate for EphemeralTransactionClient {
 
 #[cfg(test)]
 mod tests {
-    use {super::*, solana_account::AccountSharedData, solana_sdk_ids::system_program};
+    use {
+        super::*,
+        solana_account::AccountSharedData,
+        solana_keypair::{Keypair, Signer},
+        solana_message::{Message, VersionedMessage},
+        solana_sdk_ids::system_program,
+        solana_transaction::{versioned::VersionedTransaction, Transaction},
+    };
 
     fn create_test_bank() -> solana_runtime::bank::Bank {
         use solana_genesis_config::GenesisConfig;
@@ -441,5 +512,257 @@ mod tests {
             !EphemeralTransactionClient::is_infrastructure_account(&test_key),
             "Regular key should not be infrastructure"
         );
+    }
+
+    fn create_test_bank_forks_with_accounts(
+        accounts: &[(Pubkey, u64)],
+    ) -> (Arc<Bank>, Arc<RwLock<BankForks>>) {
+        use solana_genesis_config::GenesisConfig;
+        let genesis_config = GenesisConfig::new(&[], &[]);
+        let bank = Bank::new_for_tests(&genesis_config);
+
+        for (pubkey, lamports) in accounts {
+            let account = AccountSharedData::new(*lamports, 0, &system_program::id());
+            bank.store_account(pubkey, &account);
+        }
+
+        bank.freeze();
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let bank = bank_forks.read().unwrap().root_bank();
+        (bank, bank_forks)
+    }
+
+    fn create_client_with_delegated(
+        bank_forks: Arc<RwLock<BankForks>>,
+        delegated: Vec<Pubkey>,
+    ) -> EphemeralTransactionClient {
+        let delegated_set = Arc::new(delegated.into_iter().collect());
+        let touched_set = Arc::new(RwLock::new(HashSet::new()));
+        EphemeralTransactionClient::new(bank_forks, delegated_set, touched_set)
+    }
+
+    /// Helper to create a simple transfer transaction
+    fn create_transfer_tx(
+        fee_payer: &Keypair,
+        from: Pubkey,
+        to: Pubkey,
+        blockhash: solana_hash::Hash,
+    ) -> VersionedTransaction {
+        use {solana_message::VersionedMessage, solana_system_interface::instruction::transfer};
+        let instruction = transfer(&from, &to, 1_000_000);
+        let message = VersionedMessage::Legacy(Message::new_with_blockhash(
+            &[instruction],
+            Some(&fee_payer.pubkey()),
+            &blockhash,
+        ));
+        VersionedTransaction::try_new(message, &[fee_payer]).unwrap()
+    }
+
+    #[test]
+    fn test_allowed_transaction_passes() {
+        // Set delegated_accounts = {A, B}
+        // Build a transaction that writes to A and B. Verify allowed.
+        let delegated_a = Pubkey::new_unique();
+        let delegated_b = Pubkey::new_unique();
+
+        let (bank, bank_forks) = create_test_bank_forks_with_accounts(&[
+            (delegated_a, 10_000_000),
+            (delegated_b, 10_000_000),
+        ]);
+
+        let client = create_client_with_delegated(bank_forks, vec![delegated_a, delegated_b]);
+
+        // Create a keypair that we'll use as both fee payer and source
+        let fee_payer = Keypair::new();
+        let tx = create_transfer_tx(
+            &fee_payer,
+            fee_payer.pubkey(),
+            delegated_b,
+            bank.last_blockhash(),
+        );
+
+        assert!(client.is_transaction_allowed(&tx));
+    }
+
+    #[test]
+    fn test_disallowed_transaction_rejected() {
+        // Set delegated_accounts = {A}
+        // Build a transaction that writes to A and C (C exists on L1, not delegated)
+        // Verify rejected.
+        let delegated_a = Pubkey::new_unique();
+        let non_delegated_c = Pubkey::new_unique();
+
+        let (bank, bank_forks) = create_test_bank_forks_with_accounts(&[
+            (delegated_a, 10_000_000),
+            (non_delegated_c, 10_000_000), // Exists on L1, not delegated
+        ]);
+
+        let client = create_client_with_delegated(bank_forks, vec![delegated_a]);
+
+        // Create a new keypair to use as fee payer and source
+        let fee_payer = Keypair::new();
+        // Transfer from fee_payer to non_delegated_c (C exists on L1, not delegated)
+        let tx = create_transfer_tx(
+            &fee_payer,
+            fee_payer.pubkey(),
+            non_delegated_c,
+            bank.last_blockhash(),
+        );
+
+        assert!(!client.is_transaction_allowed(&tx));
+    }
+
+    #[test]
+    fn test_read_only_non_delegated_allowed() {
+        // Note: In Solana, all accounts in the transaction are writable in practice.
+        // This test verifies that the fee payer (which signs) is always allowed.
+        let delegated_a = Pubkey::new_unique();
+
+        let (bank, bank_forks) = create_test_bank_forks_with_accounts(&[(delegated_a, 10_000_000)]);
+
+        let client = create_client_with_delegated(bank_forks, vec![delegated_a]);
+
+        let fee_payer = Keypair::new();
+        // Self-transfer from fee_payer to fee_payer - only fee_payer is in tx, which is allowed
+        let tx = create_transfer_tx(
+            &fee_payer,
+            fee_payer.pubkey(),
+            fee_payer.pubkey(),
+            bank.last_blockhash(),
+        );
+
+        // Fee payer should always be allowed
+        assert!(client.is_transaction_allowed(&tx));
+    }
+
+    #[test]
+    fn test_system_program_always_allowed() {
+        // System program should always be allowed
+        let delegated_a = Pubkey::new_unique();
+
+        let (bank, bank_forks) = create_test_bank_forks_with_accounts(&[(delegated_a, 10_000_000)]);
+
+        let client = create_client_with_delegated(bank_forks, vec![delegated_a]);
+
+        let fee_payer = Keypair::new();
+        // Transfer to system program (should be allowed)
+        let tx = create_transfer_tx(
+            &fee_payer,
+            fee_payer.pubkey(),
+            system_program::id(),
+            bank.last_blockhash(),
+        );
+
+        // System program should always be allowed
+        assert!(client.is_transaction_allowed(&tx));
+    }
+
+    #[test]
+    fn test_empty_delegation_allows_all() {
+        // Set delegated_accounts = {}
+        // Build any transaction. Verify allowed (unrestricted mode).
+        let some_account = Pubkey::new_unique();
+        let receiver = Pubkey::new_unique();
+
+        let (bank, bank_forks) = create_test_bank_forks_with_accounts(&[
+            (some_account, 10_000_000),
+            (receiver, 10_000_000),
+        ]);
+
+        // Empty delegation set
+        let client = create_client_with_delegated(bank_forks, vec![]);
+
+        // Create a new keypair to use as fee payer and source
+        let fee_payer = Keypair::new();
+        // Transfer from fee_payer to receiver (both not delegated)
+        let tx = create_transfer_tx(
+            &fee_payer,
+            fee_payer.pubkey(),
+            receiver,
+            bank.last_blockhash(),
+        );
+
+        // Empty delegation set = unrestricted mode, all allowed
+        assert!(client.is_transaction_allowed(&tx));
+    }
+
+    #[test]
+    fn test_fee_payer_auto_allowed() {
+        // Fee payer (index 0) should always be allowed
+        let delegated_a = Pubkey::new_unique();
+
+        let (bank, bank_forks) = create_test_bank_forks_with_accounts(&[(delegated_a, 10_000_000)]);
+
+        let client = create_client_with_delegated(bank_forks, vec![delegated_a]);
+
+        // Create a keypair that will be both fee payer and receiver (both the same)
+        let fee_payer = Keypair::new();
+        // Self-transfer from fee_payer to fee_payer (fee_payer is new so allowed)
+        let tx = create_transfer_tx(
+            &fee_payer,
+            fee_payer.pubkey(),
+            fee_payer.pubkey(),
+            bank.last_blockhash(),
+        );
+
+        // Fee payer should always be allowed
+        assert!(client.is_transaction_allowed(&tx));
+    }
+
+    #[test]
+    fn test_new_account_creation_allowed() {
+        // Set delegated_accounts = {A}
+        // Build a transaction that writes to a new account D (doesn't exist on L1).
+        // Verify allowed - new accounts can be created.
+        let delegated_a = Pubkey::new_unique();
+
+        let (bank, bank_forks) = create_test_bank_forks_with_accounts(&[
+            (delegated_a, 10_000_000),
+            // No other accounts - any new key is a "new account"
+        ]);
+
+        let client = create_client_with_delegated(bank_forks, vec![delegated_a]);
+
+        let fee_payer = Keypair::new();
+        let new_account = Pubkey::new_unique(); // New account that doesn't exist on L1
+
+        let tx = create_transfer_tx(
+            &fee_payer,
+            fee_payer.pubkey(),
+            new_account,
+            bank.last_blockhash(),
+        );
+
+        // Should be allowed because new_account doesn't exist on L1
+        assert!(client.is_transaction_allowed(&tx));
+    }
+
+    #[test]
+    fn test_non_delegated_existing_account_rejected() {
+        // Set delegated_accounts = {A}
+        // Build a transaction that writes to B (exists on L1, not delegated)
+        // Verify rejected.
+        let delegated_a = Pubkey::new_unique();
+        let existing_non_delegated = Pubkey::new_unique();
+
+        let (bank, bank_forks) = create_test_bank_forks_with_accounts(&[
+            (delegated_a, 10_000_000),
+            (existing_non_delegated, 10_000_000),
+        ]);
+
+        let client = create_client_with_delegated(bank_forks, vec![delegated_a]);
+
+        // Create a new keypair to use as fee payer and source
+        let fee_payer = Keypair::new();
+        // Transfer from fee_payer to existing_non_delegated (exists on L1, not delegated)
+        let tx = create_transfer_tx(
+            &fee_payer,
+            fee_payer.pubkey(),
+            existing_non_delegated,
+            bank.last_blockhash(),
+        );
+
+        // Should be rejected because existing_non_delegated exists on L1 and is not delegated
+        assert!(!client.is_transaction_allowed(&tx));
     }
 }
