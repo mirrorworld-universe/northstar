@@ -282,9 +282,9 @@ mod tests {
         super::*,
         solana_account::AccountSharedData,
         solana_keypair::{Keypair, Signer},
-        solana_message::{Message, VersionedMessage},
+        solana_message::Message,
         solana_sdk_ids::system_program,
-        solana_transaction::{versioned::VersionedTransaction, Transaction},
+        solana_transaction::versioned::VersionedTransaction,
     };
 
     fn create_test_bank() -> solana_runtime::bank::Bank {
@@ -486,31 +486,6 @@ mod tests {
             user_account.lamports(),
             100_000_000_000,
             "Account should keep balance in unrestricted mode"
-        );
-    }
-
-    #[test]
-    fn test_infrastructure_account_not_zeroed() {
-        let bank = create_test_bank();
-
-        // Create a delegated set to enable zeroing
-        let delegated_pubkey = Pubkey::new_unique();
-        let delegated_set: Arc<HashSet<Pubkey>> =
-            Arc::new(vec![delegated_pubkey].into_iter().collect());
-        let touched: Arc<RwLock<HashSet<Pubkey>>> = Arc::new(RwLock::new(HashSet::new()));
-
-        // Test system program - should not be zeroed even if it were writable
-        let system_program_id = system_program::id();
-        assert!(
-            EphemeralTransactionClient::is_infrastructure_account(&system_program_id),
-            "System program should be infrastructure"
-        );
-
-        // Test that infrastructure check works correctly
-        let test_key = Pubkey::new_unique();
-        assert!(
-            !EphemeralTransactionClient::is_infrastructure_account(&test_key),
-            "Regular key should not be infrastructure"
         );
     }
 

@@ -74,7 +74,7 @@ pub enum L1Event {
         amount: u64,
         /// Deposit amount this slot (current - parent balance)
         delta: u64,
-        /// Who gets credited on L2 (vault authority = session owner for now)
+        /// Who gets credited on L2
         depositor: Pubkey,
     },
 }
@@ -1020,24 +1020,22 @@ mod portal_e2e_tests {
         );
 
         // Verify the deposit event details
-        if let Some(event) = deposit_event {
-            if let L1Event::FeeDeposited {
-                delta,
-                depositor,
-                amount,
-                ..
-            } = event
-            {
-                assert_eq!(*delta, deposit_amount, "Delta should equal deposit amount");
-                assert_eq!(
-                    *depositor, owner_pubkey,
-                    "Depositor should be the vault authority (owner)"
-                );
-                assert_eq!(
-                    *amount, deposit_amount,
-                    "Amount should be total vault balance"
-                );
-            }
+        if let Some(L1Event::FeeDeposited {
+            delta,
+            depositor,
+            amount,
+            ..
+        }) = deposit_event
+        {
+            assert_eq!(*delta, deposit_amount, "Delta should equal deposit amount");
+            assert_eq!(
+                *depositor, owner_pubkey,
+                "Depositor should be the vault authority (owner)"
+            );
+            assert_eq!(
+                *amount, deposit_amount,
+                "Amount should be total vault balance"
+            );
         }
     }
 
@@ -1221,13 +1219,11 @@ mod portal_e2e_tests {
         );
 
         // Verify the delta equals the deposit amount, not cumulative balance
-        if let Some(event) = deposit_event {
-            if let L1Event::FeeDeposited { delta, .. } = event {
-                assert_eq!(
-                    *delta, deposit_amount,
-                    "Delta should equal deposit amount (not cumulative)"
-                );
-            }
+        if let Some(L1Event::FeeDeposited { delta, .. }) = deposit_event {
+            assert_eq!(
+                *delta, deposit_amount,
+                "Delta should equal deposit amount (not cumulative)"
+            );
         }
     }
 
