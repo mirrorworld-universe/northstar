@@ -69,7 +69,7 @@ pub enum L1Event {
     },
     /// A fee deposit was made
     FeeDeposited {
-        fee_vault_pda: Pubkey,
+        session_pda: Pubkey,
         /// Total vault balance after the deposit
         amount: u64,
         /// Deposit amount this slot (current - parent balance)
@@ -161,14 +161,18 @@ impl Manager {
                     owner_program: record.owner_program.into(),
                     grid_id: record.grid_id,
                 }),
-            Some(PortalAccount::FeeVault(vault)) => {
+            Some(PortalAccount::FeeVault(_vault)) => {
+                // FeeVault balance tracking removed; events come from DepositReceipts
+                None
+            }
+            Some(PortalAccount::DepositReceipt(receipt)) => {
                 let prev_balance = bank
                     .parent()
                     .and_then(|parent| parent.get_account(&pubkey))
                     .and_then(|account| {
                         portal_state::try_parse_raw_portal_account(account.data()).and_then(|p| {
-                            if let portal_state::PortalAccount::FeeVault(v) = p {
-                                Some(v.balance)
+                            if let portal_state::PortalAccount::DepositReceipt(r) = p {
+                                Some(r.balance)
                             } else {
                                 None
                             }
@@ -176,16 +180,16 @@ impl Manager {
                     })
                     .unwrap_or(0);
 
-                let delta = vault.balance.saturating_sub(prev_balance);
+                let delta = receipt.balance.saturating_sub(prev_balance);
                 if delta == 0 {
-                    return None; // No new deposit this slot
+                    return None;
                 }
 
                 Some(L1Event::FeeDeposited {
-                    fee_vault_pda: pubkey,
-                    amount: vault.balance,
+                    session_pda: receipt.session.into(),
+                    amount: receipt.balance,
                     delta,
-                    depositor: vault.authority.into(),
+                    depositor: receipt.recipient.into(),
                 })
             }
             None => {
@@ -376,6 +380,17 @@ mod portal_e2e_tests {
         Pubkey::find_program_address(&[b"delegation", delegated_account.as_ref()], program_id)
     }
 
+    fn find_deposit_receipt_pda(
+        program_id: &Pubkey,
+        session: &Pubkey,
+        recipient: &Pubkey,
+    ) -> (Pubkey, u8) {
+        Pubkey::find_program_address(
+            &[b"deposit_receipt", session.as_ref(), recipient.as_ref()],
+            program_id,
+        )
+    }
+
     fn build_open_session_ix(
         program_id: Pubkey,
         owner: Pubkey,
@@ -406,16 +421,22 @@ mod portal_e2e_tests {
     fn build_deposit_fee_ix(
         program_id: Pubkey,
         depositor: Pubkey,
-        fee_vault_pda: Pubkey,
+        session_pda: Pubkey,
+        recipient: Pubkey,
         lamports: u64,
     ) -> Instruction {
+        let (deposit_receipt_pda, _) =
+            find_deposit_receipt_pda(&program_id, &session_pda, &recipient);
+
         let ix = PortalInstruction::DepositFee { lamports };
         let data = borsh::to_vec(&ix).unwrap();
         Instruction {
             program_id,
             accounts: vec![
                 AccountMeta::new(depositor, true),
-                AccountMeta::new(fee_vault_pda, false),
+                AccountMeta::new_readonly(session_pda, false),
+                AccountMeta::new(deposit_receipt_pda, false),
+                AccountMeta::new_readonly(recipient, false),
                 AccountMeta::new_readonly(system_program::id(), false),
             ],
             data,
@@ -966,8 +987,13 @@ mod portal_e2e_tests {
 
         // Execute DepositFee
         let deposit_amount = 2_000_000_000u64; // 2 SOL
-        let deposit_fee_ix =
-            build_deposit_fee_ix(program_id, owner_pubkey, fee_vault_pda, deposit_amount);
+        let deposit_fee_ix = build_deposit_fee_ix(
+            program_id,
+            owner_pubkey,
+            session_pda,
+            owner_pubkey,
+            deposit_amount,
+        );
 
         let blockhash = child_bank.last_blockhash();
         let tx = Transaction::new_signed_with_payer(
@@ -1159,10 +1185,15 @@ mod portal_e2e_tests {
         );
         let _ = child_bank.process_transaction(&tx);
 
-        // Third party (depositor) deposits into owner's FeeVault
+        // Third party (depositor) deposits into owner's session, credited to themselves
         let deposit_amount = 3_000_000_000u64; // 3 SOL
-        let deposit_fee_ix =
-            build_deposit_fee_ix(program_id, depositor_pubkey, fee_vault_pda, deposit_amount);
+        let deposit_fee_ix = build_deposit_fee_ix(
+            program_id,
+            depositor_pubkey,
+            session_pda,
+            depositor_pubkey,
+            deposit_amount,
+        );
 
         let blockhash = child_bank.last_blockhash();
         let tx = Transaction::new_signed_with_payer(
@@ -1203,12 +1234,13 @@ mod portal_e2e_tests {
         );
 
         // Find the deposit event with the third party deposit amount
+        // With new design: depositor == recipient (the person who gets credited on L2)
         let deposit_event = fee_events.iter().find(|e| {
             if let L1Event::FeeDeposited {
                 delta, depositor, ..
             } = e
             {
-                *delta == deposit_amount && *depositor == owner_pubkey
+                *delta == deposit_amount && *depositor == depositor_pubkey
             } else {
                 false
             }
@@ -1283,8 +1315,13 @@ mod portal_e2e_tests {
 
         // First deposit: 2 SOL
         let deposit1_amount = 2_000_000_000u64;
-        let deposit_fee_ix1 =
-            build_deposit_fee_ix(program_id, owner_pubkey, fee_vault_pda, deposit1_amount);
+        let deposit_fee_ix1 = build_deposit_fee_ix(
+            program_id,
+            owner_pubkey,
+            session_pda,
+            owner_pubkey,
+            deposit1_amount,
+        );
 
         let blockhash = child_bank.last_blockhash();
         let tx = Transaction::new_signed_with_payer(
@@ -1302,8 +1339,13 @@ mod portal_e2e_tests {
 
         // Second deposit: 3 SOL more (total should be 5 SOL)
         let deposit2_amount = 3_000_000_000u64;
-        let deposit_fee_ix2 =
-            build_deposit_fee_ix(program_id, owner_pubkey, fee_vault_pda, deposit2_amount);
+        let deposit_fee_ix2 = build_deposit_fee_ix(
+            program_id,
+            owner_pubkey,
+            session_pda,
+            owner_pubkey,
+            deposit2_amount,
+        );
 
         let blockhash = child_bank.last_blockhash();
         let tx = Transaction::new_signed_with_payer(

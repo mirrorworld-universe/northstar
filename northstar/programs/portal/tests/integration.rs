@@ -2,7 +2,7 @@
 
 use {
     borsh::BorshDeserialize,
-    northstar_portal::{FeeVault, OpenSession, PortalInstruction, Session},
+    northstar_portal::{DepositReceipt, FeeVault, OpenSession, PortalInstruction, Session},
     solana_instruction::{AccountMeta, Instruction},
     solana_keypair::Keypair,
     solana_program_test::{BanksClient, ProgramTest, ProgramTestContext},
@@ -19,6 +19,17 @@ fn find_session_pda(program_id: &Pubkey, owner: &Pubkey, grid_id: u64) -> (Pubke
 
 fn find_fee_vault_pda(program_id: &Pubkey, owner: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[b"fee_vault", owner.as_ref()], program_id)
+}
+
+fn find_deposit_receipt_pda(
+    program_id: &Pubkey,
+    session: &Pubkey,
+    recipient: &Pubkey,
+) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[b"deposit_receipt", session.as_ref(), recipient.as_ref()],
+        program_id,
+    )
 }
 
 fn build_open_session_ix(
@@ -74,9 +85,12 @@ fn build_close_session_ix(
 fn build_deposit_fee_ix(
     program_id: &Pubkey,
     depositor: &Pubkey,
-    fee_vault_pda: &Pubkey,
+    session_pda: &Pubkey,
+    recipient: &Pubkey,
     lamports: u64,
 ) -> Instruction {
+    let (deposit_receipt_pda, _) = find_deposit_receipt_pda(program_id, session_pda, recipient);
+
     let ix = PortalInstruction::DepositFee { lamports };
     let data = borsh::to_vec(&ix).unwrap();
 
@@ -84,7 +98,9 @@ fn build_deposit_fee_ix(
         program_id: *program_id,
         accounts: vec![
             AccountMeta::new(*depositor, true),
-            AccountMeta::new(*fee_vault_pda, false),
+            AccountMeta::new_readonly(*session_pda, false),
+            AccountMeta::new(deposit_receipt_pda, false),
+            AccountMeta::new_readonly(*recipient, false),
             AccountMeta::new_readonly(system_program::id(), false),
         ],
         data,
@@ -138,12 +154,12 @@ async fn test_full_lifecycle() {
     let vault_data = get_account_data(banks, &fee_vault_pda).await.unwrap();
     let vault = FeeVault::try_from_slice(&vault_data).unwrap();
     assert_eq!(vault.discriminator, FeeVault::DISCRIMINATOR);
-    assert_eq!(vault.balance, 0);
 
     let deposit_ix = build_deposit_fee_ix(
         &PORTAL_PROGRAM_ID,
         &payer.pubkey(),
-        &fee_vault_pda,
+        &session_pda,
+        &payer.pubkey(),
         2_000_000_000,
     );
 
@@ -156,9 +172,13 @@ async fn test_full_lifecycle() {
     );
     banks.process_transaction(tx).await.unwrap();
 
-    let vault_data = get_account_data(banks, &fee_vault_pda).await.unwrap();
-    let vault = FeeVault::try_from_slice(&vault_data).unwrap();
-    assert_eq!(vault.balance, 2_000_000_000);
+    // Verify DepositReceipt was created with correct balance
+    let (deposit_receipt_pda, _) =
+        find_deposit_receipt_pda(&PORTAL_PROGRAM_ID, &session_pda, &payer.pubkey());
+    let receipt_data = get_account_data(banks, &deposit_receipt_pda).await.unwrap();
+    let receipt = DepositReceipt::try_from_slice(&receipt_data).unwrap();
+    assert_eq!(receipt.discriminator, DepositReceipt::DISCRIMINATOR);
+    assert_eq!(receipt.balance, 2_000_000_000);
 
     let (
         current_slot,
@@ -290,11 +310,12 @@ async fn test_cannot_deposit_to_wrong_vault() {
         Transaction::new_signed_with_payer(&[open_ix], Some(&payer.pubkey()), &[payer], blockhash);
     banks.process_transaction(tx).await.unwrap();
 
-    // Now user_b CAN deposit to payer's FeeVault (anyone can deposit to any valid vault)
+    // Now user_b CAN deposit to payer's session (anyone can deposit to any valid session)
     let deposit_ix = build_deposit_fee_ix(
         &PORTAL_PROGRAM_ID,
         &user_b.pubkey(),
-        &fee_vault_pda,
+        &session_pda,
+        &user_b.pubkey(),
         1_000_000_000,
     );
 
@@ -312,10 +333,12 @@ async fn test_cannot_deposit_to_wrong_vault() {
         result
     );
 
-    // Verify the balance was updated
-    let vault_data = get_account_data(banks, &fee_vault_pda).await.unwrap();
-    let vault = FeeVault::try_from_slice(&vault_data).unwrap();
-    assert_eq!(vault.balance, 1_000_000_000);
+    // Verify the DepositReceipt was created with correct balance
+    let (deposit_receipt_pda, _) =
+        find_deposit_receipt_pda(&PORTAL_PROGRAM_ID, &session_pda, &user_b.pubkey());
+    let receipt_data = get_account_data(banks, &deposit_receipt_pda).await.unwrap();
+    let receipt = DepositReceipt::try_from_slice(&receipt_data).unwrap();
+    assert_eq!(receipt.balance, 1_000_000_000);
 }
 
 #[tokio::test]
@@ -345,7 +368,8 @@ async fn test_multiple_deposits_accumulate() {
     let deposit_ix_1 = build_deposit_fee_ix(
         &PORTAL_PROGRAM_ID,
         &payer.pubkey(),
-        &fee_vault_pda,
+        &session_pda,
+        &payer.pubkey(),
         1_000_000_000,
     );
 
@@ -361,7 +385,8 @@ async fn test_multiple_deposits_accumulate() {
     let deposit_ix_2 = build_deposit_fee_ix(
         &PORTAL_PROGRAM_ID,
         &payer.pubkey(),
-        &fee_vault_pda,
+        &session_pda,
+        &payer.pubkey(),
         2_000_000_000,
     );
 
@@ -374,9 +399,12 @@ async fn test_multiple_deposits_accumulate() {
     );
     banks.process_transaction(tx).await.unwrap();
 
-    let vault_data = get_account_data(banks, &fee_vault_pda).await.unwrap();
-    let vault = FeeVault::try_from_slice(&vault_data).unwrap();
-    assert_eq!(vault.balance, 3_000_000_000);
+    // Verify DepositReceipt has cumulative balance
+    let (deposit_receipt_pda, _) =
+        find_deposit_receipt_pda(&PORTAL_PROGRAM_ID, &session_pda, &payer.pubkey());
+    let receipt_data = get_account_data(banks, &deposit_receipt_pda).await.unwrap();
+    let receipt = DepositReceipt::try_from_slice(&receipt_data).unwrap();
+    assert_eq!(receipt.balance, 3_000_000_000);
 }
 
 #[tokio::test]
@@ -547,11 +575,12 @@ async fn test_anyone_can_deposit_to_vault() {
         Transaction::new_signed_with_payer(&[open_ix], Some(&payer.pubkey()), &[payer], blockhash);
     banks.process_transaction(tx).await.unwrap();
 
-    // User B deposits 1 SOL
+    // User B deposits 1 SOL (to their own receipt)
     let deposit_ix_b = build_deposit_fee_ix(
         &PORTAL_PROGRAM_ID,
         &user_b.pubkey(),
-        &fee_vault_pda,
+        &session_pda,
+        &user_b.pubkey(),
         1_000_000_000,
     );
 
@@ -564,16 +593,19 @@ async fn test_anyone_can_deposit_to_vault() {
     );
     banks.process_transaction(tx).await.unwrap();
 
-    // Verify balance is 1 SOL
-    let vault_data = get_account_data(banks, &fee_vault_pda).await.unwrap();
-    let vault = FeeVault::try_from_slice(&vault_data).unwrap();
-    assert_eq!(vault.balance, 1_000_000_000);
+    // Verify user_b's DepositReceipt has 1 SOL
+    let (receipt_b_pda, _) =
+        find_deposit_receipt_pda(&PORTAL_PROGRAM_ID, &session_pda, &user_b.pubkey());
+    let receipt_b_data = get_account_data(banks, &receipt_b_pda).await.unwrap();
+    let receipt_b = DepositReceipt::try_from_slice(&receipt_b_data).unwrap();
+    assert_eq!(receipt_b.balance, 1_000_000_000);
 
-    // User C deposits 2 SOL
+    // User C deposits 2 SOL (to their own receipt)
     let deposit_ix_c = build_deposit_fee_ix(
         &PORTAL_PROGRAM_ID,
         &user_c.pubkey(),
-        &fee_vault_pda,
+        &session_pda,
+        &user_c.pubkey(),
         2_000_000_000,
     );
 
@@ -586,36 +618,40 @@ async fn test_anyone_can_deposit_to_vault() {
     );
     banks.process_transaction(tx).await.unwrap();
 
-    // Verify balance is 3 SOL
-    let vault_data = get_account_data(banks, &fee_vault_pda).await.unwrap();
-    let vault = FeeVault::try_from_slice(&vault_data).unwrap();
-    assert_eq!(vault.balance, 3_000_000_000);
+    // Verify user_c's DepositReceipt has 2 SOL
+    let (receipt_c_pda, _) =
+        find_deposit_receipt_pda(&PORTAL_PROGRAM_ID, &session_pda, &user_c.pubkey());
+    let receipt_c_data = get_account_data(banks, &receipt_c_pda).await.unwrap();
+    let receipt_c = DepositReceipt::try_from_slice(&receipt_c_data).unwrap();
+    assert_eq!(receipt_c.balance, 2_000_000_000);
 }
 
-/// Test: Depositing to a non-portal-program-owned account fails
+/// Test: Depositing with invalid session fails
 #[tokio::test]
-async fn test_deposit_to_invalid_account_fails() {
+async fn test_deposit_to_invalid_session_fails() {
     let mut context = setup().await;
     let banks = &mut context.banks_client;
     let payer = &context.payer;
 
-    // Create a random account not owned by the portal program
-    let invalid_vault = Keypair::new();
-    let invalid_vault_pubkey = invalid_vault.pubkey();
+    // Create a random account that is NOT owned by the portal program
+    let invalid_session = Keypair::new();
+    let invalid_session_pubkey = invalid_session.pubkey();
 
     // Create and fund the invalid account (owned by system program)
-    let fund_ix = transfer(&payer.pubkey(), &invalid_vault_pubkey, 1_000_000_000);
+    let fund_ix = transfer(&payer.pubkey(), &invalid_session_pubkey, 1_000_000_000);
 
     let blockhash = banks.get_latest_blockhash().await.unwrap();
     let tx =
         Transaction::new_signed_with_payer(&[fund_ix], Some(&payer.pubkey()), &[payer], blockhash);
     banks.process_transaction(tx).await.unwrap();
 
-    // Try to deposit into the invalid account
+    // Try to deposit using the invalid account as session
+    // This should fail because the "session" is not owned by the portal program
     let deposit_ix = build_deposit_fee_ix(
         &PORTAL_PROGRAM_ID,
         &payer.pubkey(),
-        &invalid_vault_pubkey,
+        &invalid_session_pubkey,
+        &payer.pubkey(),
         500_000_000,
     );
 
@@ -627,5 +663,202 @@ async fn test_deposit_to_invalid_account_fails() {
         blockhash,
     );
     let result = banks.process_transaction(tx).await;
-    assert!(result.is_err(), "Deposit to invalid account should fail");
+    assert!(result.is_err(), "Deposit to invalid session should fail");
+}
+
+/// Test: Third party deposits SOL for a different recipient
+#[tokio::test]
+async fn test_third_party_deposit_for_recipient() {
+    let mut context = setup().await;
+    let banks = &mut context.banks_client;
+    let payer = &context.payer;
+
+    let user_b = Keypair::new();
+    let user_c = Keypair::new();
+
+    // Fund user_b and user_c
+    let transfer_ix_1 = transfer(&payer.pubkey(), &user_b.pubkey(), 10_000_000_000);
+    let transfer_ix_2 = transfer(&payer.pubkey(), &user_c.pubkey(), 10_000_000_000);
+
+    let blockhash = banks.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[transfer_ix_1, transfer_ix_2],
+        Some(&payer.pubkey()),
+        &[payer],
+        blockhash,
+    );
+    banks.process_transaction(tx).await.unwrap();
+
+    // User A (payer) opens a session
+    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID, &payer.pubkey(), 1);
+    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID, &payer.pubkey());
+
+    let open_ix = build_open_session_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer.pubkey(),
+        &session_pda,
+        &fee_vault_pda,
+        1,
+        100,
+        5_000_000_000,
+    );
+
+    let blockhash = banks.get_latest_blockhash().await.unwrap();
+    let tx =
+        Transaction::new_signed_with_payer(&[open_ix], Some(&payer.pubkey()), &[payer], blockhash);
+    banks.process_transaction(tx).await.unwrap();
+
+    // User B deposits 1.5 SOL for User C (recipient = user_c, depositor = user_b)
+    let deposit_ix = build_deposit_fee_ix(
+        &PORTAL_PROGRAM_ID,
+        &user_b.pubkey(),
+        &session_pda,
+        &user_c.pubkey(),
+        1_500_000_000,
+    );
+
+    let blockhash = banks.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[deposit_ix],
+        Some(&user_b.pubkey()),
+        &[&user_b],
+        blockhash,
+    );
+    banks.process_transaction(tx).await.unwrap();
+
+    // Verify DepositReceipt for (session_pda, user_c) was created with correct balance
+    let (deposit_receipt_pda, _) =
+        find_deposit_receipt_pda(&PORTAL_PROGRAM_ID, &session_pda, &user_c.pubkey());
+    let receipt_data = get_account_data(banks, &deposit_receipt_pda).await.unwrap();
+    let receipt = DepositReceipt::try_from_slice(&receipt_data).unwrap();
+    assert_eq!(receipt.discriminator, DepositReceipt::DISCRIMINATOR);
+    assert_eq!(receipt.session.as_ref(), session_pda.as_ref());
+    assert_eq!(receipt.recipient.as_ref(), user_c.pubkey().as_ref());
+    assert_eq!(receipt.balance, 1_500_000_000);
+}
+
+/// Test: Same depositor deposits twice - single DepositReceipt with cumulative balance
+#[tokio::test]
+async fn test_cumulative_deposit_receipt() {
+    let mut context = setup().await;
+    let banks = &mut context.banks_client;
+    let payer = &context.payer;
+
+    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID, &payer.pubkey(), 1);
+    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID, &payer.pubkey());
+
+    let open_ix = build_open_session_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer.pubkey(),
+        &session_pda,
+        &fee_vault_pda,
+        1,
+        100,
+        5_000_000_000,
+    );
+
+    let blockhash = banks.get_latest_blockhash().await.unwrap();
+    let tx =
+        Transaction::new_signed_with_payer(&[open_ix], Some(&payer.pubkey()), &[payer], blockhash);
+    banks.process_transaction(tx).await.unwrap();
+
+    // First deposit: 1 SOL
+    let deposit_ix_1 = build_deposit_fee_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer.pubkey(),
+        &session_pda,
+        &payer.pubkey(),
+        1_000_000_000,
+    );
+
+    let blockhash = banks.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[deposit_ix_1],
+        Some(&payer.pubkey()),
+        &[payer],
+        blockhash,
+    );
+    banks.process_transaction(tx).await.unwrap();
+
+    // Second deposit: 2 SOL more
+    let deposit_ix_2 = build_deposit_fee_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer.pubkey(),
+        &session_pda,
+        &payer.pubkey(),
+        2_000_000_000,
+    );
+
+    let blockhash = banks.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[deposit_ix_2],
+        Some(&payer.pubkey()),
+        &[payer],
+        blockhash,
+    );
+    banks.process_transaction(tx).await.unwrap();
+
+    // Verify single DepositReceipt with cumulative balance (3 SOL)
+    let (deposit_receipt_pda, _) =
+        find_deposit_receipt_pda(&PORTAL_PROGRAM_ID, &session_pda, &payer.pubkey());
+    let receipt_data = get_account_data(banks, &deposit_receipt_pda).await.unwrap();
+    let receipt = DepositReceipt::try_from_slice(&receipt_data).unwrap();
+    assert_eq!(receipt.balance, 3_000_000_000);
+}
+
+/// Test: Depositing to an expired session fails with SessionExpired error
+#[tokio::test]
+async fn test_deposit_to_expired_session_fails() {
+    let mut context = setup().await;
+    let banks = &mut context.banks_client;
+    let payer_pubkey = context.payer.pubkey();
+
+    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID, &payer_pubkey, 1);
+    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID, &payer_pubkey);
+
+    // Open session with short TTL (10 slots)
+    let open_ix = build_open_session_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        &fee_vault_pda,
+        1,
+        10,
+        5_000_000_000,
+    );
+
+    let blockhash = banks.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[open_ix],
+        Some(&payer_pubkey),
+        &[&context.payer],
+        blockhash,
+    );
+    banks.process_transaction(tx).await.unwrap();
+
+    // Warp past the session TTL
+    let current_slot = banks.get_root_slot().await.unwrap();
+    context.warp_to_slot(current_slot + 15).unwrap();
+
+    // Need to get fresh banks client after warp
+    let banks = &mut context.banks_client;
+
+    // Try to deposit after session expired
+    let deposit_ix = build_deposit_fee_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        &payer_pubkey,
+        1_000_000_000,
+    );
+
+    let blockhash = banks.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[deposit_ix],
+        Some(&payer_pubkey),
+        &[&context.payer],
+        blockhash,
+    );
+    let result = banks.process_transaction(tx).await;
+    assert!(result.is_err(), "Deposit to expired session should fail");
 }

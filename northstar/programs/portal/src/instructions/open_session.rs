@@ -109,7 +109,6 @@ pub fn process_open_session(
     let fee_vault_state = FeeVault {
         discriminator: FeeVault::DISCRIMINATOR,
         authority: *owner_key,
-        balance: 0,
         bump: fee_vault_bump,
     };
     let mut fee_vault_data = fee_vault.try_borrow_mut_data()?;

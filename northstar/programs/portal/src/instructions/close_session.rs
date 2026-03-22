@@ -19,6 +19,9 @@ pub fn process_close_session(
     accounts: &[AccountInfo],
     grid_id: u64,
 ) -> ProgramResult {
+    // TODO: close_session should iterate and refund all DepositReceipt PDAs
+    // associated with this session back to their respective recipients.
+    // For now, deposit receipts persist independently after session close.
     if accounts.len() < 4 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }

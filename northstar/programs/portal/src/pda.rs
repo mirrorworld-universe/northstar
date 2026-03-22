@@ -1,5 +1,5 @@
 use {
-    crate::{DelegationRecord, FeeVault, Session},
+    crate::{DelegationRecord, DepositReceipt, FeeVault, Session},
     pinocchio::pubkey::{find_program_address, Pubkey},
 };
 
@@ -16,5 +16,18 @@ pub fn find_fee_vault_pda(program_id: &Pubkey, owner: &Pubkey) -> (Pubkey, u8) {
 
 pub fn find_delegation_record_pda(program_id: &Pubkey, delegated_account: &Pubkey) -> (Pubkey, u8) {
     let seeds = &[DelegationRecord::SEED_PREFIX, delegated_account.as_ref()];
+    find_program_address(seeds, program_id)
+}
+
+pub fn find_deposit_receipt_pda(
+    program_id: &Pubkey,
+    session: &Pubkey,
+    recipient: &Pubkey,
+) -> (Pubkey, u8) {
+    let seeds = &[
+        DepositReceipt::SEED_PREFIX,
+        session.as_ref(),
+        recipient.as_ref(),
+    ];
     find_program_address(seeds, program_id)
 }

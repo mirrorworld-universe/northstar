@@ -60,6 +60,7 @@ impl EphemeralTransactionClient {
     /// Check if a transaction only writes to allowed accounts.
     /// Returns `true` if the transaction is allowed, `false` if it
     /// touches non-delegated writable accounts.
+    // TODO: handle https://solana.com/developers/guides/advanced/lookup-tables
     fn is_transaction_allowed(&self, tx: &VersionedTransaction) -> bool {
         // If delegation set is empty, allow everything (unrestricted mode)
         if self.delegated_accounts.is_empty() {
