@@ -831,6 +831,29 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
                      silently ignored",
                 ),
         )
+        // Sonic: Portal for ephemeral rollup
+        .arg(
+            Arg::with_name("portal")
+                .long("portal")
+                .validator(is_pubkey)
+                .value_name("PUBKEY")
+                .takes_value(true)
+                .help(
+                    "Deploy the NorthStar portal program at this address and enable the ephemeral \
+                     rollup service. The portal program binary (northstar_portal.so) must be \
+                     findable via BPF_OUT_DIR or the standard program search path.",
+                ),
+        )
+        // Sonic: Ephemeral RPC port for the rollup server
+        .arg(
+            Arg::with_name("ephemeral_rpc_port")
+                .long("ephemeral-rpc-port")
+                .value_name("PORT")
+                .takes_value(true)
+                .default_value("8910")
+                .validator(is_parsable::<u16>)
+                .help("Port for the ephemeral rollup RPC server"),
+        )
         .args(&pub_sub_config::args(/*test_validator:*/ true))
 }
 
