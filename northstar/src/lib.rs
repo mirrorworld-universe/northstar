@@ -68,7 +68,15 @@ pub enum L1Event {
         delegated_account: Pubkey,
     },
     /// A fee deposit was made
-    FeeDeposited { fee_vault_pda: Pubkey, amount: u64 },
+    FeeDeposited {
+        session_pda: Pubkey,
+        /// Total vault balance after the deposit
+        amount: u64,
+        /// Deposit amount this slot (current - parent balance)
+        delta: u64,
+        /// Who gets credited on L2
+        depositor: Pubkey,
+    },
 }
 
 /// Configuration for NorthStar Manager
@@ -153,10 +161,37 @@ impl Manager {
                     owner_program: record.owner_program.into(),
                     grid_id: record.grid_id,
                 }),
-            Some(PortalAccount::FeeVault(vault)) => Some(L1Event::FeeDeposited {
-                fee_vault_pda: pubkey,
-                amount: vault.balance,
-            }),
+            Some(PortalAccount::FeeVault(_vault)) => {
+                // FeeVault balance tracking removed; events come from DepositReceipts
+                None
+            }
+            Some(PortalAccount::DepositReceipt(receipt)) => {
+                let prev_balance = bank
+                    .parent()
+                    .and_then(|parent| parent.get_account(&pubkey))
+                    .and_then(|account| {
+                        portal_state::try_parse_raw_portal_account(account.data()).and_then(|p| {
+                            if let portal_state::PortalAccount::DepositReceipt(r) = p {
+                                Some(r.balance)
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                    .unwrap_or(0);
+
+                let delta = receipt.balance.saturating_sub(prev_balance);
+                if delta == 0 {
+                    return None;
+                }
+
+                Some(L1Event::FeeDeposited {
+                    session_pda: receipt.session.into(),
+                    amount: receipt.balance,
+                    delta,
+                    depositor: receipt.recipient.into(),
+                })
+            }
             None => {
                 // Unrecognized — log and skip
                 debug!("Unrecognized portal account at {pubkey}");
@@ -296,6 +331,14 @@ impl Manager {
         self.active_runtime = Some(runtime);
         Ok(())
     }
+
+    /// Credit a deposit to a depositor's account on the ephemeral bank.
+    /// Called by NorthStarService when a FeeDeposited event is detected on L1.
+    pub fn credit_deposit(&self, depositor: &Pubkey, lamports: u64) {
+        if let Some(runtime) = &self.active_runtime {
+            runtime.credit_deposit(depositor, lamports);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -337,6 +380,17 @@ mod portal_e2e_tests {
         Pubkey::find_program_address(&[b"delegation", delegated_account.as_ref()], program_id)
     }
 
+    fn find_deposit_receipt_pda(
+        program_id: &Pubkey,
+        session: &Pubkey,
+        recipient: &Pubkey,
+    ) -> (Pubkey, u8) {
+        Pubkey::find_program_address(
+            &[b"deposit_receipt", session.as_ref(), recipient.as_ref()],
+            program_id,
+        )
+    }
+
     fn build_open_session_ix(
         program_id: Pubkey,
         owner: Pubkey,
@@ -366,17 +420,23 @@ mod portal_e2e_tests {
 
     fn build_deposit_fee_ix(
         program_id: Pubkey,
-        owner: Pubkey,
-        fee_vault_pda: Pubkey,
+        depositor: Pubkey,
+        session_pda: Pubkey,
+        recipient: Pubkey,
         lamports: u64,
     ) -> Instruction {
+        let (deposit_receipt_pda, _) =
+            find_deposit_receipt_pda(&program_id, &session_pda, &recipient);
+
         let ix = PortalInstruction::DepositFee { lamports };
         let data = borsh::to_vec(&ix).unwrap();
         Instruction {
             program_id,
             accounts: vec![
-                AccountMeta::new(owner, true),
-                AccountMeta::new(fee_vault_pda, false),
+                AccountMeta::new(depositor, true),
+                AccountMeta::new_readonly(session_pda, false),
+                AccountMeta::new(deposit_receipt_pda, false),
+                AccountMeta::new_readonly(recipient, false),
                 AccountMeta::new_readonly(system_program::id(), false),
             ],
             data,
@@ -525,15 +585,8 @@ mod portal_e2e_tests {
             panic!("Expected SessionOpened event");
         }
 
-        // Verify FeeVault was also created
-        let fee_vault_events: Vec<_> = events
-            .iter()
-            .filter(|e| matches!(e, L1Event::FeeDeposited { .. }))
-            .collect();
-        assert!(
-            !fee_vault_events.is_empty(),
-            "Should detect FeeVault creation"
-        );
+        // Note: FeeVault creation (with 0 balance) is no longer emitted as an event
+        // since delta == 0 is filtered out. This is correct behavior for TASK_026.
     }
 
     /// Test: Execute Delegate instruction and verify AccountDelegated event
@@ -934,8 +987,13 @@ mod portal_e2e_tests {
 
         // Execute DepositFee
         let deposit_amount = 2_000_000_000u64; // 2 SOL
-        let deposit_fee_ix =
-            build_deposit_fee_ix(program_id, owner_pubkey, fee_vault_pda, deposit_amount);
+        let deposit_fee_ix = build_deposit_fee_ix(
+            program_id,
+            owner_pubkey,
+            session_pda,
+            owner_pubkey,
+            deposit_amount,
+        );
 
         let blockhash = child_bank.last_blockhash();
         let tx = Transaction::new_signed_with_payer(
@@ -973,13 +1031,38 @@ mod portal_e2e_tests {
 
         // Find the deposit event (not the initial 0 balance)
         let deposit_event = fee_events.iter().find(|e| {
-            if let L1Event::FeeDeposited { amount, .. } = e {
-                *amount == deposit_amount
+            if let L1Event::FeeDeposited {
+                delta, depositor, ..
+            } = e
+            {
+                *delta == deposit_amount && *depositor == owner_pubkey
             } else {
                 false
             }
         });
-        assert!(deposit_event.is_some(), "Should detect the 2 SOL deposit");
+        assert!(
+            deposit_event.is_some(),
+            "Should detect the 2 SOL deposit with delta and depositor"
+        );
+
+        // Verify the deposit event details
+        if let Some(L1Event::FeeDeposited {
+            delta,
+            depositor,
+            amount,
+            ..
+        }) = deposit_event
+        {
+            assert_eq!(*delta, deposit_amount, "Delta should equal deposit amount");
+            assert_eq!(
+                *depositor, owner_pubkey,
+                "Depositor should be the vault authority (owner)"
+            );
+            assert_eq!(
+                *amount, deposit_amount,
+                "Amount should be total vault balance"
+            );
+        }
     }
 
     /// Test: No portal events when there's no portal activity
@@ -1041,6 +1124,274 @@ mod portal_e2e_tests {
         assert!(
             events.is_empty(),
             "Should detect no portal events when there's no portal activity"
+        );
+    }
+
+    /// Test: Third party deposits to a FeeVault -> verify FeeDeposited event
+    #[test]
+    fn test_e2e_third_party_deposit_detected() {
+        setup();
+
+        // Create genesis bank
+        let genesis_config = GenesisConfig::new(&[], &[]);
+        let genesis_bank = Bank::new_for_tests(&genesis_config);
+
+        // Create BankForks first to set up fork graph
+        let bank_forks = BankForks::new_rw_arc(genesis_bank);
+        let genesis_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
+
+        // Deploy portal program
+        let program_id = deploy_portal_program(&genesis_bank);
+
+        // Create owner keypair and fund them
+        let owner_keypair = Keypair::new();
+        let owner_pubkey = owner_keypair.pubkey();
+        fund_account(&genesis_bank, &owner_pubkey, 100_000_000_000);
+
+        // Create third-party depositor keypair and fund them
+        let depositor_keypair = Keypair::new();
+        let depositor_pubkey = depositor_keypair.pubkey();
+        fund_account(&genesis_bank, &depositor_pubkey, 100_000_000_000);
+
+        // Freeze genesis bank and get slot before moving
+        let genesis_slot = genesis_bank.slot();
+        genesis_bank.freeze();
+
+        // Create child bank
+        let child_bank = Bank::new_from_parent(genesis_bank, &Pubkey::default(), genesis_slot + 1);
+
+        // Compute PDAs
+        let grid_id = 1u64;
+        let (session_pda, _) = find_session_pda(&program_id, &owner_pubkey, grid_id);
+        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id, &owner_pubkey);
+
+        // Execute OpenSession first
+        let open_session_ix = build_open_session_ix(
+            program_id,
+            owner_pubkey,
+            session_pda,
+            fee_vault_pda,
+            grid_id,
+            1000,
+            5_000_000_000,
+        );
+
+        let blockhash = child_bank.last_blockhash();
+        let tx = Transaction::new_signed_with_payer(
+            &[open_session_ix],
+            Some(&owner_pubkey),
+            &[&owner_keypair],
+            blockhash,
+        );
+        let _ = child_bank.process_transaction(&tx);
+
+        // Third party (depositor) deposits into owner's session, credited to themselves
+        let deposit_amount = 3_000_000_000u64; // 3 SOL
+        let deposit_fee_ix = build_deposit_fee_ix(
+            program_id,
+            depositor_pubkey,
+            session_pda,
+            depositor_pubkey,
+            deposit_amount,
+        );
+
+        let blockhash = child_bank.last_blockhash();
+        let tx = Transaction::new_signed_with_payer(
+            &[deposit_fee_ix],
+            Some(&depositor_pubkey),
+            &[&depositor_keypair],
+            blockhash,
+        );
+        let result = child_bank.process_transaction(&tx);
+        assert!(
+            result.is_ok(),
+            "Third party DepositFee should succeed: {:?}",
+            result
+        );
+
+        // Create manager and detect events
+        let bank_forks = BankForks::new_rw_arc(child_bank);
+
+        // Get bank reference BEFORE moving into Manager
+        let bank_ref = bank_forks.read().unwrap().root_bank();
+
+        let manager_config = ManagerConfig {
+            portal_program_id: program_id,
+            manager_account: Arc::new(Keypair::new()),
+        };
+        let manager = Manager::new(manager_config);
+
+        let events = manager.get_l1_events(&bank_ref);
+
+        // Verify FeeDeposited event with correct amount
+        let fee_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, L1Event::FeeDeposited { .. }))
+            .collect();
+        assert!(
+            !fee_events.is_empty(),
+            "Should detect at least one FeeDeposited event"
+        );
+
+        // Find the deposit event with the third party deposit amount
+        // With new design: depositor == recipient (the person who gets credited on L2)
+        let deposit_event = fee_events.iter().find(|e| {
+            if let L1Event::FeeDeposited {
+                delta, depositor, ..
+            } = e
+            {
+                *delta == deposit_amount && *depositor == depositor_pubkey
+            } else {
+                false
+            }
+        });
+        assert!(
+            deposit_event.is_some(),
+            "Should detect the 3 SOL third party deposit with correct delta and depositor"
+        );
+
+        // Verify the delta equals the deposit amount, not cumulative balance
+        if let Some(L1Event::FeeDeposited { delta, .. }) = deposit_event {
+            assert_eq!(
+                *delta, deposit_amount,
+                "Delta should equal deposit amount (not cumulative)"
+            );
+        }
+    }
+
+    /// Test: Multiple deposits across slots - verify delta is incremental, not cumulative
+    #[test]
+    fn test_e2e_deposit_delta_computed_correctly() {
+        setup();
+
+        // Create genesis bank
+        let genesis_config = GenesisConfig::new(&[], &[]);
+        let genesis_bank = Bank::new_for_tests(&genesis_config);
+
+        // Create BankForks first to set up fork graph
+        let bank_forks = BankForks::new_rw_arc(genesis_bank);
+        let genesis_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
+
+        // Deploy portal program
+        let program_id = deploy_portal_program(&genesis_bank);
+
+        // Create owner keypair and fund them
+        let owner_keypair = Keypair::new();
+        let owner_pubkey = owner_keypair.pubkey();
+        fund_account(&genesis_bank, &owner_pubkey, 100_000_000_000);
+
+        // Freeze genesis bank and get slot before moving
+        let genesis_slot = genesis_bank.slot();
+        genesis_bank.freeze();
+
+        // Create child bank for slot N+1 (first deposit)
+        let child_bank =
+            Bank::new_from_parent(genesis_bank.clone(), &Pubkey::default(), genesis_slot + 1);
+
+        // Compute PDAs
+        let grid_id = 1u64;
+        let (session_pda, _) = find_session_pda(&program_id, &owner_pubkey, grid_id);
+        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id, &owner_pubkey);
+
+        // Execute OpenSession first
+        let open_session_ix = build_open_session_ix(
+            program_id,
+            owner_pubkey,
+            session_pda,
+            fee_vault_pda,
+            grid_id,
+            1000,
+            5_000_000_000,
+        );
+
+        let blockhash = child_bank.last_blockhash();
+        let tx = Transaction::new_signed_with_payer(
+            &[open_session_ix],
+            Some(&owner_pubkey),
+            &[&owner_keypair],
+            blockhash,
+        );
+        let _ = child_bank.process_transaction(&tx);
+
+        // First deposit: 2 SOL
+        let deposit1_amount = 2_000_000_000u64;
+        let deposit_fee_ix1 = build_deposit_fee_ix(
+            program_id,
+            owner_pubkey,
+            session_pda,
+            owner_pubkey,
+            deposit1_amount,
+        );
+
+        let blockhash = child_bank.last_blockhash();
+        let tx = Transaction::new_signed_with_payer(
+            &[deposit_fee_ix1],
+            Some(&owner_pubkey),
+            &[&owner_keypair],
+            blockhash,
+        );
+        let _ = child_bank.process_transaction(&tx);
+
+        // Freeze the child bank and create a new child for slot N+2 (second deposit)
+        child_bank.freeze();
+        let child_bank =
+            Bank::new_from_parent(Arc::new(child_bank), &Pubkey::default(), genesis_slot + 2);
+
+        // Second deposit: 3 SOL more (total should be 5 SOL)
+        let deposit2_amount = 3_000_000_000u64;
+        let deposit_fee_ix2 = build_deposit_fee_ix(
+            program_id,
+            owner_pubkey,
+            session_pda,
+            owner_pubkey,
+            deposit2_amount,
+        );
+
+        let blockhash = child_bank.last_blockhash();
+        let tx = Transaction::new_signed_with_payer(
+            &[deposit_fee_ix2],
+            Some(&owner_pubkey),
+            &[&owner_keypair],
+            blockhash,
+        );
+        let _ = child_bank.process_transaction(&tx);
+
+        // Create manager and detect events on the second child bank
+        let bank_forks = BankForks::new_rw_arc(child_bank);
+        let bank_ref = bank_forks.read().unwrap().root_bank();
+
+        let manager_config = ManagerConfig {
+            portal_program_id: program_id,
+            manager_account: Arc::new(Keypair::new()),
+        };
+        let manager = Manager::new(manager_config);
+
+        let events = manager.get_l1_events(&bank_ref);
+
+        // Verify FeeDeposited event with correct delta (3 SOL, not 5 SOL)
+        let fee_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, L1Event::FeeDeposited { .. }))
+            .collect();
+
+        assert!(
+            !fee_events.is_empty(),
+            "Should detect at least one FeeDeposited event"
+        );
+
+        // Find the second deposit event
+        let second_deposit_event = fee_events.iter().find(|e| {
+            if let L1Event::FeeDeposited { delta, amount, .. } = e {
+                // Delta should be 3 SOL (the increment), amount should be 5 SOL (cumulative)
+                *delta == deposit2_amount && *amount == (deposit1_amount + deposit2_amount)
+            } else {
+                false
+            }
+        });
+
+        assert!(
+            second_deposit_event.is_some(),
+            "Should detect delta as 3 SOL (not 5 SOL cumulative)"
         );
     }
 }

@@ -4912,6 +4912,7 @@ name = "northstar"
 version = "0.1.0"
 dependencies = [
  "agave-logger",
+ "agave-reserved-account-keys",
  "arc-swap",
  "bincode",
  "borsh",

@@ -30,6 +30,8 @@ solana-time-utils.workspace = true
 solana-net-utils.workspace = true
 
 agave-logger.workspace = true
+agave-reserved-account-keys.workspace = true
+
 arc-swap.workspace = true
 bincode.workspace = true
 log.workspace = true

@@ -35,12 +35,11 @@ impl Session {
 pub struct FeeVault {
     pub discriminator: u8,
     pub authority: [u8; 32],
-    pub balance: u64,
     pub bump: u8,
 }
 
 impl FeeVault {
-    pub const LEN: usize = 42;
+    pub const LEN: usize = 34; // 1 + 32 + 1
     pub const SEED_PREFIX: &[u8] = b"fee_vault";
     pub const DISCRIMINATOR: u8 = 2;
 
@@ -62,6 +61,26 @@ impl DelegationRecord {
     pub const LEN: usize = 42;
     pub const SEED_PREFIX: &[u8] = b"delegation";
     pub const DISCRIMINATOR: u8 = 3;
+
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        self.discriminator == Self::DISCRIMINATOR
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct DepositReceipt {
+    pub discriminator: u8,
+    pub session: Pubkey,
+    pub recipient: Pubkey,
+    pub balance: u64,
+    pub bump: u8,
+}
+
+impl DepositReceipt {
+    pub const LEN: usize = 74; // 1 + 32 + 32 + 8 + 1
+    pub const SEED_PREFIX: &[u8] = b"deposit_receipt";
+    pub const DISCRIMINATOR: u8 = 4;
 
     #[inline]
     pub fn is_valid(&self) -> bool {
@@ -94,11 +113,23 @@ mod tests {
         let vault = FeeVault {
             discriminator: FeeVault::DISCRIMINATOR,
             authority: [0xAB; 32],
-            balance: 1_000_000,
             bump: 128,
         };
         let serialized = borsh::to_vec(&vault).unwrap();
         assert_eq!(serialized.len(), FeeVault::LEN);
+    }
+
+    #[test]
+    fn test_deposit_receipt_len() {
+        let receipt = DepositReceipt {
+            discriminator: DepositReceipt::DISCRIMINATOR,
+            session: [0x11; 32],
+            recipient: [0x22; 32],
+            balance: 1_000_000_000,
+            bump: 77,
+        };
+        let serialized = borsh::to_vec(&receipt).unwrap();
+        assert_eq!(serialized.len(), DepositReceipt::LEN);
     }
 
     #[test]

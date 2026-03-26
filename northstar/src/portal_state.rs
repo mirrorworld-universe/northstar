@@ -1,4 +1,4 @@
-use northstar_portal::{DelegationRecord, FeeVault, Session};
+use northstar_portal::{DelegationRecord, DepositReceipt, FeeVault, Session};
 
 /// Enum representing any portal program account type.
 #[derive(Debug, Clone)]
@@ -6,6 +6,7 @@ pub enum PortalAccount {
     Session(Session),
     FeeVault(FeeVault),
     DelegationRecord(DelegationRecord),
+    DepositReceipt(DepositReceipt),
 }
 
 pub fn try_parse_raw_portal_account(data: &[u8]) -> Option<PortalAccount> {
@@ -22,6 +23,9 @@ pub fn try_parse_raw_portal_account(data: &[u8]) -> Option<PortalAccount> {
         DelegationRecord::DISCRIMINATOR => borsh::from_slice::<DelegationRecord>(data)
             .ok()
             .map(PortalAccount::DelegationRecord),
+        DepositReceipt::DISCRIMINATOR => borsh::from_slice::<DepositReceipt>(data)
+            .ok()
+            .map(PortalAccount::DepositReceipt),
         _ => None,
     }
 }

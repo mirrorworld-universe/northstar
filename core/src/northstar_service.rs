@@ -69,57 +69,60 @@ impl NorthStarService {
                         continue;
                     };
 
-                    // Check if we already have an active runtime
-                    if manager.has_active_runtime() {
-                        continue;
-                    }
-
                     // Check for L1 events from the portal program
-                    let l1_events = manager.get_l1_events(&bank);
-                    if l1_events.is_empty() {
-                        debug!(
-                            "No L1 events at slot {}, skipping runtime creation",
-                            bank.slot()
-                        );
-                        continue;
-                    }
+                    let l1_events = &mut manager.get_l1_events(&bank).into_iter();
 
-                    // Found L1 events, create ephemeral runtime
-                    info!(
-                        "Creating ephemeral runtime at slot {} due to L1 events",
-                        bank.slot()
-                    );
-
-                    // For now, use the first event's settings
-                    // TODO: Handle multiple events or different event types
-                    let settings = match l1_events[0] {
-                        L1Event::SessionOpened {
+                    if !manager.has_active_runtime() {
+                        let Some(L1Event::SessionOpened {
                             session_pda,
                             owner,
                             grid_id,
                             ttl_slots,
                             fee_cap,
-                        } => northstar::EphemeralRollupSettings {
+                        }) = l1_events
+                            .skip_while(|e| match e {
+                                L1Event::SessionOpened { .. } => false,
+                                e => {
+                                    debug!(
+                                        "Unexpected event {e:?}. Skipping as we have no ephemeral \
+                                         runtime"
+                                    );
+                                    true
+                                }
+                            })
+                            .next()
+                        else {
+                            continue;
+                        };
+                        let settings = northstar::EphemeralRollupSettings {
                             session_pda,
                             owner,
                             grid_id,
                             ttl_slots,
                             fee_cap,
                             delegated_accounts: vec![],
-                        },
-                        // Skip other event types for now - we only create runtimes on SessionOpened
-                        _ => continue,
-                    };
+                        };
+                        info!("Creating ephemeral runtime at slot {}", bank.slot());
 
-                    let root_bank = bank_forks.read().unwrap().root_bank();
+                        if let Err(e) = manager.create_ephemeral_runtime(
+                            bank_forks.read().unwrap().root_bank(),
+                            cluster_info.clone(),
+                            settings,
+                            config.listen_addr,
+                        ) {
+                            error!("Failed to create ephemeral runtime: {}", e);
+                            continue;
+                        }
+                    }
 
-                    if let Err(e) = manager.create_ephemeral_runtime(
-                        root_bank,
-                        cluster_info.clone(),
-                        settings,
-                        config.listen_addr,
-                    ) {
-                        error!("Failed to create ephemeral runtime: {}", e);
+                    // Forward deposits to the running ER
+                    for event in l1_events {
+                        if let L1Event::FeeDeposited {
+                            delta, depositor, ..
+                        } = event
+                        {
+                            manager.credit_deposit(&depositor, delta);
+                        }
                     }
                 }
 
