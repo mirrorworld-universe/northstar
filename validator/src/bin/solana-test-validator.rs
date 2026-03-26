@@ -293,8 +293,10 @@ fn main() {
 
     let clone_feature_set = matches.is_present("clone_feature_set");
 
-    // Sonic: Extract portal program ID from CLI arguments
-    let portal = pubkey_of(&matches, "portal");
+    // Sonic: Extract portal program ID from CLI arguments (always present due to default_value)
+    let portal = matches
+        .value_of("portal")
+        .and_then(|v| v.parse::<Pubkey>().ok());
     let ephemeral_rpc_port: u16 = matches
         .value_of("ephemeral_rpc_port")
         .unwrap_or("8910")

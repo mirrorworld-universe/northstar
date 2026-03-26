@@ -81,6 +81,16 @@ use {
     tokio::time::sleep,
 };
 
+/// Sonic: Default portal program ID for ephemeral rollup support.
+/// This is a well-known test address that will be used when --portal is passed
+/// without an explicit program ID.
+pub const DEFAULT_PORTAL_PROGRAM_ID: Pubkey =
+    Pubkey::from_str_const("5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf");
+
+/// Sonic: Portal program binary embedded at compile time.
+// XXX: its hacky. Probably should be set in build.rs and use `CARGO_TARGET_DIR` or smth
+static PORTAL_PROGRAM_BINARY: &[u8] = include_bytes!("../../target/deploy/northstar_portal.so");
+
 #[derive(Clone)]
 pub struct AccountInfo<'a> {
     pub address: Option<Pubkey>,
@@ -1015,14 +1025,7 @@ impl TestValidator {
 
         // Sonic: Load portal program into genesis if portal is configured
         if let Some(portal_program_id) = config.portal {
-            let program_path = solana_program_test::find_file("northstar_portal.so")
-                .unwrap_or_else(|| {
-                    panic!(
-                        "Unable to locate northstar_portal.so. Build it first with: cargo \
-                         build-sbf -- -p northstar-portal"
-                    );
-                });
-            let data = solana_program_test::read_file(&program_path);
+            let data = PORTAL_PROGRAM_BINARY.to_vec();
             let loader = solana_sdk_ids::bpf_loader_upgradeable::id();
 
             let (programdata_address, _) =

@@ -35,7 +35,7 @@ use {
         DEFAULT_MAX_STREAMS_PER_MS, DEFAULT_MAX_UNSTAKED_CONNECTIONS, DEFAULT_QUIC_ENDPOINTS,
     },
     solana_tpu_client::tpu_client::{DEFAULT_TPU_CONNECTION_POOL_SIZE, DEFAULT_VOTE_USE_QUIC},
-    std::{cmp::Ordering, path::PathBuf, str::FromStr},
+    std::{cmp::Ordering, path::PathBuf, str::FromStr, sync::LazyLock},
 };
 
 pub mod thread_args;
@@ -51,6 +51,9 @@ const MAX_SNAPSHOT_DOWNLOAD_ABORT: u32 = 5;
 // We've observed missed leader slots leading to deadlocks on test validator
 // with less than 2 ticks per slot.
 const MINIMUM_TICKS_PER_SLOT: u64 = 2;
+
+static DEFAULT_PORTAL_PROGRAM_ID: LazyLock<String> =
+    LazyLock::new(|| solana_test_validator::DEFAULT_PORTAL_PROGRAM_ID.to_string());
 
 pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
     let app = App::new(crate_name!())
@@ -838,10 +841,10 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
                 .validator(is_pubkey)
                 .value_name("PUBKEY")
                 .takes_value(true)
+                .default_value(&DEFAULT_PORTAL_PROGRAM_ID)
                 .help(
                     "Deploy the NorthStar portal program at this address and enable the ephemeral \
-                     rollup service. The portal program binary (northstar_portal.so) must be \
-                     findable via BPF_OUT_DIR or the standard program search path.",
+                     rollup service.",
                 ),
         )
         // Sonic: Ephemeral RPC port for the rollup server
