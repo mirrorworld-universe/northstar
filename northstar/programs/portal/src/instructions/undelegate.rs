@@ -55,11 +55,13 @@ pub fn process_undelegate(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
         return Err(PortalError::DelegatedAccountOwnerMismatch.into());
     }
 
-    Assign {
-        account: delegated_account,
-        owner: owner_program.key(),
-    }
-    .invoke()?;
+    unsafe { delegated_account.assign(owner_program.key()) };
+
+    // Assign {
+    //     account: delegated_account,
+    //     owner: owner_program.key(),
+    // }
+    // .invoke()?;
 
     let delegation_record_lamports = delegation_record.lamports();
 
