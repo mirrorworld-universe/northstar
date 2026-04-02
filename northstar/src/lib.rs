@@ -310,6 +310,8 @@ impl Manager {
         settings: EphemeralRollupSettings,
         rpc_addr: SocketAddr,
     ) -> Result<()> {
+        // TODO: just for testing, disable ephemeral runtime to debug some thing
+        return Ok(());
         if self.active_runtime.is_some() {
             info!("Ephemeral runtime already active, skipping creation");
             return Ok(());

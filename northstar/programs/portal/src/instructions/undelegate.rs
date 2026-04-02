@@ -8,7 +8,10 @@ use {
 };
 
 pub fn process_undelegate(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    pinocchio_log::log!("Instruction: Undelegate");
+
     if accounts.len() < 5 {
+        pinocchio_log::log!("ERROR: Undelegate failed: not enough account keys");
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
@@ -19,6 +22,7 @@ pub fn process_undelegate(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
     let _system_program = &accounts[4];
 
     if !authority.is_signer() {
+        pinocchio_log::log!("ERROR: Undelegate failed: authority is not signer");
         return Err(PortalError::Unauthorized.into());
     }
 
@@ -26,22 +30,29 @@ pub fn process_undelegate(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
     let (expected_delegation_key, _) = find_delegation_record_pda(program_id, &delegated_key);
 
     if delegation_record.key() != &expected_delegation_key {
+        pinocchio_log::log!("ERROR: Undelegate failed: delegation record PDA mismatch");
         return Err(PortalError::InvalidPdaSeeds.into());
     }
 
     let delegation_state = DelegationRecord::try_from_slice(&delegation_record.try_borrow_data()?)
-        .map_err(|_| PortalError::InvalidAccountData)?;
+        .map_err(|_| {
+            pinocchio_log::log!("ERROR: Undelegate failed: delegation record deserialize failed");
+            PortalError::DelegationRecordDeserializeFailed
+        })?;
 
     if !delegation_state.is_valid() {
-        return Err(PortalError::InvalidAccountData.into());
+        pinocchio_log::log!("ERROR: Undelegate failed: delegation record state invalid");
+        return Err(PortalError::DelegationRecordStateInvalid.into());
     }
 
     if delegation_state.owner_program != *owner_program.key() {
+        pinocchio_log::log!("ERROR: Undelegate failed: owner program mismatch");
         return Err(PortalError::Unauthorized.into());
     }
 
     if delegated_account.owner() != program_id {
-        return Err(PortalError::InvalidAccountData.into());
+        pinocchio_log::log!("ERROR: Undelegate failed: delegated account owner mismatch");
+        return Err(PortalError::DelegatedAccountOwnerMismatch.into());
     }
 
     Assign {
@@ -56,13 +67,16 @@ pub fn process_undelegate(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
         let mut authority_lamports = authority.try_borrow_mut_lamports()?;
         *authority_lamports = authority_lamports
             .checked_add(delegation_record_lamports)
-            .ok_or(PortalError::ArithmeticOverflow)?;
+            .ok_or_else(|| {
+                pinocchio_log::log!("ERROR: Undelegate failed: arithmetic overflow");
+                PortalError::ArithmeticOverflow
+            })?;
         *delegation_record.try_borrow_mut_lamports()? = 0;
     }
 
     delegation_record.try_borrow_mut_data()?.fill(0);
 
-    pinocchio_log::log!("Account undelegated");
+    pinocchio_log::log!("Undelegate success");
 
     Ok(())
 }
