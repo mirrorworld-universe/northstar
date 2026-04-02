@@ -81,6 +81,16 @@ use {
     tokio::time::sleep,
 };
 
+/// Sonic: Default portal program ID for ephemeral rollup support.
+/// This is a well-known test address that will be used when --portal is passed
+/// without an explicit program ID.
+pub const DEFAULT_PORTAL_PROGRAM_ID: Pubkey =
+    Pubkey::from_str_const("5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf");
+
+/// Sonic: Portal program binary embedded at compile time.
+// XXX: its hacky. Probably should be set in build.rs and use `CARGO_TARGET_DIR` or smth
+static PORTAL_PROGRAM_BINARY: &[u8] = include_bytes!("../../target/deploy/northstar_portal.so");
+
 #[derive(Clone)]
 pub struct AccountInfo<'a> {
     pub address: Option<Pubkey>,
@@ -146,6 +156,10 @@ pub struct TestValidatorGenesis {
     pub transaction_account_lock_limit: Option<usize>,
     pub geyser_plugin_manager: Arc<RwLock<GeyserPluginManager>>,
     admin_rpc_service_post_init: Arc<RwLock<Option<AdminRpcRequestMetadataPostInit>>>,
+    /// Sonic: Portal program ID for ephemeral rollup service
+    portal: Option<Pubkey>,
+    /// Sonic: Ephemeral RPC port for the rollup server
+    ephemeral_rpc_port: u16,
 }
 
 impl Default for TestValidatorGenesis {
@@ -182,6 +196,8 @@ impl Default for TestValidatorGenesis {
             geyser_plugin_manager: Arc::new(RwLock::new(GeyserPluginManager::default())),
             admin_rpc_service_post_init:
                 Arc::<RwLock<Option<AdminRpcRequestMetadataPostInit>>>::default(),
+            portal: None,
+            ephemeral_rpc_port: 8910,
         }
     }
 }
@@ -317,6 +333,19 @@ impl TestValidatorGenesis {
 
     pub fn compute_unit_limit(&mut self, compute_unit_limit: u64) -> &mut Self {
         self.compute_unit_limit = Some(compute_unit_limit);
+        self
+    }
+
+    /// Sonic: Set the portal program ID to enable ephemeral rollup support.
+    /// The portal program binary will be loaded into genesis at this address.
+    pub fn portal(&mut self, portal_program_id: Pubkey) -> &mut Self {
+        self.portal = Some(portal_program_id);
+        self
+    }
+
+    /// Sonic: Set the ephemeral RPC port for the rollup server.
+    pub fn ephemeral_rpc_port(&mut self, port: u16) -> &mut Self {
+        self.ephemeral_rpc_port = port;
         self
     }
 
@@ -994,6 +1023,50 @@ impl TestValidator {
             );
         }
 
+        // Sonic: Load portal program into genesis if portal is configured
+        if let Some(portal_program_id) = config.portal {
+            let data = PORTAL_PROGRAM_BINARY.to_vec();
+            let loader = solana_sdk_ids::bpf_loader_upgradeable::id();
+
+            let (programdata_address, _) =
+                Pubkey::find_program_address(&[portal_program_id.as_ref()], &loader);
+
+            let mut program_data = bincode::serialize(&UpgradeableLoaderState::ProgramData {
+                slot: 0,
+                upgrade_authority_address: Some(Pubkey::default()),
+            })
+            .unwrap();
+            program_data.extend_from_slice(&data);
+
+            accounts.insert(
+                programdata_address,
+                AccountSharedData::from(Account {
+                    lamports: Rent::default().minimum_balance(program_data.len()).max(1),
+                    data: program_data,
+                    owner: loader,
+                    executable: false,
+                    rent_epoch: 0,
+                }),
+            );
+
+            let program_account_data = bincode::serialize(&UpgradeableLoaderState::Program {
+                programdata_address,
+            })
+            .unwrap();
+            accounts.insert(
+                portal_program_id,
+                AccountSharedData::from(Account {
+                    lamports: Rent::default()
+                        .minimum_balance(program_account_data.len())
+                        .max(1),
+                    data: program_account_data,
+                    owner: loader,
+                    executable: true,
+                    rent_epoch: 0,
+                }),
+            );
+        }
+
         let mut genesis_config = create_genesis_config_with_leader_ex_no_features(
             mint_lamports,
             &mint_address,
@@ -1211,6 +1284,10 @@ impl TestValidator {
             accounts_db_config,
             runtime_config,
             enable_scheduler_bindings: config.enable_scheduler_bindings,
+            // Sonic: Portal for ephemeral rollup
+            portal: config.portal,
+            // Sonic: Ephemeral RPC port
+            ephemeral_rpc_port: config.ephemeral_rpc_port,
             ..ValidatorConfig::default_for_test()
         };
         if let Some(ref tower_storage) = config.tower_storage {

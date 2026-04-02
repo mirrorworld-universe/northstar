@@ -293,6 +293,16 @@ fn main() {
 
     let clone_feature_set = matches.is_present("clone_feature_set");
 
+    // Sonic: Extract portal program ID from CLI arguments (always present due to default_value)
+    let portal = matches
+        .value_of("portal")
+        .and_then(|v| v.parse::<Pubkey>().ok());
+    let ephemeral_rpc_port: u16 = matches
+        .value_of("ephemeral_rpc_port")
+        .unwrap_or("8910")
+        .parse()
+        .expect("valid ephemeral rpc port");
+
     let warp_slot = if matches.is_present("warp_slot") {
         Some(match matches.value_of("warp_slot") {
             Some(_) => value_t_or_exit!(matches, "warp_slot", Slot),
@@ -384,6 +394,8 @@ fn main() {
             ("inflation_fixed", "--inflation-fixed"),
             ("faucet_sol", "--faucet-sol"),
             ("deactivate_feature", "--deactivate-feature"),
+            // Sonic: Portal is a genesis-time config
+            ("portal", "--portal"),
         ] {
             if matches.is_present(name) {
                 println!("{long} argument ignored, ledger already exists");
@@ -479,6 +491,12 @@ fn main() {
             exit(1);
         })
         .deactivate_features(&features_to_deactivate);
+
+    // Sonic: Configure portal program for ephemeral rollup
+    if let Some(portal_program_id) = portal {
+        genesis.portal(portal_program_id);
+        genesis.ephemeral_rpc_port(ephemeral_rpc_port);
+    }
 
     genesis.rpc_config(JsonRpcConfig {
         enable_rpc_transaction_history: true,

@@ -35,7 +35,7 @@ use {
         DEFAULT_MAX_STREAMS_PER_MS, DEFAULT_MAX_UNSTAKED_CONNECTIONS, DEFAULT_QUIC_ENDPOINTS,
     },
     solana_tpu_client::tpu_client::{DEFAULT_TPU_CONNECTION_POOL_SIZE, DEFAULT_VOTE_USE_QUIC},
-    std::{cmp::Ordering, path::PathBuf, str::FromStr},
+    std::{cmp::Ordering, path::PathBuf, str::FromStr, sync::LazyLock},
 };
 
 pub mod thread_args;
@@ -51,6 +51,9 @@ const MAX_SNAPSHOT_DOWNLOAD_ABORT: u32 = 5;
 // We've observed missed leader slots leading to deadlocks on test validator
 // with less than 2 ticks per slot.
 const MINIMUM_TICKS_PER_SLOT: u64 = 2;
+
+static DEFAULT_PORTAL_PROGRAM_ID: LazyLock<String> =
+    LazyLock::new(|| solana_test_validator::DEFAULT_PORTAL_PROGRAM_ID.to_string());
 
 pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
     let app = App::new(crate_name!())
@@ -830,6 +833,29 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
                      genesis configuration. If the ledger already exists then this parameter is \
                      silently ignored",
                 ),
+        )
+        // Sonic: Portal for ephemeral rollup
+        .arg(
+            Arg::with_name("portal")
+                .long("portal")
+                .validator(is_pubkey)
+                .value_name("PUBKEY")
+                .takes_value(true)
+                .default_value(&DEFAULT_PORTAL_PROGRAM_ID)
+                .help(
+                    "Deploy the NorthStar portal program at this address and enable the ephemeral \
+                     rollup service.",
+                ),
+        )
+        // Sonic: Ephemeral RPC port for the rollup server
+        .arg(
+            Arg::with_name("ephemeral_rpc_port")
+                .long("ephemeral-rpc-port")
+                .value_name("PORT")
+                .takes_value(true)
+                .default_value("8910")
+                .validator(is_parsable::<u16>)
+                .help("Port for the ephemeral rollup RPC server"),
         )
         .args(&pub_sub_config::args(/*test_validator:*/ true))
 }
