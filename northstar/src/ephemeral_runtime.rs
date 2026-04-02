@@ -41,7 +41,9 @@ pub struct EphemeralRuntime {
     /// Used for settlement diff computation (future task).
     initial_account_snapshots: HashMap<Pubkey, AccountSharedData>,
     /// Set of delegated account pubkeys for fast lookup.
-    delegated_accounts: HashSet<Pubkey>,
+    /// Shared with EphemeralTransactionClient — wrapped in RwLock so new
+    /// delegations arriving from L1 can be added at runtime.
+    delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
     /// Shared with EphemeralTransactionClient - tracks accounts that have been written to on this ER.
     touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
 
@@ -114,11 +116,11 @@ impl EphemeralRuntime {
             settings.delegated_accounts.len(),
         );
 
-        let delegated_set = Arc::new(delegated_accounts.clone());
+        let delegated_set = Arc::new(RwLock::new(delegated_accounts.clone()));
         let touched_accounts = Arc::new(RwLock::new(HashSet::new()));
         let tx_client = EphemeralTransactionClient::new(
             bank_forks.clone(),
-            delegated_set,
+            delegated_set.clone(),
             touched_accounts.clone(),
         );
 
@@ -215,7 +217,7 @@ impl EphemeralRuntime {
             exit,
             slot_advancer: Some(slot_advancer),
             initial_account_snapshots,
-            delegated_accounts,
+            delegated_accounts: delegated_set,
             touched_accounts,
 
             _settings: settings,
@@ -243,14 +245,41 @@ impl EphemeralRuntime {
         info!("EphemeralRuntime shutdown complete");
     }
 
-    /// Returns the set of delegated account pubkeys.
-    pub fn delegated_accounts(&self) -> &HashSet<Pubkey> {
-        &self.delegated_accounts
+    /// Returns a clone of the delegated account pubkeys set.
+    pub fn delegated_accounts(&self) -> HashSet<Pubkey> {
+        self.delegated_accounts.read().unwrap().clone()
     }
 
     /// Returns the initial snapshot of a delegated account.
     pub fn initial_account_snapshot(&self, pubkey: &Pubkey) -> Option<&AccountSharedData> {
         self.initial_account_snapshots.get(pubkey)
+    }
+
+    /// Handle a new account delegation from L1.
+    /// Copies the account data from L1 into the ER bank and adds it to the
+    /// delegated accounts set so transactions can write to it.
+    pub fn handle_delegation(&self, delegated_account: &Pubkey, account_data: AccountSharedData) {
+        let bank = self.bank();
+        bank.store_account(delegated_account, &account_data);
+
+        // Add to the delegated accounts set so the tx client allows writes
+        self.delegated_accounts
+            .write()
+            .unwrap()
+            .insert(*delegated_account);
+
+        // Mark as touched so the balance isn't zeroed later
+        self.touched_accounts
+            .write()
+            .unwrap()
+            .insert(*delegated_account);
+
+        info!(
+            "Delegated account {} added to ER (owner: {}, lamports: {})",
+            delegated_account,
+            account_data.owner(),
+            account_data.lamports()
+        );
     }
 
     /// Credit a deposit on the ephemeral bank. Called by NorthStarService
