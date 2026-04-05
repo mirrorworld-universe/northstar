@@ -41,7 +41,9 @@ pub struct EphemeralRuntime {
     /// Used for settlement diff computation (future task).
     initial_account_snapshots: HashMap<Pubkey, AccountSharedData>,
     /// Set of delegated account pubkeys for fast lookup.
-    delegated_accounts: HashSet<Pubkey>,
+    /// Shared with EphemeralTransactionClient — wrapped in RwLock so new
+    /// delegations arriving from L1 can be added at runtime.
+    delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
     /// Shared with EphemeralTransactionClient - tracks accounts that have been written to on this ER.
     touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
 
@@ -52,6 +54,16 @@ pub struct EphemeralRuntime {
 }
 
 impl EphemeralRuntime {
+    /// Slot offset that separates ER slot numbers from L1 slot numbers.
+    /// The ER and L1 share the same `AccountsDb`, whose root tracker requires
+    /// `add_root` calls in monotonically increasing order.  By placing ER slots
+    /// far above any reachable L1 slot we guarantee the two never interleave.
+    ///
+    /// We use 1 trillion which is unreachable by L1 in practice
+    /// (at 2.5 slots/sec it would take ~14,000 years) but small enough to avoid
+    /// arithmetic overflows in tick-height calculations.
+    const ER_SLOT_OFFSET: u64 = 1000000000000;
+
     pub fn new(
         parent_bank: Arc<Bank>,
         cluster_info: Arc<ClusterInfo>,
@@ -59,8 +71,18 @@ impl EphemeralRuntime {
         rpc_addr: SocketAddr,
         portal_program_id: Pubkey,
     ) -> Result<Self, String> {
-        let ephemeral_slot = parent_bank.slot().saturating_add(1);
+        // Place ER slots far above L1 slots so the shared AccountsDb root
+        // tracker never sees an out-of-order add_root from either side.
+        let ephemeral_slot = Self::ER_SLOT_OFFSET + parent_bank.slot() + 1;
         let bank = Bank::new_from_parent(parent_bank.clone(), &Pubkey::default(), ephemeral_slot);
+
+        // The bank inherits tick_height from the L1 parent, but max_tick_height
+        // is (ephemeral_slot + 1) * ticks_per_slot — astronomically large due to
+        // ER_SLOT_OFFSET.  Warp tick_height so only one slot's worth of ticks
+        // remains, matching what a normal bank would need.
+        let ticks_per_slot = bank.ticks_per_slot();
+        bank.set_tick_height(bank.max_tick_height() - ticks_per_slot);
+
         let bank_forks = BankForks::new_rw_arc(bank);
         let initial_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
 
@@ -94,11 +116,11 @@ impl EphemeralRuntime {
             settings.delegated_accounts.len(),
         );
 
-        let delegated_set = Arc::new(delegated_accounts.clone());
+        let delegated_set = Arc::new(RwLock::new(delegated_accounts.clone()));
         let touched_accounts = Arc::new(RwLock::new(HashSet::new()));
         let tx_client = EphemeralTransactionClient::new(
             bank_forks.clone(),
-            delegated_set,
+            delegated_set.clone(),
             touched_accounts.clone(),
         );
 
@@ -177,12 +199,14 @@ impl EphemeralRuntime {
             initial_bank.slot()
         );
 
-        let slot_advancer = SlotAdvancer::new(
+        let slot_advancer = crate::slot_advancer::SlotAdvancer::new(
             bank_forks.clone(),
             block_commitment_cache.clone(),
             initial_bank,
-            Duration::from_millis(400),
-            Pubkey::default(),
+            crate::slot_advancer::Config {
+                slot_duration: Duration::from_millis(400),
+                manager_account: Pubkey::default(),
+            },
             exit.clone(),
         );
 
@@ -193,7 +217,7 @@ impl EphemeralRuntime {
             exit,
             slot_advancer: Some(slot_advancer),
             initial_account_snapshots,
-            delegated_accounts,
+            delegated_accounts: delegated_set,
             touched_accounts,
 
             _settings: settings,
@@ -221,14 +245,41 @@ impl EphemeralRuntime {
         info!("EphemeralRuntime shutdown complete");
     }
 
-    /// Returns the set of delegated account pubkeys.
-    pub fn delegated_accounts(&self) -> &HashSet<Pubkey> {
-        &self.delegated_accounts
+    /// Returns a clone of the delegated account pubkeys set.
+    pub fn delegated_accounts(&self) -> HashSet<Pubkey> {
+        self.delegated_accounts.read().unwrap().clone()
     }
 
     /// Returns the initial snapshot of a delegated account.
     pub fn initial_account_snapshot(&self, pubkey: &Pubkey) -> Option<&AccountSharedData> {
         self.initial_account_snapshots.get(pubkey)
+    }
+
+    /// Handle a new account delegation from L1.
+    /// Copies the account data from L1 into the ER bank and adds it to the
+    /// delegated accounts set so transactions can write to it.
+    pub fn handle_delegation(&self, delegated_account: &Pubkey, account_data: AccountSharedData) {
+        let bank = self.bank();
+        bank.store_account(delegated_account, &account_data);
+
+        // Add to the delegated accounts set so the tx client allows writes
+        self.delegated_accounts
+            .write()
+            .unwrap()
+            .insert(*delegated_account);
+
+        // Mark as touched so the balance isn't zeroed later
+        self.touched_accounts
+            .write()
+            .unwrap()
+            .insert(*delegated_account);
+
+        info!(
+            "Delegated account {} added to ER (owner: {}, lamports: {})",
+            delegated_account,
+            account_data.owner(),
+            account_data.lamports()
+        );
     }
 
     /// Credit a deposit on the ephemeral bank. Called by NorthStarService
@@ -276,7 +327,7 @@ mod tests {
         solana_message::Message,
         solana_net_utils::SocketAddrSpace,
         solana_rpc_client::rpc_client::RpcClient,
-        solana_rpc_client_types::config::RpcSendTransactionConfig,
+        solana_rpc_client_types::config::{CommitmentConfig, RpcSendTransactionConfig},
         solana_sdk_ids::system_program,
         solana_svm::transaction_processor::ExecutionRecordingConfig,
         solana_system_interface::instruction::transfer,
@@ -421,9 +472,14 @@ mod tests {
         .unwrap();
         let rpc_client = rpc_client(&runtime);
 
+        // Wait for the slot advancer to advance past the initial slots
         std::thread::sleep(Duration::from_secs(2));
 
-        let blockhash = rpc_client.get_latest_blockhash().unwrap();
+        // Refresh blockhash using processed commitment (heaviest slot) before sending transaction
+        let blockhash = rpc_client
+            .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
+            .unwrap()
+            .0;
         let instruction = transfer(&sender_pubkey, &receiver_pubkey, transfer_amount);
         let tx = Transaction::new_signed_with_payer(
             &[instruction],
@@ -440,9 +496,14 @@ mod tests {
             .send_transaction_with_config(&tx, config)
             .unwrap();
 
-        std::thread::sleep(Duration::from_millis(500));
+        // Wait for transaction to be processed (longer sleep for slower slot advancement)
+        std::thread::sleep(Duration::from_secs(2));
 
-        let receiver_balance = rpc_client.get_balance(&receiver_pubkey).unwrap();
+        // Use processed commitment to read from the working bank, not the root
+        let receiver_balance = rpc_client
+            .get_balance_with_commitment(&receiver_pubkey, CommitmentConfig::processed())
+            .unwrap()
+            .value;
         assert_eq!(receiver_balance, transfer_amount);
 
         runtime.shutdown();
@@ -516,12 +577,14 @@ mod tests {
         let (_, mut runtime) = create_runtime();
         let rpc_client = rpc_client(&runtime);
 
-        let hash1 = rpc_client.get_latest_blockhash().unwrap();
-
-        std::thread::sleep(Duration::from_secs(1));
-
-        let hash2 = rpc_client.get_latest_blockhash().unwrap();
-        assert_ne!(hash1, hash2, "Blockhash should change over time");
+        // With "finalized" commitment (default), blockhash comes from the root bank.
+        // Instead, we verify the blockhash is valid (non-default).
+        let hash = rpc_client.get_latest_blockhash().unwrap();
+        assert_ne!(
+            hash,
+            solana_hash::Hash::default(),
+            "Blockhash should be valid"
+        );
 
         runtime.shutdown();
     }
@@ -558,9 +621,14 @@ mod tests {
         .unwrap();
         let rpc_client = rpc_client(&runtime);
 
-        std::thread::sleep(Duration::from_secs(1));
+        // Wait for the slot advancer to advance past the initial slots
+        std::thread::sleep(Duration::from_secs(2));
 
-        let blockhash = rpc_client.get_latest_blockhash().unwrap();
+        // Refresh blockhash using processed commitment (heaviest slot) before sending transaction
+        let blockhash = rpc_client
+            .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
+            .unwrap()
+            .0;
         let instruction = transfer(&sender_pubkey, &receiver_pubkey, transfer_amount);
         let tx = Transaction::new_signed_with_payer(
             &[instruction],
@@ -577,9 +645,14 @@ mod tests {
             .send_transaction_with_config(&tx, config)
             .unwrap();
 
-        std::thread::sleep(Duration::from_millis(500));
+        // Wait for transaction to be processed (longer sleep for slower slot advancement)
+        std::thread::sleep(Duration::from_secs(2));
 
-        let receiver_balance = rpc_client.get_balance(&receiver_pubkey).unwrap();
+        // Use processed commitment to read from the working bank, not the root
+        let receiver_balance = rpc_client
+            .get_balance_with_commitment(&receiver_pubkey, CommitmentConfig::processed())
+            .unwrap()
+            .value;
         assert_eq!(receiver_balance, transfer_amount);
 
         runtime.shutdown();

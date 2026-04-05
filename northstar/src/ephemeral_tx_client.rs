@@ -22,9 +22,9 @@ use {
 
 pub struct EphemeralTransactionClient {
     bank_forks: Arc<RwLock<BankForks>>,
-    // TODO: this can change actually with L1 event. Its better to merge it with touched_accounts
-    /// Set of delegated account pubkeys for filtering
-    delegated_accounts: Arc<HashSet<Pubkey>>,
+    /// Set of delegated account pubkeys for filtering.
+    /// Wrapped in RwLock because new delegations can arrive from L1 at runtime.
+    delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
     /// Accounts that have been written to on this ER.
     /// Once touched, their balance is "real" (not inherited from L1).
     touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
@@ -43,7 +43,7 @@ impl Clone for EphemeralTransactionClient {
 impl EphemeralTransactionClient {
     pub fn new(
         bank_forks: Arc<RwLock<BankForks>>,
-        delegated_accounts: Arc<HashSet<Pubkey>>,
+        delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
         touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
     ) -> Self {
         Self {
@@ -63,7 +63,7 @@ impl EphemeralTransactionClient {
     // TODO: handle https://solana.com/developers/guides/advanced/lookup-tables
     fn is_transaction_allowed(&self, tx: &VersionedTransaction) -> bool {
         // If delegation set is empty, allow everything (unrestricted mode)
-        if self.delegated_accounts.is_empty() {
+        if self.delegated_accounts.read().unwrap().is_empty() {
             return true;
         }
 
@@ -94,7 +94,7 @@ impl EphemeralTransactionClient {
         }
 
         // Allow delegated accounts
-        if self.delegated_accounts.contains(key) {
+        if self.delegated_accounts.read().unwrap().contains(key) {
             return true;
         }
 
@@ -194,10 +194,11 @@ impl EphemeralTransactionClient {
         bank: &Bank,
         tx: &VersionedTransaction,
         touched: &RwLock<HashSet<Pubkey>>,
-        delegated: &HashSet<Pubkey>,
+        delegated: &RwLock<HashSet<Pubkey>>,
     ) {
+        let delegated_read = delegated.read().unwrap();
         // Unrestricted mode - no zeroing (empty delegation set means dev/test mode)
-        if delegated.is_empty() {
+        if delegated_read.is_empty() {
             return;
         }
 
@@ -218,7 +219,7 @@ impl EphemeralTransactionClient {
             }
 
             // Skip delegated accounts - they keep their L1 balance
-            if delegated.contains(key) {
+            if delegated_read.contains(key) {
                 continue;
             }
 
@@ -243,7 +244,7 @@ impl EphemeralTransactionClient {
 
         // Also zero fee payer (index 0) if untouched and not delegated
         if let Some(fee_payer) = static_keys.first() {
-            if !delegated.contains(fee_payer)
+            if !delegated_read.contains(fee_payer)
                 && !touched_read.contains(fee_payer)
                 && !Self::is_infrastructure_account(fee_payer)
             {
@@ -312,8 +313,8 @@ mod tests {
         let user_pubkey = Pubkey::new_unique();
         fund_account(&bank, &user_pubkey, 100_000_000_000);
 
-        let delegated_set: Arc<HashSet<Pubkey>> =
-            Arc::new(vec![delegated_pubkey].into_iter().collect());
+        let delegated_set: Arc<RwLock<HashSet<Pubkey>>> =
+            Arc::new(RwLock::new(vec![delegated_pubkey].into_iter().collect()));
         let touched = Arc::new(RwLock::new(HashSet::new()));
 
         // Create a test transaction that transfers from user
@@ -365,8 +366,8 @@ mod tests {
         let user_pubkey = Pubkey::new_unique();
         fund_account(&bank, &user_pubkey, 100_000_000_000);
 
-        let delegated_set: Arc<HashSet<Pubkey>> =
-            Arc::new(vec![delegated_pubkey].into_iter().collect());
+        let delegated_set: Arc<RwLock<HashSet<Pubkey>>> =
+            Arc::new(RwLock::new(vec![delegated_pubkey].into_iter().collect()));
         let touched = Arc::new(RwLock::new(HashSet::new()));
 
         // Mark the user account as touched
@@ -413,8 +414,8 @@ mod tests {
         let delegated_account = AccountSharedData::new(50_000_000_000, 0, &Pubkey::new_unique());
         bank.store_account(&delegated_pubkey, &delegated_account);
 
-        let delegated_set: Arc<HashSet<Pubkey>> =
-            Arc::new(vec![delegated_pubkey].into_iter().collect());
+        let delegated_set: Arc<RwLock<HashSet<Pubkey>>> =
+            Arc::new(RwLock::new(vec![delegated_pubkey].into_iter().collect()));
         let touched = Arc::new(RwLock::new(HashSet::new()));
 
         // Create a test transaction that uses the delegated account as writable
@@ -455,7 +456,7 @@ mod tests {
         fund_account(&bank, &user_pubkey, 100_000_000_000);
 
         // Empty delegated set = unrestricted mode
-        let delegated_set: Arc<HashSet<Pubkey>> = Arc::new(HashSet::new());
+        let delegated_set: Arc<RwLock<HashSet<Pubkey>>> = Arc::new(RwLock::new(HashSet::new()));
         let touched = Arc::new(RwLock::new(HashSet::new()));
 
         // Create a test transaction
@@ -512,7 +513,7 @@ mod tests {
         bank_forks: Arc<RwLock<BankForks>>,
         delegated: Vec<Pubkey>,
     ) -> EphemeralTransactionClient {
-        let delegated_set = Arc::new(delegated.into_iter().collect());
+        let delegated_set = Arc::new(RwLock::new(delegated.into_iter().collect()));
         let touched_set = Arc::new(RwLock::new(HashSet::new()));
         EphemeralTransactionClient::new(bank_forks, delegated_set, touched_set)
     }

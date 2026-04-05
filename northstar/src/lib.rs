@@ -339,6 +339,27 @@ impl Manager {
             runtime.credit_deposit(depositor, lamports);
         }
     }
+
+    /// Handle a new account delegation from L1.
+    /// Called by NorthStarService when an AccountDelegated event is detected on L1.
+    /// Copies the account data from L1 into the ephemeral bank and adds it to
+    /// the delegated set so transactions are allowed to write to it.
+    pub fn handle_delegation(
+        &self,
+        bank: &Bank,
+        delegated_account: &Pubkey,
+    ) {
+        if let Some(runtime) = &self.active_runtime {
+            if let Some(account_data) = bank.get_account(delegated_account) {
+                runtime.handle_delegation(delegated_account, account_data);
+            } else {
+                warn!(
+                    "Cannot handle delegation: account {} not found on L1",
+                    delegated_account
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -347,7 +368,7 @@ mod portal_e2e_tests {
         super::*,
         agave_logger::setup,
         northstar_portal::{OpenSession, PortalInstruction},
-        solana_account::AccountSharedData,
+        solana_account::{AccountSharedData, WritableAccount},
         solana_genesis_config::GenesisConfig,
         solana_gossip::contact_info::ContactInfo,
         solana_instruction::{AccountMeta, Instruction},
@@ -932,7 +953,120 @@ mod portal_e2e_tests {
         runtime.shutdown();
     }
 
-    /// Test: DepositFee transaction -> verify FeeDeposited event
+    /// Test: handle_delegation adds a new delegated account to a running ER at runtime
+    #[test]
+    fn test_e2e_handle_delegation_at_runtime() {
+        setup();
+
+        // --- Set up L1 bank with portal program ---
+        let genesis_config = GenesisConfig::new(&[], &[]);
+        let genesis_bank = Bank::new_for_tests(&genesis_config);
+        let bank_forks = BankForks::new_rw_arc(genesis_bank);
+        let genesis_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
+        let program_id = deploy_portal_program(&genesis_bank);
+
+        let owner_keypair = Keypair::new();
+        let owner_pubkey = owner_keypair.pubkey();
+        fund_account(&genesis_bank, &owner_pubkey, 100_000_000_000);
+
+        let genesis_slot = genesis_bank.slot();
+        genesis_bank.freeze();
+
+        let child_bank = Bank::new_from_parent(genesis_bank, &Pubkey::default(), genesis_slot + 1);
+
+        // Create a delegated account with some data, owned by the portal program
+        let delegated_account_pubkey = Pubkey::new_unique();
+        let delegated_data = vec![0xDE; 64];
+        let mut delegated_account =
+            AccountSharedData::new(5_000_000_000, delegated_data.len(), &program_id);
+        delegated_account.data_as_mut_slice().copy_from_slice(&delegated_data);
+        child_bank.store_account(&delegated_account_pubkey, &delegated_account);
+
+        // Open session on L1
+        let grid_id = 1u64;
+        let (session_pda, _) = find_session_pda(&program_id, &owner_pubkey, grid_id);
+        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id, &owner_pubkey);
+
+        let open_session_ix = build_open_session_ix(
+            program_id,
+            owner_pubkey,
+            session_pda,
+            fee_vault_pda,
+            grid_id,
+            1000,
+            5_000_000_000,
+        );
+        let blockhash = child_bank.last_blockhash();
+        let tx = Transaction::new_signed_with_payer(
+            &[open_session_ix],
+            Some(&owner_pubkey),
+            &[&owner_keypair],
+            blockhash,
+        );
+        let _ = child_bank.process_transaction(&tx);
+        child_bank.freeze();
+
+        // --- Create ER with NO initial delegations ---
+        let parent_bank = Arc::new(child_bank);
+        let cluster_info = create_test_cluster_info();
+        let settings = EphemeralRollupSettings {
+            session_pda,
+            owner: owner_pubkey,
+            grid_id,
+            ttl_slots: 1000,
+            fee_cap: 5_000_000_000,
+            delegated_accounts: vec![], // empty — no delegations at start
+        };
+
+        let mut runtime = EphemeralRuntime::new(
+            parent_bank.clone(),
+            cluster_info,
+            settings,
+            find_free_addr(),
+            program_id,
+        )
+        .expect("Failed to create ephemeral runtime");
+
+        // Verify account is NOT in delegated set yet
+        assert!(
+            !runtime.delegated_accounts().contains(&delegated_account_pubkey),
+            "Account should not be delegated yet"
+        );
+
+        // --- Simulate L1 delegation event arriving at runtime ---
+        let account_data = parent_bank
+            .get_account(&delegated_account_pubkey)
+            .expect("Account should exist on L1");
+        runtime.handle_delegation(&delegated_account_pubkey, account_data.clone());
+
+        // Verify account IS in delegated set now
+        assert!(
+            runtime.delegated_accounts().contains(&delegated_account_pubkey),
+            "Account should be delegated after handle_delegation"
+        );
+
+        // Verify account is readable on the ER bank
+        let er_bank = runtime.bank();
+        let er_account = er_bank
+            .get_account(&delegated_account_pubkey)
+            .expect("Delegated account should be readable on ER");
+        assert_eq!(
+            er_account.data(),
+            &delegated_data[..],
+            "Account data should match L1 data"
+        );
+        assert_eq!(er_account.lamports(), 5_000_000_000);
+
+        // Verify the account is readable via RPC
+        std::thread::sleep(Duration::from_secs(2));
+        let rpc_client = RpcClient::new(runtime.rpc_addr());
+        let rpc_balance = rpc_client
+            .get_balance(&delegated_account_pubkey)
+            .expect("Should be able to get balance via RPC");
+        assert_eq!(rpc_balance, 5_000_000_000, "RPC balance should match");
+
+        runtime.shutdown();
+    }
     #[test]
     fn test_e2e_deposit_fee_detected() {
         setup();
