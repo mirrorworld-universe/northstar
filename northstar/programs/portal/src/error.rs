@@ -10,6 +10,15 @@ pub enum PortalError {
     InsufficientFees = 5,
     ArithmeticOverflow = 6,
     InvalidPdaSeeds = 7,
+    SessionAccountOwnerMismatch = 8,
+    SessionDeserializeFailed = 9,
+    SessionStateInvalid = 10,
+    DepositReceiptDeserializeFailed = 11,
+    DepositReceiptStateInvalid = 12,
+    DelegatedAccountOwnerMismatch = 13,
+    DelegationRecordAlreadyInitialized = 14,
+    DelegationRecordDeserializeFailed = 15,
+    DelegationRecordStateInvalid = 16,
 }
 
 impl From<PortalError> for ProgramError {

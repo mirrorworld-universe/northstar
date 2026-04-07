@@ -21,7 +21,15 @@ pub fn process_open_session(
         fee_cap,
     }: OpenSession,
 ) -> ProgramResult {
+    pinocchio_log::log!(
+        "Instruction: OpenSession, grid_id={}, ttl_slots={}, fee_cap={}",
+        grid_id,
+        ttl_slots,
+        fee_cap
+    );
+
     if accounts.len() < 4 {
+        pinocchio_log::log!("ERROR: OpenSession failed: not enough account keys");
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
@@ -33,6 +41,7 @@ pub fn process_open_session(
     let owner_key = owner.key();
 
     if !owner.is_signer() {
+        pinocchio_log::log!("ERROR: OpenSession failed: owner is not signer");
         return Err(PortalError::Unauthorized.into());
     }
 
@@ -40,9 +49,11 @@ pub fn process_open_session(
     let (expected_fee_vault_key, fee_vault_bump) = find_fee_vault_pda(program_id, owner_key);
 
     if session.key() != &expected_session_key {
+        pinocchio_log::log!("ERROR: OpenSession failed: session PDA mismatch");
         return Err(PortalError::InvalidPdaSeeds.into());
     }
     if fee_vault.key() != &expected_fee_vault_key {
+        pinocchio_log::log!("ERROR: OpenSession failed: fee vault PDA mismatch");
         return Err(PortalError::InvalidPdaSeeds.into());
     }
 
@@ -114,7 +125,7 @@ pub fn process_open_session(
     let mut fee_vault_data = fee_vault.try_borrow_mut_data()?;
     BorshSerialize::serialize(&fee_vault_state, &mut &mut fee_vault_data[..FeeVault::LEN]).unwrap();
 
-    pinocchio_log::log!("Session opened");
+    pinocchio_log::log!("OpenSession success");
 
     Ok(())
 }

@@ -21,35 +21,45 @@ pub fn process_deposit_fee(
     accounts: &[AccountInfo],
     lamports: u64,
 ) -> ProgramResult {
+    pinocchio_log::log!("Instruction: DepositFee, lamports={}", lamports);
+
     if accounts.len() < 5 {
+        pinocchio_log::log!("ERROR: DepositFee failed: not enough account keys");
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
     let depositor = &accounts[0];
     let session = &accounts[1];
-    let deposit_receipt = &accounts[2];
-    let recipient = &accounts[3];
+    let deposit_receipt = &accounts[2]; // lamport receiver account belong to this program
+    let recipient = &accounts[3]; // who will receive the lamports
     let _system_program = &accounts[4];
 
     if !depositor.is_signer() {
+        pinocchio_log::log!("ERROR: DepositFee failed: depositor is not signer");
         return Err(PortalError::Unauthorized.into());
     }
 
     // Validate session is owned by portal program
     if session.owner() != program_id {
-        return Err(PortalError::InvalidAccountData.into());
+        pinocchio_log::log!("ERROR: DepositFee failed: session owner mismatch");
+        return Err(PortalError::SessionAccountOwnerMismatch.into());
     }
 
     let session_state = Session::try_from_slice(&session.try_borrow_data()?)
-        .map_err(|_| PortalError::InvalidAccountData)?;
+        .map_err(|_| {
+            pinocchio_log::log!("ERROR: DepositFee failed: session deserialize failed");
+            PortalError::SessionDeserializeFailed
+        })?;
 
     if !session_state.is_valid() {
-        return Err(PortalError::InvalidAccountData.into());
+        pinocchio_log::log!("ERROR: DepositFee failed: session state invalid");
+        return Err(PortalError::SessionStateInvalid.into());
     }
 
     // Check session is not expired
     let clock = Clock::get()?;
     if session_state.is_expired(clock.slot) {
+        pinocchio_log::log!("ERROR: DepositFee failed: session expired");
         return Err(PortalError::SessionExpired.into());
     }
 
@@ -65,6 +75,7 @@ pub fn process_deposit_fee(
         find_deposit_receipt_pda(program_id, session_key, recipient_key);
 
     if deposit_receipt.key() != &expected_receipt_key {
+        pinocchio_log::log!("ERROR: DepositFee failed: deposit receipt PDA mismatch");
         return Err(PortalError::InvalidPdaSeeds.into());
     }
 
@@ -109,16 +120,23 @@ pub fn process_deposit_fee(
     } else {
         // Subsequent deposit — update existing receipt
         let mut receipt_state = DepositReceipt::try_from_slice(&deposit_receipt.try_borrow_data()?)
-            .map_err(|_| PortalError::InvalidAccountData)?;
+            .map_err(|_| {
+                pinocchio_log::log!("ERROR: DepositFee failed: receipt deserialize failed");
+                PortalError::DepositReceiptDeserializeFailed
+            })?;
 
         if !receipt_state.is_valid() {
-            return Err(PortalError::InvalidAccountData.into());
+            pinocchio_log::log!("ERROR: DepositFee failed: receipt state invalid");
+            return Err(PortalError::DepositReceiptStateInvalid.into());
         }
 
         receipt_state.balance = receipt_state
             .balance
             .checked_add(lamports)
-            .ok_or(PortalError::ArithmeticOverflow)?;
+            .ok_or_else(|| {
+                pinocchio_log::log!("ERROR: DepositFee failed: arithmetic overflow");
+                PortalError::ArithmeticOverflow
+            })?;
 
         let mut receipt_data = deposit_receipt.try_borrow_mut_data()?;
         BorshSerialize::serialize(
@@ -136,7 +154,7 @@ pub fn process_deposit_fee(
     }
     .invoke()?;
 
-    pinocchio_log::log!("DepositFee");
+    pinocchio_log::log!("DepositFee success");
 
     Ok(())
 }

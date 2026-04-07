@@ -17,33 +17,40 @@ pub fn process_delegate(
     accounts: &[AccountInfo],
     grid_id: u64,
 ) -> ProgramResult {
+    pinocchio_log::log!("Instruction: Delegate, grid_id={}", grid_id);
+
     if accounts.len() < 5 {
+        pinocchio_log::log!("ERROR: Delegate failed: not enough account keys");
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
     let payer = &accounts[0];
     let delegated_account = &accounts[1];
-    let owner_program = &accounts[2];
+    let owner_program = &accounts[2]; // the original program of delegated account
     let delegation_record = &accounts[3];
     let _system_program = &accounts[4];
 
     if !payer.is_signer() {
+        pinocchio_log::log!("ERROR: Delegate failed: payer is not signer");
         return Err(PortalError::Unauthorized.into());
     }
 
     if delegated_account.owner() != program_id {
-        return Err(PortalError::InvalidAccountData.into());
+        pinocchio_log::log!("ERROR: Delegate failed: delegated account owner mismatch");
+        return Err(PortalError::DelegatedAccountOwnerMismatch.into());
     }
 
     let delegated_key = *delegated_account.key();
     let (expected_delegation_key, bump) = find_delegation_record_pda(program_id, &delegated_key);
 
     if delegation_record.key() != &expected_delegation_key {
+        pinocchio_log::log!("ERROR: Delegate failed: delegation record PDA mismatch");
         return Err(PortalError::InvalidPdaSeeds.into());
     }
 
     if delegation_record.lamports() > 0 {
-        return Err(PortalError::InvalidAccountData.into());
+        pinocchio_log::log!("ERROR: Delegate failed: delegation record already initialized");
+        return Err(PortalError::DelegationRecordAlreadyInitialized.into());
     }
 
     let rent = Rent::get()?;
@@ -79,7 +86,7 @@ pub fn process_delegate(
     )
     .unwrap();
 
-    pinocchio_log::log!("Account delegated");
+    pinocchio_log::log!("Delegate success");
 
     Ok(())
 }
