@@ -57,11 +57,6 @@ pub fn process_undelegate(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
 
     unsafe { delegated_account.assign(owner_program.key()) };
 
-    // Assign {
-    //     account: delegated_account,
-    //     owner: owner_program.key(),
-    // }
-    // .invoke()?;
 
     let delegation_record_lamports = delegation_record.lamports();
 
@@ -70,7 +65,6 @@ pub fn process_undelegate(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
         *authority_lamports = authority_lamports
             .checked_add(delegation_record_lamports)
             .ok_or_else(|| {
-                pinocchio_log::log!("ERROR: Undelegate failed: arithmetic overflow");
                 PortalError::ArithmeticOverflow
             })?;
         *delegation_record.try_borrow_mut_lamports()? = 0;
