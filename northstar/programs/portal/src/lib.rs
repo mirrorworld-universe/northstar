@@ -28,7 +28,8 @@ pub unsafe extern "C" fn entrypoint(input: *mut u8) -> u64 {
 
     let (program_id, count, instruction_data) = deserialize(input, &mut accounts_arr);
 
-    let accounts: &[AccountInfo] = core::slice::from_raw_parts(accounts_arr.as_ptr() as *const AccountInfo, count);
+    let accounts: &[AccountInfo] =
+        core::slice::from_raw_parts(accounts_arr.as_ptr() as *const AccountInfo, count);
 
     let instruction = match borsh::from_slice(instruction_data) {
         Ok(inst) => inst,

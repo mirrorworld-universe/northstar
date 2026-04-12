@@ -252,7 +252,10 @@ mod tests {
         advancer.join();
 
         let new_blockhash = bank_forks.read().unwrap().working_bank().last_blockhash();
-        assert_ne!(initial_blockhash, new_blockhash, "Blockhash should have changed");
+        assert_ne!(
+            initial_blockhash, new_blockhash,
+            "Blockhash should have changed"
+        );
     }
 
     #[test]
@@ -301,8 +304,7 @@ mod tests {
         let parent_bank = Arc::new(parent_bank);
 
         let ephemeral_slot = 40u64;
-        let ephemeral_bank =
-            Bank::new_from_parent(parent_bank, &Pubkey::default(), ephemeral_slot);
+        let ephemeral_bank = Bank::new_from_parent(parent_bank, &Pubkey::default(), ephemeral_slot);
 
         let bank_forks = BankForks::new_rw_arc(ephemeral_bank);
         let initial_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());

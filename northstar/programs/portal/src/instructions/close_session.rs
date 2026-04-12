@@ -84,7 +84,9 @@ pub fn process_close_session(
         *owner_lamports = owner_lamports
             .checked_add(fee_vault.lamports())
             .ok_or_else(|| {
-                pinocchio_log::log!("ERROR: CloseSession failed: arithmetic overflow on fee vault refund");
+                pinocchio_log::log!(
+                    "ERROR: CloseSession failed: arithmetic overflow on fee vault refund"
+                );
                 PortalError::ArithmeticOverflow
             })?;
     }
@@ -95,7 +97,9 @@ pub fn process_close_session(
         *owner_lamports = owner_lamports
             .checked_add(session.lamports())
             .ok_or_else(|| {
-                pinocchio_log::log!("ERROR: CloseSession failed: arithmetic overflow on session refund");
+                pinocchio_log::log!(
+                    "ERROR: CloseSession failed: arithmetic overflow on session refund"
+                );
                 PortalError::ArithmeticOverflow
             })?;
     }

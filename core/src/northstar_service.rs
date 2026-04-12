@@ -43,8 +43,16 @@ impl NorthStarService {
         config: NorthStarServiceConfig,
         exit: Arc<AtomicBool>,
     ) -> Self {
-        // Sonic: Initialize NorthStar manager
+        // Sonic: Initialize NorthStar manager with always-on ephemeral RPC
         let mut manager = northstar::Manager::new(cfg);
+        {
+            let root_bank = bank_forks.read().unwrap().root_bank();
+            if let Err(e) =
+                manager.init_runtime(root_bank, cluster_info.clone(), config.listen_addr)
+            {
+                error!("Failed to initialize ephemeral runtime: {e}");
+            }
+        }
 
         let thread_hdl = Builder::new()
             .name("solNorthStar".to_string())
@@ -52,8 +60,8 @@ impl NorthStarService {
                 loop {
                     // Check for exit first
                     if exit.load(Ordering::Relaxed) {
-                        // Shutdown any active runtime
-                        manager.shutdown_active_runtime();
+                        // Shutdown the always-on runtime
+                        manager.shutdown_runtime();
                         break;
                     }
 
@@ -70,64 +78,45 @@ impl NorthStarService {
                     };
 
                     // Check for L1 events from the portal program
-                    let l1_events = &mut manager.get_l1_events(&bank).into_iter();
+                    let l1_events = manager.get_l1_events(&bank);
 
-                    if !manager.has_active_runtime() {
-                        let Some(L1Event::SessionOpened {
-                            session_pda,
-                            owner,
-                            grid_id,
-                            ttl_slots,
-                            fee_cap,
-                        }) = l1_events
-                            .skip_while(|e| match e {
-                                L1Event::SessionOpened { .. } => false,
-                                e => {
-                                    debug!(
-                                        "Unexpected event {e:?}. Skipping as we have no ephemeral \
-                                         runtime"
-                                    );
-                                    true
-                                }
-                            })
-                            .next()
-                        else {
-                            continue;
-                        };
-                        let settings = northstar::EphemeralRollupSettings {
-                            session_pda,
-                            owner,
-                            grid_id,
-                            ttl_slots,
-                            fee_cap,
-                            delegated_accounts: vec![],
-                        };
-                        info!("Creating ephemeral runtime at slot {}", bank.slot());
-
-                        if let Err(e) = manager.create_ephemeral_runtime(
-                            bank_forks.read().unwrap().root_bank(),
-                            cluster_info.clone(),
-                            settings,
-                            config.listen_addr,
-                        ) {
-                            error!("Failed to create ephemeral runtime: {}", e);
-                            continue;
-                        }
-                    }
-
-                    // Forward deposits to the running ER
                     for event in l1_events {
-                        if let L1Event::FeeDeposited {
-                            delta, depositor, ..
-                        } = event
-                        {
-                            manager.credit_deposit(&depositor, delta);
+                        match event {
+                            L1Event::SessionOpened {
+                                session_pda: _,
+                                owner: _,
+                                grid_id: _,
+                                ttl_slots: _,
+                                fee_cap: _,
+                            } if !manager.has_active_runtime() => {
+                                info!(
+                                    "SessionOpened detected at slot {}, activating ephemeral \
+                                     runtime",
+                                    bank.slot()
+                                );
+                                // Sonic: Re-fork from CURRENT L1 root bank
+                                let l1_root = bank_forks.read().unwrap().root_bank();
+                                manager.activate_session(l1_root);
+                            }
+                            L1Event::AccountDelegated {
+                                delegated_account, ..
+                            } => {
+                                manager.handle_delegation(&bank, &delegated_account);
+                            }
+                            L1Event::FeeDeposited {
+                                delta, depositor, ..
+                            } => {
+                                manager.credit_deposit(&depositor, delta);
+                            }
+                            other => {
+                                debug!("Unhandled L1 event: {other:?}");
+                            }
                         }
                     }
                 }
 
                 // Cleanup on exit
-                manager.shutdown_active_runtime();
+                manager.shutdown_runtime();
 
                 debug!("NorthStar service shutting down");
             })

@@ -45,11 +45,10 @@ pub fn process_deposit_fee(
         return Err(PortalError::SessionAccountOwnerMismatch.into());
     }
 
-    let session_state = Session::try_from_slice(&session.try_borrow_data()?)
-        .map_err(|_| {
-            pinocchio_log::log!("ERROR: DepositFee failed: session deserialize failed");
-            PortalError::SessionDeserializeFailed
-        })?;
+    let session_state = Session::try_from_slice(&session.try_borrow_data()?).map_err(|_| {
+        pinocchio_log::log!("ERROR: DepositFee failed: session deserialize failed");
+        PortalError::SessionDeserializeFailed
+    })?;
 
     if !session_state.is_valid() {
         pinocchio_log::log!("ERROR: DepositFee failed: session state invalid");
@@ -130,13 +129,10 @@ pub fn process_deposit_fee(
             return Err(PortalError::DepositReceiptStateInvalid.into());
         }
 
-        receipt_state.balance = receipt_state
-            .balance
-            .checked_add(lamports)
-            .ok_or_else(|| {
-                pinocchio_log::log!("ERROR: DepositFee failed: arithmetic overflow");
-                PortalError::ArithmeticOverflow
-            })?;
+        receipt_state.balance = receipt_state.balance.checked_add(lamports).ok_or_else(|| {
+            pinocchio_log::log!("ERROR: DepositFee failed: arithmetic overflow");
+            PortalError::ArithmeticOverflow
+        })?;
 
         let mut receipt_data = deposit_receipt.try_borrow_mut_data()?;
         BorshSerialize::serialize(
