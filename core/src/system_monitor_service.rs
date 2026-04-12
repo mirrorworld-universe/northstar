@@ -1,7 +1,7 @@
 #[cfg(target_arch = "x86")]
-use core::arch::x86::{CpuidResult, __cpuid, __cpuid_count, __get_cpuid_max};
+use core::arch::x86::{__cpuid, __cpuid_count, __get_cpuid_max, CpuidResult};
 #[cfg(target_arch = "x86_64")]
-use core::arch::x86_64::{CpuidResult, __cpuid, __cpuid_count, __get_cpuid_max};
+use core::arch::x86_64::{__cpuid, __cpuid_count, __get_cpuid_max, CpuidResult};
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 #[cfg(target_os = "linux")]

@@ -209,6 +209,7 @@ impl EphemeralRuntime {
             max_complete_transaction_status_slot,
             None,
             runtime.clone(),
+            Some(delegated_set.clone()),
         )?;
 
         info!(
@@ -1151,6 +1152,63 @@ mod tests {
         // Snapshots should exist for valid accounts
         assert!(runtime.initial_account_snapshot(&delegated1).is_some());
         assert!(runtime.initial_account_snapshot(&delegated2).is_some());
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_rpc_get_delegated_accounts() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        let portal_program_id = Pubkey::new_unique();
+
+        // Create two delegated accounts owned by portal program
+        let delegated1 = Pubkey::new_unique();
+        let delegated2 = Pubkey::new_unique();
+        let account1 = AccountSharedData::new(1_000_000, 0, &portal_program_id);
+        let account2 = AccountSharedData::new(2_000_000, 0, &portal_program_id);
+        parent_bank.store_account(&delegated1, &account1);
+        parent_bank.store_account(&delegated2, &account2);
+        parent_bank.freeze();
+
+        let cluster_info = create_test_cluster_info();
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            delegated_accounts: vec![delegated1, delegated2],
+        };
+
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            cluster_info,
+            settings,
+            find_free_addr(),
+            portal_program_id,
+        )
+        .unwrap();
+
+        std::thread::sleep(Duration::from_secs(2));
+
+        // Call getDelegatedAccounts via RPC
+        let rpc_client = rpc_client(&runtime);
+        let accounts: Vec<String> = rpc_client
+            .send(
+                solana_rpc_client_types::request::RpcRequest::Custom {
+                    method: "getDelegatedAccounts",
+                },
+                serde_json::Value::Null,
+            )
+            .unwrap();
+
+        assert_eq!(accounts.len(), 2);
+
+        let account_set: HashSet<String> = accounts.into_iter().collect();
+        assert!(account_set.contains(&delegated1.to_string()));
+        assert!(account_set.contains(&delegated2.to_string()));
 
         runtime.shutdown();
     }
