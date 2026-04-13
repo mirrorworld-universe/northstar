@@ -171,7 +171,7 @@ use {
         Transaction, TransactionVerificationMode,
     },
     solana_transaction_context::{
-        transaction_accounts::KeyedAccountSharedData, TransactionReturnData,
+        transaction::TransactionReturnData, transaction_accounts::KeyedAccountSharedData,
     },
     solana_transaction_error::{TransactionError, TransactionResult as Result},
     solana_vote::vote_account::{VoteAccount, VoteAccounts, VoteAccountsHashMap},
@@ -225,6 +225,10 @@ pub(crate) mod tests;
 pub const SECONDS_PER_YEAR: f64 = 365.25 * 24.0 * 60.0 * 60.0;
 
 pub const MAX_LEADER_SCHEDULE_STAKES: Epoch = 5;
+
+/// This will be guaranteed through the VAT rules,
+/// only the top 2000 validators by stake will be present in vote account structures.
+pub const MAX_ALPENGLOW_VOTE_ACCOUNTS: usize = 2000;
 
 pub type BankStatusCache = StatusCache<Result<()>>;
 #[cfg_attr(
@@ -935,7 +939,7 @@ pub struct Bank {
 #[derive(Debug)]
 struct VoteReward {
     vote_account: AccountSharedData,
-    commission: u8,
+    commission_bps: u16,
     vote_rewards: u64,
 }
 
@@ -967,8 +971,6 @@ struct EpochInflationRewards {
     /// the epoch and its stake is equal to the network capitalization i.e.
     /// the total supply.
     validator_rewards_lamports: u64,
-    /// How long a single epoch lasts in years.
-    epoch_duration_in_years: f64,
     /// The current inflation rate for the validators.
     validator_rate: f64,
     /// The current inflation rate for the foundation.
@@ -2413,7 +2415,6 @@ impl Bank {
 
         EpochInflationRewards {
             validator_rewards_lamports,
-            epoch_duration_in_years,
             validator_rate,
             foundation_rate,
         }
@@ -2435,7 +2436,7 @@ impl Bank {
             vote_pubkey,
             VoteReward {
                 mut vote_account,
-                commission,
+                commission_bps,
                 vote_rewards,
             },
         ) in vote_account_rewards
@@ -2451,7 +2452,7 @@ impl Bank {
                     reward_type: RewardType::Voting,
                     lamports: vote_rewards as i64,
                     post_balance: vote_account.lamports(),
-                    commission: Some(commission),
+                    commission_bps: Some(commission_bps),
                 },
                 vote_account,
             ));
@@ -4123,13 +4124,6 @@ impl Bank {
             .flush_accounts_cache(true, Some(self.slot()))
     }
 
-    pub fn flush_accounts_cache_if_needed(&self) {
-        self.rc
-            .accounts
-            .accounts_db
-            .flush_accounts_cache(false, Some(self.slot()))
-    }
-
     /// Technically this issues (or even burns!) new lamports,
     /// so be extra careful for its usage
     fn store_account_and_update_capitalization(
@@ -5406,6 +5400,40 @@ impl Bank {
         {
             self.rent_collector.deprecate_rent_exemption_threshold();
             self.update_rent();
+        }
+
+        // SIMD-0437 feature gates: all assume rent exemption threshold has been deprecated
+        // (SIMD-0194), so rent.lamports_per_byte_year can be set directly. These gates are
+        // expected to activate in order; if multiple activate in one epoch, the lowest
+        // activated lamports_per_byte value will be used. If features are activated out of
+        // order, the most recently activated value will be used.
+        let rent_feature_gates = [
+            (
+                feature_set::set_lamports_per_byte_to_6333::id(),
+                feature_set::set_lamports_per_byte_to_6333::LAMPORTS_PER_BYTE,
+            ),
+            (
+                feature_set::set_lamports_per_byte_to_5080::id(),
+                feature_set::set_lamports_per_byte_to_5080::LAMPORTS_PER_BYTE,
+            ),
+            (
+                feature_set::set_lamports_per_byte_to_2575::id(),
+                feature_set::set_lamports_per_byte_to_2575::LAMPORTS_PER_BYTE,
+            ),
+            (
+                feature_set::set_lamports_per_byte_to_1322::id(),
+                feature_set::set_lamports_per_byte_to_1322::LAMPORTS_PER_BYTE,
+            ),
+            (
+                feature_set::set_lamports_per_byte_to_696::id(),
+                feature_set::set_lamports_per_byte_to_696::LAMPORTS_PER_BYTE,
+            ),
+        ];
+        for (feature_id, lamports_per_byte_year) in rent_feature_gates {
+            if new_feature_activations.contains(&feature_id) {
+                self.rent_collector.rent.lamports_per_byte_year = lamports_per_byte_year;
+                self.update_rent();
+            }
         }
 
         if new_feature_activations.contains(&feature_set::pico_inflation::id()) {

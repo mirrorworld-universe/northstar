@@ -35,8 +35,9 @@ pub(crate) struct PartitionedStakeReward {
     pub stake: Stake,
     /// Stake reward for recording in the Bank on distribution
     pub stake_reward: u64,
-    /// Vote commission for recording reward info
-    pub commission: u8,
+    /// Vote commission in basis points (0-10,000 representing 0-100%) for
+    /// recording reward info.
+    pub commission_bps: u16,
 }
 
 /// A vector of stake rewards.
@@ -303,7 +304,6 @@ pub(super) struct PartitionedRewardsCalculation {
     pub(super) stake_rewards: StakeRewardCalculation,
     pub(super) validator_rate: f64,
     pub(super) foundation_rate: f64,
-    pub(super) prev_epoch_duration_in_years: f64,
     pub(super) capitalization: u64,
     point_value: PointValue,
 }
@@ -448,7 +448,7 @@ mod tests {
                     stake_pubkey: stake_reward.stake_pubkey,
                     stake,
                     stake_reward: stake_reward.stake_reward_info.lamports as u64,
-                    commission: stake_reward.stake_reward_info.commission.unwrap(),
+                    commission_bps: stake_reward.stake_reward_info.commission_bps.unwrap(),
                 })
             } else {
                 None
@@ -1184,7 +1184,7 @@ mod tests {
             reward_type: RewardType::Voting,
             lamports: 55,
             post_balance: 5555,
-            commission: Some(5),
+            commission_bps: Some(500),
         };
 
         let rewards_and_partitions = KeyedRewardsAndNumPartitions {

@@ -1,15 +1,12 @@
 use {
-    crate::{
-        blockstore::Blockstore,
-        leader_schedule::{FixedSchedule, LeaderSchedule},
-        leader_schedule_utils,
-    },
+    crate::blockstore::Blockstore,
     itertools::Itertools,
     log::*,
     solana_clock::{Epoch, Slot},
     solana_epoch_schedule::EpochSchedule,
+    solana_leader_schedule::{FixedSchedule, LeaderSchedule},
     solana_pubkey::Pubkey,
-    solana_runtime::bank::Bank,
+    solana_runtime::{bank::Bank, leader_schedule_utils},
     std::{
         collections::{hash_map::Entry, HashMap, VecDeque},
         sync::{
@@ -250,8 +247,6 @@ mod tests {
                 bootstrap_validator_stake_lamports, create_genesis_config,
                 create_genesis_config_with_leader, GenesisConfigInfo,
             },
-            get_tmp_ledger_path_auto_delete,
-            leader_schedule::IdentityKeyedLeaderSchedule,
             staking_utils::tests::setup_vote_and_stake_accounts,
         },
         crossbeam_channel::unbounded,
@@ -260,6 +255,7 @@ mod tests {
             EpochSchedule, DEFAULT_LEADER_SCHEDULE_SLOT_OFFSET, MINIMUM_SLOTS_PER_EPOCH,
         },
         solana_keypair::Keypair,
+        solana_leader_schedule::LeaderSchedule,
         solana_runtime::stake_utils,
         solana_signer::Signer,
         std::{sync::Arc, thread::Builder},
@@ -308,10 +304,7 @@ mod tests {
         let mut cached_schedules: HashMap<Epoch, Arc<LeaderSchedule>> = HashMap::new();
         let mut order = VecDeque::new();
         for i in 0..=MAX_SCHEDULES {
-            cached_schedules.insert(
-                i as u64,
-                Arc::new(Box::new(IdentityKeyedLeaderSchedule::default())),
-            );
+            cached_schedules.insert(i as u64, Arc::new(LeaderSchedule::default()));
             order.push_back(i as u64);
         }
         LeaderScheduleCache::retain_latest(&mut cached_schedules, &mut order, MAX_SCHEDULES);

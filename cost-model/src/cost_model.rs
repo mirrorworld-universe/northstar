@@ -36,7 +36,9 @@ impl CostModel {
         transaction: &'a Tx,
         feature_set: &FeatureSet,
     ) -> TransactionCost<'a, Tx> {
-        if transaction.is_simple_vote_transaction() {
+        let stop_use_static_simple_vote_tx_cost =
+            feature_set.is_active(&feature_set::stop_use_static_simple_vote_tx_cost::id());
+        if transaction.is_simple_vote_transaction() && !stop_use_static_simple_vote_tx_cost {
             TransactionCost::SimpleVote { transaction }
         } else {
             let (programs_execution_cost, loaded_accounts_data_size_cost) =
@@ -62,7 +64,9 @@ impl CostModel {
         actual_loaded_accounts_data_size_bytes: u32,
         feature_set: &FeatureSet,
     ) -> TransactionCost<'a, Tx> {
-        if transaction.is_simple_vote_transaction() {
+        let stop_use_static_simple_vote_tx_cost =
+            feature_set.is_active(&feature_set::stop_use_static_simple_vote_tx_cost::id());
+        if transaction.is_simple_vote_transaction() && !stop_use_static_simple_vote_tx_cost {
             TransactionCost::SimpleVote { transaction }
         } else {
             let loaded_accounts_data_size_cost = Self::calculate_loaded_accounts_data_size_cost(
@@ -93,7 +97,9 @@ impl CostModel {
         num_write_locks: u64,
         feature_set: &FeatureSet,
     ) -> TransactionCost<'a, Tx> {
-        if transaction.is_simple_vote_transaction() {
+        let stop_use_static_simple_vote_tx_cost =
+            feature_set.is_active(&feature_set::stop_use_static_simple_vote_tx_cost::id());
+        if transaction.is_simple_vote_transaction() && !stop_use_static_simple_vote_tx_cost {
             return TransactionCost::SimpleVote { transaction };
         }
         let (programs_execution_cost, loaded_accounts_data_size_cost) =
@@ -142,12 +148,7 @@ impl CostModel {
     fn get_signature_cost(transaction: &impl StaticMeta, feature_set: &FeatureSet) -> u64 {
         let signatures_count_detail = transaction.signature_details();
 
-        let ed25519_verify_cost =
-            if feature_set.is_active(&feature_set::ed25519_precompile_verify_strict::id()) {
-                ED25519_VERIFY_STRICT_COST
-            } else {
-                ED25519_VERIFY_COST
-            };
+        let ed25519_verify_cost = ED25519_VERIFY_STRICT_COST;
 
         let secp256r1_verify_cost =
             if feature_set.is_active(&feature_set::enable_secp256r1_precompile::id()) {

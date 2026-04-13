@@ -114,7 +114,7 @@ use {
         sanitized::SanitizedTransaction, Transaction, TransactionVerificationMode,
     },
     solana_transaction_error::{TransactionError, TransactionResult as Result},
-    solana_vote_interface::state::TowerSync,
+    solana_vote_interface::state::{TowerSync, BLS_PUBLIC_KEY_COMPRESSED_SIZE},
     solana_vote_program::{
         vote_instruction,
         vote_state::{
@@ -149,21 +149,23 @@ impl VoteReward {
         let validator_pubkey = solana_pubkey::new_rand();
         let validator_stake_lamports = rng.random_range(1..200);
         let validator_voting_keypair = Keypair::new();
-        let commission: u8 = rng.random_range(1..20);
-        let commission_bps = u16::from(commission) * 100;
+        let commission_bps: u16 = rng.random_range(100..2_000);
 
         let validator_vote_account = vote_state::create_v4_account_with_authorized(
             &validator_pubkey,
             &validator_voting_keypair.pubkey(),
+            [0u8; BLS_PUBLIC_KEY_COMPRESSED_SIZE],
             &validator_voting_keypair.pubkey(),
-            None,
             commission_bps,
+            &validator_voting_keypair.pubkey(),
+            0,
+            &validator_voting_keypair.pubkey(),
             validator_stake_lamports,
         );
 
         Self {
             vote_account: validator_vote_account,
-            commission,
+            commission_bps,
             vote_rewards: rng.random_range(1..200),
         }
     }
@@ -809,7 +811,7 @@ where
                 reward_type: RewardType::Voting,
                 lamports: 0,
                 post_balance: bank1.get_balance(&vote_id),
-                commission: Some(0),
+                commission_bps: Some(0),
             }
         ),]
     );
@@ -857,7 +859,7 @@ where
                 reward_type: RewardType::Staking,
                 lamports: validator_rewards_lamports as i64,
                 post_balance: bank2.get_balance(&stake_id),
-                commission: Some(0),
+                commission_bps: Some(0),
             }
         )]
     );
@@ -905,9 +907,12 @@ fn do_test_bank_update_rewards_determinism() -> u64 {
     let mut vote_account = vote_state::create_v4_account_with_authorized(
         &node_pubkey,
         &vote_id,
+        [0u8; BLS_PUBLIC_KEY_COMPRESSED_SIZE],
         &vote_id,
-        None,
         0,
+        &vote_id,
+        0,
+        &vote_id,
         100,
     );
     let stake_id1 = solana_pubkey::new_rand();
@@ -1469,7 +1474,7 @@ fn test_bank_tx_fee() {
                 reward_type: RewardType::Fee,
                 lamports: expected_fee_collected as i64,
                 post_balance: initial_balance + expected_fee_collected,
-                commission: None,
+                commission_bps: None,
             }
         )]
     );
@@ -1504,7 +1509,7 @@ fn test_bank_tx_fee() {
                 reward_type: RewardType::Fee,
                 lamports: expected_fee_collected as i64,
                 post_balance: initial_balance + 2 * expected_fee_collected,
-                commission: None,
+                commission_bps: None,
             }
         )]
     );
@@ -1579,7 +1584,7 @@ fn test_bank_tx_compute_unit_fee() {
                 reward_type: RewardType::Fee,
                 lamports: expected_fee_collected as i64,
                 post_balance: initial_balance + expected_fee_collected,
-                commission: None,
+                commission_bps: None,
             }
         )]
     );
@@ -1614,7 +1619,7 @@ fn test_bank_tx_compute_unit_fee() {
                 reward_type: RewardType::Fee,
                 lamports: expected_fee_collected as i64,
                 post_balance: initial_balance + 2 * expected_fee_collected,
-                commission: None,
+                commission_bps: None,
             }
         )]
     );
@@ -1799,25 +1804,34 @@ fn test_readonly_accounts(relax_intrabatch_account_locks: bool) {
     let vote_account0 = vote_state::create_v4_account_with_authorized(
         &vote_pubkey0,
         &authorized_voter.pubkey(),
+        [0u8; BLS_PUBLIC_KEY_COMPRESSED_SIZE],
         &authorized_voter.pubkey(),
-        None,
         0,
+        &authorized_voter.pubkey(),
+        0,
+        &authorized_voter.pubkey(),
         100,
     );
     let vote_account1 = vote_state::create_v4_account_with_authorized(
         &vote_pubkey1,
         &authorized_voter.pubkey(),
+        [0u8; BLS_PUBLIC_KEY_COMPRESSED_SIZE],
         &authorized_voter.pubkey(),
-        None,
         0,
+        &authorized_voter.pubkey(),
+        0,
+        &authorized_voter.pubkey(),
         100,
     );
     let vote_account2 = vote_state::create_v4_account_with_authorized(
         &vote_pubkey2,
         &authorized_voter.pubkey(),
+        [0u8; BLS_PUBLIC_KEY_COMPRESSED_SIZE],
         &authorized_voter.pubkey(),
-        None,
         0,
+        &authorized_voter.pubkey(),
+        0,
+        &authorized_voter.pubkey(),
         100,
     );
     bank.store_account(&vote_pubkey0, &vote_account0);
@@ -7100,6 +7114,141 @@ fn test_block_limits() {
     );
 }
 
+#[test]
+fn test_simd_0437_rent_feature_gates_epoch_transition() {
+    let (mut genesis_config, _mint_keypair) = create_genesis_config(1_000_000);
+    genesis_config.rent.lamports_per_byte_year = 0;
+    let (mut bank, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
+
+    let rent_feature_gates = [
+        (
+            feature_set::set_lamports_per_byte_to_6333::id(),
+            feature_set::set_lamports_per_byte_to_6333::LAMPORTS_PER_BYTE,
+        ),
+        (
+            feature_set::set_lamports_per_byte_to_5080::id(),
+            feature_set::set_lamports_per_byte_to_5080::LAMPORTS_PER_BYTE,
+        ),
+        (
+            feature_set::set_lamports_per_byte_to_2575::id(),
+            feature_set::set_lamports_per_byte_to_2575::LAMPORTS_PER_BYTE,
+        ),
+        (
+            feature_set::set_lamports_per_byte_to_1322::id(),
+            feature_set::set_lamports_per_byte_to_1322::LAMPORTS_PER_BYTE,
+        ),
+        (
+            feature_set::set_lamports_per_byte_to_696::id(),
+            feature_set::set_lamports_per_byte_to_696::LAMPORTS_PER_BYTE,
+        ),
+    ];
+    let feature_account_balance =
+        std::cmp::max(genesis_config.rent.minimum_balance(Feature::size_of()), 1);
+
+    for (feature_id, expected_lamports_per_byte_year) in rent_feature_gates {
+        assert!(
+            !bank.feature_set.is_active(&feature_id),
+            "feature should be inactive before activation"
+        );
+        bank.store_account(
+            &feature_id,
+            &feature::create_account(&Feature { activated_at: None }, feature_account_balance),
+        );
+
+        // Cross the epoch boundary to apply feature activation.
+        goto_end_of_slot(bank.clone());
+        bank = new_from_parent_next_epoch(bank, &bank_forks, 1);
+
+        assert!(
+            bank.feature_set.is_active(&feature_id),
+            "feature should be active after epoch transition"
+        );
+        assert_eq!(
+            bank.rent_collector.rent.lamports_per_byte_year, expected_lamports_per_byte_year,
+            "rent collector should reflect the active gate"
+        );
+
+        let rent_account = bank.get_account(&sysvar::rent::id()).unwrap();
+        let rent = from_account::<sysvar::rent::Rent, _>(&rent_account).unwrap();
+        assert_eq!(
+            rent.lamports_per_byte_year, expected_lamports_per_byte_year,
+            "rent sysvar should be updated after activation"
+        );
+    }
+}
+
+#[test]
+fn test_simd_0437_rent_feature_gate_activation_ordering() {
+    let (mut genesis_config, _mint_keypair) = create_genesis_config(1_000_000);
+    genesis_config.rent.lamports_per_byte_year = 0;
+    let (mut bank, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
+
+    let feature_account_balance =
+        std::cmp::max(genesis_config.rent.minimum_balance(Feature::size_of()), 1);
+
+    // Multiple activations in a single epoch boundary should settle on the lowest value.
+    let multiple_activation_features = [
+        (
+            feature_set::set_lamports_per_byte_to_6333::id(),
+            feature_set::set_lamports_per_byte_to_6333::LAMPORTS_PER_BYTE,
+        ),
+        (
+            feature_set::set_lamports_per_byte_to_2575::id(),
+            feature_set::set_lamports_per_byte_to_2575::LAMPORTS_PER_BYTE,
+        ),
+    ];
+    for (feature_id, _) in multiple_activation_features {
+        bank.store_account(
+            &feature_id,
+            &feature::create_account(&Feature { activated_at: None }, feature_account_balance),
+        );
+    }
+    goto_end_of_slot(bank.clone());
+    bank = new_from_parent_next_epoch(bank, &bank_forks, 1);
+    assert!(bank
+        .feature_set
+        .is_active(&feature_set::set_lamports_per_byte_to_6333::id()));
+    assert!(bank
+        .feature_set
+        .is_active(&feature_set::set_lamports_per_byte_to_2575::id()));
+    assert_eq!(
+        bank.rent_collector.rent.lamports_per_byte_year,
+        feature_set::set_lamports_per_byte_to_2575::LAMPORTS_PER_BYTE,
+        "lowest activated value should win when multiple activate in one epoch"
+    );
+
+    // Out-of-order activation across epochs should use the most recent activation.
+    bank.store_account(
+        &feature_set::set_lamports_per_byte_to_1322::id(),
+        &feature::create_account(&Feature { activated_at: None }, feature_account_balance),
+    );
+    goto_end_of_slot(bank.clone());
+    bank = new_from_parent_next_epoch(bank, &bank_forks, 1);
+    assert!(bank
+        .feature_set
+        .is_active(&feature_set::set_lamports_per_byte_to_1322::id()));
+    assert_eq!(
+        bank.rent_collector.rent.lamports_per_byte_year,
+        feature_set::set_lamports_per_byte_to_1322::LAMPORTS_PER_BYTE,
+        "first activation should be applied after its epoch boundary"
+    );
+
+    bank.store_account(
+        &feature_set::set_lamports_per_byte_to_5080::id(),
+        &feature::create_account(&Feature { activated_at: None }, feature_account_balance),
+    );
+    goto_end_of_slot(bank.clone());
+    bank = new_from_parent_next_epoch(bank, &bank_forks, 1);
+    assert!(bank
+        .feature_set
+        .is_active(&feature_set::set_lamports_per_byte_to_5080::id()));
+    assert_eq!(
+        bank.rent_collector.rent.lamports_per_byte_year,
+        feature_set::set_lamports_per_byte_to_5080::LAMPORTS_PER_BYTE,
+        "most recent activation should win even when out of order"
+    );
+}
+
 fn min_rent_exempt_balance_for_sysvars(bank: &Bank, sysvar_ids: &[Pubkey]) -> u64 {
     sysvar_ids
         .iter()
@@ -8779,6 +8928,11 @@ fn do_test_clean_dropped_unrooted_banks(freeze_bank1: FreezeBank1) {
     bank1
         .transfer(amount, &mint_keypair, &key1.pubkey())
         .unwrap();
+    // Store accounts with lamports to populate the index
+    bank1.store_account(&key4.pubkey(), &AccountSharedData::new(1, 0, &owner));
+    bank1.store_account(&key5.pubkey(), &AccountSharedData::new(1, 0, &owner));
+
+    // Then set the accounts to zero lamports
     bank1.store_account(&key4.pubkey(), &AccountSharedData::new(0, 0, &owner));
     bank1.store_account(&key5.pubkey(), &AccountSharedData::new(0, 0, &owner));
 
@@ -9877,9 +10031,12 @@ fn test_rent_state_changes_sysvars() {
     let validator_vote_account = vote_state::create_v4_account_with_authorized(
         &validator_pubkey,
         &validator_voting_keypair.pubkey(),
+        [0u8; BLS_PUBLIC_KEY_COMPRESSED_SIZE],
         &validator_voting_keypair.pubkey(),
-        None,
         0,
+        &validator_voting_keypair.pubkey(),
+        0,
+        &validator_voting_keypair.pubkey(),
         validator_stake_lamports,
     );
 
@@ -11060,9 +11217,11 @@ where
     // create a bank a few epochs in the future..
     let bank = new_from_parent_next_epoch(bank, &bank_forks, 2);
 
-    // create the next bank in the current epoch
+    // create the next bank in the current epoch and populate bob's account with some lamports and data
     let slot = bank.slot() + 1;
     let bank = Bank::new_from_parent_with_bank_forks(bank_forks.as_ref(), bank, &collector, slot);
+    let account = AccountSharedData::new(1, len1, &program);
+    bank.store_account(&bob_pubkey, &account);
 
     // create the next bank where we will store a zero-lamport account to be cleaned
     let slot = bank.slot() + 1;
@@ -11215,10 +11374,6 @@ fn test_system_instruction_unsigned_transaction() {
 fn test_calc_vote_accounts_to_store_empty() {
     let vote_account_rewards = HashMap::default();
     let result = Bank::calc_vote_accounts_to_store(vote_account_rewards);
-    assert_eq!(
-        result.accounts_with_rewards.len(),
-        result.accounts_with_rewards.len()
-    );
     assert!(result.accounts_with_rewards.is_empty());
 }
 
@@ -11232,22 +11387,18 @@ fn test_calc_vote_accounts_to_store_overflow() {
         pubkey,
         VoteReward {
             vote_account,
-            commission: 0,
+            commission_bps: 0,
             vote_rewards: 1, // enough to overflow
         },
     );
     let result = Bank::calc_vote_accounts_to_store(vote_account_rewards);
-    assert_eq!(
-        result.accounts_with_rewards.len(),
-        result.accounts_with_rewards.len()
-    );
     assert!(result.accounts_with_rewards.is_empty());
 }
 
 #[test]
 fn test_calc_vote_accounts_to_store_normal() {
     let pubkey = solana_pubkey::new_rand();
-    for commission in 0..2 {
+    for commission_bps in [0, 100] {
         for vote_rewards in 0..2 {
             let mut vote_account_rewards = HashMap::default();
             let mut vote_account = AccountSharedData::default();
@@ -11256,28 +11407,23 @@ fn test_calc_vote_accounts_to_store_normal() {
                 pubkey,
                 VoteReward {
                     vote_account: vote_account.clone(),
-                    commission,
+                    commission_bps,
                     vote_rewards,
                 },
             );
             let result = Bank::calc_vote_accounts_to_store(vote_account_rewards);
-            assert_eq!(
-                result.accounts_with_rewards.len(),
-                result.accounts_with_rewards.len()
-            );
             assert_eq!(result.accounts_with_rewards.len(), 1);
             let (pubkey_result, rewards, account) = &result.accounts_with_rewards[0];
             _ = vote_account.checked_add_lamports(vote_rewards);
             assert!(accounts_equal(account, &vote_account));
-            assert_eq!(
-                *rewards,
-                RewardInfo {
-                    reward_type: RewardType::Voting,
-                    lamports: vote_rewards as i64,
-                    post_balance: vote_account.lamports(),
-                    commission: Some(commission),
-                }
-            );
+
+            let expected_reward_info = RewardInfo {
+                reward_type: RewardType::Voting,
+                lamports: vote_rewards as i64,
+                post_balance: vote_account.lamports(),
+                commission_bps: Some(commission_bps),
+            };
+            assert_eq!(*rewards, expected_reward_info);
             assert_eq!(*pubkey_result, pubkey);
         }
     }
@@ -12091,9 +12237,12 @@ fn test_bank_epoch_stakes() {
                     let vote_account = VoteAccount::try_from(create_v4_account_with_authorized(
                         &node_id,
                         &authorized_voter,
+                        [0u8; BLS_PUBLIC_KEY_COMPRESSED_SIZE],
                         &node_id,
-                        None,
                         0,
+                        &node_id,
+                        0,
+                        &node_id,
                         100,
                     ))
                     .unwrap();

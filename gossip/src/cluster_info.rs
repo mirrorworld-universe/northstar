@@ -136,6 +136,9 @@ pub const DEFAULT_NUM_TVU_RECEIVE_SOCKETS: NonZeroUsize = MINIMUM_NUM_TVU_RECEIV
 pub const MINIMUM_NUM_TVU_RETRANSMIT_SOCKETS: NonZeroUsize = NonZeroUsize::new(1).unwrap();
 pub const DEFAULT_NUM_TVU_RETRANSMIT_SOCKETS: NonZeroUsize = NonZeroUsize::new(12).unwrap();
 
+/// Minimum stake required for a node to bypass the initial ping check when joining gossip.
+pub(crate) const MIN_STAKE_TO_SKIP_PING: u64 = 10_000 * solana_native_token::LAMPORTS_PER_SOL;
+
 #[derive(Debug, PartialEq, Eq, Error)]
 pub enum ClusterInfoError {
     #[error("NoPeers")]
@@ -595,10 +598,10 @@ impl ClusterInfo {
                         },
                         self.addr_to_string(&ip_addr, &node.gossip()),
                         self.addr_to_string(&ip_addr, &node.tpu_vote(contact_info::Protocol::UDP)),
-                        self.addr_to_string(&ip_addr, &node.tpu(contact_info::Protocol::UDP)),
+                        self.addr_to_string(&ip_addr, &node.tpu(contact_info::Protocol::QUIC)),
                         self.addr_to_string(
                             &ip_addr,
-                            &node.tpu_forwards(contact_info::Protocol::UDP)
+                            &node.tpu_forwards(contact_info::Protocol::QUIC)
                         ),
                         self.addr_to_string(&ip_addr, &node.tvu(contact_info::Protocol::UDP)),
                         self.addr_to_string(
@@ -1143,7 +1146,7 @@ impl ClusterInfo {
 
     fn is_spy_node(node: &ContactInfo, socket_addr_space: &SocketAddrSpace) -> bool {
         ![
-            node.tpu(contact_info::Protocol::UDP),
+            node.tpu(contact_info::Protocol::QUIC),
             node.gossip(),
             node.tvu(contact_info::Protocol::UDP),
         ]
@@ -1162,7 +1165,7 @@ impl ClusterInfo {
             .get_nodes_contact_info()
             .filter(|node| {
                 node.pubkey() != &self_pubkey
-                    && self.check_socket_addr_space(&node.tpu(contact_info::Protocol::UDP))
+                    && self.check_socket_addr_space(&node.tpu(contact_info::Protocol::QUIC))
             })
             .cloned()
             .collect()
@@ -1645,10 +1648,10 @@ impl ClusterInfo {
     where
         R: Rng + CryptoRng,
     {
-        let mut cache = HashMap::<(Pubkey, SocketAddr), bool>::new();
+        let mut cache = HashMap::<SocketAddr, bool>::new();
         let mut ping_cache = self.ping_cache.lock().unwrap();
-        let mut hard_check = move |node| {
-            let (check, ping) = ping_cache.check(rng, &self.keypair(), now, node);
+        let mut hard_check = move |node: (Pubkey, SocketAddr)| {
+            let (check, ping) = ping_cache.check(rng, &self.keypair(), now, node.1);
             if let Some(ping) = ping {
                 let ping = Protocol::PingMessage(ping);
                 if let Some(pkt) = make_gossip_packet(node.1, &ping, &self.stats) {
@@ -1668,7 +1671,7 @@ impl ClusterInfo {
         move |request| {
             ContactInfo::is_valid_address(&request.addr, &self.socket_addr_space) && {
                 let node = (request.pubkey, request.addr);
-                *cache.entry(node).or_insert_with(|| hard_check(node))
+                *cache.entry(node.1).or_insert_with(|| hard_check(node))
             }
         }
     }
@@ -2016,6 +2019,7 @@ impl ClusterInfo {
                 &mut rng,
                 &self_keypair,
                 value,
+                stakes,
                 &self.socket_addr_space,
                 &self.ping_cache,
                 &mut pings,
@@ -2359,43 +2363,40 @@ impl ClusterInfo {
 
 #[derive(Debug)]
 pub struct Sockets {
-    pub gossip: Arc<[UdpSocket]>,
-    pub ip_echo: Option<TcpListener>,
-    pub tvu: Vec<UdpSocket>,
-    pub tpu: Vec<UdpSocket>,
-    pub tpu_forwards: Vec<UdpSocket>,
-    pub tpu_vote: Vec<UdpSocket>,
-    pub broadcast: Vec<UdpSocket>,
+    pub gossip: Arc<[UdpSocket]>,     // udp read/write
+    pub ip_echo: Option<TcpListener>, // read/write (tcp)
+    pub tvu: Vec<UdpSocket>,          // udp read only
+    pub tpu_vote: Vec<UdpSocket>,     // udp read only
+    pub broadcast: Vec<UdpSocket>,    // udp write only
     // Socket sending out local repair requests,
     // and receiving repair responses from the cluster.
-    pub repair: UdpSocket,
-    pub repair_quic: UdpSocket,
-    pub retransmit_sockets: Vec<UdpSocket>,
+    pub repair: UdpSocket,                  // udp read/write
+    pub repair_quic: UdpSocket,             // quic read/write
+    pub retransmit_sockets: Vec<UdpSocket>, // udp write only
     // Socket receiving remote repair requests from the cluster,
     // and sending back repair responses.
-    pub serve_repair: UdpSocket,
-    pub serve_repair_quic: UdpSocket,
+    pub serve_repair: UdpSocket,      // udp read/write
+    pub serve_repair_quic: UdpSocket, // quic read/write
     // Socket sending out local RepairProtocol::AncestorHashes,
     // and receiving AncestorHashesResponse from the cluster.
-    pub ancestor_hashes_requests: UdpSocket,
-    pub ancestor_hashes_requests_quic: UdpSocket,
-    pub tpu_quic: Vec<UdpSocket>,
-    pub tpu_forwards_quic: Vec<UdpSocket>,
-    pub tpu_vote_quic: Vec<UdpSocket>,
+    pub ancestor_hashes_requests: UdpSocket, // udp read/write
+    pub ancestor_hashes_requests_quic: UdpSocket, // quic read/write
+    pub tpu_quic: Vec<UdpSocket>,            // quic read only
+    pub tpu_forwards_quic: Vec<UdpSocket>,   // quic read only
+    pub tpu_vote_quic: Vec<UdpSocket>,       // quic read only
 
     /// Client-side socket for ForwardingStage vote transactions
-    pub tpu_vote_forwarding_client: UdpSocket,
+    pub tpu_vote_forwarding_client: UdpSocket, // udp write only
     /// Client-side socket for ForwardingStage non-vote transactions
-    pub tpu_transaction_forwarding_clients: Box<[UdpSocket]>,
+    pub tpu_transaction_forwarding_clients: Box<[UdpSocket]>, // quic write only
     /// Socket for alpenglow consensus logic
-    pub alpenglow: Option<UdpSocket>,
+    pub alpenglow: Option<UdpSocket>, // udp read/write
     /// Connection cache endpoint for QUIC-based Vote
-    pub quic_vote_client: UdpSocket,
+    pub quic_vote_client: UdpSocket, // quic write only
     /// Connection cache endpoint for QUIC-based Alpenglow messages
-    pub quic_alpenglow_client: UdpSocket,
+    pub quic_alpenglow_client: UdpSocket, // quic write only
     /// Client-side socket for RPC/SendTransactionService.
-    pub rpc_sts_client: UdpSocket,
-    pub vortexor_receivers: Option<Vec<UdpSocket>>,
+    pub rpc_sts_client: UdpSocket, // quic write only
 }
 
 pub struct NodeConfig {
@@ -2409,7 +2410,6 @@ pub struct NodeConfig {
     pub public_tpu_addr: Option<SocketAddr>,
     pub public_tpu_forwards_addr: Option<SocketAddr>,
     pub public_tvu_addr: Option<SocketAddr>,
-    pub vortexor_receiver_addr: Option<SocketAddr>,
 
     /// The number of TVU receive sockets to create
     pub num_tvu_receive_sockets: NonZeroUsize,
@@ -2500,6 +2500,7 @@ fn verify_gossip_addr<R: Rng + CryptoRng>(
     rng: &mut R,
     keypair: &Keypair,
     value: &CrdsValue,
+    stakes: &HashMap<Pubkey, u64>,
     socket_addr_space: &SocketAddrSpace,
     ping_cache: &Mutex<PingCache>,
     pings: &mut Vec<(SocketAddr, Ping)>,
@@ -2508,14 +2509,17 @@ fn verify_gossip_addr<R: Rng + CryptoRng>(
         CrdsData::ContactInfo(node) => (node.pubkey(), node.gossip()),
         _ => return true, // If not a contact-info, nothing to verify.
     };
+    // For (sufficiently) staked nodes, don't bother with ping/pong.
+    if stakes.get(pubkey).copied() >= Some(MIN_STAKE_TO_SKIP_PING) {
+        return true;
+    }
     // Invalid addresses are not verifiable.
     let Some(addr) = addr.filter(|addr| socket_addr_space.check(addr)) else {
         return false;
     };
     let (out, ping) = {
-        let node = (*pubkey, addr);
         let mut ping_cache = ping_cache.lock().unwrap();
-        ping_cache.check(rng, keypair, Instant::now(), node)
+        ping_cache.check(rng, keypair, Instant::now(), addr)
     };
     if let Some(ping) = ping {
         pings.push((addr, ping));
@@ -2679,17 +2683,20 @@ mod tests {
             this_node.clone(),
             SocketAddrSpace::Unspecified,
         );
-        let remote_nodes: Vec<(Keypair, SocketAddr)> =
-            repeat_with(|| new_rand_remote_node(&mut rng))
-                .take(128)
-                .collect();
+        let mut remote_nodes = Vec::with_capacity(128);
+        let mut remote_ips = HashSet::with_capacity(128);
+        while remote_nodes.len() < 128 {
+            let node = new_rand_remote_node(&mut rng);
+            if remote_ips.insert(node.1.ip()) {
+                remote_nodes.push(node);
+            }
+        }
         let pings: Vec<_> = {
             let mut ping_cache = cluster_info.ping_cache.lock().unwrap();
             remote_nodes
                 .iter()
-                .map(|(keypair, socket)| {
-                    let node = (keypair.pubkey(), *socket);
-                    let (check, ping) = ping_cache.check(&mut rng, &this_node, now, node);
+                .map(|(_, socket)| {
+                    let (check, ping) = ping_cache.check(&mut rng, &this_node, now, *socket);
                     // Assert that initially remote nodes will not pass the
                     // ping/pong check.
                     assert!(!check);
@@ -2707,18 +2714,21 @@ mod tests {
         // Assert that remote nodes now pass the ping/pong check.
         {
             let mut ping_cache = cluster_info.ping_cache.lock().unwrap();
-            for (keypair, socket) in &remote_nodes {
-                let node = (keypair.pubkey(), *socket);
-                let (check, _) = ping_cache.check(&mut rng, &this_node, now, node);
+            for (_, socket) in &remote_nodes {
+                let (check, _) = ping_cache.check(&mut rng, &this_node, now, *socket);
                 assert!(check);
             }
         }
         // Assert that a new random remote node still will not pass the check.
         {
             let mut ping_cache = cluster_info.ping_cache.lock().unwrap();
-            let (keypair, socket) = new_rand_remote_node(&mut rng);
-            let node = (keypair.pubkey(), socket);
-            let (check, _) = ping_cache.check(&mut rng, &this_node, now, node);
+            let socket = loop {
+                let (_keypair, socket) = new_rand_remote_node(&mut rng);
+                if !remote_ips.contains(&socket.ip()) {
+                    break socket;
+                }
+            };
+            let (check, _) = ping_cache.check(&mut rng, &this_node, now, socket);
             assert!(!check);
         }
     }
@@ -2862,7 +2872,7 @@ mod tests {
         }
         check_sockets(&node.sockets.gossip, ip, range);
         check_sockets(&node.sockets.tvu, ip, range);
-        check_sockets(&node.sockets.tpu, ip, range);
+        check_sockets(&node.sockets.tpu_quic, ip, range);
     }
 
     #[test]
@@ -2880,7 +2890,6 @@ mod tests {
             num_tvu_receive_sockets: MINIMUM_NUM_TVU_RECEIVE_SOCKETS,
             num_tvu_retransmit_sockets: MINIMUM_NUM_TVU_RECEIVE_SOCKETS,
             num_quic_endpoints: DEFAULT_NUM_QUIC_ENDPOINTS,
-            vortexor_receiver_addr: None,
         };
 
         let node = Node::new_with_external_ip(&solana_pubkey::new_rand(), config);
@@ -2906,7 +2915,6 @@ mod tests {
             num_tvu_receive_sockets: MINIMUM_NUM_TVU_RECEIVE_SOCKETS,
             num_tvu_retransmit_sockets: MINIMUM_NUM_TVU_RECEIVE_SOCKETS,
             num_quic_endpoints: DEFAULT_NUM_QUIC_ENDPOINTS,
-            vortexor_receiver_addr: None,
         };
 
         let node = Node::new_with_external_ip(&solana_pubkey::new_rand(), config);
@@ -2931,11 +2939,11 @@ mod tests {
             SocketAddrSpace::Unspecified,
         );
         let stakes = HashMap::<Pubkey, u64>::default();
-        cluster_info.ping_cache.lock().unwrap().mock_pong(
-            *peer.pubkey(),
-            peer.gossip().unwrap(),
-            Instant::now(),
-        );
+        cluster_info
+            .ping_cache
+            .lock()
+            .unwrap()
+            .mock_pong(peer.gossip().unwrap(), Instant::now());
         cluster_info.insert_info(peer);
         cluster_info.gossip.refresh_push_active_set(
             &cluster_info.keypair(),
@@ -3397,11 +3405,11 @@ mod tests {
         let other_node_pubkey = solana_pubkey::new_rand();
         let other_node = ContactInfo::new_localhost(&other_node_pubkey, timestamp());
         assert_ne!(other_node.gossip().unwrap(), entrypoint.gossip().unwrap());
-        cluster_info.ping_cache.lock().unwrap().mock_pong(
-            *other_node.pubkey(),
-            other_node.gossip().unwrap(),
-            Instant::now(),
-        );
+        cluster_info
+            .ping_cache
+            .lock()
+            .unwrap()
+            .mock_pong(other_node.gossip().unwrap(), Instant::now());
         cluster_info.insert_info(other_node.clone());
         stakes.insert(other_node_pubkey, 10);
 
