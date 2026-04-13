@@ -707,7 +707,7 @@ pub fn execute(
         use_registered_io_uring_buffers: resource_limits::check_memlock_limit_for_disk_io(
             solana_accounts_db::accounts_db::TOTAL_IO_URING_BUFFERS_SIZE_LIMIT,
         ),
-        snapshots_use_direct_io: false,
+        snapshots_use_direct_io: !matches.is_present("no_accounts_db_snapshots_direct_io"),
     };
 
     let on_start_geyser_plugin_config_files = if matches.is_present("geyser_plugin_config") {
@@ -907,17 +907,6 @@ pub fn execute(
         value_t_or_exit!(matches, "minimal_snapshot_download_speed", f32);
     let maximum_snapshot_download_abort =
         value_t_or_exit!(matches, "maximum_snapshot_download_abort", u64);
-
-    if matches!(
-        validator_config.block_production_method,
-        BlockProductionMethod::UnifiedScheduler
-    ) {
-        warn!(
-            "Currently, the unified-scheduler method is experimental for block-production. It has \
-             known security issues and should be used only for developing and benchmarking \
-             purposes"
-        );
-    }
 
     let public_rpc_addr = matches
         .value_of("public_rpc_addr")

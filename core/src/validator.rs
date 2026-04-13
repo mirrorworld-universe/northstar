@@ -51,7 +51,7 @@ use {
     solana_accounts_db::{
         accounts_db::{ACCOUNTS_DB_CONFIG_FOR_TESTING, AccountsDbConfig},
         accounts_update_notifier_interface::AccountsUpdateNotifier,
-        utils::move_and_async_delete_path_contents,
+        utils::{move_and_async_delete_path_contents, validate_account_paths_for_direct_io},
     },
     solana_client::connection_cache::{ConnectionCache, Protocol},
     solana_clock::Slot,
@@ -211,29 +211,10 @@ pub enum BlockProductionMethod {
     CentralScheduler,
     #[default]
     CentralSchedulerGreedy,
-    UnifiedScheduler,
 }
 
 impl BlockProductionMethod {
-    pub fn cli_names() -> &'static [&'static str] {
-        // Simply return Self::VARIANTS by removing this code block altogether once after
-        // UnifiedScheduler isn't experimental
-        {
-            use std::sync::LazyLock;
-            static VARIANTS_NO_EXPERIMENTAL: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
-                BlockProductionMethod::VARIANTS
-                    .iter()
-                    .filter_map(|&variant| (variant != "unified-scheduler").then_some(variant))
-                    .collect()
-            });
-
-            let disable_experimental =
-                std::env::var("SOLANA_ENABLE_EXPERIMENTAL_BLOCK_PRODUCTION_METHOD").is_err();
-            if disable_experimental {
-                return &VARIANTS_NO_EXPERIMENTAL[..];
-            }
-        }
-
+    pub const fn cli_names() -> &'static [&'static str] {
         Self::VARIANTS
     }
 
@@ -313,9 +294,6 @@ pub fn supported_scheduling_mode(
     (verification, production): (&BlockVerificationMethod, &BlockProductionMethod),
 ) -> SupportedSchedulingMode {
     match (verification, production) {
-        (BlockVerificationMethod::UnifiedScheduler, BlockProductionMethod::UnifiedScheduler) => {
-            SupportedSchedulingMode::Both
-        }
         (BlockVerificationMethod::UnifiedScheduler, _) => {
             SupportedSchedulingMode::Either(SchedulingMode::BlockVerification)
         }
@@ -848,12 +826,13 @@ impl Validator {
         let genesis_config = load_genesis(config, ledger_path)?;
         metrics_config_sanity_check(genesis_config.cluster_type)?;
 
-        info!("Cleaning accounts paths..");
+        info!("Validating and cleaning accounts paths..");
         *start_progress.write().unwrap() = ValidatorStartProgress::CleaningAccounts;
-        let mut timer = Measure::start("clean_accounts_paths");
+        let mut timer = Measure::start("validate_and_clean_accounts_paths");
+        validate_account_paths(config)?;
         cleanup_accounts_paths(config);
         timer.stop();
-        info!("Cleaning accounts paths done. {timer}");
+        info!("Validating and cleaning accounts paths done. {timer}");
 
         snapshot_utils::purge_incomplete_bank_snapshots(&config.snapshot_config.bank_snapshots_dir);
         snapshot_utils::purge_old_bank_snapshots_at_startup(
@@ -1007,6 +986,11 @@ impl Validator {
             socket_addr_space,
         );
         cluster_info.set_contact_debug_interval(config.contact_debug_interval);
+        if let Some(known_validators) = &config.known_validators {
+            cluster_info
+                .set_trim_keep_pubkeys(known_validators.iter().copied())
+                .expect("set_trim_keep_pubkeys should succeed as ClusterInfo was just created");
+        }
         cluster_info.set_entrypoints(cluster_entrypoints);
         cluster_info.restore_contact_info(ledger_path, config.contact_save_interval);
         cluster_info.set_bind_ip_addrs(node.bind_ip_addrs.clone());
@@ -2974,6 +2958,14 @@ fn cleanup_accounts_paths(config: &ValidatorConfig) {
             move_and_async_delete_path_contents(shrink_path);
         }
     }
+}
+
+fn validate_account_paths(config: &ValidatorConfig) -> std::io::Result<()> {
+    validate_account_paths_for_direct_io(
+        &config.accounts_db_config,
+        &config.account_paths,
+        &config.account_snapshot_paths,
+    )
 }
 
 pub fn is_snapshot_config_valid(snapshot_config: &SnapshotConfig) -> bool {

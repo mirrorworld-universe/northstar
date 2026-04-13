@@ -1536,9 +1536,7 @@ impl AsyncVerificationProgress {
         self.pending_jobs = self.pending_jobs.saturating_add(1);
         let sender = self.sender.clone();
         replay_tx_thread_pool.spawn(move || {
-            sender
-                .send(work())
-                .expect("AsyncVerificationProgress work sender failed");
+            let _ = sender.send(work());
         });
         Ok(())
     }
@@ -1728,7 +1726,7 @@ fn confirm_slot_entries(
     let last_entry_hash = entries.last().map(|e| e.hash);
     if !skip_verification {
         let start_hash = progress.last_entry;
-        let verify_entries = entries.clone();
+        let verify_entries = entry::entries_to_verification_data(&entries);
         progress.async_verification.spawn(
             replay_tx_thread_pool,
             poh_verify_elapsed,
@@ -1737,7 +1735,7 @@ fn confirm_slot_entries(
                     "verify-batch-size",
                     ("size", verify_entries.len() as i64, i64)
                 );
-                let state = verify_entries.verify_cpu(&start_hash);
+                let state = entry::verify_entries_cpu(&verify_entries, &start_hash);
                 let error = if state.status() {
                     None
                 } else {
@@ -2514,6 +2512,7 @@ pub mod tests {
         },
         assert_matches::assert_matches,
         rand::{Rng, rng},
+        rayon::ThreadPoolBuilder,
         solana_account::{AccountSharedData, WritableAccount},
         solana_cost_model::transaction_cost::TransactionCost,
         solana_entry::entry::{create_ticks, next_entry, next_entry_mut},
@@ -2545,7 +2544,11 @@ pub mod tests {
             self,
             vote_state::{MAX_LOCKOUT_HISTORY, TowerSync, VoteStateV4, VoteStateVersions},
         },
-        std::{collections::BTreeSet, slice, sync::RwLock},
+        std::{
+            collections::BTreeSet,
+            slice,
+            sync::{Arc, Barrier, RwLock},
+        },
         test_case::{test_case, test_matrix},
         trees::tr,
     };
@@ -5170,6 +5173,69 @@ pub mod tests {
         } else {
             panic!("batch should have been sent");
         }
+    }
+
+    #[test]
+    fn test_confirm_slot_entries_async_sigverify_fail() {
+        let GenesisConfigInfo {
+            genesis_config,
+            mint_keypair,
+            ..
+        } = create_genesis_config(100 * LAMPORTS_PER_SOL);
+        let genesis_hash = genesis_config.hash();
+        let (bank, _bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
+
+        let mut tx =
+            system_transaction::transfer(&mint_keypair, &Pubkey::new_unique(), 1, genesis_hash);
+        tx.signatures[0] = solana_signature::Signature::default();
+        let entry = Entry::new(&genesis_hash, 1, vec![tx]);
+
+        assert_matches!(
+            confirm_slot_entries_for_tests(&bank, vec![entry], false, genesis_hash),
+            Err(BlockstoreProcessorError::InvalidTransaction(
+                TransactionError::SignatureFailure
+            ))
+        );
+    }
+
+    #[test]
+    fn test_async_verification_progress_drop() {
+        let exit_barrier = Arc::new(Barrier::new(2));
+        let drop_barrier = Arc::new(Barrier::new(2));
+
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(1)
+            .exit_handler({
+                let exit_barrier = exit_barrier.clone();
+                move |_| {
+                    exit_barrier.wait();
+                }
+            })
+            .build()
+            .unwrap();
+
+        let mut progress = AsyncVerificationProgress::new();
+        progress
+            .spawn(&pool, &mut 0, {
+                let drop_barrier = drop_barrier.clone();
+                move || {
+                    // wait for the test to drop `progress` so the channel spawn() sends results to
+                    // gets disconnected
+                    drop_barrier.wait();
+                    AsyncVerificationResult {
+                        poh_verify_elapsed: 0,
+                        error: None,
+                    }
+                }
+            })
+            .unwrap();
+
+        // ensure that in flight or pending tasks don't panic if AsyncVerificationProgress gets
+        // dropped
+        drop(progress);
+        drop_barrier.wait();
+        drop(pool);
+        exit_barrier.wait();
     }
 
     fn do_test_schedule_batches_for_execution(should_succeed: bool) {
