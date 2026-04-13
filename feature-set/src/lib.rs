@@ -170,8 +170,9 @@ impl FeatureSet {
                 .is_active(&bls_pubkey_management_in_vote_account::id()),
             enable_alt_bn128_g2_syscalls: self.is_active(&enable_alt_bn128_g2_syscalls::id()),
             commission_rate_in_basis_points: self.is_active(&commission_rate_in_basis_points::id()),
-            custom_commission_collector: self.is_active(&custom_commission_collector::id()),
+            custom_commission_collector: false, // Feature disabled for now.
             enable_bls12_381_syscall: self.is_active(&enable_bls12_381_syscall::id()),
+            block_revenue_sharing: false, // Hard-coded as disabled for now. Not a fully-implemented feature yet.
         }
     }
 }
@@ -1287,6 +1288,14 @@ pub mod stop_use_static_simple_vote_tx_cost {
     solana_pubkey::declare_id!("NSVt1s8oP1A9NjEc6UNcj2voeCcfzHaq4jZTiUL2Mf5");
 }
 
+pub mod limit_instruction_accounts {
+    solana_pubkey::declare_id!("DqbnFPASg7tHmZ6qfpdrt2M6MWoSeiicWPXxPhxqFCQ");
+}
+
+pub mod block_revenue_sharing {
+    solana_pubkey::declare_id!("HqUXZzYaxpbjHRCZHn8GLDCSecyCe2A7JD3An6asGdw4");
+}
+
 pub static FEATURE_NAMES: LazyLock<AHashMap<Pubkey, &'static str>> = LazyLock::new(|| {
     [
         (secp256k1_program_enabled::id(), "secp256k1 program"),
@@ -2267,10 +2276,6 @@ pub static FEATURE_NAMES: LazyLock<AHashMap<Pubkey, &'static str>> = LazyLock::n
             "SIMD-0291: Commission rate in basis points",
         ),
         (
-            custom_commission_collector::id(),
-            "SIMD-0232: Custom Commission Collector Account",
-        ),
-        (
             enable_bls12_381_syscall::id(),
             "SIMD-0388: BLS12-381 syscalls",
         ),
@@ -2297,6 +2302,10 @@ pub static FEATURE_NAMES: LazyLock<AHashMap<Pubkey, &'static str>> = LazyLock::n
         (
             stop_use_static_simple_vote_tx_cost::id(),
             "stop use static SimpleVote transaction cost, issue #10227",
+        ),
+        (
+            limit_instruction_accounts::id(),
+            "SIMD-406: Maximum instruction accounts",
         ),
         /*************** ADD NEW FEATURES HERE ***************/
     ]

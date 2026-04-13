@@ -421,6 +421,8 @@ pub struct ValidatorConfig {
     pub delay_leader_block_for_pending_fork: bool,
     pub voting_service_test_override: Option<VotingServiceOverride>,
     pub repair_handler_type: RepairHandlerType,
+    // Thread niceness adjustment for snapshot packager service
+    pub snapshot_packager_niceness_adj: i8,
     // Sonic: Portal pubkey for ephemeral rollup
     pub portal: Option<Pubkey>,
     // Sonic: Ephemeral RPC port for rollup server
@@ -512,6 +514,7 @@ impl ValidatorConfig {
             delay_leader_block_for_pending_fork: false,
             voting_service_test_override: None,
             repair_handler_type: RepairHandlerType::default(),
+            snapshot_packager_niceness_adj: 0,
             // Sonic: Portal pubkey for ephemeral rollup
             portal: None,
             // Sonic: Default ephemeral RPC port
@@ -523,18 +526,16 @@ impl ValidatorConfig {
         }
     }
 
+    #[cfg(feature = "dev-context-only-utils")]
     pub fn enable_default_rpc_block_subscribe(&mut self) {
-        let pubsub_config = PubSubConfig {
+        self.pubsub_config = PubSubConfig {
             enable_block_subscription: true,
-            ..PubSubConfig::default()
+            ..PubSubConfig::default_for_tests()
         };
-        let rpc_config = JsonRpcConfig {
+        self.rpc_config = JsonRpcConfig {
             enable_rpc_transaction_history: true,
             ..JsonRpcConfig::default_for_test()
         };
-
-        self.pubsub_config = pubsub_config;
-        self.rpc_config = rpc_config;
     }
 }
 
@@ -1050,6 +1051,7 @@ impl Validator {
             cluster_info.clone(),
             snapshot_controller.clone(),
             enable_gossip_push,
+            config.snapshot_packager_niceness_adj,
         );
         let snapshot_request_handler = SnapshotRequestHandler {
             snapshot_controller: snapshot_controller.clone(),
@@ -1502,11 +1504,13 @@ impl Validator {
         );
         let serve_repair = {
             let bank_forks_r = bank_forks.read().unwrap();
+            let leader_state = poh_recorder.read().unwrap().shared_leader_state();
             config.repair_handler_type.create_serve_repair(
                 blockstore.clone(),
                 cluster_info.clone(),
                 bank_forks_r.sharable_banks(),
                 config.repair_whitelist.clone(),
+                leader_state,
                 bank_forks_r.migration_status(),
             )
         };
@@ -2363,23 +2367,26 @@ fn load_blockstore(
     let entry_notifier_service = entry_notifier
         .map(|entry_notifier| EntryNotifierService::new(entry_notifier, exit.clone()));
 
-    let (bank_forks, mut leader_schedule_cache, starting_snapshot_hashes) =
-        bank_forks_utils::load_bank_forks(
-            genesis_config,
-            &blockstore,
-            config.account_paths.clone(),
-            &config.snapshot_config,
-            &process_options,
-            transaction_history_services
-                .transaction_status_sender
-                .as_ref(),
-            entry_notifier_service
-                .as_ref()
-                .map(|service| service.sender()),
-            accounts_update_notifier,
-            exit,
-        )
-        .map_err(|err| err.to_string())?;
+    let (bank_forks, starting_snapshot_hashes) = bank_forks_utils::load_bank_forks(
+        genesis_config,
+        &blockstore,
+        config.account_paths.clone(),
+        &config.snapshot_config,
+        &process_options,
+        transaction_history_services
+            .transaction_status_sender
+            .as_ref(),
+        entry_notifier_service
+            .as_ref()
+            .map(|service| service.sender()),
+        accounts_update_notifier,
+        exit,
+    )
+    .map_err(|err| err.to_string())?;
+
+    let mut leader_schedule_cache =
+        LeaderScheduleCache::new_from_bank(&bank_forks.read().unwrap().root_bank());
+    leader_schedule_cache.set_fixed_leader_schedule(config.fixed_leader_schedule.clone());
 
     // Before replay starts, set the callbacks in each of the banks in BankForks so that
     // all dropped banks come through the `pruned_banks_receiver` channel. This way all bank
@@ -2388,8 +2395,6 @@ fn load_blockstore(
     // is processing the dropped banks from the `pruned_banks_receiver` channel.
     let pruned_banks_receiver =
         AccountsBackgroundService::setup_bank_drop_callback(bank_forks.clone());
-
-    leader_schedule_cache.set_fixed_leader_schedule(config.fixed_leader_schedule.clone());
 
     Ok((
         bank_forks,

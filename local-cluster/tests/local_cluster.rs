@@ -43,6 +43,7 @@ use {
         bank_forks_utils,
         blockstore::{entries_to_test_shreds, Blockstore},
         blockstore_processor::{self, ProcessOptions},
+        leader_schedule_cache::LeaderScheduleCache,
         shred::{ProcessShredsStats, ReedSolomonCache, Shred, Shredder},
         use_snapshot_archives_at_startup::UseSnapshotArchivesAtStartup,
     },
@@ -62,7 +63,7 @@ use {
         local_cluster::{ClusterConfig, LocalCluster, DEFAULT_MINT_LAMPORTS},
         validator_configs::*,
     },
-    solana_net_utils::SocketAddrSpace,
+    solana_net_utils::{sockets::bind_to_localhost_unique, SocketAddrSpace},
     solana_poh_config::PohConfig,
     solana_pubkey::Pubkey,
     solana_pubsub_client::pubsub_client::PubsubClient,
@@ -2348,7 +2349,7 @@ fn create_snapshot_to_hard_fork(
     let ledger_path = blockstore.ledger_path();
     let genesis_config = open_genesis_config(ledger_path, u64::MAX).unwrap();
     let snapshot_config = create_simple_snapshot_config(ledger_path);
-    let (bank_forks, leader_schedule_cache, _) = bank_forks_utils::load_bank_forks(
+    let (bank_forks, _) = bank_forks_utils::load_bank_forks(
         &genesis_config,
         blockstore,
         vec![
@@ -2364,6 +2365,10 @@ fn create_snapshot_to_hard_fork(
         Arc::default(),
     )
     .expect("must load bank forks");
+
+    let leader_schedule_cache =
+        LeaderScheduleCache::new_from_bank(&bank_forks.read().unwrap().root_bank());
+
     blockstore_processor::process_blockstore_from_root(
         blockstore,
         &bank_forks,
@@ -3313,7 +3318,7 @@ fn do_test_lockout_violation_with_or_without_tower(with_tower: bool) {
         validator_to_slots.into_iter(),
     ));
     for slot in 0..=validator_b_last_leader_slot {
-        assert_eq!(leader_schedule[slot], validator_b_pubkey);
+        assert_eq!(leader_schedule[slot].id, validator_b_pubkey);
     }
 
     default_config.fixed_leader_schedule = Some(FixedSchedule {
@@ -6145,7 +6150,7 @@ fn test_alpenglow_imbalanced_stakes_catchup() {
     };
 
     // Create our UDP socket to listen to votes
-    let vote_listener_addr = solana_net_utils::bind_to_localhost().unwrap();
+    let vote_listener_addr = bind_to_localhost_unique().unwrap();
 
     let mut validator_config = ValidatorConfig::default_for_test();
     validator_config.fixed_leader_schedule = Some(leader_schedule);
@@ -6223,7 +6228,7 @@ fn test_alpenglow_migration(num_nodes: usize) {
     agave_logger::setup_with_default(AG_DEBUG_LOG_FILTER);
     let test_name = &format!("test_alpenglow_migration_{num_nodes}");
 
-    let vote_listener_socket = solana_net_utils::bind_to_localhost().unwrap();
+    let vote_listener_socket = bind_to_localhost_unique().unwrap();
     let vote_listener_addr = vote_listener_socket.try_clone().unwrap();
     let mut validator_config = ValidatorConfig::default_for_test();
     validator_config.voting_service_test_override = Some(VotingServiceOverride {
