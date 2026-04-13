@@ -4,7 +4,6 @@ use {
     pinocchio::{
         account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, ProgramResult,
     },
-    pinocchio_system::instructions::Assign,
 };
 
 pub fn process_undelegate(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
@@ -57,16 +56,13 @@ pub fn process_undelegate(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
 
     unsafe { delegated_account.assign(owner_program.key()) };
 
-
     let delegation_record_lamports = delegation_record.lamports();
 
     if delegation_record_lamports > 0 {
         let mut authority_lamports = authority.try_borrow_mut_lamports()?;
         *authority_lamports = authority_lamports
             .checked_add(delegation_record_lamports)
-            .ok_or_else(|| {
-                PortalError::ArithmeticOverflow
-            })?;
+            .ok_or(PortalError::ArithmeticOverflow)?;
         *delegation_record.try_borrow_mut_lamports()? = 0;
     }
 

@@ -4,6 +4,7 @@ use {
     crate::{
         cluster_tpu_info::ClusterTpuInfo,
         max_slots::MaxSlots,
+        northstar::*,
         optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
         rpc::{rpc_accounts::*, rpc_accounts_scan::*, rpc_bank::*, rpc_full::*, rpc_minimal::*, *},
         rpc_cache::LargestAccountsCache,
@@ -34,6 +35,7 @@ use {
     solana_metrics::inc_new_counter_info,
     solana_perf::thread::renice_this_thread,
     solana_poh::poh_recorder::PohRecorder,
+    solana_pubkey::Pubkey,
     solana_quic_definitions::NotifyKeyUpdate,
     solana_runtime::{
         bank::Bank, bank_forks::BankForks, commitment::BlockCommitmentCache,
@@ -47,6 +49,7 @@ use {
     solana_storage_bigtable::CredentialType,
     solana_validator_exit::Exit,
     std::{
+        collections::HashSet,
         net::{SocketAddr, UdpSocket},
         path::{Path, PathBuf},
         pin::Pin,
@@ -552,6 +555,7 @@ impl JsonRpcService {
             config.max_complete_transaction_status_slot,
             config.prioritization_fee_cache,
             runtime,
+            None, // delegated_accounts: not an ephemeral rollup node
         )?;
         Ok(json_rpc_service)
     }
@@ -587,6 +591,8 @@ impl JsonRpcService {
         max_complete_transaction_status_slot: Arc<AtomicU64>,
         prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
         runtime: Arc<TokioRuntime>,
+        // Sonic: Optional delegated accounts set for ephemeral rollup RPC.
+        delegated_accounts: Option<Arc<RwLock<HashSet<Pubkey>>>>,
     ) -> Result<Self, String> {
         Self::new(
             rpc_addr,
@@ -609,6 +615,7 @@ impl JsonRpcService {
             max_complete_transaction_status_slot,
             prioritization_fee_cache,
             runtime,
+            delegated_accounts,
         )
     }
 
@@ -641,6 +648,8 @@ impl JsonRpcService {
         max_complete_transaction_status_slot: Arc<AtomicU64>,
         prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
         runtime: Arc<TokioRuntime>,
+        // Sonic: Optional delegated accounts set for ephemeral rollup RPC.
+        delegated_accounts: Option<Arc<RwLock<HashSet<Pubkey>>>>,
     ) -> Result<Self, String> {
         info!("rpc bound to {rpc_addr:?}");
         info!("rpc configuration: {config:?}");
@@ -714,7 +723,7 @@ impl JsonRpcService {
         let max_request_body_size = config
             .max_request_body_size
             .unwrap_or(MAX_REQUEST_BODY_SIZE);
-        let (request_processor, receiver) = JsonRpcRequestProcessor::new(
+        let (mut request_processor, receiver) = JsonRpcRequestProcessor::new(
             config,
             snapshot_config.clone(),
             bank_forks.clone(),
@@ -733,6 +742,12 @@ impl JsonRpcService {
             prioritization_fee_cache,
             Arc::clone(&runtime),
         );
+
+        // Sonic: Wire delegated accounts into request processor
+        let has_delegated_accounts = delegated_accounts.is_some();
+        if let Some(da) = delegated_accounts {
+            request_processor.set_delegated_accounts(da);
+        }
 
         let _send_transaction_service = Arc::new(SendTransactionService::new(
             &bank_forks,
@@ -756,6 +771,10 @@ impl JsonRpcService {
                 let mut io = MetaIoHandler::default();
 
                 io.extend_with(rpc_minimal::MinimalImpl.to_delegate());
+                // Sonic: Register NorthStar RPC methods when delegated accounts are available
+                if has_delegated_accounts {
+                    io.extend_with(NorthStarImpl.to_delegate());
+                }
                 if full_api {
                     io.extend_with(rpc_bank::BankDataImpl.to_delegate());
                     io.extend_with(rpc_accounts::AccountsDataImpl.to_delegate());
@@ -961,6 +980,8 @@ mod tests {
             Arc::new(AtomicU64::default()),
             Some(Arc::new(PrioritizationFeeCache::default())),
             runtime,
+            // Sonic:
+            None,
         )
         .expect("assume successful JsonRpcService start");
         let thread = rpc_service.thread_hdl.thread();

@@ -75,6 +75,10 @@ pub struct RunArgs {
     pub portal: Option<Pubkey>,
     // Sonic: Ephemeral RPC port for the rollup server
     pub ephemeral_rpc_port: u16,
+    // Sonic: Ephemeral WebSocket port for rollup PubSub
+    pub ephemeral_ws_port: u16,
+    // Sonic: Ephemeral TPU port for rollup QUIC transactions
+    pub ephemeral_tpu_port: u16,
     pub rpc_bootstrap_config: RpcBootstrapConfig,
     pub blockstore_options: BlockstoreOptions,
     pub json_rpc_config: JsonRpcConfig,
@@ -147,6 +151,18 @@ impl FromClapArgMatches for RunArgs {
             .unwrap_or("8910")
             .parse()
             .expect("valid ephemeral rpc port");
+        // Sonic: Extract ephemeral WS port from CLI arguments
+        let ephemeral_ws_port = matches
+            .value_of("ephemeral_ws_port")
+            .unwrap_or("8911")
+            .parse()
+            .expect("valid ephemeral ws port");
+        // Sonic: Extract ephemeral TPU port from CLI arguments
+        let ephemeral_tpu_port = matches
+            .value_of("ephemeral_tpu_port")
+            .unwrap_or("8912")
+            .parse()
+            .expect("valid ephemeral tpu port");
 
         Ok(RunArgs {
             identity_keypair,
@@ -159,6 +175,10 @@ impl FromClapArgMatches for RunArgs {
             portal,
             // Sonic: Ephemeral RPC port
             ephemeral_rpc_port,
+            // Sonic: Ephemeral WS port
+            ephemeral_ws_port,
+            // Sonic: Ephemeral TPU port
+            ephemeral_tpu_port,
             rpc_bootstrap_config: RpcBootstrapConfig::from_clap_arg_match(matches)?,
             blockstore_options: BlockstoreOptions::from_clap_arg_match(matches)?,
             json_rpc_config: JsonRpcConfig::from_clap_arg_match(matches)?,
@@ -701,6 +721,26 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .default_value("8910")
             .validator(is_parsable::<u16>)
             .help("Port for ephemeral rollup RPC server"),
+    )
+    // Sonic: Ephemeral WS port for the rollup PubSub
+    .arg(
+        Arg::with_name("ephemeral_ws_port")
+            .long("ephemeral-ws-port")
+            .value_name("PORT")
+            .takes_value(true)
+            .default_value("8911")
+            .validator(is_parsable::<u16>)
+            .help("Port for ephemeral rollup WebSocket (PubSub) server"),
+    )
+    // Sonic: Ephemeral TPU port for the rollup QUIC transactions
+    .arg(
+        Arg::with_name("ephemeral_tpu_port")
+            .long("ephemeral-tpu-port")
+            .value_name("PORT")
+            .takes_value(true)
+            .default_value("8912")
+            .validator(is_parsable::<u16>)
+            .help("Port for ephemeral rollup TPU (QUIC) endpoint"),
     )
     .arg(
         Arg::with_name("repair_validators")
@@ -1396,6 +1436,10 @@ mod tests {
                 portal: None,
                 // Sonic: Default ephemeral RPC port
                 ephemeral_rpc_port: 8910,
+                // Sonic: Default ephemeral WS port
+                ephemeral_ws_port: 8911,
+                // Sonic: Default ephemeral TPU port
+                ephemeral_tpu_port: 8912,
                 rpc_bootstrap_config: RpcBootstrapConfig::default(),
                 blockstore_options: BlockstoreOptions::default(),
                 json_rpc_config,
@@ -1424,6 +1468,10 @@ mod tests {
                 portal: self.portal,
                 // Sonic:
                 ephemeral_rpc_port: self.ephemeral_rpc_port,
+                // Sonic:
+                ephemeral_ws_port: self.ephemeral_ws_port,
+                // Sonic:
+                ephemeral_tpu_port: self.ephemeral_tpu_port,
                 rpc_bootstrap_config: self.rpc_bootstrap_config.clone(),
                 blockstore_options: self.blockstore_options.clone(),
                 json_rpc_config: self.json_rpc_config.clone(),

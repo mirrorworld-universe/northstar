@@ -1,16 +1,21 @@
 use {
     crate::{
-        ephemeral_tx_client::EphemeralTransactionClient, slot_advancer::SlotAdvancer,
-        EphemeralRollupSettings,
+        ephemeral_tpu::EphemeralTpu, ephemeral_tx_client::EphemeralTransactionClient,
+        slot_advancer::SlotAdvancer, EphemeralRollupSettings,
     },
     log::{info, warn},
     solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
     solana_gossip::cluster_info::ClusterInfo,
+    solana_keypair::Keypair,
     solana_ledger::{blockstore::Blockstore, leader_schedule_cache::LeaderScheduleCache},
     solana_pubkey::Pubkey,
     solana_rpc::{
-        max_slots::MaxSlots, optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
-        rpc::JsonRpcConfig, rpc_service::JsonRpcService,
+        max_slots::MaxSlots,
+        optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
+        rpc::JsonRpcConfig,
+        rpc_pubsub_service::{PubSubConfig, PubSubService},
+        rpc_service::JsonRpcService,
+        rpc_subscriptions::RpcSubscriptions,
     },
     solana_runtime::{
         bank::Bank,
@@ -33,9 +38,24 @@ use {
 
 pub struct EphemeralRuntime {
     bank_forks: Arc<RwLock<BankForks>>,
+    block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
+    optimistically_confirmed_bank: Arc<RwLock<OptimisticallyConfirmedBank>>,
     rpc_service: JsonRpcService,
     rpc_addr: SocketAddr,
-    exit: Arc<AtomicBool>,
+    /// Sonic: PubSub WebSocket service for subscriptions.
+    pubsub_service: Option<PubSubService>,
+    /// Sonic: Trigger to cancel PubSub service on shutdown.
+    pubsub_trigger: Option<stream_cancel::Trigger>,
+    /// Sonic: RPC subscriptions shared between PubSub and slot advancer.
+    rpc_subscriptions: Arc<RpcSubscriptions>,
+    ws_addr: SocketAddr,
+    /// Sonic: TPU QUIC endpoint for direct transaction submission.
+    tpu: Option<EphemeralTpu>,
+    tpu_addr: SocketAddr,
+    /// Sonic: Controls the RPC service lifetime — only set on final shutdown.
+    rpc_exit: Arc<AtomicBool>,
+    /// Sonic: Controls the current SlotAdvancer — set when resetting to new parent.
+    advancer_exit: Arc<AtomicBool>,
     slot_advancer: Option<SlotAdvancer>,
     /// Snapshot of delegated account state at ER creation time.
     /// Used for settlement diff computation (future task).
@@ -46,6 +66,11 @@ pub struct EphemeralRuntime {
     delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
     /// Shared with EphemeralTransactionClient - tracks accounts that have been written to on this ER.
     touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+
+    /// Sonic: When false, the tx_client rejects all transactions.
+    /// Set to true when an ephemeral session is active.
+    active: Arc<AtomicBool>,
+    _portal_program_id: Pubkey,
 
     _tx_client: EphemeralTransactionClient,
     _settings: EphemeralRollupSettings,
@@ -69,7 +94,10 @@ impl EphemeralRuntime {
         cluster_info: Arc<ClusterInfo>,
         settings: EphemeralRollupSettings,
         rpc_addr: SocketAddr,
+        ws_addr: SocketAddr,
+        tpu_addr: SocketAddr,
         portal_program_id: Pubkey,
+        manager_keypair: Arc<Keypair>,
     ) -> Result<Self, String> {
         // Place ER slots far above L1 slots so the shared AccountsDb root
         // tracker never sees an out-of-order add_root from either side.
@@ -118,10 +146,13 @@ impl EphemeralRuntime {
 
         let delegated_set = Arc::new(RwLock::new(delegated_accounts.clone()));
         let touched_accounts = Arc::new(RwLock::new(HashSet::new()));
+        // Sonic: Starts inactive — transactions rejected until activate() is called
+        let active = Arc::new(AtomicBool::new(false));
         let tx_client = EphemeralTransactionClient::new(
             bank_forks.clone(),
             delegated_set.clone(),
             touched_accounts.clone(),
+            active.clone(),
         );
 
         let ledger_dir = TempDir::new().map_err(|e| e.to_string())?;
@@ -152,7 +183,11 @@ impl EphemeralRuntime {
         let genesis_hash = initial_bank.hash();
 
         let validator_exit = Arc::new(RwLock::new(solana_validator_exit::Exit::default()));
-        let exit = Arc::new(AtomicBool::new(false));
+        // Sonic: Separate exit flags for RPC service and slot advancer.
+        // rpc_exit controls the RPC service lifetime (set only on final shutdown).
+        // advancer_exit controls the current SlotAdvancer (set when resetting to new parent).
+        let rpc_exit = Arc::new(AtomicBool::new(false));
+        let advancer_exit = Arc::new(AtomicBool::new(false));
         let override_health_check = Arc::new(AtomicBool::new(true));
 
         let runtime = Arc::new(
@@ -177,22 +212,59 @@ impl EphemeralRuntime {
             None,
             bank_forks.clone(),
             block_commitment_cache.clone(),
-            blockstore,
-            cluster_info,
+            blockstore.clone(),
+            cluster_info.clone(),
             genesis_hash,
             ledger_dir.path(),
             validator_exit,
-            exit.clone(),
+            rpc_exit.clone(),
             override_health_check,
-            optimistically_confirmed_bank,
+            optimistically_confirmed_bank.clone(),
             send_transaction_service::Config::default(),
             max_slots,
             leader_schedule_cache,
             tx_client.clone(),
-            max_complete_transaction_status_slot,
+            max_complete_transaction_status_slot.clone(),
             None,
             runtime.clone(),
+            Some(delegated_set.clone()),
         )?;
+
+        // Sonic: Start PubSub WebSocket service
+        let rpc_subscriptions = Arc::new(RpcSubscriptions::new_with_config(
+            rpc_exit.clone(),
+            max_complete_transaction_status_slot,
+            blockstore,
+            bank_forks.clone(),
+            block_commitment_cache.clone(),
+            optimistically_confirmed_bank.clone(),
+            &PubSubConfig::default(),
+            None,
+        ));
+
+        let (pubsub_service, pubsub_trigger) = {
+            let (trigger, pubsub_svc) =
+                PubSubService::new(PubSubConfig::default(), &rpc_subscriptions, ws_addr);
+            (Some(pubsub_svc), Some(trigger))
+        };
+
+        info!("EphemeralRuntime PubSub listening at {ws_addr}");
+
+        // Sonic: Start TPU QUIC endpoint
+        let tpu_socket = solana_net_utils::sockets::bind_to(tpu_addr.ip(), tpu_addr.port())
+            .map_err(|e| format!("Failed to bind ER TPU socket on {tpu_addr}: {e}"))?;
+        let actual_tpu_addr = tpu_socket
+            .local_addr()
+            .map_err(|e| format!("Failed to get ER TPU local addr: {e}"))?;
+        let tpu = EphemeralTpu::new(
+            tpu_socket,
+            &manager_keypair,
+            tx_client.clone(),
+            rpc_exit.clone(),
+        )
+        .map_err(|e| format!("Failed to start ER TPU: {e}"))?;
+
+        info!("EphemeralRuntime TPU listening at {actual_tpu_addr}");
 
         info!(
             "EphemeralRuntime listening at {rpc_addr} with slot {}",
@@ -207,18 +279,30 @@ impl EphemeralRuntime {
                 slot_duration: Duration::from_millis(400),
                 manager_account: Pubkey::default(),
             },
-            exit.clone(),
+            advancer_exit.clone(),
+            Some(rpc_subscriptions.clone()),
         );
 
         Ok(Self {
             bank_forks,
+            block_commitment_cache,
+            optimistically_confirmed_bank,
             rpc_service,
             rpc_addr,
-            exit,
+            pubsub_service,
+            pubsub_trigger,
+            rpc_subscriptions,
+            ws_addr,
+            tpu: Some(tpu),
+            tpu_addr: actual_tpu_addr,
+            rpc_exit,
+            advancer_exit,
             slot_advancer: Some(slot_advancer),
             initial_account_snapshots,
             delegated_accounts: delegated_set,
             touched_accounts,
+            active,
+            _portal_program_id: portal_program_id,
 
             _settings: settings,
             _tx_client: tx_client,
@@ -231,18 +315,126 @@ impl EphemeralRuntime {
         format!("http://{}", self.rpc_addr)
     }
 
+    /// Sonic: Get the WebSocket address.
+    pub fn ws_addr(&self) -> String {
+        format!("ws://{}", self.ws_addr)
+    }
+
+    /// Sonic: Get the TPU QUIC address.
+    pub fn tpu_addr(&self) -> SocketAddr {
+        self.tpu_addr
+    }
+
+    /// Sonic: Activate the ephemeral rollup — transactions will be accepted.
+    pub fn activate(&self) {
+        info!("Activating ephemeral rollup at {}", self.rpc_addr);
+        self.active.store(true, Ordering::Relaxed);
+    }
+
+    /// Sonic: Deactivate the ephemeral rollup — transactions will be rejected.
+    pub fn deactivate(&self) {
+        info!("Deactivating ephemeral rollup at {}", self.rpc_addr);
+        self.active.store(false, Ordering::Relaxed);
+    }
+
+    /// Sonic: Check if the ephemeral rollup is accepting transactions.
+    pub fn is_active(&self) -> bool {
+        self.active.load(Ordering::Relaxed)
+    }
+
     pub fn bank(&self) -> Arc<Bank> {
         self.bank_forks.read().unwrap().working_bank()
     }
 
     pub fn shutdown(&mut self) {
         info!("Shutting down EphemeralRuntime at {}", self.rpc_addr);
-        self.exit.store(true, Ordering::Relaxed);
+        // Stop slot advancer first
+        self.advancer_exit.store(true, Ordering::Relaxed);
         if let Some(advancer) = self.slot_advancer.take() {
             advancer.join();
         }
+        // Stop TPU
+        if let Some(mut tpu) = self.tpu.take() {
+            tpu.shutdown();
+        }
+        // Stop PubSub (Trigger drop cancels the Tripwire)
+        drop(self.pubsub_trigger.take());
+        if let Some(pubsub) = self.pubsub_service.take() {
+            let _ = pubsub.close();
+        }
+        // Then stop RPC service
+        self.rpc_exit.store(true, Ordering::Relaxed);
         self.rpc_service.exit();
         info!("EphemeralRuntime shutdown complete");
+    }
+
+    /// Sonic: Reset the ephemeral bank to a fresh fork from a new L1 root bank.
+    /// Stops the old SlotAdvancer, swaps BankForks in-place (same Arc, new contents),
+    /// clears session state, and starts a new SlotAdvancer.
+    /// Called when a new session opens to get a fresh L1 snapshot.
+    pub fn reset_to_new_parent(&mut self, parent_bank: Arc<Bank>) {
+        // 1. Stop old slot advancer
+        self.advancer_exit.store(true, Ordering::Relaxed);
+        if let Some(advancer) = self.slot_advancer.take() {
+            advancer.join();
+        }
+
+        // 2. Create new ephemeral bank from current L1 root
+        let ephemeral_slot = Self::ER_SLOT_OFFSET + parent_bank.slot() + 1;
+        let bank = Bank::new_from_parent(parent_bank, &Pubkey::default(), ephemeral_slot);
+        let ticks_per_slot = bank.ticks_per_slot();
+        bank.set_tick_height(bank.max_tick_height() - ticks_per_slot);
+
+        // 3. Swap BankForks in-place — same Arc, new contents.
+        //    All holders (RPC service, tx_client) see the new bank.
+        let new_bf_arc = BankForks::new_rw_arc(bank);
+        let new_bf = Arc::try_unwrap(new_bf_arc)
+            .unwrap_or_else(|_| panic!("just created, refcount must be 1"))
+            .into_inner()
+            .expect("lock not poisoned");
+        *self.bank_forks.write().unwrap() = new_bf;
+
+        let initial_bank = self.bank_forks.read().unwrap().root_bank();
+        let slot = initial_bank.slot();
+
+        // 4. Update commitment cache
+        *self.block_commitment_cache.write().unwrap() = BlockCommitmentCache::new(
+            std::collections::HashMap::new(),
+            0,
+            CommitmentSlots {
+                slot,
+                root: slot,
+                highest_confirmed_slot: slot,
+                highest_super_majority_root: slot,
+            },
+        );
+
+        // 5. Update optimistically confirmed bank
+        *self.optimistically_confirmed_bank.write().unwrap() = OptimisticallyConfirmedBank {
+            bank: initial_bank.clone(),
+        };
+
+        // 6. Clear session state
+        self.initial_account_snapshots.clear();
+        self.delegated_accounts.write().unwrap().clear();
+        self.touched_accounts.write().unwrap().clear();
+
+        // 7. Start new slot advancer
+        let advancer_exit = Arc::new(AtomicBool::new(false));
+        self.advancer_exit = advancer_exit.clone();
+        self.slot_advancer = Some(crate::slot_advancer::SlotAdvancer::new(
+            self.bank_forks.clone(),
+            self.block_commitment_cache.clone(),
+            initial_bank,
+            crate::slot_advancer::Config {
+                slot_duration: Duration::from_millis(400),
+                manager_account: Pubkey::default(),
+            },
+            advancer_exit,
+            Some(self.rpc_subscriptions.clone()),
+        ));
+
+        info!("EphemeralRuntime reset to new L1 parent, ER slot {}", slot);
     }
 
     /// Returns a clone of the delegated account pubkeys set.
@@ -308,7 +500,7 @@ impl EphemeralRuntime {
 
 impl Drop for EphemeralRuntime {
     fn drop(&mut self) {
-        if !self.exit.load(Ordering::Relaxed) {
+        if !self.rpc_exit.load(Ordering::Relaxed) {
             log::warn!(
                 "EphemeralRuntime on {} dropped without explicit shutdown",
                 self.rpc_addr
@@ -379,7 +571,10 @@ mod tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             portal_program_id,
+            Arc::new(Keypair::new()),
         )
         .unwrap();
         (parent_bank, runtime)
@@ -427,7 +622,10 @@ mod tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
         )
         .unwrap();
         let rpc_client = rpc_client(&runtime);
@@ -467,9 +665,13 @@ mod tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
         )
         .unwrap();
+        runtime.activate();
         let rpc_client = rpc_client(&runtime);
 
         // Wait for the slot advancer to advance past the initial slots
@@ -510,6 +712,146 @@ mod tests {
     }
 
     #[test]
+    fn test_transactions_rejected_when_inactive() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        let sender_keypair = Keypair::new();
+        let sender_pubkey = sender_keypair.pubkey();
+        let receiver_pubkey = Pubkey::new_unique();
+        let sender_initial = 100_000_000_000u64;
+        let transfer_amount = 10_000_000_000u64;
+        fund_account(&parent_bank, &sender_pubkey, sender_initial);
+        parent_bank.freeze();
+
+        let cluster_info = create_test_cluster_info();
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            cluster_info,
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        // Do NOT call runtime.activate() — runtime stays inactive
+        assert!(!runtime.is_active());
+        let rpc_client = rpc_client(&runtime);
+
+        std::thread::sleep(Duration::from_secs(2));
+
+        // RPC reads should still work when inactive
+        let blockhash = rpc_client
+            .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
+            .unwrap()
+            .0;
+        assert_ne!(blockhash, solana_hash::Hash::default());
+
+        // Send a transaction — it should be silently dropped by the inactive tx client
+        let instruction = transfer(&sender_pubkey, &receiver_pubkey, transfer_amount);
+        let tx = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&sender_pubkey),
+            &[&sender_keypair],
+            blockhash,
+        );
+
+        let config = RpcSendTransactionConfig {
+            skip_preflight: true,
+            ..Default::default()
+        };
+        // sendTransaction RPC succeeds (returns sig) but tx is dropped internally
+        rpc_client
+            .send_transaction_with_config(&tx, config)
+            .unwrap();
+
+        std::thread::sleep(Duration::from_secs(2));
+
+        // Receiver should have 0 balance — transaction was rejected
+        let receiver_balance = rpc_client
+            .get_balance_with_commitment(&receiver_pubkey, CommitmentConfig::processed())
+            .unwrap()
+            .value;
+        assert_eq!(
+            receiver_balance, 0,
+            "Transaction should be rejected when runtime is inactive"
+        );
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_reset_to_new_parent_picks_up_fresh_l1_state() {
+        agave_logger::setup();
+
+        // Create initial L1 bank with account A
+        let parent_bank = create_test_bank();
+        let account_a = Pubkey::new_unique();
+        fund_account(&parent_bank, &account_a, 10_000_000_000);
+        parent_bank.freeze();
+        let parent_bank = Arc::new(parent_bank);
+
+        // Create runtime from initial bank (inactive)
+        let cluster_info = create_test_cluster_info();
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            parent_bank.clone(),
+            cluster_info,
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+
+        // Verify account A visible on ER
+        assert_eq!(runtime.bank().get_balance(&account_a), 10_000_000_000);
+
+        // Create a new L1 bank with account B (simulates L1 advancing)
+        let new_parent = Bank::new_from_parent(parent_bank, &Pubkey::default(), 1);
+        let account_b = Pubkey::new_unique();
+        fund_account(&new_parent, &account_b, 20_000_000_000);
+        new_parent.freeze();
+        let new_parent = Arc::new(new_parent);
+
+        // Reset to new parent
+        runtime.reset_to_new_parent(new_parent);
+        runtime.activate();
+
+        std::thread::sleep(Duration::from_millis(500));
+
+        // Account B (created after startup) should now be visible
+        assert_eq!(runtime.bank().get_balance(&account_b), 20_000_000_000);
+
+        // Account A should still be visible (inherited from L1 chain)
+        assert_eq!(runtime.bank().get_balance(&account_a), 10_000_000_000);
+
+        // Session state should be cleared
+        assert!(runtime.delegated_accounts().is_empty());
+
+        runtime.shutdown();
+    }
+
+    #[test]
     fn test_isolation_from_l1() {
         agave_logger::setup();
 
@@ -539,7 +881,10 @@ mod tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
         )
         .unwrap();
 
@@ -616,9 +961,13 @@ mod tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
         )
         .unwrap();
+        runtime.activate();
         let rpc_client = rpc_client(&runtime);
 
         // Wait for the slot advancer to advance past the initial slots
@@ -703,9 +1052,13 @@ mod tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
         )
         .unwrap();
+        runtime.activate();
         let rpc_client = rpc_client(&runtime);
 
         std::thread::sleep(Duration::from_millis(500));
@@ -767,7 +1120,10 @@ mod tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             portal_program_id,
+            Arc::new(Keypair::new()),
         )
         .unwrap();
 
@@ -811,7 +1167,10 @@ mod tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             portal_program_id,
+            Arc::new(Keypair::new()),
         )
         .unwrap();
 
@@ -847,7 +1206,10 @@ mod tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             portal_program_id,
+            Arc::new(Keypair::new()),
         )
         .unwrap();
 
@@ -892,7 +1254,10 @@ mod tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             portal_program_id,
+            Arc::new(Keypair::new()),
         )
         .unwrap();
 
@@ -904,6 +1269,66 @@ mod tests {
         // Snapshots should exist for valid accounts
         assert!(runtime.initial_account_snapshot(&delegated1).is_some());
         assert!(runtime.initial_account_snapshot(&delegated2).is_some());
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_rpc_get_delegated_accounts() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        let portal_program_id = Pubkey::new_unique();
+
+        // Create two delegated accounts owned by portal program
+        let delegated1 = Pubkey::new_unique();
+        let delegated2 = Pubkey::new_unique();
+        let account1 = AccountSharedData::new(1_000_000, 0, &portal_program_id);
+        let account2 = AccountSharedData::new(2_000_000, 0, &portal_program_id);
+        parent_bank.store_account(&delegated1, &account1);
+        parent_bank.store_account(&delegated2, &account2);
+        parent_bank.freeze();
+
+        let cluster_info = create_test_cluster_info();
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            delegated_accounts: vec![delegated1, delegated2],
+        };
+
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            cluster_info,
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            portal_program_id,
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+
+        std::thread::sleep(Duration::from_secs(2));
+
+        // Call getDelegatedAccounts via RPC
+        let rpc_client = rpc_client(&runtime);
+        let accounts: Vec<String> = rpc_client
+            .send(
+                solana_rpc_client_types::request::RpcRequest::Custom {
+                    method: "getDelegatedAccounts",
+                },
+                serde_json::Value::Null,
+            )
+            .unwrap();
+
+        assert_eq!(accounts.len(), 2);
+
+        let account_set: HashSet<String> = accounts.into_iter().collect();
+        assert!(account_set.contains(&delegated1.to_string()));
+        assert!(account_set.contains(&delegated2.to_string()));
 
         runtime.shutdown();
     }

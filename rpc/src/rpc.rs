@@ -254,6 +254,8 @@ pub struct JsonRpcRequestProcessor {
     max_complete_transaction_status_slot: Arc<AtomicU64>,
     prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
     runtime: Arc<Runtime>,
+    /// Sonic: Optional set of delegated account pubkeys for ephemeral rollup RPC.
+    pub(crate) delegated_accounts: Option<Arc<RwLock<HashSet<Pubkey>>>>,
 }
 impl Metadata for JsonRpcRequestProcessor {}
 
@@ -439,9 +441,15 @@ impl JsonRpcRequestProcessor {
                 max_complete_transaction_status_slot,
                 prioritization_fee_cache,
                 runtime,
+                delegated_accounts: None,
             },
             transaction_receiver,
         )
+    }
+
+    /// Sonic: Set the delegated accounts for ephemeral rollup RPC.
+    pub fn set_delegated_accounts(&mut self, accounts: Arc<RwLock<HashSet<Pubkey>>>) {
+        self.delegated_accounts = Some(accounts);
     }
 
     #[cfg(test)]
@@ -522,6 +530,7 @@ impl JsonRpcRequestProcessor {
             max_complete_transaction_status_slot: Arc::new(AtomicU64::default()),
             prioritization_fee_cache: Some(Arc::new(PrioritizationFeeCache::default())),
             runtime,
+            delegated_accounts: None,
         }
     }
 

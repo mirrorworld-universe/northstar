@@ -11,6 +11,7 @@ use {
 };
 
 pub mod ephemeral_runtime;
+pub mod ephemeral_tpu;
 pub mod ephemeral_tx_client;
 pub mod portal_state;
 pub mod slot_advancer;
@@ -96,8 +97,10 @@ pub struct EphemeralForkMetadata {}
 /// Main manager for ephemeral rollup forks
 pub struct Manager {
     config: ManagerConfig,
-    /// Active ephemeral runtime, if one is running
-    active_runtime: Option<EphemeralRuntime>,
+    /// Sonic: Always-on ephemeral runtime. Created once at startup via
+    /// `init_runtime()`, stays alive for the validator's lifetime.
+    /// The `active` flag inside gates transaction acceptance.
+    runtime: Option<EphemeralRuntime>,
 }
 
 impl Manager {
@@ -106,24 +109,34 @@ impl Manager {
         info!("Initializing NorthStar Manager with config: {config:?}");
         Self {
             config,
-            active_runtime: None,
+            runtime: None,
         }
     }
 
-    /// Check if an ephemeral runtime is currently active
+    /// Sonic: Check if an ephemeral session is currently active (accepting transactions)
     pub fn has_active_runtime(&self) -> bool {
-        self.active_runtime.is_some()
+        self.runtime.as_ref().is_some_and(|r| r.is_active())
     }
 
-    /// Get the RPC port of the active runtime, if any
-    pub fn active_runtime_addr(&self) -> Option<String> {
-        self.active_runtime.as_ref().map(|r| r.rpc_addr())
+    /// Sonic: Check if the always-on runtime has been initialized
+    pub fn has_runtime(&self) -> bool {
+        self.runtime.is_some()
     }
 
-    /// Shutdown the active ephemeral runtime, if any
-    pub fn shutdown_active_runtime(&mut self) {
-        if let Some(mut runtime) = self.active_runtime.take() {
-            info!("Shutting down ephemeral rollup");
+    /// Get the RPC address of the runtime, if initialized
+    pub fn runtime_addr(&self) -> Option<String> {
+        self.runtime.as_ref().map(|r| r.rpc_addr())
+    }
+
+    /// Get the WebSocket address of the runtime, if initialized
+    pub fn runtime_ws_addr(&self) -> Option<String> {
+        self.runtime.as_ref().map(|r| r.ws_addr())
+    }
+
+    /// Sonic: Shutdown the always-on runtime (called at validator exit)
+    pub fn shutdown_runtime(&mut self) {
+        if let Some(mut runtime) = self.runtime.take() {
+            info!("Shutting down ephemeral rollup runtime");
             runtime.shutdown();
         }
     }
@@ -299,10 +312,79 @@ impl Manager {
         }
     }
 
+    /// Sonic: Initialize the always-on ephemeral RPC runtime.
+    /// Called once at validator startup. RPC starts listening immediately
+    /// but rejects transactions until `activate_session()` is called.
+    pub fn init_runtime(
+        &mut self,
+        root_bank: Arc<Bank>,
+        cluster_info: Arc<ClusterInfo>,
+        rpc_addr: SocketAddr,
+        ws_addr: SocketAddr,
+        tpu_addr: SocketAddr,
+    ) -> Result<()> {
+        if self.runtime.is_some() {
+            info!("Ephemeral runtime already initialized, skipping");
+            return Ok(());
+        }
+
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::default(),
+            owner: Pubkey::default(),
+            grid_id: 0,
+            ttl_slots: 0,
+            fee_cap: 0,
+            delegated_accounts: vec![],
+        };
+
+        let runtime = EphemeralRuntime::new(
+            root_bank,
+            cluster_info,
+            settings,
+            rpc_addr,
+            ws_addr,
+            tpu_addr,
+            self.config.portal_program_id,
+            self.config.manager_account.clone(),
+        )
+        .map_err(|e| {
+            error!("Failed to create ephemeral runtime: {}", e);
+            NorthStarError::RuntimeCreationFailed(e)
+        })?;
+
+        info!(
+            "Always-on ephemeral RPC initialized at {rpc_addr}, WS at {ws_addr}, TPU at \
+             {tpu_addr} (inactive)"
+        );
+        self.runtime = Some(runtime);
+        Ok(())
+    }
+
+    /// Sonic: Activate the ephemeral session — resets bank to current L1 root
+    /// and starts accepting transactions.
+    pub fn activate_session(&mut self, root_bank: Arc<Bank>) {
+        if let Some(runtime) = &mut self.runtime {
+            runtime.reset_to_new_parent(root_bank);
+            runtime.activate();
+        } else {
+            warn!("Cannot activate session: runtime not initialized");
+        }
+    }
+
+    /// Sonic: Deactivate the ephemeral session — transactions will be rejected.
+    pub fn deactivate_session(&mut self) {
+        if let Some(runtime) = &self.runtime {
+            runtime.deactivate();
+        } else {
+            warn!("Cannot deactivate session: runtime not initialized");
+        }
+    }
+
     /// Create and store an EphemeralRuntime from the root bank
     ///
     /// This creates a fully functional ephemeral rollup with its own RPC server.
-    /// The runtime is stored in the Manager and can be accessed via active_runtime_port().
+    /// The runtime is stored in the Manager and can be accessed via runtime_addr().
+    #[cfg(test)]
     pub fn create_ephemeral_runtime(
         &mut self,
         root_bank: Arc<Bank>,
@@ -310,8 +392,8 @@ impl Manager {
         settings: EphemeralRollupSettings,
         rpc_addr: SocketAddr,
     ) -> Result<()> {
-        if self.active_runtime.is_some() {
-            info!("Ephemeral runtime already active, skipping creation");
+        if self.runtime.is_some() {
+            info!("Ephemeral runtime already exists, skipping creation");
             return Ok(());
         }
 
@@ -320,7 +402,11 @@ impl Manager {
             cluster_info,
             settings,
             rpc_addr,
+            // Tests: no WS or TPU — use unbound addrs that won't be used
+            "127.0.0.1:0".parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
             self.config.portal_program_id,
+            self.config.manager_account.clone(),
         )
         .map_err(|e| {
             error!("Failed to create ephemeral runtime: {}", e);
@@ -328,14 +414,20 @@ impl Manager {
         })?;
 
         info!("Ephemeral rollup started on {}", rpc_addr);
-        self.active_runtime = Some(runtime);
+        runtime.activate();
+        self.runtime = Some(runtime);
         Ok(())
     }
 
     /// Credit a deposit to a depositor's account on the ephemeral bank.
     /// Called by NorthStarService when a FeeDeposited event is detected on L1.
+    /// Only processes when a session is active.
     pub fn credit_deposit(&self, depositor: &Pubkey, lamports: u64) {
-        if let Some(runtime) = &self.active_runtime {
+        if let Some(runtime) = &self.runtime {
+            if !runtime.is_active() {
+                warn!("Ignoring deposit for {depositor}: no active session");
+                return;
+            }
             runtime.credit_deposit(depositor, lamports);
         }
     }
@@ -344,12 +436,13 @@ impl Manager {
     /// Called by NorthStarService when an AccountDelegated event is detected on L1.
     /// Copies the account data from L1 into the ephemeral bank and adds it to
     /// the delegated set so transactions are allowed to write to it.
-    pub fn handle_delegation(
-        &self,
-        bank: &Bank,
-        delegated_account: &Pubkey,
-    ) {
-        if let Some(runtime) = &self.active_runtime {
+    /// Only processes when a session is active.
+    pub fn handle_delegation(&self, bank: &Bank, delegated_account: &Pubkey) {
+        if let Some(runtime) = &self.runtime {
+            if !runtime.is_active() {
+                warn!("Ignoring delegation for {delegated_account}: no active session");
+                return;
+            }
             if let Some(account_data) = bank.get_account(delegated_account) {
                 runtime.handle_delegation(delegated_account, account_data);
             } else {
@@ -892,7 +985,10 @@ mod portal_e2e_tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             program_id,
+            Arc::new(Keypair::new()),
         )
         .expect("Failed to create ephemeral runtime");
 
@@ -979,7 +1075,9 @@ mod portal_e2e_tests {
         let delegated_data = vec![0xDE; 64];
         let mut delegated_account =
             AccountSharedData::new(5_000_000_000, delegated_data.len(), &program_id);
-        delegated_account.data_as_mut_slice().copy_from_slice(&delegated_data);
+        delegated_account
+            .data_as_mut_slice()
+            .copy_from_slice(&delegated_data);
         child_bank.store_account(&delegated_account_pubkey, &delegated_account);
 
         // Open session on L1
@@ -1023,13 +1121,18 @@ mod portal_e2e_tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             program_id,
+            Arc::new(Keypair::new()),
         )
         .expect("Failed to create ephemeral runtime");
 
         // Verify account is NOT in delegated set yet
         assert!(
-            !runtime.delegated_accounts().contains(&delegated_account_pubkey),
+            !runtime
+                .delegated_accounts()
+                .contains(&delegated_account_pubkey),
             "Account should not be delegated yet"
         );
 
@@ -1041,7 +1144,9 @@ mod portal_e2e_tests {
 
         // Verify account IS in delegated set now
         assert!(
-            runtime.delegated_accounts().contains(&delegated_account_pubkey),
+            runtime
+                .delegated_accounts()
+                .contains(&delegated_account_pubkey),
             "Account should be delegated after handle_delegation"
         );
 

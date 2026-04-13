@@ -16,7 +16,10 @@ use {
     std::{
         collections::HashSet,
         error::Error,
-        sync::{Arc, RwLock},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, RwLock,
+        },
     },
 };
 
@@ -28,6 +31,9 @@ pub struct EphemeralTransactionClient {
     /// Accounts that have been written to on this ER.
     /// Once touched, their balance is "real" (not inherited from L1).
     touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+    /// When false, all transactions are rejected.
+    /// Shared with EphemeralRuntime — set to true when a session is active.
+    active: Arc<AtomicBool>,
 }
 
 impl Clone for EphemeralTransactionClient {
@@ -36,6 +42,7 @@ impl Clone for EphemeralTransactionClient {
             bank_forks: Arc::clone(&self.bank_forks),
             delegated_accounts: Arc::clone(&self.delegated_accounts),
             touched_accounts: Arc::clone(&self.touched_accounts),
+            active: Arc::clone(&self.active),
         }
     }
 }
@@ -45,11 +52,13 @@ impl EphemeralTransactionClient {
         bank_forks: Arc<RwLock<BankForks>>,
         delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
         touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+        active: Arc<AtomicBool>,
     ) -> Self {
         Self {
             bank_forks,
             delegated_accounts,
             touched_accounts,
+            active,
         }
     }
 
@@ -116,6 +125,14 @@ impl TransactionClient for EphemeralTransactionClient {
         wire_transactions: Vec<Vec<u8>>,
         _stats: &SendTransactionServiceStats,
     ) {
+        // Sonic: Reject all transactions when ephemeral rollup session is not active
+        if !self.active.load(Ordering::Relaxed) {
+            warn!(
+                "Ephemeral rollup not active, rejecting {} transaction(s)",
+                wire_transactions.len()
+            );
+            return;
+        }
         // BUG: This should work around slot advancer, because it might change
         // bank between transactions
         let bank = self.bank();
@@ -515,7 +532,12 @@ mod tests {
     ) -> EphemeralTransactionClient {
         let delegated_set = Arc::new(RwLock::new(delegated.into_iter().collect()));
         let touched_set = Arc::new(RwLock::new(HashSet::new()));
-        EphemeralTransactionClient::new(bank_forks, delegated_set, touched_set)
+        EphemeralTransactionClient::new(
+            bank_forks,
+            delegated_set,
+            touched_set,
+            Arc::new(AtomicBool::new(true)),
+        )
     }
 
     /// Helper to create a simple transfer transaction

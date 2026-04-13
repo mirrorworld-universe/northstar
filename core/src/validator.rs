@@ -422,6 +422,10 @@ pub struct ValidatorConfig {
     pub portal: Option<Pubkey>,
     // Sonic: Ephemeral RPC port for rollup server
     pub ephemeral_rpc_port: u16,
+    // Sonic: Ephemeral WebSocket port for rollup PubSub
+    pub ephemeral_ws_port: u16,
+    // Sonic: Ephemeral TPU port for rollup QUIC transactions
+    pub ephemeral_tpu_port: u16,
 }
 
 impl ValidatorConfig {
@@ -508,6 +512,10 @@ impl ValidatorConfig {
             portal: None,
             // Sonic: Default ephemeral RPC port
             ephemeral_rpc_port: 8910,
+            // Sonic: Default ephemeral WebSocket port
+            ephemeral_ws_port: 8911,
+            // Sonic: Default ephemeral TPU port
+            ephemeral_tpu_port: 8912,
         }
     }
 
@@ -1378,6 +1386,12 @@ impl Validator {
                     cluster_info.clone(),
                     crate::northstar_service::NorthStarServiceConfig {
                         listen_addr: format!("0.0.0.0:{}", config.ephemeral_rpc_port)
+                            .parse()
+                            .unwrap(),
+                        ws_addr: format!("0.0.0.0:{}", config.ephemeral_ws_port)
+                            .parse()
+                            .unwrap(),
+                        tpu_addr: format!("0.0.0.0:{}", config.ephemeral_tpu_port)
                             .parse()
                             .unwrap(),
                         // TODO: extract to some constant or make a parameter within portal program
