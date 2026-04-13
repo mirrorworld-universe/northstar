@@ -341,6 +341,10 @@ parking_lot = "0.12"
 pem = "1.1.1"
 percentage = "0.1.0"
 pickledb = { version = "0.5.1", default-features = false }
+pinocchio = { version = "0.11.1", features = ["cpi"] }
+pinocchio-log = "0.5.1"
+pinocchio-pubkey = "0.3.0"
+pinocchio-system = "0.6.0"
 predicates = "3.1"
 pretty-hex = "0.4.1"
 pretty_assertions = "1.4.1"

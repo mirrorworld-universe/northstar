@@ -4834,7 +4834,7 @@ name = "northstar-portal"
 version = "0.1.0"
 dependencies = [
  "borsh",
- "pinocchio",
+ "pinocchio 0.11.1",
  "pinocchio-log",
  "pinocchio-pubkey",
  "pinocchio-system",
@@ -5347,6 +5347,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b971851087bc3699b001954ad02389d50c41405ece3548cbcafc88b3e20017a"
 
 [[package]]
+name = "pinocchio"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d707cea2843c1a2fd8ec49e4116ce3fdaedcd552a3ee168b03ce60e627fc0f62"
+dependencies = [
+ "solana-account-view",
+ "solana-address 2.2.0",
+ "solana-define-syscall 5.0.0",
+ "solana-instruction-view",
+ "solana-program-error",
+]
+
+[[package]]
 name = "pinocchio-log"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5373,18 +5386,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb0225638cadcbebae8932cb7f49cb5da7c15c21beb19f048f05a5ca7d93f065"
 dependencies = [
  "five8_const 0.1.4",
- "pinocchio",
+ "pinocchio 0.9.2",
  "sha2-const-stable",
 ]
 
 [[package]]
 name = "pinocchio-system"
-version = "0.4.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4be2a6dad40b5e75d1486f021619c4bd504c34c1362c9b94ed7fa525b1cc63cc"
+checksum = "b47216785b5877051afa074920e88b5990c4ce74f0da94c7cb5a139684c48ffe"
 dependencies = [
- "pinocchio",
- "pinocchio-pubkey",
+ "pinocchio 0.11.1",
+ "solana-address 2.2.0",
 ]
 
 [[package]]
@@ -7121,6 +7134,16 @@ dependencies = [
  "solana-address 2.2.0",
  "solana-program-error",
  "solana-program-memory",
+]
+
+[[package]]
+name = "solana-account-view"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc141b940560430425ebaadb7645496c45f6a10fad9911d719bd03eab7f4d422"
+dependencies = [
+ "solana-address 2.2.0",
+ "solana-program-error",
 ]
 
 [[package]]
@@ -8981,6 +9004,18 @@ dependencies = [
  "serde_derive",
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
+ "solana-program-error",
+]
+
+[[package]]
+name = "solana-instruction-view"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ab7a27d0c4214b9f7389c3dd00b68c93093a67f1dcc5b7893aebe299bbcbb47"
+dependencies = [
+ "solana-account-view",
+ "solana-address 2.2.0",
+ "solana-define-syscall 5.0.0",
  "solana-program-error",
 ]
 
