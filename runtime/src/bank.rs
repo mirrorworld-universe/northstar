@@ -470,11 +470,9 @@ pub struct BankFieldsToDeserialize {
     pub(crate) genesis_creation_time: UnixTimestamp,
     pub(crate) slots_per_year: f64,
     pub(crate) slot: Slot,
-    pub(crate) epoch: Epoch,
     pub(crate) block_height: u64,
     pub(crate) leader_id: Pubkey,
     pub(crate) fee_rate_governor: FeeRateGovernor,
-    pub(crate) rent_collector: RentCollector,
     pub(crate) epoch_schedule: EpochSchedule,
     pub(crate) inflation: Inflation,
     pub(crate) stakes: DeserializableStakes<Delegation>,
@@ -1844,6 +1842,7 @@ impl Bank {
     ) -> Self {
         let now = Instant::now();
         let slot = fields.slot;
+        let epoch = fields.epoch_schedule.get_epoch(slot);
         let ancestors = Ancestors::from(vec![slot]);
         // For backward compatibility, we can only serialize and deserialize
         // Stakes<Delegation> in BankFieldsTo{Serialize,Deserialize}. But Bank
@@ -1877,6 +1876,17 @@ impl Bank {
             "should be populated (from fields.versioned_epoch_stakes)"
         );
         let stakes_accounts_load_duration = now.elapsed();
+        // The serialized rent collector is deprecated. Instead, reconstruct from fields plus
+        // the rent sysvar account state.
+        let rent = {
+            let rent_sysvar = bank_rc
+                .accounts
+                .load_with_fixed_root_do_not_populate_read_cache(&ancestors, &sysvar::rent::id())
+                .expect("snapshot must contain rent sysvar account")
+                .0;
+            from_account::<sysvar::rent::Rent, _>(&rent_sysvar)
+                .expect("snapshot must contain well-formed rent sysvar account")
+        };
         let mut bank = Self {
             rc: bank_rc,
             status_cache: Arc::<RwLock<BankStatusCache>>::default(),
@@ -1902,12 +1912,16 @@ impl Bank {
             slots_per_year: fields.slots_per_year,
             slot,
             bank_id: 0,
-            epoch: fields.epoch,
+            epoch,
             block_height: fields.block_height,
             leader_id: fields.leader_id,
             fee_rate_governor: fields.fee_rate_governor,
-            // clone()-ing is needed to consider a gated behavior in rent_collector
-            rent_collector: Self::get_rent_collector_from(&fields.rent_collector, fields.epoch),
+            rent_collector: RentCollector::new(
+                epoch,
+                fields.epoch_schedule.clone(),
+                fields.slots_per_year,
+                rent,
+            ),
             epoch_schedule: fields.epoch_schedule,
             inflation: Arc::new(RwLock::new(fields.inflation)),
             stakes_cache: StakesCache::new(stakes),
@@ -1972,7 +1986,6 @@ impl Bank {
             )
         );
         assert_eq!(bank.epoch_schedule, genesis_config.epoch_schedule);
-        assert_eq!(bank.epoch, bank.epoch_schedule.get_epoch(bank.slot));
 
         bank.initialize_after_snapshot_restore(|| {
             ThreadPoolBuilder::new()
