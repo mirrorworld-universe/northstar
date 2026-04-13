@@ -12,10 +12,10 @@ use {
         collections::HashMap,
         io::BufRead,
         sync::{
-            atomic::{AtomicBool, Ordering},
             Arc,
+            atomic::{AtomicBool, Ordering},
         },
-        thread::{self, sleep, Builder, JoinHandle},
+        thread::{self, Builder, JoinHandle, sleep},
         time::Duration,
     },
     sys_info::{Error, LoadAvg},

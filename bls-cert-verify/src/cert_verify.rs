@@ -8,10 +8,10 @@ use {
     bitvec::vec::BitVec,
     rayon::{iter::IntoParallelRefIterator, join},
     solana_bls_signatures::{
-        pubkey::Pubkey as BlsPubkey, signature::AsSignatureAffine, BlsError, PubkeyProjective,
-        Signature as BlsSignature, SignatureProjective, VerifiablePubkey,
+        BlsError, PubkeyProjective, Signature as BlsSignature, SignatureProjective,
+        VerifiablePubkey, pubkey::Pubkey as BlsPubkey, signature::AsSignatureAffine,
     },
-    solana_signer_store::{decode, DecodeError, Decoded},
+    solana_signer_store::{DecodeError, Decoded, decode},
     thiserror::Error,
 };
 
@@ -128,8 +128,7 @@ fn serialize_vote(vote: &Vote) -> Vec<u8> {
 /// This function handles the "Base2" case where all participating validators have signed
 /// the exact same payload. This is the standard verification path and covers virtually all
 /// cases in practice.
-#[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
-fn verify_base2<S: AsSignatureAffine>(
+pub fn verify_base2<S: AsSignatureAffine>(
     payload: &[u8],
     signature: &S,
     ranks: &[u8],

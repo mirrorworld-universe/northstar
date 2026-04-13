@@ -2,7 +2,7 @@ use {
     crate::{error::PortalError, pda::find_delegation_record_pda, state::DelegationRecord},
     borsh::BorshDeserialize,
     pinocchio::{
-        account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, ProgramResult,
+        ProgramResult, account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey,
     },
 };
 

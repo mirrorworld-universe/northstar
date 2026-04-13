@@ -17,8 +17,8 @@ use {
         collections::HashSet,
         error::Error,
         sync::{
-            atomic::{AtomicBool, Ordering},
             Arc, RwLock,
+            atomic::{AtomicBool, Ordering},
         },
     },
 };

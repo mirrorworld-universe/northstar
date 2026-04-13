@@ -4,7 +4,7 @@ exclude = ["gen-headers"]
 resolver = "2"
 
 [workspace.package]
-version = "4.0.0-alpha.0"
+version = "4.0.0-beta.0"
 authors = ["Anza Maintainers <maintainers@anza.xyz>"]
 description = "Blockchain, Rebuilt for Scale"
 repository = "https://github.com/anza-xyz/agave"
@@ -47,5 +47,12 @@ regex = "1.12.3"
 reqwest = { version = "0.12.28", default-features = false }
 semver = "1.0.27"
 serde = { version = "1.0.228", features = ["derive"] }
-serial_test = "3.3.1"
+serial_test = "3.4.0"
 tar = "0.4.44"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.full-dev]
+inherits = "dev"
+debug = "full"

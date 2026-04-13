@@ -19,10 +19,10 @@ use {
         authorized_voters::AuthorizedVoters,
         error::VoteError,
         state::{
-            BlockTimestamp, LandedVote, Lockout, VoteInit, VoteInitV2, VoteState1_14_11,
-            VoteStateV3, VoteStateV4, VoteStateVersions, BLS_PUBLIC_KEY_COMPRESSED_SIZE,
+            BLS_PUBLIC_KEY_COMPRESSED_SIZE, BlockTimestamp, LandedVote, Lockout,
             MAX_EPOCH_CREDITS_HISTORY, MAX_LOCKOUT_HISTORY, VOTE_CREDITS_GRACE_SLOTS,
-            VOTE_CREDITS_MAXIMUM_PER_SLOT,
+            VOTE_CREDITS_MAXIMUM_PER_SLOT, VoteInit, VoteInitV2, VoteState1_14_11, VoteStateV3,
+            VoteStateV4, VoteStateVersions,
         },
     },
     std::collections::VecDeque,
@@ -1138,7 +1138,7 @@ mod tests {
         },
         solana_vote_interface::{
             authorized_voters::AuthorizedVoters,
-            state::{BlockTimestamp, VoteInit, MAX_EPOCH_CREDITS_HISTORY, MAX_LOCKOUT_HISTORY},
+            state::{BlockTimestamp, MAX_EPOCH_CREDITS_HISTORY, MAX_LOCKOUT_HISTORY, VoteInit},
         },
         std::collections::VecDeque,
         test_case::test_case,
@@ -1417,10 +1417,12 @@ mod tests {
         // purged and no longer queryable
         assert_eq!(vote_state.authorized_voters().len(), 1);
         for i in 0..5 {
-            assert!(vote_state
-                .authorized_voters()
-                .get_authorized_voter(i)
-                .is_none());
+            assert!(
+                vote_state
+                    .authorized_voters()
+                    .get_authorized_voter(i)
+                    .is_none()
+            );
         }
 
         // Set an authorized voter change at slot 7
@@ -1489,10 +1491,12 @@ mod tests {
         // be purged, but only because we didn't cache an entry for current - 1.
         assert_eq!(vote_state.authorized_voters().len(), 1);
         for i in 0..5 {
-            assert!(vote_state
-                .authorized_voters()
-                .get_authorized_voter(i)
-                .is_none());
+            assert!(
+                vote_state
+                    .authorized_voters()
+                    .get_authorized_voter(i)
+                    .is_none()
+            );
         }
 
         // Say we're in epoch 7. Cache entries for both epochs 6 and 7.
@@ -1510,10 +1514,12 @@ mod tests {
 
         // 0..=5 should still be purged.
         for i in 0..=5 {
-            assert!(vote_state
-                .authorized_voters()
-                .get_authorized_voter(i)
-                .is_none());
+            assert!(
+                vote_state
+                    .authorized_voters()
+                    .get_authorized_voter(i)
+                    .is_none()
+            );
         }
 
         // Set an authorized voter change at epoch 9.
@@ -1830,7 +1836,7 @@ mod tests {
         rent: Rent,
         expected_version: ExpectedVoteStateVersion,
     ) {
-        let transaction_context = mock_transaction_context(vote_pubkey, vote_account, rent.clone());
+        let transaction_context = mock_transaction_context(vote_pubkey, vote_account, rent);
         let instruction_context = transaction_context.get_next_instruction_context().unwrap();
         let mut vote_account = instruction_context
             .try_borrow_instruction_account(0)
@@ -1865,7 +1871,7 @@ mod tests {
         vote_account: AccountSharedData,
         rent: Rent,
     ) {
-        let transaction_context = mock_transaction_context(vote_pubkey, vote_account, rent.clone());
+        let transaction_context = mock_transaction_context(vote_pubkey, vote_account, rent);
         let instruction_context = transaction_context.get_next_instruction_context().unwrap();
         let mut vote_account = instruction_context
             .try_borrow_instruction_account(0)
@@ -2150,7 +2156,7 @@ mod tests {
                 authorized_withdrawer,
                 commission,
                 authorized_voters: AuthorizedVoters::new(0, authorized_voter),
-                votes: votes_deque.clone(),
+                votes: votes_deque,
                 epoch_credits: epoch_credits.clone(),
                 root_slot,
                 ..VoteState1_14_11::default()
@@ -2226,7 +2232,7 @@ mod tests {
                 pending_delegator_rewards: 999,
                 bls_pubkey_compressed: Some([42; BLS_PUBLIC_KEY_COMPRESSED_SIZE]),
                 authorized_voters: AuthorizedVoters::new(0, authorized_voter),
-                epoch_credits: epoch_credits.clone(),
+                epoch_credits,
                 root_slot,
                 ..VoteStateV4::default()
             };
@@ -2297,7 +2303,7 @@ mod tests {
         let mut vote_account = AccountSharedData::new(lamports, account_size, &id());
         vote_account.set_data_from_slice(&vec![0; account_size]);
 
-        let transaction_context = mock_transaction_context(vote_pubkey, vote_account, rent.clone());
+        let transaction_context = mock_transaction_context(vote_pubkey, vote_account, rent);
         let instruction_context = transaction_context.get_next_instruction_context().unwrap();
         let mut vote_account_borrowed = instruction_context
             .try_borrow_instruction_account(0)

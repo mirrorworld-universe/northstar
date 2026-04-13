@@ -1,6 +1,6 @@
 use {
     crate::{DelegationRecord, DepositReceipt, FeeVault, Session},
-    pinocchio::pubkey::{find_program_address, Pubkey},
+    pinocchio::pubkey::{Pubkey, find_program_address},
 };
 
 pub fn find_session_pda(program_id: &Pubkey, owner: &Pubkey, grid_id: u64) -> (Pubkey, u8) {

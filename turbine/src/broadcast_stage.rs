@@ -8,11 +8,9 @@ use {
         fail_entry_verification_broadcast_run::FailEntryVerificationBroadcastRun,
         standard_broadcast_run::StandardBroadcastRun,
     },
-    crate::{
-        cluster_nodes::{ClusterNodes, ClusterNodesCache},
-        xdp::XdpSender,
-    },
+    crate::cluster_nodes::{ClusterNodes, ClusterNodesCache},
     agave_votor::event::VotorEventSender,
+    agave_xdp::xdp_retransmitter::XdpSender,
     crossbeam_channel::{Receiver, RecvError, RecvTimeoutError, Sender, unbounded},
     itertools::Itertools,
     solana_clock::Slot,
@@ -172,7 +170,12 @@ impl BroadcastStageType {
                 exit_sender,
                 blockstore,
                 bank_forks,
-                BroadcastDuplicatesRun::new(shred_version, config.clone()),
+                BroadcastDuplicatesRun::new(
+                    shred_version,
+                    config.clone(),
+                    migration_status,
+                    votor_event_sender,
+                ),
                 xdp_sender,
             ),
         }
@@ -539,7 +542,7 @@ pub fn broadcast_shreds(
         BroadcastSocket::Xdp(s) => {
             let mut send_xdp_time = Measure::start("send_xdp");
             for (idx, (payload, addr)) in packets.into_iter().enumerate() {
-                if let Err(e) = s.try_send(idx, addr, payload.clone()) {
+                if let Err(e) = s.try_send(idx, addr, payload.bytes.clone()) {
                     log::warn!("xdp channel full: {e:?}");
                     transmit_stats.dropped_packets_xdp += 1;
                     result = Err(Error::XdpChannelFull);

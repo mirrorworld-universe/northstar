@@ -15,7 +15,7 @@ use {
             transaction_scheduler::{
                 prio_graph_scheduler::PrioGraphScheduler,
                 scheduler_controller::{
-                    SchedulerConfig, SchedulerController, DEFAULT_SCHEDULER_PACING_FILL_TIME_MILLIS,
+                    DEFAULT_SCHEDULER_PACING_FILL_TIME_MILLIS, SchedulerConfig, SchedulerController,
                 },
                 scheduler_error::SchedulerError,
             },
@@ -23,8 +23,8 @@ use {
         validator::BlockProductionMethod,
     },
     agave_banking_stage_ingress_types::BankingPacketReceiver,
-    crossbeam_channel::{unbounded, Receiver, Sender},
-    futures::{stream::FuturesUnordered, StreamExt},
+    crossbeam_channel::{Receiver, Sender, unbounded},
+    futures::{StreamExt, stream::FuturesUnordered},
     histogram::Histogram,
     solana_gossip::{cluster_info::ClusterInfo, contact_info::ContactInfoQuery},
     solana_ledger::blockstore_processor::TransactionStatusSender,
@@ -44,8 +44,8 @@ use {
         num::{NonZeroU64, NonZeroUsize, Saturating},
         ops::Deref,
         sync::{
-            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
             Arc, RwLock,
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         },
         thread::{self, Builder, JoinHandle},
         time::Duration,
@@ -931,13 +931,13 @@ mod tests {
         solana_ledger::{
             blockstore::Blockstore,
             genesis_utils::{
-                create_genesis_config, create_genesis_config_with_leader, GenesisConfigInfo,
+                GenesisConfigInfo, create_genesis_config, create_genesis_config_with_leader,
             },
             get_tmp_ledger_path_auto_delete,
         },
         solana_perf::packet::to_packet_batches,
         solana_poh::{
-            poh_recorder::{create_test_recorder, PohRecorderError},
+            poh_recorder::{PohRecorderError, create_test_recorder},
             record_channels::record_channels,
             transaction_recorder::RecordTransactionsSummary,
         },
@@ -947,7 +947,7 @@ mod tests {
         solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
         solana_signer::Signer,
         solana_system_transaction as system_transaction,
-        solana_transaction::{sanitized::SanitizedTransaction, Transaction},
+        solana_transaction::{Transaction, sanitized::SanitizedTransaction},
         solana_vote::vote_transaction::new_tower_sync_transaction,
         solana_vote_program::vote_state::TowerSync,
         std::{sync::atomic::Ordering, thread::sleep, time::Instant},
@@ -964,7 +964,7 @@ mod tests {
     #[test]
     fn test_banking_stage_shutdown1() {
         let genesis_config = create_genesis_config(2).genesis_config;
-        let (bank, bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
+        let (bank, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
         let banking_tracer = BankingTracer::new_disabled();
         let Channels {
             non_vote_sender,
@@ -991,7 +991,7 @@ mod tests {
 
         let banking_stage = BankingStage::new_num_threads(
             BlockProductionMethod::CentralScheduler,
-            poh_recorder.clone(),
+            poh_recorder,
             transaction_recorder,
             non_vote_receiver,
             tpu_vote_receiver,
@@ -1023,7 +1023,7 @@ mod tests {
         } = create_genesis_config(2);
         genesis_config.ticks_per_slot = 4;
         let num_extra_ticks = 2;
-        let (bank, bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
+        let (bank, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
         let start_hash = bank.last_blockhash();
         let banking_tracer = BankingTracer::new_disabled();
         let Channels {
@@ -1087,9 +1087,11 @@ mod tests {
             .collect();
         trace!("done");
         assert_eq!(entries.len(), genesis_config.ticks_per_slot as usize);
-        assert!(entries
-            .verify(&start_hash, &entry::thread_pool_for_tests())
-            .status());
+        assert!(
+            entries
+                .verify(&start_hash, &entry::thread_pool_for_tests())
+                .status()
+        );
         assert_eq!(entries[entries.len() - 1].hash, bank.last_blockhash());
     }
 
@@ -1101,7 +1103,7 @@ mod tests {
             mint_keypair,
             ..
         } = create_slow_genesis_config(10);
-        let (bank, bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
+        let (bank, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
         let start_hash = bank.last_blockhash();
         let banking_tracer = BankingTracer::new_disabled();
         let Channels {
@@ -1124,7 +1126,7 @@ mod tests {
             transaction_recorder,
             poh_service,
             entry_receiver,
-        ) = create_test_recorder(bank.clone(), blockstore, None, None);
+        ) = create_test_recorder(bank, blockstore, None, None);
         let (replay_vote_sender, _replay_vote_receiver) = unbounded();
 
         let banking_stage = BankingStage::new_num_threads(
@@ -1142,7 +1144,7 @@ mod tests {
             None,
             replay_vote_sender,
             None,
-            bank_forks.clone(), // keep a local-copy of bank-forks so worker threads do not lose weak access to bank-forks
+            bank_forks, // keep a local-copy of bank-forks so worker threads do not lose weak access to bank-forks
             None,
         );
 
@@ -1197,7 +1199,7 @@ mod tests {
         drop(poh_recorder);
 
         let blockhash = start_hash;
-        let (bank, _bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
+        let (bank, _bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
 
         // receive entries + ticks. The sender has been dropped, so there
         // are no more entries that will ever come in after the `iter` here.
@@ -1207,9 +1209,11 @@ mod tests {
                 .map(|(_bank, (entry, _tick_height))| entry),
         );
 
-        assert!(entries
-            .verify(&blockhash, &entry::thread_pool_for_tests())
-            .status());
+        assert!(
+            entries
+                .verify(&blockhash, &entry::thread_pool_for_tests())
+                .status()
+        );
         for entry in entries {
             bank.process_entry_transactions(entry.transactions)
                 .iter()
@@ -1270,7 +1274,7 @@ mod tests {
         let (replay_vote_sender, _replay_vote_receiver) = unbounded();
         let entry_receiver = {
             // start a banking_stage to eat verified receiver
-            let (bank, bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
+            let (bank, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
             let (
                 exit,
                 poh_recorder,
@@ -1281,7 +1285,7 @@ mod tests {
             ) = create_test_recorder(bank.clone(), blockstore, None, None);
             let banking_stage = BankingStage::new_num_threads(
                 BlockProductionMethod::CentralScheduler,
-                poh_recorder.clone(),
+                poh_recorder,
                 transaction_recorder,
                 non_vote_receiver,
                 tpu_vote_receiver,
@@ -1323,7 +1327,7 @@ mod tests {
             .map(|(_bank, (entry, _tick_height))| entry)
             .collect();
 
-        let (bank, _bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
+        let (bank, _bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
         for entry in entries {
             let _ = bank
                 .try_process_entry_transactions(entry.transactions)
@@ -1345,7 +1349,7 @@ mod tests {
             mint_keypair,
             ..
         } = create_genesis_config(10_000);
-        let (bank, _bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
+        let (bank, _bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
 
         let (record_sender, mut record_receiver) = record_channels(false);
         let recorder = TransactionRecorder::new(record_sender);
@@ -1406,7 +1410,7 @@ mod tests {
             mint_keypair,
             ..
         } = create_slow_genesis_config(10000);
-        let (bank, bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
+        let (bank, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
         let start_hash = bank.last_blockhash();
         let banking_tracer = BankingTracer::new_disabled();
         let Channels {
@@ -1434,7 +1438,7 @@ mod tests {
 
         let banking_stage = BankingStage::new_num_threads(
             BlockProductionMethod::CentralScheduler,
-            poh_recorder.clone(),
+            poh_recorder,
             transaction_recorder,
             non_vote_receiver,
             tpu_vote_receiver,

@@ -7,7 +7,7 @@ mod pda;
 mod state;
 
 use pinocchio::{
-    account_info::AccountInfo, entrypoint::deserialize, no_allocator, MAX_TX_ACCOUNTS, SUCCESS,
+    MAX_TX_ACCOUNTS, SUCCESS, account_info::AccountInfo, entrypoint::deserialize, no_allocator,
 };
 pub use {error::*, instruction::*, pda::*, state::*};
 

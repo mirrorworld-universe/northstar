@@ -2,21 +2,21 @@
 //! Core types for solana-transaction-status
 use {
     crate::option_serializer::OptionSerializer,
-    base64::{prelude::BASE64_STANDARD, Engine},
+    base64::{Engine, prelude::BASE64_STANDARD},
     core::fmt,
     serde::{
+        Deserialize, Deserializer, Serialize,
         de::{self, Deserialize as DeserializeTrait, Error as DeserializeError},
         ser::{Serialize as SerializeTrait, SerializeTupleVariant},
-        Deserialize, Deserializer, Serialize,
     },
-    serde_json::{from_value, Value},
+    serde_json::{Value, from_value},
     solana_account_decoder_client_types::token::UiTokenAmount,
     solana_commitment_config::CommitmentConfig,
     solana_instruction::error::InstructionError,
     solana_message::{
+        MessageHeader,
         compiled_instruction::CompiledInstruction,
         v0::{LoadedAddresses, MessageAddressTableLookup},
-        MessageHeader,
     },
     solana_reward_info::RewardType,
     solana_signature::Signature,
@@ -206,7 +206,7 @@ pub struct Reward {
     pub reward_type: Option<RewardType>,
     pub commission: Option<u8>, // Vote account commission when the reward was credited, only present for voting and staking rewards
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub commission_bps: Option<u16>, // Vote account commission in basis points (SIMD-0232)
+    pub commission_bps: Option<u16>, // Vote account commission in basis points (SIMD-0291)
 }
 
 pub type Rewards = Vec<Reward>;

@@ -1,6 +1,6 @@
 use {
     agave_scheduler_bindings::{
-        SharableTransactionBatchRegion, SharableTransactionRegion, MAX_TRANSACTIONS_PER_MESSAGE,
+        MAX_TRANSACTIONS_PER_MESSAGE, SharableTransactionBatchRegion, SharableTransactionRegion,
     },
     agave_transaction_view::transaction_data::TransactionData,
     core::ptr::NonNull,
@@ -38,7 +38,6 @@ impl TransactionPtr {
     ///
     /// If you are trying to construct a pointer for use by Agave, you almost certainly want to use
     /// [`Self::from_sharable_transaction_region`].
-    #[cfg(feature = "dev-context-only-utils")]
     pub unsafe fn from_raw_parts(ptr: NonNull<u8>, count: usize) -> Self {
         Self { ptr, count }
     }

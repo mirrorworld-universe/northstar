@@ -6,11 +6,11 @@ use {
     },
     borsh::BorshDeserialize,
     pinocchio::{
+        ProgramResult,
         account_info::AccountInfo,
         program_error::ProgramError,
         pubkey::Pubkey,
-        sysvars::{clock::Clock, Sysvar},
-        ProgramResult,
+        sysvars::{Sysvar, clock::Clock},
     },
 };
 

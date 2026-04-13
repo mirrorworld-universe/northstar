@@ -133,18 +133,19 @@ use {
     crate::entry::{Entry, MaxDataShredsLen},
     agave_votor_messages::consensus_message::{Certificate, CertificateType},
     solana_bls_signatures::{
-        Signature as BLSSignature, SignatureCompressed as BLSSignatureCompressed,
+        BlsError, Signature as BLSSignature, SignatureCompressed as BLSSignatureCompressed,
+        signature::AsSignatureAffine,
     },
     solana_clock::Slot,
     solana_hash::Hash,
     std::mem::MaybeUninit,
     wincode::{
+        ReadResult, SchemaRead, SchemaWrite, WriteResult,
         config::{Config, DefaultConfig},
         containers::{Pod, Vec as WincodeVec},
         error::write_length_encoding_overflow,
         io::{Reader, Writer},
         len::{BincodeLen, FixIntLen},
-        ReadResult, SchemaRead, SchemaWrite, WriteResult,
     },
 };
 
@@ -204,7 +205,6 @@ pub enum BlockComponentError {
 /// Block production metadata. User agent is capped at 255 bytes.
 #[derive(Clone, PartialEq, Eq, Debug, SchemaWrite, SchemaRead)]
 pub struct BlockFooterV1 {
-    #[wincode(with = "Pod<Hash>")]
     pub bank_hash: Hash,
     pub block_producer_time_nanos: u64,
     #[wincode(with = "WincodeVec<u8, FixIntLen<u8>>")]
@@ -217,14 +217,12 @@ pub struct BlockFooterV1 {
 #[derive(Clone, PartialEq, Eq, Debug, SchemaWrite, SchemaRead)]
 pub struct BlockHeaderV1 {
     pub parent_slot: Slot,
-    #[wincode(with = "Pod<Hash>")]
     pub parent_block_id: Hash,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, SchemaWrite, SchemaRead)]
 pub struct UpdateParentV1 {
     pub new_parent_slot: Slot,
-    #[wincode(with = "Pod<Hash>")]
     pub new_parent_block_id: Hash,
 }
 
@@ -232,7 +230,6 @@ pub struct UpdateParentV1 {
 #[derive(Clone, PartialEq, Eq, Debug, SchemaWrite, SchemaRead)]
 pub struct GenesisCertificate {
     pub slot: Slot,
-    #[wincode(with = "Pod<Hash>")]
     pub block_id: Hash,
     #[wincode(with = "Pod<BLSSignature>")]
     pub bls_signature: BLSSignature,
@@ -281,7 +278,6 @@ impl From<GenesisCertificate> for Certificate {
 #[derive(Clone, PartialEq, Eq, Debug, SchemaWrite, SchemaRead)]
 pub struct FinalCertificate {
     pub slot: Slot,
-    #[wincode(with = "Pod<Hash>")]
     pub block_id: Hash,
     pub final_aggregate: VotesAggregate,
     pub notar_aggregate: Option<VotesAggregate>,
@@ -308,6 +304,31 @@ pub struct VotesAggregate {
     signature: BLSSignatureCompressed,
     #[wincode(with = "WincodeVec<u8, FixIntLen<u16>>")]
     bitmap: Vec<u8>,
+}
+
+impl VotesAggregate {
+    /// Creates a VotesAggregate from a Certificate's signature and bitmap.
+    ///
+    /// # Panics
+    /// Panics if the signature cannot be converted to compressed format.
+    /// This should never happen for valid certificates from the consensus pool.
+    pub fn from_certificate(cert: &Certificate) -> Self {
+        Self {
+            signature: BLSSignatureCompressed::try_from(&cert.signature)
+                .expect("valid certificate signature should convert to compressed format"),
+            bitmap: cert.bitmap.clone(),
+        }
+    }
+
+    /// Uncompresses the signature.
+    pub fn uncompress_signature(&self) -> Result<BLSSignature, BlsError> {
+        Ok(BLSSignature::from(self.signature.try_as_affine()?))
+    }
+
+    /// Consumes self and returns the bitmap.
+    pub fn into_bitmap(self) -> Vec<u8> {
+        self.bitmap
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, SchemaWrite, SchemaRead)]

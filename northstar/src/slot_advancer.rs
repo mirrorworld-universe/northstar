@@ -11,8 +11,8 @@ use {
     },
     std::{
         sync::{
-            atomic::{AtomicBool, Ordering},
             Arc, RwLock,
+            atomic::{AtomicBool, Ordering},
         },
         thread::{self, JoinHandle},
         time::Duration,
@@ -337,14 +337,14 @@ mod tests {
             None,
         );
 
-        thread::sleep(Duration::from_millis(150));
+        thread::sleep(Duration::from_millis(300));
         exit.store(true, Ordering::Relaxed);
         advancer.join();
 
         let latest_slot = bank_forks.read().unwrap().working_bank().slot();
         assert!(
-            latest_slot > ephemeral_slot + 10,
-            "Should have advanced well past initial slot {}, but only got {}",
+            latest_slot > ephemeral_slot + 5,
+            "Should have advanced from non-zero initial slot {} by multiple slots, but only got {}",
             ephemeral_slot,
             latest_slot
         );

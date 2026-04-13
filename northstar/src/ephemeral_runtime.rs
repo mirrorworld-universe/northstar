@@ -1,7 +1,7 @@
 use {
     crate::{
-        ephemeral_tpu::EphemeralTpu, ephemeral_tx_client::EphemeralTransactionClient,
-        slot_advancer::SlotAdvancer, EphemeralRollupSettings,
+        EphemeralRollupSettings, ephemeral_tpu::EphemeralTpu,
+        ephemeral_tx_client::EphemeralTransactionClient, slot_advancer::SlotAdvancer,
     },
     log::{info, warn},
     solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
@@ -27,8 +27,8 @@ use {
         collections::{HashMap, HashSet},
         net::SocketAddr,
         sync::{
-            atomic::{AtomicBool, AtomicU64, Ordering},
             Arc, RwLock,
+            atomic::{AtomicBool, AtomicU64, Ordering},
         },
         time::Duration,
     },
@@ -1131,9 +1131,11 @@ mod tests {
         assert!(runtime.delegated_accounts().contains(&delegated_pubkey));
 
         // Verify snapshot is stored
-        assert!(runtime
-            .initial_account_snapshot(&delegated_pubkey)
-            .is_some());
+        assert!(
+            runtime
+                .initial_account_snapshot(&delegated_pubkey)
+                .is_some()
+        );
 
         runtime.shutdown();
     }

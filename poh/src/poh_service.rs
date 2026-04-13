@@ -15,8 +15,8 @@ use {
     solana_poh_config::PohConfig,
     std::{
         sync::{
-            atomic::{AtomicBool, Ordering},
             Arc, Mutex, RwLock,
+            atomic::{AtomicBool, Ordering},
         },
         thread::{self, Builder, JoinHandle},
         time::{Duration, Instant},
@@ -674,12 +674,12 @@ mod tests {
             record_channels::record_channels,
         },
         crossbeam_channel::bounded,
-        rand::{rng, Rng},
+        rand::{Rng, rng},
         solana_clock::{DEFAULT_HASHES_PER_TICK, DEFAULT_MS_PER_SLOT, DEFAULT_TICKS_PER_SLOT},
         solana_hash::Hash,
         solana_ledger::{
             blockstore::Blockstore,
-            genesis_utils::{create_genesis_config, GenesisConfigInfo},
+            genesis_utils::{GenesisConfigInfo, create_genesis_config},
             get_tmp_ledger_path_auto_delete,
             leader_schedule_cache::LeaderScheduleCache,
         },
@@ -700,7 +700,7 @@ mod tests {
         } = create_genesis_config(2);
         let hashes_per_tick = Some(DEFAULT_HASHES_PER_TICK);
         genesis_config.poh_config.hashes_per_tick = hashes_per_tick;
-        let (bank, _bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
+        let (bank, _bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
         let prev_hash = bank.last_blockhash();
         let ledger_path = get_tmp_ledger_path_auto_delete!();
         let blockstore = Blockstore::open(ledger_path.path())
@@ -900,7 +900,7 @@ mod tests {
         } = create_genesis_config(2);
         let hashes_per_tick = Some(DEFAULT_HASHES_PER_TICK);
         genesis_config.poh_config.hashes_per_tick = hashes_per_tick;
-        let (bank, _bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
+        let (bank, _bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
         let prev_hash = bank.last_blockhash();
         let ledger_path = get_tmp_ledger_path_auto_delete!();
         let blockstore = Blockstore::open(ledger_path.path())

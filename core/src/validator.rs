@@ -5,17 +5,16 @@ use {
     crate::{
         admin_rpc_post_init::{AdminRpcRequestMetadataPostInit, KeyUpdaterType, KeyUpdaters},
         banking_stage::{
-            transaction_scheduler::scheduler_controller::SchedulerConfig,
-            unified_scheduler::ensure_banking_stage_setup, BankingStage,
+            BankingStage, transaction_scheduler::scheduler_controller::SchedulerConfig,
+            unified_scheduler::ensure_banking_stage_setup,
         },
         banking_trace::{self, BankingTracer, TraceError},
         block_creation_loop::{BlockCreationLoop, BlockCreationLoopConfig, ReplayHighestFrozen},
         cluster_info_vote_listener::VoteTracker,
         completed_data_sets_service::CompletedDataSetsService,
         consensus::{
-            reconcile_blockstore_roots_with_external_source,
+            ExternalRootSource, Tower, reconcile_blockstore_roots_with_external_source,
             tower_storage::{NullTowerStorage, TowerStorage},
-            ExternalRootSource, Tower,
         },
         forwarding_stage::ForwardingClientConfig,
         repair::{
@@ -24,32 +23,33 @@ use {
             repair_handler::RepairHandlerType,
             serve_repair_service::ServeRepairService,
         },
-        resource_limits::{adjust_nofile_limit, ResourceLimitError},
+        resource_limits::{ResourceLimitError, adjust_nofile_limit},
         sample_performance_service::SamplePerformanceService,
         snapshot_packager_service::SnapshotPackagerService,
         stats_reporter_service::StatsReporterService,
         system_monitor_service::{
-            verify_net_stats_access, SystemMonitorService, SystemMonitorStatsReportConfig,
+            SystemMonitorService, SystemMonitorStatsReportConfig, verify_net_stats_access,
         },
         tpu::{Tpu, TpuSockets},
         tvu::{AlpenglowInitializationState, Tvu, TvuConfig, TvuSockets},
     },
     agave_snapshots::{
-        snapshot_archive_info::SnapshotArchiveInfoGetter as _, snapshot_config::SnapshotConfig,
-        snapshot_hash::StartingSnapshotHashes, SnapshotInterval,
+        SnapshotInterval, snapshot_archive_info::SnapshotArchiveInfoGetter as _,
+        snapshot_config::SnapshotConfig, snapshot_hash::StartingSnapshotHashes,
     },
     agave_votor::{
         vote_history::VoteHistory,
         vote_history_storage::{NullVoteHistoryStorage, VoteHistoryStorage},
         voting_service::VotingServiceOverride,
     },
-    anyhow::{anyhow, Context, Result},
-    crossbeam_channel::{bounded, unbounded, Receiver},
+    agave_xdp::xdp_retransmitter::{XdpRetransmitBuilder, XdpRetransmitter},
+    anyhow::{Context, Result, anyhow},
+    crossbeam_channel::{Receiver, bounded, unbounded},
     quinn::Endpoint,
     serde::{Deserialize, Serialize},
     solana_account::ReadableAccount,
     solana_accounts_db::{
-        accounts_db::{AccountsDbConfig, ACCOUNTS_DB_CONFIG_FOR_TESTING},
+        accounts_db::{ACCOUNTS_DB_CONFIG_FOR_TESTING, AccountsDbConfig},
         accounts_update_notifier_interface::AccountsUpdateNotifier,
         utils::move_and_async_delete_path_contents,
     },
@@ -60,10 +60,10 @@ use {
     solana_epoch_schedule::MAX_LEADER_SCHEDULE_EPOCH_OFFSET,
     solana_genesis_config::GenesisConfig,
     solana_genesis_utils::{
-        open_genesis_config, OpenGenesisConfigError, MAX_GENESIS_ARCHIVE_UNPACKED_SIZE,
+        MAX_GENESIS_ARCHIVE_UNPACKED_SIZE, OpenGenesisConfigError, open_genesis_config,
     },
     solana_geyser_plugin_manager::{
-        geyser_plugin_service::GeyserPluginService, GeyserPluginManagerRequest,
+        GeyserPluginManagerRequest, geyser_plugin_service::GeyserPluginService,
     },
     solana_gossip::{
         cluster_info::{
@@ -82,11 +82,11 @@ use {
     solana_ledger::{
         bank_forks_utils,
         blockstore::{
-            Blockstore, BlockstoreError, PurgeType, MAX_COMPLETED_SLOTS_IN_CHANNEL,
-            MAX_REPLAY_WAKE_UP_SIGNALS,
+            Blockstore, BlockstoreError, MAX_COMPLETED_SLOTS_IN_CHANNEL,
+            MAX_REPLAY_WAKE_UP_SIGNALS, PurgeType,
         },
         blockstore_metric_report_service::BlockstoreMetricReportService,
-        blockstore_options::{BlockstoreOptions, BLOCKSTORE_DIRECTORY_ROCKS_LEVEL},
+        blockstore_options::{BLOCKSTORE_DIRECTORY_ROCKS_LEVEL, BlockstoreOptions},
         blockstore_processor::{self, TransactionStatusSender},
         entry_notifier_interface::EntryNotifierArc,
         entry_notifier_service::{EntryNotifierSender, EntryNotifierService},
@@ -104,7 +104,6 @@ use {
         transaction_recorder::TransactionRecorder,
     },
     solana_pubkey::Pubkey,
-    solana_rayon_threadlimit::get_thread_count,
     solana_rpc::{
         max_slots::MaxSlots,
         optimistically_confirmed_bank_tracker::{
@@ -144,11 +143,7 @@ use {
     },
     solana_time_utils::timestamp,
     solana_tpu_client::tpu_client::{DEFAULT_TPU_CONNECTION_POOL_SIZE, DEFAULT_VOTE_USE_QUIC},
-    solana_turbine::{
-        self,
-        broadcast_stage::BroadcastStageType,
-        xdp::{XdpRetransmitBuilder, XdpRetransmitter},
-    },
+    solana_turbine::{self, broadcast_stage::BroadcastStageType},
     solana_unified_scheduler_logic::SchedulingMode,
     solana_unified_scheduler_pool::{DefaultSchedulerPool, SupportedSchedulingMode},
     solana_validator_exit::Exit,
@@ -162,8 +157,8 @@ use {
         path::{Path, PathBuf},
         str::FromStr,
         sync::{
-            atomic::{AtomicBool, AtomicU64, Ordering},
             Arc, Mutex, RwLock,
+            atomic::{AtomicBool, AtomicU64, Ordering},
         },
         thread::{self, Builder, JoinHandle},
         time::{Duration, Instant},
@@ -423,9 +418,6 @@ pub struct ValidatorConfig {
 
 impl ValidatorConfig {
     pub fn default_for_test() -> Self {
-        let max_thread_count =
-            NonZeroUsize::new(num_cpus::get()).expect("thread count is non-zero");
-
         Self {
             logfile: None,
             expected_genesis_hash: None,
@@ -491,12 +483,13 @@ impl ValidatorConfig {
             generator_config: None,
             use_snapshot_archives_at_startup: UseSnapshotArchivesAtStartup::default(),
             unified_scheduler_handler_threads: None,
+            // Fix threadpools to small and reasonable sizes; unit tests should
+            // not be creating excessive load and benches can configure more
             ip_echo_server_threads: NonZeroUsize::new(1).expect("1 is non-zero"),
-            rayon_global_threads: max_thread_count,
+            rayon_global_threads: NonZeroUsize::new(2).expect("2 is non-zero"),
             replay_forks_threads: NonZeroUsize::new(1).expect("1 is non-zero"),
-            replay_transactions_threads: max_thread_count,
-            tvu_shred_sigverify_threads: NonZeroUsize::new(get_thread_count())
-                .expect("thread count is non-zero"),
+            replay_transactions_threads: NonZeroUsize::new(2).expect("2 is non-zero"),
+            tvu_shred_sigverify_threads: NonZeroUsize::new(2).expect("2 is non-zero"),
             delay_leader_block_for_pending_fork: false,
             voting_service_test_override: None,
             repair_handler_type: RepairHandlerType::default(),
@@ -1725,7 +1718,7 @@ impl Validator {
             Some(snapshot_controller.clone()),
             config.runtime_config.log_messages_bytes_limit,
             prioritization_fee_cache.clone(),
-            banking_tracer.clone(),
+            banking_tracer,
             repair_response_quic_receiver,
             repair_quic_async_senders.repair_request_quic_sender,
             repair_quic_async_senders.ancestor_hashes_request_quic_sender,
@@ -1736,8 +1729,8 @@ impl Validator {
             vote_connection_cache,
             AlpenglowInitializationState {
                 leader_window_info_sender,
-                replay_highest_frozen: replay_highest_frozen.clone(),
-                highest_parent_ready: highest_parent_ready.clone(),
+                replay_highest_frozen,
+                highest_parent_ready,
                 votor_event_sender: votor_event_sender.clone(),
                 votor_event_receiver,
                 cancel: cancel.clone(),
@@ -3008,7 +3001,7 @@ pub fn is_snapshot_config_valid(snapshot_config: &SnapshotConfig) -> bool {
 mod tests {
     use {
         super::*,
-        crossbeam_channel::{bounded, RecvTimeoutError},
+        crossbeam_channel::{RecvTimeoutError, bounded},
         solana_entry::entry,
         solana_genesis_config::create_genesis_config,
         solana_gossip::contact_info::ContactInfo,
@@ -3230,10 +3223,12 @@ mod tests {
         // assert that slots less than 5 aren't affected
         assert!(blockstore.meta(4).unwrap().unwrap().next_slots.is_empty());
         for i in 5..10 {
-            assert!(blockstore
-                .get_data_shreds_for_slot(i, 0)
-                .unwrap()
-                .is_empty());
+            assert!(
+                blockstore
+                    .get_data_shreds_for_slot(i, 0)
+                    .unwrap()
+                    .is_empty()
+            );
         }
     }
 
@@ -3318,15 +3313,17 @@ mod tests {
         let rpc_override_health_check = Arc::new(AtomicBool::new(false));
         let start_progress = Arc::new(RwLock::new(ValidatorStartProgress::default()));
 
-        assert!(!wait_for_supermajority(
-            &config,
-            None,
-            &bank_forks,
-            &cluster_info,
-            rpc_override_health_check.clone(),
-            &start_progress,
-        )
-        .unwrap());
+        assert!(
+            !wait_for_supermajority(
+                &config,
+                None,
+                &bank_forks,
+                &cluster_info,
+                rpc_override_health_check.clone(),
+                &start_progress,
+            )
+            .unwrap()
+        );
 
         // bank=0, wait=1, should fail
         config.wait_for_supermajority = Some(1);
@@ -3349,15 +3346,17 @@ mod tests {
             1,
         ));
         config.wait_for_supermajority = Some(0);
-        assert!(!wait_for_supermajority(
-            &config,
-            None,
-            &bank_forks,
-            &cluster_info,
-            rpc_override_health_check.clone(),
-            &start_progress,
-        )
-        .unwrap());
+        assert!(
+            !wait_for_supermajority(
+                &config,
+                None,
+                &bank_forks,
+                &cluster_info,
+                rpc_override_health_check.clone(),
+                &start_progress,
+            )
+            .unwrap()
+        );
 
         // bank=1, wait=1, equal, but bad hash provided
         config.wait_for_supermajority = Some(1);

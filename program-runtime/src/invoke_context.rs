@@ -237,11 +237,7 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
 
     /// Push a stack frame onto the invocation stack
     pub fn push(&mut self) -> Result<(), InstructionError> {
-        let instruction_context = self
-            .transaction_context
-            .get_instruction_context_at_index_in_trace(
-                self.transaction_context.get_instruction_trace_length(),
-            )?;
+        let instruction_context = self.transaction_context.get_next_instruction_context()?;
         let program_id = instruction_context
             .get_program_key()
             .map_err(|_| InstructionError::UnsupportedProgramId)?;
@@ -271,7 +267,7 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
     }
 
     /// Pop a stack frame from the invocation stack
-    fn pop(&mut self) -> Result<(), InstructionError> {
+    pub(crate) fn pop(&mut self) -> Result<(), InstructionError> {
         self.syscall_context.pop();
         self.transaction_context.pop()
     }
@@ -282,13 +278,29 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
         self.transaction_context.get_instruction_stack_height()
     }
 
-    /// Entrypoint for a cross-program invocation from a builtin program
-    pub fn native_invoke(
+    /// Entrypoint for a cross-program invocation from a builtin program.
+    ///
+    /// Takes signer seeds and derives PDAs internally via
+    /// `create_program_address`, mirroring the SBF CPI path. This makes
+    /// it structurally impossible for a builtin to vouch for a non-PDA
+    /// address (e.g. a user wallet) as a signer.
+    pub fn native_invoke_signed(
         &mut self,
         instruction: Instruction,
-        signers: &[Pubkey],
+        signer_seeds: &[&[&[u8]]],
     ) -> Result<(), InstructionError> {
-        self.prepare_next_cpi_instruction(instruction, signers)?;
+        let caller_program_id = *self
+            .transaction_context
+            .get_current_instruction_context()?
+            .get_program_key()?;
+        // The conversion from `PubkeyError` to `InstructionError` through
+        // num-traits is incorrect, but it's the existing behavior.
+        let signers = signer_seeds
+            .iter()
+            .map(|seeds| Pubkey::create_program_address(seeds, &caller_program_id))
+            .collect::<Result<Vec<Pubkey>, solana_pubkey::PubkeyError>>()
+            .map_err(|e| e as u64)?;
+        self.prepare_next_cpi_instruction(instruction, &signers)?;
         let mut compute_units_consumed = 0;
         self.process_instruction(&mut compute_units_consumed, &mut ExecuteTimings::default())?;
         Ok(())
@@ -780,6 +792,7 @@ macro_rules! with_mock_invoke_context_with_feature_set {
         $invoke_context:ident,
         $transaction_context:ident,
         $feature_set:ident,
+        $top_level_instructions:literal,
         $transaction_accounts:expr $(,)?
     ) => {
         use {
@@ -805,7 +818,7 @@ macro_rules! with_mock_invoke_context_with_feature_set {
             Rent::default(),
             compute_budget.max_instruction_stack_depth,
             compute_budget.max_instruction_trace_length,
-            /* number_of_top_level_instructions */ 1,
+            $top_level_instructions,
         );
         let mut sysvar_cache = SysvarCache::default();
         sysvar_cache.fill_missing_entries(|pubkey, callback| {
@@ -847,6 +860,20 @@ macro_rules! with_mock_invoke_context_with_feature_set {
             ),
         );
     };
+    (
+        $invoke_context:ident,
+        $transaction_context:ident,
+        $feature_set:ident,
+        $transaction_accounts:expr $(,)?
+    ) => {
+        with_mock_invoke_context_with_feature_set!(
+            $invoke_context,
+            $transaction_context,
+            $feature_set,
+            1,
+            $transaction_accounts
+        );
+    };
 }
 
 #[macro_export]
@@ -854,6 +881,7 @@ macro_rules! with_mock_invoke_context {
     (
         $invoke_context:ident,
         $transaction_context:ident,
+        $top_level_instructions:literal,
         $transaction_accounts:expr $(,)?
     ) => {
         let feature_set = &solana_svm_feature_set::SVMFeatureSet::default();
@@ -861,8 +889,21 @@ macro_rules! with_mock_invoke_context {
             $invoke_context,
             $transaction_context,
             feature_set,
+            $top_level_instructions,
             $transaction_accounts
         )
+    };
+    (
+        $invoke_context:ident,
+        $transaction_context:ident,
+        $transaction_accounts:expr $(,)?
+    ) => {
+        with_mock_invoke_context!(
+            $invoke_context,
+            $transaction_context,
+            1,
+            $transaction_accounts
+        );
     };
 }
 
@@ -990,6 +1031,7 @@ mod tests {
         solana_instruction::Instruction,
         solana_keypair::Keypair,
         solana_rent::Rent,
+        solana_sdk_ids::system_program,
         solana_signer::Signer,
         solana_transaction::{Transaction, sanitized::SanitizedTransaction},
         solana_transaction_context::MAX_ACCOUNTS_PER_INSTRUCTION,
@@ -1088,7 +1130,7 @@ mod tests {
                         assert_eq!(result, Err(InstructionError::UnbalancedInstruction));
                         result?;
                         invoke_context
-                            .native_invoke(inner_instruction, &[])
+                            .native_invoke_signed(inner_instruction, &[])
                             .and(invoke_context.pop())?;
                     }
                     MockInstruction::UnbalancedPop => instruction_context
@@ -1170,7 +1212,7 @@ mod tests {
     }
 
     #[test]
-    fn test_max_instruction_trace_length() {
+    fn test_max_instruction_trace_length_top_level() {
         const MAX_INSTRUCTIONS: usize = 8;
         let mut transaction_context = TransactionContext::new(
             vec![(
@@ -1193,6 +1235,61 @@ mod tests {
                 .unwrap();
             transaction_context.pop().unwrap();
         }
+        assert_eq!(
+            transaction_context.push(),
+            Err(InstructionError::MaxInstructionTraceLengthExceeded)
+        );
+    }
+
+    #[test]
+    fn test_max_instruction_trace_length_cpi() {
+        // Hitting the limit with CPIs
+        const MAX_INSTRUCTIONS: usize = 8;
+        let mut transaction_context = TransactionContext::new(
+            vec![(
+                Pubkey::new_unique(),
+                AccountSharedData::new(1, 1, &Pubkey::new_unique()),
+            )],
+            Rent::default(),
+            256,
+            MAX_INSTRUCTIONS,
+            2,
+        );
+
+        // To be uncommented when we reorder the trace
+        // transaction_context
+        //     .configure_instruction_at_index(
+        //         0,
+        //         0,
+        //         vec![InstructionAccount::new(0, false, false)],
+        //         vec![u16::MAX; 256],
+        //         Cow::Owned(Vec::new()),
+        //         None,
+        //     )
+        //     .unwrap();
+        //
+        // transaction_context
+        //     .configure_instruction_at_index(
+        //         1,
+        //         0,
+        //         vec![InstructionAccount::new(0, false, false)],
+        //         vec![u16::MAX; 256],
+        //         Cow::Owned(Vec::new()),
+        //         None,
+        //     )
+        //     .unwrap();
+
+        for _ in 0..MAX_INSTRUCTIONS {
+            transaction_context.push().unwrap();
+            transaction_context
+                .configure_next_cpi_for_tests(
+                    0,
+                    vec![InstructionAccount::new(0, false, false)],
+                    Vec::new(),
+                )
+                .unwrap();
+        }
+
         assert_eq!(
             transaction_context.push(),
             Err(InstructionError::MaxInstructionTraceLengthExceeded)
@@ -1255,7 +1352,7 @@ mod tests {
         let inner_instruction =
             Instruction::new_with_bincode(callee_program_id, &instruction, metas);
         let result = invoke_context
-            .native_invoke(inner_instruction, &[])
+            .native_invoke_signed(inner_instruction, &[])
             .and(invoke_context.pop());
         assert_eq!(result, expected_result);
     }
@@ -1438,7 +1535,7 @@ mod tests {
             }
         }
 
-        with_mock_invoke_context!(invoke_context, transaction_context, transaction_accounts);
+        with_mock_invoke_context!(invoke_context, transaction_context, 2, transaction_accounts);
 
         let instruction_1 = Instruction::new_with_bytes(program_id, &[20], account_metas.clone());
 
@@ -1652,5 +1749,152 @@ mod tests {
                 assert_eq!(is_duplicate, Some(index_in_instruction.saturating_sub(1)));
             }
         }
+    }
+
+    // Used for native_invoke_signed tests below.
+    const TEST_CALLER_PROGRAM_ID: Pubkey = Pubkey::new_from_array([1u8; 32]);
+    const TEST_CALLEE_PROGRAM_ID: Pubkey = Pubkey::new_from_array([2u8; 32]);
+    const TEST_WRONG_PROGRAM_ID: Pubkey = Pubkey::new_from_array([3u8; 32]);
+    const TEST_MOCK_EXTRA_KEY: Pubkey = Pubkey::new_from_array([4u8; 32]);
+    const TEST_ACCOUNT_KEY: Pubkey = Pubkey::new_from_array([5u8; 32]);
+
+    /// Runs a `native_invoke_signed` call with the standard test setup and returns
+    /// the result.
+    ///
+    /// Same layout for all tests:
+    ///   0: target account (writable, signer iff `target_is_signer`)
+    ///   1: caller program (executable)
+    ///   2: mock extra (satisfies MockBuiltin's 2-account requirement)
+    ///   3: callee program (executable)
+    fn run_native_invoke_signed_test(
+        target_key: Pubkey,
+        target_is_signer: bool,
+        inner_instruction: Instruction,
+        signer_seeds: &[&[&[u8]]],
+    ) -> Result<(), InstructionError> {
+        let target_account = AccountSharedData::new(100, 0, &TEST_CALLEE_PROGRAM_ID);
+        let mock_extra_account = AccountSharedData::new(0, 1, &system_program::id());
+        let mut caller_program_account = AccountSharedData::new(1, 1, &native_loader::id());
+        caller_program_account.set_executable(true);
+        let mut callee_program_account = AccountSharedData::new(1, 1, &native_loader::id());
+        callee_program_account.set_executable(true);
+        let transaction_accounts = vec![
+            (target_key, target_account),
+            (TEST_CALLER_PROGRAM_ID, caller_program_account),
+            (TEST_MOCK_EXTRA_KEY, mock_extra_account),
+            (TEST_CALLEE_PROGRAM_ID, callee_program_account),
+        ];
+
+        with_mock_invoke_context!(invoke_context, transaction_context, transaction_accounts);
+        let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::default();
+        program_cache_for_tx_batch.replenish(
+            TEST_CALLEE_PROGRAM_ID,
+            Arc::new(ProgramCacheEntry::new_builtin(0, 1, MockBuiltin::vm)),
+        );
+        invoke_context.program_cache_for_tx_batch = &mut program_cache_for_tx_batch;
+
+        let instruction_accounts = (0..4)
+            .map(|i| InstructionAccount::new(i, i == 0 && target_is_signer, i < 2))
+            .collect::<Vec<_>>();
+        invoke_context
+            .transaction_context
+            .configure_top_level_instruction_for_tests(1, instruction_accounts, vec![])
+            .unwrap();
+        invoke_context.push().unwrap();
+
+        let result = invoke_context.native_invoke_signed(inner_instruction, signer_seeds);
+        invoke_context.pop().unwrap();
+        result
+    }
+
+    // Valid PDA seeds grant signer privilege to the derived address.
+    #[test]
+    fn test_native_invoke_signed_with_valid_pda_signer() {
+        let (pda_key, bump_seed) =
+            Pubkey::find_program_address(&[b"seed"], &TEST_CALLER_PROGRAM_ID);
+        let instruction = Instruction::new_with_bincode(
+            TEST_CALLEE_PROGRAM_ID,
+            &MockInstruction::NoopSuccess,
+            vec![
+                AccountMeta::new(pda_key, true),
+                AccountMeta::new_readonly(TEST_MOCK_EXTRA_KEY, false),
+            ],
+        );
+        let result =
+            run_native_invoke_signed_test(pda_key, false, instruction, &[&[b"seed", &[bump_seed]]]);
+        assert!(
+            result.is_ok(),
+            "valid PDA signer should succeed: {result:?}"
+        );
+    }
+
+    // Oversized seeds (>MAX_SEED_LEN) hit `MaxSeedLengthExceeded`
+    // (discriminant 0) which the broken `as u64` num-traits conversion
+    // maps to `Custom(0)`.
+    #[test]
+    fn test_native_invoke_signed_with_invalid_seeds() {
+        let instruction = Instruction::new_with_bincode(
+            TEST_CALLEE_PROGRAM_ID,
+            &MockInstruction::NoopSuccess,
+            vec![AccountMeta::new(TEST_ACCOUNT_KEY, true)],
+        );
+        let oversized_seed = [0u8; 33];
+        let result = run_native_invoke_signed_test(
+            TEST_ACCOUNT_KEY,
+            false,
+            instruction,
+            &[&[&oversized_seed]],
+        );
+        assert_eq!(result, Err(InstructionError::Custom(0)));
+    }
+
+    // CPI marks an account as signer but caller provides no seeds —
+    // signer privilege escalation.
+    #[test]
+    fn test_native_invoke_signed_pda_privilege_escalation_without_seeds() {
+        let (pda_key, _bump_seed) =
+            Pubkey::find_program_address(&[b"seed"], &TEST_CALLER_PROGRAM_ID);
+        let instruction = Instruction::new_with_bincode(
+            TEST_CALLEE_PROGRAM_ID,
+            &MockInstruction::NoopSuccess,
+            vec![AccountMeta::new(pda_key, true)],
+        );
+        let result = run_native_invoke_signed_test(pda_key, false, instruction, &[]);
+        assert_eq!(result, Err(InstructionError::PrivilegeEscalation));
+    }
+
+    // Seeds valid for a different program ID don't grant signer privilege
+    // because native_invoke_signed derives against the caller's own program ID.
+    #[test]
+    fn test_native_invoke_signed_uses_caller_program_id_for_pda() {
+        let (pda_key, bump_seed) = Pubkey::find_program_address(&[b"seed"], &TEST_WRONG_PROGRAM_ID);
+        let instruction = Instruction::new_with_bincode(
+            TEST_CALLEE_PROGRAM_ID,
+            &MockInstruction::NoopSuccess,
+            vec![AccountMeta::new(pda_key, true)],
+        );
+        let result =
+            run_native_invoke_signed_test(pda_key, false, instruction, &[&[b"seed", &[bump_seed]]]);
+        assert_eq!(result, Err(InstructionError::PrivilegeEscalation));
+    }
+
+    // Top-level signer privilege carries through CPI without needing seeds.
+    #[test]
+    fn test_native_invoke_signed_top_level_signer_needs_no_seeds() {
+        let (pda_key, _bump_seed) =
+            Pubkey::find_program_address(&[b"seed"], &TEST_CALLER_PROGRAM_ID);
+        let instruction = Instruction::new_with_bincode(
+            TEST_CALLEE_PROGRAM_ID,
+            &MockInstruction::NoopSuccess,
+            vec![
+                AccountMeta::new(pda_key, true),
+                AccountMeta::new_readonly(TEST_MOCK_EXTRA_KEY, false),
+            ],
+        );
+        let result = run_native_invoke_signed_test(pda_key, true, instruction, &[]);
+        assert!(
+            result.is_ok(),
+            "top-level signer should not need seeds: {result:?}"
+        );
     }
 }

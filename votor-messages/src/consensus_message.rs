@@ -1,11 +1,15 @@
 //! Put Alpenglow consensus messages here so all clients can agree on the format.
 use {
-    crate::vote::Vote,
+    crate::{
+        fraction::Fraction,
+        migration::GENESIS_VOTE_THRESHOLD,
+        vote::{Vote, VoteType},
+    },
     serde::{Deserialize, Serialize},
     solana_bls_signatures::Signature as BLSSignature,
     solana_clock::Slot,
     solana_hash::Hash,
-    wincode::{containers::Pod, SchemaRead, SchemaWrite},
+    wincode::{SchemaRead, SchemaWrite, containers::Pod},
 };
 
 /// The seed used to derive the BLS keypair
@@ -54,15 +58,15 @@ pub enum CertificateType {
     /// Finalize certificate
     Finalize(Slot),
     /// Fast finalize certificate
-    FinalizeFast(Slot, #[wincode(with = "Pod<Hash>")] Hash),
+    FinalizeFast(Slot, Hash),
     /// Notarize certificate
-    Notarize(Slot, #[wincode(with = "Pod<Hash>")] Hash),
+    Notarize(Slot, Hash),
     /// Notarize fallback certificate
-    NotarizeFallback(Slot, #[wincode(with = "Pod<Hash>")] Hash),
+    NotarizeFallback(Slot, Hash),
     /// Skip certificate
     Skip(Slot),
     /// Genesis certificate
-    Genesis(Slot, #[wincode(with = "Pod<Hash>")] Hash),
+    Genesis(Slot, Hash),
 }
 
 impl CertificateType {
@@ -86,6 +90,16 @@ impl CertificateType {
     /// Is this a finalize / fast finalize certificate?
     pub fn is_finalization(&self) -> bool {
         matches!(self, Self::Finalize(_) | Self::FinalizeFast(_, _))
+    }
+
+    /// Is this a slow finalize certificate?
+    pub fn is_slow_finalization(&self) -> bool {
+        matches!(self, Self::Finalize(_))
+    }
+
+    /// Is this a notarize certificate?
+    pub fn is_notarize(&self) -> bool {
+        matches!(self, Self::Notarize(_, _))
     }
 
     /// Is this a notarize fallback certificate?
@@ -159,6 +173,31 @@ impl CertificateType {
             }
             // Other certificate types do not use Base3 encoding.
             _ => None,
+        }
+    }
+
+    /// Returns the stake fraction required for certificate completion and the
+    /// `VoteType`s that contribute to this certificate.
+    ///
+    /// Must be in sync with `Vote::to_cert_types`
+    pub const fn limits_and_vote_types(&self) -> (Fraction, &'static [VoteType]) {
+        match self {
+            CertificateType::Notarize(_, _) => {
+                (Fraction::from_percentage(60), &[VoteType::Notarize])
+            }
+            CertificateType::NotarizeFallback(_, _) => (
+                Fraction::from_percentage(60),
+                &[VoteType::Notarize, VoteType::NotarizeFallback],
+            ),
+            CertificateType::FinalizeFast(_, _) => {
+                (Fraction::from_percentage(80), &[VoteType::Notarize])
+            }
+            CertificateType::Finalize(_) => (Fraction::from_percentage(60), &[VoteType::Finalize]),
+            CertificateType::Skip(_) => (
+                Fraction::from_percentage(60),
+                &[VoteType::Skip, VoteType::SkipFallback],
+            ),
+            CertificateType::Genesis(_, _) => (GENESIS_VOTE_THRESHOLD, &[VoteType::Genesis]),
         }
     }
 }

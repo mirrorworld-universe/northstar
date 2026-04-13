@@ -1,6 +1,6 @@
 use {
     log::*,
-    portal_state::{try_parse_raw_portal_account, PortalAccount},
+    portal_state::{PortalAccount, try_parse_raw_portal_account},
     solana_account::{AccountSharedData, ReadableAccount},
     solana_gossip::cluster_info::ClusterInfo,
     solana_keypair::Keypair,
@@ -470,7 +470,7 @@ mod portal_e2e_tests {
         solana_rpc_client::rpc_client::RpcClient,
         solana_runtime::{
             bank_forks::BankForks,
-            genesis_utils::{create_genesis_config, GenesisConfigInfo},
+            genesis_utils::{GenesisConfigInfo, create_genesis_config},
         },
         solana_sdk_ids::system_program,
         solana_system_interface::instruction::transfer,

@@ -1,5 +1,5 @@
 use {
-    crate::{home_dir, utils::spawn, Config},
+    crate::{Config, home_dir, utils::spawn},
     bzip2::bufread::BzDecoder,
     log::{debug, error, info, warn},
     regex::Regex,
@@ -11,7 +11,7 @@ use {
         fs::{self, File},
         io::{BufRead, BufReader, ErrorKind},
         path::{Path, PathBuf},
-        process::{exit, Command},
+        process::{Command, exit},
         sync::OnceLock,
     },
     tar::Archive,
@@ -596,7 +596,7 @@ fn nix_patch_bin_or_dylib(out: &Path, fname: &Path) {
             name = \"solana-sbf-dependencies\";
             paths = [
                 libedit
-                python310
+                python3
                 ncurses
                 zlib
                 xz.out

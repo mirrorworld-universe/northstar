@@ -1,21 +1,21 @@
 use {
     crossbeam_channel::Sender,
     jsonrpc_core::{BoxFuture, ErrorCode, MetaIoHandler, Metadata, Result},
-    jsonrpc_core_client::{transports::ipc, RpcError},
+    jsonrpc_core_client::{RpcError, transports::ipc},
     jsonrpc_derive::rpc,
     jsonrpc_ipc_server::{
-        tokio::sync::oneshot::channel as oneshot_channel, RequestContext, ServerBuilder,
+        RequestContext, ServerBuilder, tokio::sync::oneshot::channel as oneshot_channel,
     },
     log::*,
-    serde::{de::Deserializer, Deserialize, Serialize},
+    serde::{Deserialize, Serialize, de::Deserializer},
     solana_accounts_db::accounts_index::AccountIndex,
     solana_core::{
         admin_rpc_post_init::AdminRpcRequestMetadataPostInit,
         banking_stage::{
-            transaction_scheduler::scheduler_controller::SchedulerConfig, BankingControlMsg,
-            BankingStage,
+            BankingControlMsg, BankingStage,
+            transaction_scheduler::scheduler_controller::SchedulerConfig,
         },
-        consensus::{tower_storage::TowerStorage, Tower},
+        consensus::{Tower, tower_storage::TowerStorage},
         repair::repair_service,
         validator::{
             BlockProductionMethod, SchedulerPacing, TransactionStructure, ValidatorStartProgress,
@@ -23,7 +23,7 @@ use {
     },
     solana_geyser_plugin_manager::GeyserPluginManagerRequest,
     solana_gossip::contact_info::{ContactInfo, Protocol, SOCKET_ADDR_UNSPECIFIED},
-    solana_keypair::{read_keypair_file, Keypair},
+    solana_keypair::{Keypair, read_keypair_file},
     solana_metrics::{datapoint_info, datapoint_warn},
     solana_pubkey::Pubkey,
     solana_rpc::rpc::verify_pubkey,
@@ -39,8 +39,8 @@ use {
         num::NonZeroUsize,
         path::{Path, PathBuf},
         sync::{
-            atomic::{AtomicBool, Ordering},
             Arc, RwLock,
+            atomic::{AtomicBool, Ordering},
         },
         thread::{self, Builder},
         time::{Duration, Instant, SystemTime},
@@ -209,7 +209,7 @@ pub trait AdminRpc {
 
     #[rpc(meta, name = "addAuthorizedVoterFromBytes")]
     fn add_authorized_voter_from_bytes(&self, meta: Self::Metadata, keypair: Vec<u8>)
-        -> Result<()>;
+    -> Result<()>;
 
     #[rpc(meta, name = "removeAllAuthorizedVoters")]
     fn remove_all_authorized_voters(&self, meta: Self::Metadata) -> Result<()>;
@@ -291,6 +291,9 @@ pub trait AdminRpc {
         num_workers: NonZeroUsize,
         scheduler_pacing: SchedulerPacing,
     ) -> Result<()>;
+
+    #[rpc(meta, name = "isGeneratingSnapshots")]
+    fn is_generating_snapshots(&self, meta: Self::Metadata) -> Result<bool>;
 }
 
 pub struct AdminRpcImpl;
@@ -882,6 +885,16 @@ impl AdminRpc for AdminRpcImpl {
             Ok(())
         })
     }
+
+    fn is_generating_snapshots(&self, meta: Self::Metadata) -> Result<bool> {
+        if let Some(snapshot_controller) = meta.snapshot_controller() {
+            Ok(snapshot_controller.is_generating_snapshots())
+        } else {
+            Err(jsonrpc_core::error::Error::invalid_params(
+                "snapshot_controller unavailable",
+            ))
+        }
+    }
 }
 
 impl AdminRpcImpl {
@@ -1085,7 +1098,7 @@ mod tests {
         serde_json::Value,
         solana_account::{Account, AccountSharedData},
         solana_accounts_db::{
-            accounts_db::{AccountsDbConfig, ACCOUNTS_DB_CONFIG_FOR_TESTING},
+            accounts_db::{ACCOUNTS_DB_CONFIG_FOR_TESTING, AccountsDbConfig},
             accounts_index::AccountSecondaryIndexes,
         },
         solana_core::{
@@ -1097,10 +1110,10 @@ mod tests {
         solana_ledger::{
             create_new_tmp_ledger,
             genesis_utils::{
-                create_genesis_config, create_genesis_config_with_leader, GenesisConfigInfo,
+                GenesisConfigInfo, create_genesis_config, create_genesis_config_with_leader,
             },
         },
-        solana_net_utils::{sockets::bind_to_localhost_unique, SocketAddrSpace},
+        solana_net_utils::{SocketAddrSpace, sockets::bind_to_localhost_unique},
         solana_program_option::COption,
         solana_program_pack::Pack,
         solana_pubkey::Pubkey,
@@ -1743,5 +1756,59 @@ mod tests {
             serde_json::from_str(&exit_response.expect("actual response"))
                 .expect("actual response deserialization");
         assert_eq!(actual_parsed_response, expected_parsed_response);
+    }
+
+    #[test]
+    fn test_is_generating_snapshots() {
+        // Test with snapshots enabled
+        let rpc = RpcHandler::start_with_config(TestConfig::default());
+        let RpcHandler { io, meta, .. } = rpc;
+
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"isGeneratingSnapshots","params":[]}"#;
+        let response = io.handle_request_sync(request, meta.clone());
+        let result: Value = serde_json::from_str(&response.expect("actual response"))
+            .expect("actual response deserialization");
+
+        // Should return a boolean result indicating if snapshots are being generated
+        assert!(result["result"].is_boolean());
+        // Verify that snapshots are being generated since the test setup includes a snapshot controller
+        assert!(result["result"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_is_generating_snapshots_no_controller() {
+        // Test with snapshots enabled
+        let rpc = RpcHandler::start_with_config(TestConfig::default());
+        let RpcHandler { io, .. } = rpc;
+
+        // Test with no post_init (snapshot_controller unavailable)
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"isGeneratingSnapshots","params":[]}"#;
+        let validator_exit = create_validator_exit(Arc::new(AtomicBool::new(false)));
+        let authorized_voter_keypairs = Arc::new(RwLock::new(vec![Arc::new(Keypair::new())]));
+        let start_progress = Arc::new(RwLock::new(ValidatorStartProgress::default()));
+
+        let meta_no_post_init = AdminRpcRequestMetadata {
+            rpc_addr: None,
+            start_time: SystemTime::now(),
+            start_progress,
+            validator_exit,
+            validator_exit_backpressure: HashMap::default(),
+            authorized_voter_keypairs,
+            tower_storage: Arc::new(NullTowerStorage {}),
+            post_init: Arc::new(RwLock::new(None)),
+            staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
+            rpc_to_plugin_manager_sender: None,
+        };
+
+        let response = io.handle_request_sync(request, meta_no_post_init);
+        let result: Value = serde_json::from_str(&response.expect("actual response"))
+            .expect("actual response deserialization");
+
+        // Should return an error when snapshot_controller is unavailable
+        assert!(result["error"].is_object());
+        assert_eq!(
+            result["error"]["message"].as_str().unwrap(),
+            "snapshot_controller unavailable"
+        );
     }
 }
