@@ -23,6 +23,10 @@ use {
 pub struct NorthStarServiceConfig {
     /// Port for the ephemeral rollup RPC server
     pub listen_addr: SocketAddr,
+    /// Sonic: Port for the ephemeral rollup WebSocket (PubSub)
+    pub ws_addr: SocketAddr,
+    /// Sonic: Port for the ephemeral rollup TPU (QUIC)
+    pub tpu_addr: SocketAddr,
     /// Duration for each slot in the ephemeral rollup
     pub slot_duration: Duration,
 }
@@ -47,9 +51,13 @@ impl NorthStarService {
         let mut manager = northstar::Manager::new(cfg);
         {
             let root_bank = bank_forks.read().unwrap().root_bank();
-            if let Err(e) =
-                manager.init_runtime(root_bank, cluster_info.clone(), config.listen_addr)
-            {
+            if let Err(e) = manager.init_runtime(
+                root_bank,
+                cluster_info.clone(),
+                config.listen_addr,
+                config.ws_addr,
+                config.tpu_addr,
+            ) {
                 error!("Failed to initialize ephemeral runtime: {e}");
             }
         }
@@ -195,6 +203,8 @@ mod tests {
         let exit = Arc::new(AtomicBool::new(false));
         let config = NorthStarServiceConfig {
             listen_addr: find_free_addr(),
+            ws_addr: find_free_addr(),
+            tpu_addr: find_free_addr(),
             slot_duration: Duration::from_millis(400),
         };
 
@@ -245,6 +255,8 @@ mod tests {
         let exit = Arc::new(AtomicBool::new(false));
         let config = NorthStarServiceConfig {
             listen_addr: find_free_addr(),
+            ws_addr: find_free_addr(),
+            tpu_addr: find_free_addr(),
             slot_duration: Duration::from_millis(400),
         };
 
@@ -298,6 +310,8 @@ mod tests {
         let exit = Arc::new(AtomicBool::new(false));
         let config = NorthStarServiceConfig {
             listen_addr: find_free_addr(),
+            ws_addr: find_free_addr(),
+            tpu_addr: find_free_addr(),
             slot_duration: Duration::from_millis(400),
         };
 

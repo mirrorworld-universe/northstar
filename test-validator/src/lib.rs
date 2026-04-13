@@ -160,6 +160,10 @@ pub struct TestValidatorGenesis {
     portal: Option<Pubkey>,
     /// Sonic: Ephemeral RPC port for the rollup server
     ephemeral_rpc_port: u16,
+    /// Sonic: Ephemeral WS port for the rollup PubSub
+    ephemeral_ws_port: u16,
+    /// Sonic: Ephemeral TPU port for the rollup QUIC
+    ephemeral_tpu_port: u16,
 }
 
 impl Default for TestValidatorGenesis {
@@ -198,6 +202,8 @@ impl Default for TestValidatorGenesis {
                 Arc::<RwLock<Option<AdminRpcRequestMetadataPostInit>>>::default(),
             portal: None,
             ephemeral_rpc_port: 8910,
+            ephemeral_ws_port: 8911,
+            ephemeral_tpu_port: 8912,
         }
     }
 }
@@ -346,6 +352,18 @@ impl TestValidatorGenesis {
     /// Sonic: Set the ephemeral RPC port for the rollup server.
     pub fn ephemeral_rpc_port(&mut self, port: u16) -> &mut Self {
         self.ephemeral_rpc_port = port;
+        self
+    }
+
+    /// Sonic: Set the ephemeral WebSocket port for the rollup PubSub.
+    pub fn ephemeral_ws_port(&mut self, port: u16) -> &mut Self {
+        self.ephemeral_ws_port = port;
+        self
+    }
+
+    /// Sonic: Set the ephemeral TPU port for the rollup QUIC endpoint.
+    pub fn ephemeral_tpu_port(&mut self, port: u16) -> &mut Self {
+        self.ephemeral_tpu_port = port;
         self
     }
 
@@ -1288,6 +1306,10 @@ impl TestValidator {
             portal: config.portal,
             // Sonic: Ephemeral RPC port
             ephemeral_rpc_port: config.ephemeral_rpc_port,
+            // Sonic: Ephemeral WS port
+            ephemeral_ws_port: config.ephemeral_ws_port,
+            // Sonic: Ephemeral TPU port
+            ephemeral_tpu_port: config.ephemeral_tpu_port,
             ..ValidatorConfig::default_for_test()
         };
         if let Some(ref tower_storage) = config.tower_storage {

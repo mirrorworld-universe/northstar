@@ -85,6 +85,8 @@ pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
         // Sonic:
         portal: None,
         ephemeral_rpc_port: config.ephemeral_rpc_port,
+        ephemeral_ws_port: config.ephemeral_ws_port,
+        ephemeral_tpu_port: config.ephemeral_tpu_port,
     }
 }
 

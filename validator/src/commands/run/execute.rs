@@ -588,6 +588,10 @@ pub fn execute(
         portal: run_args.portal,
         // Sonic: Ephemeral RPC port for rollup server
         ephemeral_rpc_port: run_args.ephemeral_rpc_port,
+        // Sonic: Ephemeral WS port for rollup PubSub
+        ephemeral_ws_port: run_args.ephemeral_ws_port,
+        // Sonic: Ephemeral TPU port for rollup QUIC
+        ephemeral_tpu_port: run_args.ephemeral_tpu_port,
         broadcast_stage_type: BroadcastStageType::Standard,
         block_verification_method: value_t_or_exit!(
             matches,

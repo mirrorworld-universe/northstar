@@ -2,6 +2,7 @@ use {
     log::{debug, info},
     solana_hash::Hash,
     solana_pubkey::Pubkey,
+    solana_rpc::rpc_subscriptions::RpcSubscriptions,
     solana_runtime::{
         bank::Bank,
         bank_forks::BankForks,
@@ -47,6 +48,7 @@ impl SlotAdvancer {
         initial_bank: Arc<Bank>,
         config: Config,
         exit: Arc<AtomicBool>,
+        rpc_subscriptions: Option<Arc<RpcSubscriptions>>,
     ) -> Self {
         let exit_clone = Arc::clone(&exit);
         let thread = thread::spawn(move || {
@@ -56,6 +58,7 @@ impl SlotAdvancer {
                 initial_bank,
                 config,
                 exit_clone,
+                rpc_subscriptions,
             );
         });
         Self {
@@ -70,6 +73,7 @@ impl SlotAdvancer {
         mut current_bank: Arc<Bank>,
         config: Config,
         exit: Arc<AtomicBool>,
+        rpc_subscriptions: Option<Arc<RpcSubscriptions>>,
     ) {
         let mut current_slot = current_bank.slot();
 
@@ -157,6 +161,11 @@ impl SlotAdvancer {
                 next_bank_arc.last_blockhash()
             );
 
+            // Sonic: Notify RPC subscriptions about the new slot
+            if let Some(ref subs) = rpc_subscriptions {
+                subs.notify_slot(current_slot, current_bank_slot, current_slot);
+            }
+
             current_bank = next_bank_arc;
         }
 
@@ -210,6 +219,7 @@ mod tests {
             initial_bank,
             config,
             exit.clone(),
+            None,
         );
 
         thread::sleep(Duration::from_millis(300));
@@ -245,6 +255,7 @@ mod tests {
             initial_bank,
             config,
             exit.clone(),
+            None,
         );
 
         thread::sleep(Duration::from_millis(50));
@@ -277,6 +288,7 @@ mod tests {
             initial_bank,
             config,
             exit.clone(),
+            None,
         );
 
         thread::sleep(Duration::from_millis(100));
@@ -322,6 +334,7 @@ mod tests {
             initial_bank,
             config,
             exit.clone(),
+            None,
         );
 
         thread::sleep(Duration::from_millis(150));

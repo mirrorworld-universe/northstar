@@ -302,6 +302,16 @@ fn main() {
         .unwrap_or("8910")
         .parse()
         .expect("valid ephemeral rpc port");
+    let ephemeral_ws_port: u16 = matches
+        .value_of("ephemeral_ws_port")
+        .unwrap_or("8911")
+        .parse()
+        .expect("valid ephemeral ws port");
+    let ephemeral_tpu_port: u16 = matches
+        .value_of("ephemeral_tpu_port")
+        .unwrap_or("8912")
+        .parse()
+        .expect("valid ephemeral tpu port");
 
     let warp_slot = if matches.is_present("warp_slot") {
         Some(match matches.value_of("warp_slot") {
@@ -496,6 +506,8 @@ fn main() {
     if let Some(portal_program_id) = portal {
         genesis.portal(portal_program_id);
         genesis.ephemeral_rpc_port(ephemeral_rpc_port);
+        genesis.ephemeral_ws_port(ephemeral_ws_port);
+        genesis.ephemeral_tpu_port(ephemeral_tpu_port);
     }
 
     genesis.rpc_config(JsonRpcConfig {

@@ -1,16 +1,21 @@
 use {
     crate::{
-        ephemeral_tx_client::EphemeralTransactionClient, slot_advancer::SlotAdvancer,
-        EphemeralRollupSettings,
+        ephemeral_tpu::EphemeralTpu, ephemeral_tx_client::EphemeralTransactionClient,
+        slot_advancer::SlotAdvancer, EphemeralRollupSettings,
     },
     log::{info, warn},
     solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
     solana_gossip::cluster_info::ClusterInfo,
+    solana_keypair::Keypair,
     solana_ledger::{blockstore::Blockstore, leader_schedule_cache::LeaderScheduleCache},
     solana_pubkey::Pubkey,
     solana_rpc::{
-        max_slots::MaxSlots, optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
-        rpc::JsonRpcConfig, rpc_service::JsonRpcService,
+        max_slots::MaxSlots,
+        optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
+        rpc::JsonRpcConfig,
+        rpc_pubsub_service::{PubSubConfig, PubSubService},
+        rpc_service::JsonRpcService,
+        rpc_subscriptions::RpcSubscriptions,
     },
     solana_runtime::{
         bank::Bank,
@@ -37,6 +42,16 @@ pub struct EphemeralRuntime {
     optimistically_confirmed_bank: Arc<RwLock<OptimisticallyConfirmedBank>>,
     rpc_service: JsonRpcService,
     rpc_addr: SocketAddr,
+    /// Sonic: PubSub WebSocket service for subscriptions.
+    pubsub_service: Option<PubSubService>,
+    /// Sonic: Trigger to cancel PubSub service on shutdown.
+    pubsub_trigger: Option<stream_cancel::Trigger>,
+    /// Sonic: RPC subscriptions shared between PubSub and slot advancer.
+    rpc_subscriptions: Arc<RpcSubscriptions>,
+    ws_addr: SocketAddr,
+    /// Sonic: TPU QUIC endpoint for direct transaction submission.
+    tpu: Option<EphemeralTpu>,
+    tpu_addr: SocketAddr,
     /// Sonic: Controls the RPC service lifetime — only set on final shutdown.
     rpc_exit: Arc<AtomicBool>,
     /// Sonic: Controls the current SlotAdvancer — set when resetting to new parent.
@@ -79,7 +94,10 @@ impl EphemeralRuntime {
         cluster_info: Arc<ClusterInfo>,
         settings: EphemeralRollupSettings,
         rpc_addr: SocketAddr,
+        ws_addr: SocketAddr,
+        tpu_addr: SocketAddr,
         portal_program_id: Pubkey,
+        manager_keypair: Arc<Keypair>,
     ) -> Result<Self, String> {
         // Place ER slots far above L1 slots so the shared AccountsDb root
         // tracker never sees an out-of-order add_root from either side.
@@ -194,8 +212,8 @@ impl EphemeralRuntime {
             None,
             bank_forks.clone(),
             block_commitment_cache.clone(),
-            blockstore,
-            cluster_info,
+            blockstore.clone(),
+            cluster_info.clone(),
             genesis_hash,
             ledger_dir.path(),
             validator_exit,
@@ -206,11 +224,47 @@ impl EphemeralRuntime {
             max_slots,
             leader_schedule_cache,
             tx_client.clone(),
-            max_complete_transaction_status_slot,
+            max_complete_transaction_status_slot.clone(),
             None,
             runtime.clone(),
             Some(delegated_set.clone()),
         )?;
+
+        // Sonic: Start PubSub WebSocket service
+        let rpc_subscriptions = Arc::new(RpcSubscriptions::new_with_config(
+            rpc_exit.clone(),
+            max_complete_transaction_status_slot,
+            blockstore,
+            bank_forks.clone(),
+            block_commitment_cache.clone(),
+            optimistically_confirmed_bank.clone(),
+            &PubSubConfig::default(),
+            None,
+        ));
+
+        let (pubsub_service, pubsub_trigger) = {
+            let (trigger, pubsub_svc) =
+                PubSubService::new(PubSubConfig::default(), &rpc_subscriptions, ws_addr);
+            (Some(pubsub_svc), Some(trigger))
+        };
+
+        info!("EphemeralRuntime PubSub listening at {ws_addr}");
+
+        // Sonic: Start TPU QUIC endpoint
+        let tpu_socket = solana_net_utils::sockets::bind_to(tpu_addr.ip(), tpu_addr.port())
+            .map_err(|e| format!("Failed to bind ER TPU socket on {tpu_addr}: {e}"))?;
+        let actual_tpu_addr = tpu_socket
+            .local_addr()
+            .map_err(|e| format!("Failed to get ER TPU local addr: {e}"))?;
+        let tpu = EphemeralTpu::new(
+            tpu_socket,
+            &manager_keypair,
+            tx_client.clone(),
+            rpc_exit.clone(),
+        )
+        .map_err(|e| format!("Failed to start ER TPU: {e}"))?;
+
+        info!("EphemeralRuntime TPU listening at {actual_tpu_addr}");
 
         info!(
             "EphemeralRuntime listening at {rpc_addr} with slot {}",
@@ -226,6 +280,7 @@ impl EphemeralRuntime {
                 manager_account: Pubkey::default(),
             },
             advancer_exit.clone(),
+            Some(rpc_subscriptions.clone()),
         );
 
         Ok(Self {
@@ -234,6 +289,12 @@ impl EphemeralRuntime {
             optimistically_confirmed_bank,
             rpc_service,
             rpc_addr,
+            pubsub_service,
+            pubsub_trigger,
+            rpc_subscriptions,
+            ws_addr,
+            tpu: Some(tpu),
+            tpu_addr: actual_tpu_addr,
             rpc_exit,
             advancer_exit,
             slot_advancer: Some(slot_advancer),
@@ -252,6 +313,16 @@ impl EphemeralRuntime {
 
     pub fn rpc_addr(&self) -> String {
         format!("http://{}", self.rpc_addr)
+    }
+
+    /// Sonic: Get the WebSocket address.
+    pub fn ws_addr(&self) -> String {
+        format!("ws://{}", self.ws_addr)
+    }
+
+    /// Sonic: Get the TPU QUIC address.
+    pub fn tpu_addr(&self) -> SocketAddr {
+        self.tpu_addr
     }
 
     /// Sonic: Activate the ephemeral rollup — transactions will be accepted.
@@ -281,6 +352,15 @@ impl EphemeralRuntime {
         self.advancer_exit.store(true, Ordering::Relaxed);
         if let Some(advancer) = self.slot_advancer.take() {
             advancer.join();
+        }
+        // Stop TPU
+        if let Some(mut tpu) = self.tpu.take() {
+            tpu.shutdown();
+        }
+        // Stop PubSub (Trigger drop cancels the Tripwire)
+        drop(self.pubsub_trigger.take());
+        if let Some(pubsub) = self.pubsub_service.take() {
+            let _ = pubsub.close();
         }
         // Then stop RPC service
         self.rpc_exit.store(true, Ordering::Relaxed);
@@ -351,6 +431,7 @@ impl EphemeralRuntime {
                 manager_account: Pubkey::default(),
             },
             advancer_exit,
+            Some(self.rpc_subscriptions.clone()),
         ));
 
         info!("EphemeralRuntime reset to new L1 parent, ER slot {}", slot);
@@ -490,7 +571,10 @@ mod tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             portal_program_id,
+            Arc::new(Keypair::new()),
         )
         .unwrap();
         (parent_bank, runtime)
@@ -538,7 +622,10 @@ mod tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
         )
         .unwrap();
         let rpc_client = rpc_client(&runtime);
@@ -578,7 +665,10 @@ mod tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
         )
         .unwrap();
         runtime.activate();
@@ -648,7 +738,10 @@ mod tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
         )
         .unwrap();
         // Do NOT call runtime.activate() — runtime stays inactive
@@ -723,7 +816,10 @@ mod tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
         )
         .unwrap();
 
@@ -785,7 +881,10 @@ mod tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
         )
         .unwrap();
 
@@ -862,7 +961,10 @@ mod tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
         )
         .unwrap();
         runtime.activate();
@@ -950,7 +1052,10 @@ mod tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
         )
         .unwrap();
         runtime.activate();
@@ -1015,7 +1120,10 @@ mod tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             portal_program_id,
+            Arc::new(Keypair::new()),
         )
         .unwrap();
 
@@ -1059,7 +1167,10 @@ mod tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             portal_program_id,
+            Arc::new(Keypair::new()),
         )
         .unwrap();
 
@@ -1095,7 +1206,10 @@ mod tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             portal_program_id,
+            Arc::new(Keypair::new()),
         )
         .unwrap();
 
@@ -1140,7 +1254,10 @@ mod tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             portal_program_id,
+            Arc::new(Keypair::new()),
         )
         .unwrap();
 
@@ -1187,7 +1304,10 @@ mod tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             portal_program_id,
+            Arc::new(Keypair::new()),
         )
         .unwrap();
 

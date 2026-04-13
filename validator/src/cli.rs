@@ -857,6 +857,26 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
                 .validator(is_parsable::<u16>)
                 .help("Port for the ephemeral rollup RPC server"),
         )
+        // Sonic: Ephemeral WS port for the rollup PubSub
+        .arg(
+            Arg::with_name("ephemeral_ws_port")
+                .long("ephemeral-ws-port")
+                .value_name("PORT")
+                .takes_value(true)
+                .default_value("8911")
+                .validator(is_parsable::<u16>)
+                .help("Port for the ephemeral rollup WebSocket (PubSub) server"),
+        )
+        // Sonic: Ephemeral TPU port for the rollup QUIC
+        .arg(
+            Arg::with_name("ephemeral_tpu_port")
+                .long("ephemeral-tpu-port")
+                .value_name("PORT")
+                .takes_value(true)
+                .default_value("8912")
+                .validator(is_parsable::<u16>)
+                .help("Port for the ephemeral rollup TPU (QUIC) endpoint"),
+        )
         .args(&pub_sub_config::args(/*test_validator:*/ true))
 }
 

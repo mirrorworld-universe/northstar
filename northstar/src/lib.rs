@@ -11,6 +11,7 @@ use {
 };
 
 pub mod ephemeral_runtime;
+pub mod ephemeral_tpu;
 pub mod ephemeral_tx_client;
 pub mod portal_state;
 pub mod slot_advancer;
@@ -125,6 +126,11 @@ impl Manager {
     /// Get the RPC address of the runtime, if initialized
     pub fn runtime_addr(&self) -> Option<String> {
         self.runtime.as_ref().map(|r| r.rpc_addr())
+    }
+
+    /// Get the WebSocket address of the runtime, if initialized
+    pub fn runtime_ws_addr(&self) -> Option<String> {
+        self.runtime.as_ref().map(|r| r.ws_addr())
     }
 
     /// Sonic: Shutdown the always-on runtime (called at validator exit)
@@ -314,6 +320,8 @@ impl Manager {
         root_bank: Arc<Bank>,
         cluster_info: Arc<ClusterInfo>,
         rpc_addr: SocketAddr,
+        ws_addr: SocketAddr,
+        tpu_addr: SocketAddr,
     ) -> Result<()> {
         if self.runtime.is_some() {
             info!("Ephemeral runtime already initialized, skipping");
@@ -334,14 +342,20 @@ impl Manager {
             cluster_info,
             settings,
             rpc_addr,
+            ws_addr,
+            tpu_addr,
             self.config.portal_program_id,
+            self.config.manager_account.clone(),
         )
         .map_err(|e| {
             error!("Failed to create ephemeral runtime: {}", e);
             NorthStarError::RuntimeCreationFailed(e)
         })?;
 
-        info!("Always-on ephemeral RPC initialized at {rpc_addr} (inactive)");
+        info!(
+            "Always-on ephemeral RPC initialized at {rpc_addr}, WS at {ws_addr}, TPU at \
+             {tpu_addr} (inactive)"
+        );
         self.runtime = Some(runtime);
         Ok(())
     }
@@ -388,7 +402,11 @@ impl Manager {
             cluster_info,
             settings,
             rpc_addr,
+            // Tests: no WS or TPU — use unbound addrs that won't be used
+            "127.0.0.1:0".parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
             self.config.portal_program_id,
+            self.config.manager_account.clone(),
         )
         .map_err(|e| {
             error!("Failed to create ephemeral runtime: {}", e);
@@ -967,7 +985,10 @@ mod portal_e2e_tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             program_id,
+            Arc::new(Keypair::new()),
         )
         .expect("Failed to create ephemeral runtime");
 
@@ -1100,7 +1121,10 @@ mod portal_e2e_tests {
             cluster_info,
             settings,
             find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
             program_id,
+            Arc::new(Keypair::new()),
         )
         .expect("Failed to create ephemeral runtime");
 
