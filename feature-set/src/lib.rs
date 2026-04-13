@@ -1189,7 +1189,7 @@ pub mod static_instruction_limit {
 }
 
 pub mod discard_unexpected_data_complete_shreds {
-    solana_pubkey::declare_id!("shredXP8xLjJWp1AWh3gAFsFn4GSH1vohhCMDHw5koU");
+    solana_pubkey::declare_id!("dcomRRWHXP1FVWPqi9Mm4oxJhF4ehC795SvAtUdA9os");
 }
 
 pub mod vote_state_v4 {
@@ -1308,11 +1308,11 @@ pub mod vote_account_initialize_v2 {
 }
 
 pub mod validate_chained_block_id {
-    solana_pubkey::declare_id!("vbiddkDHTSHSvL8B21AetWvTBLxxUZ1FmU6DFjztyRn");
+    solana_pubkey::declare_id!("vcmrbYbiMVKaq1snKP6eCacNDcr6qZvpCNUjmk6gxvZ");
 }
 
 pub mod validator_admission_ticket {
-    solana_pubkey::declare_id!("VATtb1DepUwdPh5bFVasdtkbeDNsftZSRzr2aKpKWJA");
+    solana_pubkey::declare_id!("VAT9huvhPjRN9cyrPytq9rwvEJ3J4ADtjdncgZRyANJ");
 }
 
 pub mod direct_account_pointers_in_program_input {
