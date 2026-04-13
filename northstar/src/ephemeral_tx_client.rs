@@ -3,7 +3,6 @@ use {
     solana_account::{ReadableAccount, WritableAccount},
     solana_keypair::Keypair,
     solana_pubkey::Pubkey,
-    solana_quic_definitions::NotifyKeyUpdate,
     solana_runtime::{bank::Bank, bank_forks::BankForks},
     solana_sdk_ids::{bpf_loader, bpf_loader_upgradeable, system_program, sysvar},
     solana_send_transaction_service::{
@@ -12,6 +11,7 @@ use {
     },
     solana_svm::transaction_processor::ExecutionRecordingConfig,
     solana_svm_timings::ExecuteTimings,
+    solana_tls_utils::NotifyKeyUpdate,
     solana_transaction::versioned::VersionedTransaction,
     std::{
         collections::HashSet,

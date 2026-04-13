@@ -65,7 +65,8 @@ use {
     solana_instruction::{error::InstructionError, AccountMeta, Instruction},
     solana_keypair::{keypair_from_seed, Keypair},
     solana_loader_v3_interface::{
-        instruction::UpgradeableLoaderInstruction, state::UpgradeableLoaderState,
+        get_program_data_address, instruction::UpgradeableLoaderInstruction,
+        state::UpgradeableLoaderState,
     },
     solana_loader_v4_interface::{instruction as loader_v4, state::LoaderV4State},
     solana_message::{
@@ -830,21 +831,22 @@ where
         - bank2_sysvar_delta();
 
     // this assumes that no new builtins or precompiles were activated in bank1 or bank2
-    let PrevEpochInflationRewards {
-        validator_rewards, ..
-    } = bank2.calculate_previous_epoch_inflation_rewards(bank0.capitalization(), bank0.epoch());
+    let EpochInflationRewards {
+        validator_rewards_lamports,
+        ..
+    } = bank2.calculate_epoch_inflation_rewards(bank0.capitalization(), bank0.epoch());
 
     // verify the stake and vote accounts are the right size
     assert!(
         ((bank2.get_balance(&stake_id) - stake_account.lamports() + bank2.get_balance(&vote_id)
             - vote_account.lamports()) as f64
-            - validator_rewards as f64)
+            - validator_rewards_lamports as f64)
             .abs()
             < 1.0
     );
 
     // verify the rewards are the right size
-    assert!((validator_rewards as f64 - paid_rewards as f64).abs() < 1.0); // rounding, truncating
+    assert!((validator_rewards_lamports as f64 - paid_rewards as f64).abs() < 1.0); // rounding, truncating
 
     // verify validator rewards show up in rewards vectors
     assert_eq!(
@@ -853,7 +855,7 @@ where
             stake_id,
             RewardInfo {
                 reward_type: RewardType::Staking,
-                lamports: validator_rewards as i64,
+                lamports: validator_rewards_lamports as i64,
                 post_balance: bank2.get_balance(&stake_id),
                 commission: Some(0),
             }
@@ -1183,15 +1185,19 @@ fn test_one_tx_two_out_atomic_pass() {
 // This test demonstrates that fees are paid even when a program fails.
 #[test]
 fn test_detect_failed_duplicate_transactions() {
-    let (mut genesis_config, mint_keypair) = create_genesis_config(10_000);
+    let (mut genesis_config, mint_keypair) = create_genesis_config(LAMPORTS_PER_SOL);
     genesis_config.fee_rate_governor = FeeRateGovernor::new(5_000, 0);
     let (bank, _bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
 
     let dest = Keypair::new();
 
     // source with 0 program context
-    let tx =
-        system_transaction::transfer(&mint_keypair, &dest.pubkey(), 10_000, genesis_config.hash());
+    let tx = system_transaction::transfer(
+        &mint_keypair,
+        &dest.pubkey(),
+        LAMPORTS_PER_SOL,
+        genesis_config.hash(),
+    );
     let signature = tx.signatures[0];
     assert!(!bank.has_signature(&signature));
 
@@ -1207,7 +1213,10 @@ fn test_detect_failed_duplicate_transactions() {
     assert_eq!(bank.get_balance(&dest.pubkey()), 0);
 
     // This should be the original balance minus the transaction fee.
-    assert_eq!(bank.get_balance(&mint_keypair.pubkey()), 5000);
+    assert_eq!(
+        bank.get_balance(&mint_keypair.pubkey()),
+        LAMPORTS_PER_SOL - 5_000
+    );
 }
 
 #[test]
@@ -1932,16 +1941,11 @@ fn test_load_and_execute_commit_transactions_fees_only() {
         genesis_config.epoch_schedule.get_first_slot_in_epoch(1),
     );
 
-    // Use rent-paying fee payer to show that rent is not collected for fees
-    // only transactions even when they use a rent-paying account.
-    let rent_paying_fee_payer = Pubkey::new_unique();
+    let fee_payer = Pubkey::new_unique();
+    let fee_payer_initial_balance = 10 * genesis_config.rent.minimum_balance(0);
     bank.store_account(
-        &rent_paying_fee_payer,
-        &AccountSharedData::new(
-            genesis_config.rent.minimum_balance(0) - 1,
-            0,
-            &system_program::id(),
-        ),
+        &fee_payer,
+        &AccountSharedData::new(fee_payer_initial_balance, 0, &system_program::id()),
     );
 
     // Use nonce to show that loaded account stats also included loaded
@@ -1949,7 +1953,7 @@ fn test_load_and_execute_commit_transactions_fees_only() {
     let nonce_size = nonce::state::State::size();
     let nonce_balance = genesis_config.rent.minimum_balance(nonce_size);
     let nonce_pubkey = Pubkey::new_unique();
-    let nonce_authority = rent_paying_fee_payer;
+    let nonce_authority = fee_payer;
     let nonce_initial_hash = DurableNonce::from_blockhash(&Hash::new_unique());
     let nonce_data = nonce::state::Data::new(nonce_authority, nonce_initial_hash, 5000);
     let nonce_account = AccountSharedData::new_data(
@@ -1965,10 +1969,10 @@ fn test_load_and_execute_commit_transactions_fees_only() {
     let missing_program_id = Pubkey::new_unique();
     let transaction = Transaction::new_unsigned(Message::new_with_blockhash(
         &[
-            system_instruction::advance_nonce_account(&nonce_pubkey, &rent_paying_fee_payer),
+            system_instruction::advance_nonce_account(&nonce_pubkey, &fee_payer),
             Instruction::new_with_bincode(missing_program_id, &0, vec![]),
         ],
-        Some(&rent_paying_fee_payer),
+        Some(&fee_payer),
         &nonce_data.blockhash(),
     ));
 
@@ -1996,7 +2000,7 @@ fn test_load_and_execute_commit_transactions_fees_only() {
                 loaded_accounts_count: 2,
                 loaded_accounts_data_size: nonce_size as u32,
             },
-            fee_payer_post_balance: genesis_config.rent.minimum_balance(0) - 1 - 5000,
+            fee_payer_post_balance: fee_payer_initial_balance - 5000,
         })]
     );
 }
@@ -3356,7 +3360,7 @@ fn test_bank_cloned_stake_delegations() {
 
 #[test]
 fn test_is_delta_with_no_committables() {
-    let (genesis_config, mint_keypair) = create_genesis_config(8000);
+    let (genesis_config, mint_keypair) = create_genesis_config(LAMPORTS_PER_SOL);
     let (bank, _bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
     bank.is_delta.store(false, Relaxed);
 
@@ -3379,7 +3383,11 @@ fn test_is_delta_with_no_committables() {
     // Should fail with InstructionError, but InstructionErrors are committable,
     // so is_delta should be true
     assert_eq!(
-        bank.transfer(10_001, &mint_keypair, &solana_pubkey::new_rand()),
+        bank.transfer(
+            LAMPORTS_PER_SOL + 1,
+            &mint_keypair,
+            &solana_pubkey::new_rand()
+        ),
         Err(TransactionError::InstructionError(
             0,
             SystemError::ResultWithNegativeLamports.into(),
@@ -5199,11 +5207,13 @@ fn test_fuzz_instructions() {
         .map(|_| {
             let key = solana_pubkey::new_rand();
             let balance = if rng().random_ratio(9, 10) {
+                // rent exempt min balance is added because RentPaying accounts are no longer allowed
                 let lamports = if rng().random_ratio(1, 5) {
                     rng().random_range(0..10)
                 } else {
                     rng().random_range(20..100)
-                };
+                } + bank.get_minimum_balance_for_rent_exemption(10);
+
                 let space = rng().random_range(0..10);
                 let owner = Pubkey::default();
                 let account = AccountSharedData::new(lamports, space, &owner);
@@ -5477,7 +5487,10 @@ fn test_clean_nonrooted() {
     test_utils::deposit(&bank1, &pubkey0, some_lamports).unwrap();
     goto_end_of_slot(bank1.clone());
     bank1.freeze();
-    bank1.flush_accounts_cache_slot_for_tests();
+    bank1
+        .accounts()
+        .accounts_db
+        .flush_unrooted_slot_cache(bank1.slot());
 
     bank1.print_accounts_stats();
 
@@ -5706,7 +5719,7 @@ fn test_add_builtin_account() {
 /// to use the write cache
 fn add_root_and_flush_write_cache(bank: &Bank) {
     bank.rc.accounts.add_root(bank.slot());
-    bank.flush_accounts_cache_slot_for_tests()
+    bank.force_flush_accounts_cache();
 }
 
 #[test]
@@ -6130,12 +6143,12 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
         account
     };
     let program_account = AccountSharedData::new(
-        min_programdata_balance,
+        min_program_balance,
         UpgradeableLoaderState::size_of_program(),
         &bpf_loader_upgradeable::id(),
     );
     let programdata_account = AccountSharedData::new(
-        1,
+        min_programdata_balance,
         UpgradeableLoaderState::size_of_programdata(elf.len()),
         &bpf_loader_upgradeable::id(),
     );
@@ -7306,7 +7319,7 @@ fn test_timestamp_fast() {
 
 #[test]
 fn test_program_is_native_loader() {
-    let (genesis_config, mint_keypair) = create_genesis_config(50000);
+    let (genesis_config, mint_keypair) = create_genesis_config(LAMPORTS_PER_SOL);
     let bank = Bank::new_for_tests(&genesis_config);
     let (bank, _bank_forks) = bank.wrap_with_bank_forks_for_tests();
 
@@ -8531,6 +8544,7 @@ fn test_get_largest_accounts() {
 
     let pubkeys: Vec<_> = (0..5).map(|_| Pubkey::new_unique()).collect();
     let pubkeys_hashset: HashSet<_> = pubkeys.iter().cloned().collect();
+    let exclude_hashset: HashSet<_> = [*bank.leader_id()].into_iter().collect(); // exclude leader account when querying
 
     let pubkeys_balances: Vec<_> = pubkeys
         .iter()
@@ -8557,7 +8571,11 @@ fn test_get_largest_accounts() {
     bank.store_account(&pubkeys_balances[4].0, &account4);
 
     // Create HashSet to exclude an account
-    let exclude4: HashSet<_> = pubkeys[4..].iter().cloned().collect();
+    let exclude4 = pubkeys[4..]
+        .iter()
+        .cloned()
+        .chain(exclude_hashset.iter().cloned())
+        .collect();
 
     let mut sorted_accounts = pubkeys_balances.clone();
     sorted_accounts.sort_by(|a, b| a.1.cmp(&b.1).reverse());
@@ -8569,7 +8587,7 @@ fn test_get_largest_accounts() {
         vec![(pubkeys[4], 5 * LAMPORTS_PER_SOL)]
     );
     assert_eq!(
-        bank.get_largest_accounts(1, &HashSet::new(), AccountAddressFilter::Exclude, false)
+        bank.get_largest_accounts(1, &exclude_hashset, AccountAddressFilter::Exclude, false)
             .unwrap(),
         vec![(pubkeys[4], 5 * LAMPORTS_PER_SOL)]
     );
@@ -8627,6 +8645,7 @@ fn test_get_largest_accounts() {
     let exclude: HashSet<_> = [pubkeys[0], pubkeys[2], pubkeys[4]]
         .iter()
         .cloned()
+        .chain(exclude_hashset.iter().cloned())
         .collect();
     assert_eq!(
         bank.get_largest_accounts(2, &exclude, AccountAddressFilter::Exclude, false)
@@ -9646,17 +9665,6 @@ fn test_invalid_rent_state_changes_existing_accounts() {
     let account_data_size = 100;
     let rent_exempt_minimum = genesis_config.rent.minimum_balance(account_data_size);
 
-    // Create legacy accounts of various kinds
-    let rent_paying_account = Keypair::new();
-    genesis_config.accounts.insert(
-        rent_paying_account.pubkey(),
-        Account::new_rent_epoch(
-            rent_exempt_minimum - 1,
-            account_data_size,
-            &mock_program_id,
-            INITIAL_RENT_EPOCH + 1,
-        ),
-    );
     let rent_exempt_account = Keypair::new();
     genesis_config.accounts.insert(
         rent_exempt_account.pubkey(),
@@ -9679,39 +9687,6 @@ fn test_invalid_rent_state_changes_existing_accounts() {
         let account = bank.get_account(pubkey).unwrap();
         Rent::default().is_exempt(account.lamports(), account.data().len())
     };
-
-    // RentPaying account can be left as Uninitialized, in other RentPaying states, or RentExempt
-    let tx = create_mock_transfer(
-        &mint_keypair,        // payer
-        &rent_paying_account, // from
-        &mint_keypair,        // to
-        1,
-        mock_program_id,
-        recent_blockhash,
-    );
-    let result = bank.process_transaction(&tx);
-    assert!(result.is_ok());
-    assert!(!check_account_is_rent_exempt(&rent_paying_account.pubkey()));
-    let tx = create_mock_transfer(
-        &mint_keypair,        // payer
-        &rent_paying_account, // from
-        &mint_keypair,        // to
-        rent_exempt_minimum - 2,
-        mock_program_id,
-        recent_blockhash,
-    );
-    let result = bank.process_transaction(&tx);
-    assert!(result.is_ok());
-    assert!(bank.get_account(&rent_paying_account.pubkey()).is_none());
-
-    bank.store_account(
-        // restore program-owned account
-        &rent_paying_account.pubkey(),
-        &AccountSharedData::new(rent_exempt_minimum - 1, account_data_size, &mock_program_id),
-    );
-    let result = bank.transfer(1, &mint_keypair, &rent_paying_account.pubkey());
-    assert!(result.is_ok());
-    assert!(check_account_is_rent_exempt(&rent_paying_account.pubkey()));
 
     // RentExempt account can only remain RentExempt or be Uninitialized
     let tx = create_mock_transfer(
@@ -9953,12 +9928,6 @@ fn test_invalid_rent_state_changes_fee_payer() {
     );
     let rent_exempt_minimum = genesis_config.rent.minimum_balance(0);
 
-    // Create legacy rent-paying System account
-    let rent_paying_fee_payer = Keypair::new();
-    genesis_config.accounts.insert(
-        rent_paying_fee_payer.pubkey(),
-        Account::new(rent_exempt_minimum - 1, 0, &system_program::id()),
-    );
     // Create RentExempt recipient account
     let recipient = Pubkey::new_unique();
     genesis_config.accounts.insert(
@@ -9995,70 +9964,6 @@ fn test_invalid_rent_state_changes_fee_payer() {
     ));
     let fee = bank.get_fee_for_message(&dummy_message).unwrap();
 
-    // RentPaying fee-payer can remain RentPaying
-    let tx = Transaction::new(
-        &[&rent_paying_fee_payer, &mint_keypair],
-        Message::new(
-            &[system_instruction::transfer(
-                &mint_keypair.pubkey(),
-                &recipient,
-                rent_exempt_minimum,
-            )],
-            Some(&rent_paying_fee_payer.pubkey()),
-        ),
-        recent_blockhash,
-    );
-    let result = bank.process_transaction(&tx);
-    assert!(result.is_ok());
-    assert!(!check_account_is_rent_exempt(
-        &rent_paying_fee_payer.pubkey()
-    ));
-
-    // RentPaying fee-payer can remain RentPaying on failed executed tx
-    let sender = Keypair::new();
-    let fee_payer_balance = bank.get_balance(&rent_paying_fee_payer.pubkey());
-    let tx = Transaction::new(
-        &[&rent_paying_fee_payer, &sender],
-        Message::new(
-            &[system_instruction::transfer(
-                &sender.pubkey(),
-                &recipient,
-                rent_exempt_minimum,
-            )],
-            Some(&rent_paying_fee_payer.pubkey()),
-        ),
-        recent_blockhash,
-    );
-    let result = bank.process_transaction(&tx);
-    assert_eq!(
-        result.unwrap_err(),
-        TransactionError::InstructionError(0, InstructionError::Custom(1))
-    );
-    assert_ne!(
-        fee_payer_balance,
-        bank.get_balance(&rent_paying_fee_payer.pubkey())
-    );
-    assert!(!check_account_is_rent_exempt(
-        &rent_paying_fee_payer.pubkey()
-    ));
-
-    // RentPaying fee-payer can be emptied with fee and transaction
-    let tx = Transaction::new(
-        &[&rent_paying_fee_payer],
-        Message::new(
-            &[system_instruction::transfer(
-                &rent_paying_fee_payer.pubkey(),
-                &recipient,
-                bank.get_balance(&rent_paying_fee_payer.pubkey()) - fee,
-            )],
-            Some(&rent_paying_fee_payer.pubkey()),
-        ),
-        recent_blockhash,
-    );
-    let result = bank.process_transaction(&tx);
-    assert!(result.is_ok());
-    assert_eq!(0, bank.get_balance(&rent_paying_fee_payer.pubkey()));
-
     // RentExempt fee-payer cannot become RentPaying from transaction fee
     let tx = Transaction::new(
         &[&rent_exempt_fee_payer, &mint_keypair],
@@ -10082,6 +9987,7 @@ fn test_invalid_rent_state_changes_fee_payer() {
     ));
 
     // RentExempt fee-payer cannot become RentPaying via failed executed tx
+    let sender = Keypair::new();
     let tx = Transaction::new(
         &[&rent_exempt_fee_payer, &sender],
         Message::new(
@@ -10351,64 +10257,22 @@ fn test_resize_and_rent() {
         &AccountSharedData::new(1_000_000_000, 0, &mock_program_id),
     );
 
-    let rent_paying_pubkey = solana_pubkey::new_rand();
+    let test_pubkey = solana_pubkey::new_rand();
     let mut rent_paying_account = AccountSharedData::new(
-        rent_exempt_minimum_small - 1,
+        rent_exempt_minimum_small,
         account_data_size_small,
         &mock_program_id,
     );
     rent_paying_account.set_rent_epoch(1);
 
     // restore program-owned account
-    bank.store_account(&rent_paying_pubkey, &rent_paying_account);
-
-    // rent paying, realloc larger, fail because not rent exempt
-    let tx = create_mock_realloc_tx(
-        &mint_keypair,
-        &funding_keypair,
-        &rent_paying_pubkey,
-        account_data_size_large,
-        rent_exempt_minimum_small - 1,
-        mock_program_id,
-        recent_blockhash,
-    );
-    let expected_err = {
-        let account_index = tx
-            .message
-            .account_keys
-            .iter()
-            .position(|key| key == &rent_paying_pubkey)
-            .unwrap() as u8;
-        TransactionError::InsufficientFundsForRent { account_index }
-    };
-    assert_eq!(bank.process_transaction(&tx).unwrap_err(), expected_err);
-    assert_eq!(
-        rent_exempt_minimum_small - 1,
-        bank.get_account(&rent_paying_pubkey).unwrap().lamports()
-    );
-
-    // rent paying, realloc larger and rent exempt
-    let tx = create_mock_realloc_tx(
-        &mint_keypair,
-        &funding_keypair,
-        &rent_paying_pubkey,
-        account_data_size_large,
-        rent_exempt_minimum_large,
-        mock_program_id,
-        recent_blockhash,
-    );
-    let result = bank.process_transaction(&tx);
-    assert!(result.is_ok());
-    assert_eq!(
-        rent_exempt_minimum_large,
-        bank.get_account(&rent_paying_pubkey).unwrap().lamports()
-    );
+    bank.store_account(&test_pubkey, &rent_paying_account);
 
     // rent exempt, realloc small, fail because not rent exempt
     let tx = create_mock_realloc_tx(
         &mint_keypair,
         &funding_keypair,
-        &rent_paying_pubkey,
+        &test_pubkey,
         account_data_size_small,
         rent_exempt_minimum_small - 1,
         mock_program_id,
@@ -10419,21 +10283,21 @@ fn test_resize_and_rent() {
             .message
             .account_keys
             .iter()
-            .position(|key| key == &rent_paying_pubkey)
+            .position(|key| key == &test_pubkey)
             .unwrap() as u8;
         TransactionError::InsufficientFundsForRent { account_index }
     };
     assert_eq!(bank.process_transaction(&tx).unwrap_err(), expected_err);
     assert_eq!(
-        rent_exempt_minimum_large,
-        bank.get_account(&rent_paying_pubkey).unwrap().lamports()
+        rent_exempt_minimum_small,
+        bank.get_account(&test_pubkey).unwrap().lamports()
     );
 
     // rent exempt, realloc smaller and rent exempt
     let tx = create_mock_realloc_tx(
         &mint_keypair,
         &funding_keypair,
-        &rent_paying_pubkey,
+        &test_pubkey,
         account_data_size_small,
         rent_exempt_minimum_small,
         mock_program_id,
@@ -10443,14 +10307,14 @@ fn test_resize_and_rent() {
     assert!(result.is_ok());
     assert_eq!(
         rent_exempt_minimum_small,
-        bank.get_account(&rent_paying_pubkey).unwrap().lamports()
+        bank.get_account(&test_pubkey).unwrap().lamports()
     );
 
     // rent exempt, realloc large, fail because not rent exempt
     let tx = create_mock_realloc_tx(
         &mint_keypair,
         &funding_keypair,
-        &rent_paying_pubkey,
+        &test_pubkey,
         account_data_size_large,
         rent_exempt_minimum_large - 1,
         mock_program_id,
@@ -10461,21 +10325,21 @@ fn test_resize_and_rent() {
             .message
             .account_keys
             .iter()
-            .position(|key| key == &rent_paying_pubkey)
+            .position(|key| key == &test_pubkey)
             .unwrap() as u8;
         TransactionError::InsufficientFundsForRent { account_index }
     };
     assert_eq!(bank.process_transaction(&tx).unwrap_err(), expected_err);
     assert_eq!(
         rent_exempt_minimum_small,
-        bank.get_account(&rent_paying_pubkey).unwrap().lamports()
+        bank.get_account(&test_pubkey).unwrap().lamports()
     );
 
     // rent exempt, realloc large and rent exempt
     let tx = create_mock_realloc_tx(
         &mint_keypair,
         &funding_keypair,
-        &rent_paying_pubkey,
+        &test_pubkey,
         account_data_size_large,
         rent_exempt_minimum_large,
         mock_program_id,
@@ -10485,30 +10349,10 @@ fn test_resize_and_rent() {
     assert!(result.is_ok());
     assert_eq!(
         rent_exempt_minimum_large,
-        bank.get_account(&rent_paying_pubkey).unwrap().lamports()
+        bank.get_account(&test_pubkey).unwrap().lamports()
     );
 
     let created_keypair = Keypair::new();
-
-    // create account, not rent exempt
-    let tx = system_transaction::create_account(
-        &mint_keypair,
-        &created_keypair,
-        recent_blockhash,
-        rent_exempt_minimum_small - 1,
-        account_data_size_small as u64,
-        &system_program::id(),
-    );
-    let expected_err = {
-        let account_index = tx
-            .message
-            .account_keys
-            .iter()
-            .position(|key| key == &created_keypair.pubkey())
-            .unwrap() as u8;
-        TransactionError::InsufficientFundsForRent { account_index }
-    };
-    assert_eq!(bank.process_transaction(&tx).unwrap_err(), expected_err);
 
     // create account, rent exempt
     let tx = system_transaction::create_account(
@@ -12420,4 +12264,139 @@ fn test_parent_block_id() {
     // expected value.
     let child_bank = Bank::new_from_parent(parent_bank, &Pubkey::new_unique(), 1);
     assert_eq!(parent_block_id, child_bank.parent_block_id());
+}
+
+#[test]
+fn test_bpf_loader_upgradeable_deploy_with_more_than_255_accounts() {
+    let (genesis_config, _mint_keypair) = create_genesis_config_no_tx_fee(1_000_000_000);
+    let bank = Bank::new_for_tests(&genesis_config);
+    let (bank, _bank_forks) = bank.wrap_with_bank_forks_for_tests();
+    let bank_client = BankClient::new_shared(bank.clone());
+
+    // Setup keypairs and addresses
+    let payer_keypair = Keypair::new();
+    let program_keypair = Keypair::new();
+    let buffer_address = Pubkey::new_unique();
+    let (programdata_address, _) = Pubkey::find_program_address(
+        &[program_keypair.pubkey().as_ref()],
+        &bpf_loader_upgradeable::id(),
+    );
+    let upgrade_authority_keypair = Keypair::new();
+
+    // Load program file
+    let mut file = File::open("../programs/bpf_loader/test_elfs/out/noop_aligned.so")
+        .expect("file open failed");
+    let mut elf = Vec::new();
+    file.read_to_end(&mut elf).unwrap();
+
+    // Compute rent exempt balances
+    let program_len = elf.len();
+    let min_program_balance =
+        bank.get_minimum_balance_for_rent_exemption(UpgradeableLoaderState::size_of_program());
+    let min_buffer_balance = bank.get_minimum_balance_for_rent_exemption(
+        UpgradeableLoaderState::size_of_buffer(program_len),
+    );
+    let min_programdata_balance = bank.get_minimum_balance_for_rent_exemption(
+        UpgradeableLoaderState::size_of_programdata(program_len),
+    );
+
+    // Setup accounts
+    let buffer_account = {
+        let mut account = AccountSharedData::new(
+            min_buffer_balance,
+            UpgradeableLoaderState::size_of_buffer(elf.len()),
+            &bpf_loader_upgradeable::id(),
+        );
+        account
+            .set_state(&UpgradeableLoaderState::Buffer {
+                authority_address: Some(upgrade_authority_keypair.pubkey()),
+            })
+            .unwrap();
+        account
+            .data_as_mut_slice()
+            .get_mut(UpgradeableLoaderState::size_of_buffer_metadata()..)
+            .unwrap()
+            .copy_from_slice(&elf);
+        account
+    };
+
+    // Test successful deploy
+    let payer_base_balance = LAMPORTS_PER_SOL;
+    let deploy_fees = {
+        let fee_calculator = genesis_config.fee_rate_governor.create_fee_calculator();
+        3 * fee_calculator.lamports_per_signature
+    };
+    let min_payer_balance = min_program_balance
+        .saturating_add(min_programdata_balance)
+        .saturating_sub(min_buffer_balance.saturating_add(deploy_fees));
+    bank.store_account(
+        &payer_keypair.pubkey(),
+        &AccountSharedData::new(
+            payer_base_balance.saturating_add(min_payer_balance),
+            0,
+            &system_program::id(),
+        ),
+    );
+    bank.store_account(&program_keypair.pubkey(), &AccountSharedData::default());
+    bank.store_account(&programdata_address, &AccountSharedData::default());
+    bank.store_account(&buffer_address, &buffer_account);
+
+    fn deploy_with_max_program_len(
+        payer_address: &Pubkey,
+        program_address: &Pubkey,
+        buffer_address: &Pubkey,
+        upgrade_authority_address: &Pubkey,
+        program_lamports: u64,
+        max_data_len: usize,
+    ) -> std::result::Result<Vec<Instruction>, InstructionError> {
+        let programdata_address = get_program_data_address(program_address);
+        let dummy_pubkey = Pubkey::new_unique();
+        let mut deploy_ix_accounts = vec![
+            AccountMeta::new(*payer_address, true),
+            AccountMeta::new(programdata_address, false),
+            AccountMeta::new(*program_address, false),
+            AccountMeta::new(*buffer_address, false),
+            AccountMeta::new_readonly(sysvar::rent::id(), false),
+            AccountMeta::new_readonly(sysvar::clock::id(), false),
+            AccountMeta::new_readonly(dummy_pubkey, false),
+            AccountMeta::new_readonly(*upgrade_authority_address, true),
+        ];
+        while deploy_ix_accounts.len() < 256 {
+            deploy_ix_accounts.push(AccountMeta::new_readonly(dummy_pubkey, false));
+        }
+
+        Ok(vec![
+            system_instruction::create_account(
+                payer_address,
+                program_address,
+                program_lamports,
+                UpgradeableLoaderState::size_of_program() as u64,
+                &bpf_loader_upgradeable::id(),
+            ),
+            Instruction::new_with_bincode(
+                bpf_loader_upgradeable::id(),
+                &UpgradeableLoaderInstruction::DeployWithMaxDataLen { max_data_len },
+                deploy_ix_accounts,
+            ),
+        ])
+    }
+
+    let message = Message::new(
+        &deploy_with_max_program_len(
+            &payer_keypair.pubkey(),
+            &program_keypair.pubkey(),
+            &buffer_address,
+            &upgrade_authority_keypair.pubkey(),
+            min_program_balance,
+            elf.len(),
+        )
+        .unwrap(),
+        Some(&payer_keypair.pubkey()),
+    );
+    assert!(bank_client
+        .send_and_confirm_message(
+            &[&payer_keypair, &program_keypair, &upgrade_authority_keypair],
+            message
+        )
+        .is_err());
 }

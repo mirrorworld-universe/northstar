@@ -43,10 +43,13 @@ use {
             },
         },
         bank_forks::BankForks,
-        epoch_stakes::{NodeVoteAccounts, VersionedEpochStakes},
+        epoch_stakes::{
+            DeserializableVersionedEpochStakes, NodeVoteAccounts, VersionedEpochStakes,
+        },
         inflation_rewards::points::InflationPointCalculationEvent,
         installed_scheduler_pool::{BankWithScheduler, InstalledSchedulerRwLock},
         rent_collector::RentCollector,
+        reward_info::RewardInfo,
         runtime_config::RuntimeConfig,
         stake_account::StakeAccount,
         stake_history::StakeHistory as CowStakeHistory,
@@ -54,14 +57,14 @@ use {
             calculate_stake_weighted_timestamp, MaxAllowableDrift,
             MAX_ALLOWABLE_DRIFT_PERCENTAGE_FAST, MAX_ALLOWABLE_DRIFT_PERCENTAGE_SLOW_V2,
         },
-        stakes::{SerdeStakesToStakeFormat, Stakes, StakesCache},
+        stakes::{DeserializableStakes, SerdeStakesToStakeFormat, Stakes, StakesCache},
         status_cache::{SlotDelta, StatusCache},
         transaction_batch::{OwnedOrBorrowed, TransactionBatch},
     },
     accounts_lt_hash::{CacheValue as AccountsLtHashCacheValue, Stats as AccountsLtHashStats},
     agave_feature_set::{
         self as feature_set, increase_cpi_account_info_limit, raise_cpi_nesting_limit_to_8,
-        FeatureSet,
+        relax_programdata_account_check_migration, FeatureSet,
     },
     agave_precompiles::{get_precompile, get_precompiles, is_precompile},
     agave_reserved_account_keys::ReservedAccountKeys,
@@ -84,8 +87,9 @@ use {
     },
     solana_accounts_db::{
         account_locks::validate_account_locks,
+        account_storage_entry::AccountStorageEntry,
         accounts::{AccountAddressFilter, Accounts, PubkeyAccountSlot},
-        accounts_db::{AccountStorageEntry, AccountsDb, AccountsDbConfig},
+        accounts_db::{AccountsDb, AccountsDbConfig},
         accounts_hash::AccountsLtHash,
         accounts_index::{IndexKey, ScanConfig, ScanResult},
         accounts_update_notifier_interface::AccountsUpdateNotifier,
@@ -124,7 +128,6 @@ use {
         loaded_programs::{ProgramCacheEntry, ProgramRuntimeEnvironments},
     },
     solana_pubkey::{Pubkey, PubkeyHasherBuilder},
-    solana_reward_info::RewardInfo,
     solana_runtime_transaction::{
         runtime_transaction::RuntimeTransaction, transaction_with_meta::TransactionWithMeta,
     },
@@ -427,7 +430,6 @@ impl TransactionLogCollector {
 /// new fields can be optionally serialized and optionally deserialized. At some point, the serialization and
 /// deserialization will use a new mechanism or otherwise be in sync more clearly.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "dev-context-only-utils", derive(PartialEq))]
 pub struct BankFieldsToDeserialize {
     pub(crate) blockhash_queue: BlockhashQueue,
     pub(crate) ancestors: AncestorsForSerialization,
@@ -454,8 +456,10 @@ pub struct BankFieldsToDeserialize {
     pub(crate) rent_collector: RentCollector,
     pub(crate) epoch_schedule: EpochSchedule,
     pub(crate) inflation: Inflation,
-    pub(crate) stakes: Stakes<Delegation>,
-    pub(crate) versioned_epoch_stakes: HashMap<Epoch, VersionedEpochStakes>,
+    pub(crate) stakes: DeserializableStakes<Delegation>,
+    /// Transformed into `HashMap<Epoch, VersionedEpochStakes>` in `serde_snapshot` and passed to
+    /// `Bank::new_from_snapshot` as separate parameter for performance (conversion is time consuming)
+    pub(crate) versioned_epoch_stakes: Vec<(Epoch, DeserializableVersionedEpochStakes)>,
     pub(crate) is_delta: bool,
     pub(crate) accounts_data_len: u64,
     pub(crate) accounts_lt_hash: AccountsLtHash,
@@ -957,11 +961,17 @@ impl Default for BankTestConfig {
     }
 }
 
-#[derive(Debug)]
-struct PrevEpochInflationRewards {
-    validator_rewards: u64,
-    prev_epoch_duration_in_years: f64,
+/// Data returned from [`Bank::calculate_epoch_inflation_rewards()`].
+struct EpochInflationRewards {
+    /// Amount of rewards a validator should get if it voted in every slot in
+    /// the epoch and its stake is equal to the network capitalization i.e.
+    /// the total supply.
+    validator_rewards_lamports: u64,
+    /// How long a single epoch lasts in years.
+    epoch_duration_in_years: f64,
+    /// The current inflation rate for the validators.
     validator_rate: f64,
+    /// The current inflation rate for the foundation.
     foundation_rate: f64,
 }
 
@@ -1814,6 +1824,7 @@ impl Bank {
         fields: BankFieldsToDeserialize,
         debug_keys: Option<Arc<HashSet<Pubkey>>>,
         accounts_data_size_initial: u64,
+        epoch_stakes: HashMap<Epoch, VersionedEpochStakes>,
     ) -> Self {
         let now = Instant::now();
         let ancestors = Ancestors::from(&fields.ancestors);
@@ -1827,17 +1838,28 @@ impl Bank {
         // Note that we are disabling the read cache while we populate the stakes cache.
         // The stakes accounts will not be expected to be loaded again.
         // If we populate the read cache with these loads, then we'll just soon have to evict these.
-        let (stakes, stakes_time) = measure_time!(Stakes::new(&fields.stakes, |pubkey| {
-            let (account, _slot) = bank_rc
-                .accounts
-                .load_with_fixed_root_do_not_populate_read_cache(&ancestors, pubkey)?;
-            Some(account)
-        })
+        let (stakes, stakes_time) = measure_time!(Stakes::load_from_deserialized_delegations(
+            fields.stakes,
+            |pubkey| {
+                let (account, _slot) = bank_rc
+                    .accounts
+                    .load_with_fixed_root_do_not_populate_read_cache(&ancestors, pubkey)?;
+                Some(account)
+            }
+        )
         .expect(
             "Stakes cache is inconsistent with accounts-db. This can indicate a corrupted \
              snapshot or bugs in cached accounts or accounts-db.",
         ));
         info!("Loading Stakes took: {stakes_time}");
+        assert!(
+            fields.versioned_epoch_stakes.is_empty(),
+            "should be already converted and passed in epoch_stakes parameter"
+        );
+        assert!(
+            !epoch_stakes.is_empty(),
+            "should be populated (from fields.versioned_epoch_stakes)"
+        );
         let stakes_accounts_load_duration = now.elapsed();
         let mut bank = Self {
             rc: bank_rc,
@@ -1874,7 +1896,7 @@ impl Bank {
             epoch_schedule: fields.epoch_schedule,
             inflation: Arc::new(RwLock::new(fields.inflation)),
             stakes_cache: StakesCache::new(stakes),
-            epoch_stakes: fields.versioned_epoch_stakes,
+            epoch_stakes,
             is_delta: AtomicBool::new(fields.is_delta),
             rewards: RwLock::new(vec![]),
             cluster_type: Some(genesis_config.cluster_type),
@@ -2325,11 +2347,11 @@ impl Bank {
         });
     }
 
-    pub fn epoch_duration_in_years(&self, prev_epoch: Epoch) -> f64 {
+    pub fn epoch_duration_in_years(&self, epoch: Epoch) -> f64 {
         // period: time that has passed as a fraction of a year, basically the length of
         //  an epoch as a fraction of a year
         //  calculated as: slots_elapsed / (slots / year)
-        self.epoch_schedule().get_slots_in_epoch(prev_epoch) as f64 / self.slots_per_year
+        self.epoch_schedule().get_slots_in_epoch(epoch) as f64 / self.slots_per_year
     }
 
     // Calculates the starting-slot for inflation from the activation slot.
@@ -2370,11 +2392,12 @@ impl Bank {
         num_slots as f64 / self.slots_per_year
     }
 
-    fn calculate_previous_epoch_inflation_rewards(
+    /// For a given [`capitalization`] (total_supply in lamports) and [`epoch`], calculates various inflation related info.
+    fn calculate_epoch_inflation_rewards(
         &self,
-        prev_epoch_capitalization: u64,
-        prev_epoch: Epoch,
-    ) -> PrevEpochInflationRewards {
+        capitalization: u64,
+        epoch: Epoch,
+    ) -> EpochInflationRewards {
         let slot_in_year = self.slot_in_year_for_inflation();
         let (validator_rate, foundation_rate) = {
             let inflation = self.inflation.read().unwrap();
@@ -2384,14 +2407,13 @@ impl Bank {
             )
         };
 
-        let prev_epoch_duration_in_years = self.epoch_duration_in_years(prev_epoch);
-        let validator_rewards = (validator_rate
-            * prev_epoch_capitalization as f64
-            * prev_epoch_duration_in_years) as u64;
+        let epoch_duration_in_years = self.epoch_duration_in_years(epoch);
+        let validator_rewards_lamports =
+            (validator_rate * capitalization as f64 * epoch_duration_in_years) as u64;
 
-        PrevEpochInflationRewards {
-            validator_rewards,
-            prev_epoch_duration_in_years,
+        EpochInflationRewards {
+            validator_rewards_lamports,
+            epoch_duration_in_years,
             validator_rate,
             foundation_rate,
         }
@@ -2405,38 +2427,36 @@ impl Bank {
     /// by combining previously separate rewards and accounts vectors into a
     /// single accounts_with_rewards vector.
     fn calc_vote_accounts_to_store(vote_account_rewards: VoteRewards) -> VoteRewardsAccounts {
-        let len = vote_account_rewards.len();
         let mut result = VoteRewardsAccounts {
-            accounts_with_rewards: Vec::with_capacity(len),
+            accounts_with_rewards: Vec::with_capacity(vote_account_rewards.len()),
             total_vote_rewards_lamports: 0,
         };
-        vote_account_rewards.into_iter().for_each(
-            |(
-                vote_pubkey,
-                VoteReward {
-                    mut vote_account,
-                    commission,
-                    vote_rewards,
-                },
-            )| {
-                if let Err(err) = vote_account.checked_add_lamports(vote_rewards) {
-                    debug!("reward redemption failed for {vote_pubkey}: {err:?}");
-                    return;
-                }
-
-                result.accounts_with_rewards.push((
-                    vote_pubkey,
-                    RewardInfo {
-                        reward_type: RewardType::Voting,
-                        lamports: vote_rewards as i64,
-                        post_balance: vote_account.lamports(),
-                        commission: Some(commission),
-                    },
-                    vote_account,
-                ));
-                result.total_vote_rewards_lamports += vote_rewards;
+        for (
+            vote_pubkey,
+            VoteReward {
+                mut vote_account,
+                commission,
+                vote_rewards,
             },
-        );
+        ) in vote_account_rewards
+        {
+            if let Err(err) = vote_account.checked_add_lamports(vote_rewards) {
+                debug!("reward redemption failed for {vote_pubkey}: {err:?}");
+                continue;
+            }
+
+            result.accounts_with_rewards.push((
+                vote_pubkey,
+                RewardInfo {
+                    reward_type: RewardType::Voting,
+                    lamports: vote_rewards as i64,
+                    post_balance: vote_account.lamports(),
+                    commission: Some(commission),
+                },
+                vote_account,
+            ));
+            result.total_vote_rewards_lamports += vote_rewards;
+        }
         result
     }
 
@@ -5440,6 +5460,8 @@ impl Bank {
             if let Err(e) = self.upgrade_loader_v2_program_with_loader_v3_program(
                 &feature_set::replace_spl_token_with_p_token::SPL_TOKEN_PROGRAM_ID,
                 &feature_set::replace_spl_token_with_p_token::PTOKEN_PROGRAM_BUFFER,
+                self.feature_set
+                    .is_active(&relax_programdata_account_check_migration::id()),
                 "replace_spl_token_with_p_token",
             ) {
                 warn!(
@@ -5474,9 +5496,12 @@ impl Bank {
                 // activation, perform the migration which will remove it from
                 // the builtins list and the cache.
                 if new_feature_activations.contains(&core_bpf_migration_config.feature_id) {
-                    if let Err(e) = self
-                        .migrate_builtin_to_core_bpf(&builtin.program_id, core_bpf_migration_config)
-                    {
+                    if let Err(e) = self.migrate_builtin_to_core_bpf(
+                        &builtin.program_id,
+                        core_bpf_migration_config,
+                        self.feature_set
+                            .is_active(&relax_programdata_account_check_migration::id()),
+                    ) {
                         warn!(
                             "Failed to migrate builtin {} to Core BPF: {}",
                             builtin.name, e
@@ -5495,6 +5520,8 @@ impl Bank {
                     if let Err(e) = self.migrate_builtin_to_core_bpf(
                         &stateless_builtin.program_id,
                         core_bpf_migration_config,
+                        self.feature_set
+                            .is_active(&relax_programdata_account_check_migration::id()),
                     ) {
                         warn!(
                             "Failed to migrate stateless builtin {} to Core BPF: {}",
@@ -6020,14 +6047,6 @@ impl Bank {
     #[must_use]
     pub fn process_entry_transactions(&self, txs: Vec<VersionedTransaction>) -> Vec<Result<()>> {
         self.try_process_entry_transactions(txs).unwrap()
-    }
-
-    #[cfg(test)]
-    pub fn flush_accounts_cache_slot_for_tests(&self) {
-        self.rc
-            .accounts
-            .accounts_db
-            .flush_accounts_cache_slot_for_tests(self.slot())
     }
 
     pub fn get_sysvar_cache_for_tests(&self) -> SysvarCache {

@@ -178,6 +178,7 @@ impl FeatureSet {
             create_account_allow_prefund: self.is_active(&create_account_allow_prefund::id()),
             bls_pubkey_management_in_vote_account: self
                 .is_active(&bls_pubkey_management_in_vote_account::id()),
+            enable_alt_bn128_g2_syscalls: self.is_active(&enable_alt_bn128_g2_syscalls::id()),
         }
     }
 }
@@ -773,11 +774,11 @@ pub mod apply_cost_tracker_during_replay {
 }
 
 pub mod stricter_abi_and_runtime_constraints {
-    solana_pubkey::declare_id!("Eoh7e1sDqtyPtuiWAhBNSJinvtJWTTDgeUMRi3RF8zWS");
+    solana_pubkey::declare_id!("StricterAbiAndRuntimeConstraints11111111111");
 }
 
 pub mod account_data_direct_mapping {
-    solana_pubkey::declare_id!("6f2qai82RU7Dutj1WJfRzLJKYA36QWvTa89CR1imgj7N");
+    solana_pubkey::declare_id!("AccountDataDirectMapping1111111111111111111");
 }
 
 pub mod add_set_tx_loaded_accounts_data_size_instruction {
@@ -1037,7 +1038,7 @@ pub mod enable_sbpf_v2_deployment_and_execution {
 }
 
 pub mod enable_sbpf_v3_deployment_and_execution {
-    solana_pubkey::declare_id!("BUwGLeF3Lxyfv1J1wY8biFHBB2hrk2QhbNftQf3VV3cC");
+    solana_pubkey::declare_id!("HMVQjrdGk6UvC66bRe4XZ9PeEKbto71zXMMxHVFpHFTF");
 }
 
 pub mod remove_accounts_executable_flag_checks {
@@ -1133,7 +1134,7 @@ pub mod disable_zk_elgamal_proof_program {
 }
 
 pub mod reenable_zk_elgamal_proof_program {
-    solana_pubkey::declare_id!("zkesAyFB19sTkX8i9ReoKaMNDA4YNTPYJpZKPDt7FMW");
+    solana_pubkey::declare_id!("zkexuyPRdyTVbZqEAREueqL2xvvoBhRgth9xGSc1tMN");
 }
 
 pub mod raise_block_limits_to_100m {
@@ -1203,13 +1204,13 @@ pub mod fix_alt_bn128_pairing_length_check {
 pub mod replace_spl_token_with_p_token {
     use super::Pubkey;
 
-    solana_pubkey::declare_id!("ptokEXBPT9HuYdAQRysaStZNTY9bHsAcQzNscEoA6HC");
+    solana_pubkey::declare_id!("ptokFjwyJtrwCa9Kgo9xoDS59V4QccBGEaRFnRPnSdP");
 
     pub const SPL_TOKEN_PROGRAM_ID: Pubkey =
         Pubkey::from_str_const("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 
     pub const PTOKEN_PROGRAM_BUFFER: Pubkey =
-        Pubkey::from_str_const("ptokNfvuU7terQ2r2452RzVXB3o4GT33yPWo1fUkkZ2");
+        Pubkey::from_str_const("ptok6rngomXrDbWf5v5Mkmu5CEbB51hzSCPDoj9DrvF");
 }
 
 pub mod alt_bn128_little_endian {
@@ -1217,7 +1218,15 @@ pub mod alt_bn128_little_endian {
 }
 
 pub mod bls_pubkey_management_in_vote_account {
-    solana_pubkey::declare_id!("EGJLweNUVskAPEwpjvNB7JT6uUi6h4mFhowNYXVSrimG");
+    solana_pubkey::declare_id!("2uxQgtKa2ECHGs67Zdj7dgmzn2w9HiqhdcedwCWfYzzq");
+}
+
+pub mod relax_programdata_account_check_migration {
+    solana_pubkey::declare_id!("rexav5eNTUSNT1K2N7cfRjnthwhcP5BC25v2tA4rW4h");
+}
+
+pub mod enable_alt_bn128_g2_syscalls {
+    solana_pubkey::declare_id!("bn1hKNURMGQaQoEVxahcEAcqiX3NwRs6hgKKNSLeKxH");
 }
 
 pub static FEATURE_NAMES: LazyLock<AHashMap<Pubkey, &'static str>> = LazyLock::new(|| {
@@ -2186,6 +2195,14 @@ pub static FEATURE_NAMES: LazyLock<AHashMap<Pubkey, &'static str>> = LazyLock::n
         (
             bls_pubkey_management_in_vote_account::id(),
             "SIMD-0387: BLS Pubkey Management in Vote Account",
+        ),
+        (
+            relax_programdata_account_check_migration::id(),
+            "SIMD-0444: Relax program data account check in migration",
+        ),
+        (
+            enable_alt_bn128_g2_syscalls::id(),
+            "SIMD-302: Add alt_bn128 G2 syscalls",
         ),
         /*************** ADD NEW FEATURES HERE ***************/
     ]

@@ -462,23 +462,54 @@ mod portal_e2e_tests {
         agave_logger::setup,
         northstar_portal::{OpenSession, PortalInstruction},
         solana_account::{AccountSharedData, WritableAccount},
-        solana_genesis_config::GenesisConfig,
         solana_gossip::contact_info::ContactInfo,
         solana_instruction::{AccountMeta, Instruction},
         solana_keypair::{Keypair, Signer},
         solana_net_utils::SocketAddrSpace,
+        solana_rent::Rent,
         solana_rpc_client::rpc_client::RpcClient,
-        solana_runtime::bank_forks::BankForks,
-        solana_sdk_ids::{bpf_loader, system_program},
+        solana_runtime::{
+            bank_forks::BankForks,
+            genesis_utils::{create_genesis_config, GenesisConfigInfo},
+        },
+        solana_sdk_ids::system_program,
         solana_system_interface::instruction::transfer,
         solana_transaction::Transaction,
-        std::{net::TcpListener, time::Duration},
+        std::{net::TcpListener, sync::RwLock, time::Duration},
     };
 
-    /// Deploy the portal BPF program into the given bank.
-    /// Returns the program ID.
-    fn deploy_portal_program(bank: &Bank) -> Pubkey {
-        solana_runtime::loader_utils::create_program(bank, &bpf_loader::id(), "northstar_portal")
+    /// Set up a test bank with portal program in genesis.
+    /// Returns (bank, bank_forks, program_id, mint_keypair).
+    fn setup_bank_with_portal() -> (Arc<Bank>, Arc<RwLock<BankForks>>, Pubkey, Keypair) {
+        let GenesisConfigInfo {
+            mut genesis_config,
+            mint_keypair,
+            ..
+        } = create_genesis_config(1_000_000_000_000);
+        genesis_config.rent = Rent::default();
+
+        let program_id = Pubkey::new_unique();
+        let program_data = solana_runtime::loader_utils::load_program_from_file("northstar_portal");
+        genesis_config.accounts.insert(
+            program_id,
+            solana_account::Account {
+                lamports: genesis_config
+                    .rent
+                    .minimum_balance(program_data.len())
+                    .max(1),
+                data: program_data,
+                owner: solana_sdk_ids::bpf_loader::id(),
+                executable: true,
+                rent_epoch: 0,
+            },
+        );
+
+        let (bank, _) = Bank::new_with_bank_forks_for_tests(&genesis_config);
+        bank.fill_bank_with_ticks_for_tests();
+        let bank = Bank::new_from_parent(bank.clone(), bank.leader_id(), bank.slot() + 1);
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
+        (bank, bank_forks, program_id, mint_keypair)
     }
 
     fn find_session_pda(program_id: &Pubkey, owner: &Pubkey, grid_id: u64) -> (Pubkey, u8) {
@@ -596,47 +627,24 @@ mod portal_e2e_tests {
         listener.local_addr().unwrap()
     }
 
-    fn fund_account(bank: &Bank, pubkey: &Pubkey, lamports: u64) {
-        let account = AccountSharedData::new(lamports, 0, &system_program::id());
-        bank.store_account(pubkey, &account);
-    }
-
     /// Test: Deploy portal BPF program and execute OpenSession -> verify L1 event detection
     #[test]
     fn test_e2e_portal_to_l1_events() {
         setup();
 
-        // Create genesis bank
-        let genesis_config = GenesisConfig::new(&[], &[]);
-        let genesis_bank = Bank::new_for_tests(&genesis_config);
+        let (bank, _bank_forks, program_id, mint_keypair) = setup_bank_with_portal();
 
-        // Create BankForks first to set up fork graph
-        let bank_forks = BankForks::new_rw_arc(genesis_bank);
-        let genesis_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
-
-        // Deploy portal program
-        let program_id = deploy_portal_program(&genesis_bank);
-
-        // Create owner keypair and fund them
         let owner_keypair = Keypair::new();
         let owner_pubkey = owner_keypair.pubkey();
-        fund_account(&genesis_bank, &owner_pubkey, 100_000_000_000); // 100 SOL
+        bank.transfer(100_000_000_000, &mint_keypair, &owner_pubkey)
+            .unwrap();
 
-        // Freeze genesis bank and get slot before moving
-        let genesis_slot = genesis_bank.slot();
-        genesis_bank.freeze();
-
-        // Create child bank
-        let child_bank = Bank::new_from_parent(genesis_bank, &Pubkey::default(), genesis_slot + 1);
-
-        // Compute PDAs
         let grid_id = 1u64;
         let ttl_slots = 1000u64;
-        let fee_cap = 5_000_000_000u64; // 5 SOL
+        let fee_cap = 5_000_000_000u64;
         let (session_pda, _) = find_session_pda(&program_id, &owner_pubkey, grid_id);
         let (fee_vault_pda, _) = find_fee_vault_pda(&program_id, &owner_pubkey);
 
-        // Execute OpenSession transaction
         let open_session_ix = build_open_session_ix(
             program_id,
             owner_pubkey,
@@ -647,7 +655,7 @@ mod portal_e2e_tests {
             fee_cap,
         );
 
-        let blockhash = child_bank.last_blockhash();
+        let blockhash = bank.last_blockhash();
         let tx = Transaction::new_signed_with_payer(
             &[open_session_ix],
             Some(&owner_pubkey),
@@ -655,14 +663,10 @@ mod portal_e2e_tests {
             blockhash,
         );
 
-        let result = child_bank.process_transaction(&tx);
+        let result = bank.process_transaction(&tx);
         assert!(result.is_ok(), "OpenSession should succeed: {:?}", result);
 
-        // Create manager and detect events
-        let bank_forks = BankForks::new_rw_arc(child_bank);
-
-        // Get a reference to the bank from the BankForks BEFORE moving to Manager
-        let bank_ref = bank_forks.read().unwrap().root_bank();
+        let bank_ref = bank;
 
         let manager_config = ManagerConfig {
             portal_program_id: program_id,
@@ -672,7 +676,6 @@ mod portal_e2e_tests {
 
         let events = manager.get_l1_events(&bank_ref);
 
-        // Verify events
         let session_events: Vec<_> = events
             .iter()
             .filter(|e| matches!(e, L1Event::SessionOpened { .. }))
@@ -698,9 +701,6 @@ mod portal_e2e_tests {
         } else {
             panic!("Expected SessionOpened event");
         }
-
-        // Note: FeeVault creation (with 0 balance) is no longer emitted as an event
-        // since delta == 0 is filtered out. This is correct behavior for TASK_026.
     }
 
     /// Test: Execute Delegate instruction and verify AccountDelegated event
@@ -708,50 +708,24 @@ mod portal_e2e_tests {
     fn test_e2e_delegation_detected() {
         setup();
 
-        // Create genesis bank
-        let genesis_config = GenesisConfig::new(&[], &[]);
-        let genesis_bank = Bank::new_for_tests(&genesis_config);
+        let (bank, _bank_forks, program_id, mint_keypair) = setup_bank_with_portal();
 
-        // Create BankForks first to set up fork graph
-        let bank_forks = BankForks::new_rw_arc(genesis_bank);
-        let genesis_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
-
-        // Deploy portal program
-        let program_id = deploy_portal_program(&genesis_bank);
-
-        // Create owner keypair and fund them
         let owner_keypair = Keypair::new();
         let owner_pubkey = owner_keypair.pubkey();
-        fund_account(&genesis_bank, &owner_pubkey, 100_000_000_000);
+        bank.transfer(100_000_000_000, &mint_keypair, &owner_pubkey)
+            .unwrap();
 
-        // Create delegated account with fake "application program" owner
         let owner_program = Pubkey::new_unique();
         let delegated_account = Pubkey::new_unique();
-        let delegated_account_data = vec![0xAB; 100];
-        let delegated_account_owner =
-            AccountSharedData::new(1_000_000, delegated_account_data.len(), &owner_program);
-        genesis_bank.store_account(&delegated_account, &delegated_account_owner);
+        let portal_owned_account = AccountSharedData::new(1_000_000, 100, &program_id);
+        bank.store_account(&delegated_account, &portal_owned_account);
 
-        // Freeze genesis bank and get slot before moving
-        let genesis_slot = genesis_bank.slot();
-        genesis_bank.freeze();
-
-        // Create child bank
-        let child_bank = Bank::new_from_parent(genesis_bank, &Pubkey::default(), genesis_slot + 1);
-
-        // First, change delegated account owner to portal program (simulating assign)
-        let portal_owned_account =
-            AccountSharedData::new(1_000_000, delegated_account_data.len(), &program_id);
-        child_bank.store_account(&delegated_account, &portal_owned_account);
-
-        // Compute PDAs
         let grid_id = 1u64;
         let (session_pda, _) = find_session_pda(&program_id, &owner_pubkey, grid_id);
         let (fee_vault_pda, _) = find_fee_vault_pda(&program_id, &owner_pubkey);
         let (delegation_record_pda, _) =
             find_delegation_record_pda(&program_id, &delegated_account);
 
-        // Execute OpenSession first
         let open_session_ix = build_open_session_ix(
             program_id,
             owner_pubkey,
@@ -761,17 +735,15 @@ mod portal_e2e_tests {
             1000,
             5_000_000_000,
         );
-
-        let blockhash = child_bank.last_blockhash();
+        let blockhash = bank.last_blockhash();
         let tx = Transaction::new_signed_with_payer(
             &[open_session_ix],
             Some(&owner_pubkey),
             &[&owner_keypair],
             blockhash,
         );
-        let _ = child_bank.process_transaction(&tx);
+        bank.process_transaction(&tx).unwrap();
 
-        // Execute Delegate instruction
         let delegate_ix = build_delegate_ix(
             program_id,
             owner_pubkey,
@@ -780,22 +752,17 @@ mod portal_e2e_tests {
             delegation_record_pda,
             grid_id,
         );
-
-        let blockhash = child_bank.last_blockhash();
+        let blockhash = bank.last_blockhash();
         let tx = Transaction::new_signed_with_payer(
             &[delegate_ix],
             Some(&owner_pubkey),
             &[&owner_keypair],
             blockhash,
         );
-        let result = child_bank.process_transaction(&tx);
+        let result = bank.process_transaction(&tx);
         assert!(result.is_ok(), "Delegate should succeed: {:?}", result);
 
-        // Create manager and detect events
-        let bank_forks = BankForks::new_rw_arc(child_bank);
-
-        // Get bank reference BEFORE moving into Manager
-        let bank_ref = bank_forks.read().unwrap().root_bank();
+        let bank_ref = bank;
 
         let manager_config = ManagerConfig {
             portal_program_id: program_id,
@@ -805,7 +772,6 @@ mod portal_e2e_tests {
 
         let events = manager.get_l1_events(&bank_ref);
 
-        // Verify AccountDelegated event
         let delegation_events: Vec<_> = events
             .iter()
             .filter(|e| matches!(e, L1Event::AccountDelegated { .. }))
@@ -842,38 +808,22 @@ mod portal_e2e_tests {
     fn test_e2e_delegated_account_visible_on_l2() {
         setup();
 
-        // Create genesis bank
-        let genesis_config = GenesisConfig::new(&[], &[]);
-        let genesis_bank = Bank::new_for_tests(&genesis_config);
+        let (bank, _bank_forks, program_id, mint_keypair) = setup_bank_with_portal();
 
-        // Create BankForks first to set up fork graph
-        let bank_forks = BankForks::new_rw_arc(genesis_bank);
-        let genesis_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
-
-        // Deploy portal program
-        let program_id = deploy_portal_program(&genesis_bank);
-
-        // Create owner keypair and fund them
         let owner_keypair = Keypair::new();
         let owner_pubkey = owner_keypair.pubkey();
-        fund_account(&genesis_bank, &owner_pubkey, 100_000_000_000);
+        bank.transfer(100_000_000_000, &mint_keypair, &owner_pubkey)
+            .unwrap();
 
-        // Freeze genesis bank and get slot before moving
-        let genesis_slot = genesis_bank.slot();
-        genesis_bank.freeze();
-
-        // Create child bank
-        let child_bank = Bank::new_from_parent(genesis_bank, &Pubkey::default(), genesis_slot + 1);
-
-        // Create delegated account with specific data, owned by portal program
-        // Store on child_bank (not genesis_bank) to ensure it's properly accessible
         let delegated_account = Pubkey::new_unique();
         let delegated_account_data = vec![0xAB; 100];
-        let delegated_account_owner =
+        let mut delegated_account_owner =
             AccountSharedData::new(1_000_000, delegated_account_data.len(), &program_id);
-        child_bank.store_account(&delegated_account, &delegated_account_owner);
+        delegated_account_owner
+            .data_as_mut_slice()
+            .copy_from_slice(&delegated_account_data);
+        bank.store_account(&delegated_account, &delegated_account_owner);
 
-        // Compute PDAs
         let grid_id = 1u64;
         let ttl_slots = 1000u64;
         let fee_cap = 5_000_000_000u64;
@@ -882,7 +832,6 @@ mod portal_e2e_tests {
         let (delegation_record_pda, _) =
             find_delegation_record_pda(&program_id, &delegated_account);
 
-        // Execute OpenSession
         let open_session_ix = build_open_session_ix(
             program_id,
             owner_pubkey,
@@ -892,17 +841,15 @@ mod portal_e2e_tests {
             ttl_slots,
             fee_cap,
         );
-
-        let blockhash = child_bank.last_blockhash();
+        let blockhash = bank.last_blockhash();
         let tx = Transaction::new_signed_with_payer(
             &[open_session_ix],
             Some(&owner_pubkey),
             &[&owner_keypair],
             blockhash,
         );
-        let _ = child_bank.process_transaction(&tx);
+        bank.process_transaction(&tx).unwrap();
 
-        // Execute Delegate instruction
         let delegate_ix = build_delegate_ix(
             program_id,
             owner_pubkey,
@@ -911,24 +858,17 @@ mod portal_e2e_tests {
             delegation_record_pda,
             grid_id,
         );
-
-        let blockhash = child_bank.last_blockhash();
+        let blockhash = bank.last_blockhash();
         let tx = Transaction::new_signed_with_payer(
             &[delegate_ix],
             Some(&owner_pubkey),
             &[&owner_keypair],
             blockhash,
         );
-        let _ = child_bank.process_transaction(&tx);
+        bank.process_transaction(&tx).unwrap();
+        bank.freeze();
 
-        // Freeze child bank
-        child_bank.freeze();
-
-        // Detect events - create BankForks from the frozen child bank
-        let bank_forks = BankForks::new_rw_arc(child_bank);
-
-        // Get bank reference BEFORE moving into Manager
-        let bank_ref = bank_forks.read().unwrap().root_bank();
+        let bank_ref = bank;
 
         let manager_config = ManagerConfig {
             portal_program_id: program_id,
@@ -938,7 +878,6 @@ mod portal_e2e_tests {
 
         let events = manager.get_l1_events(&bank_ref);
 
-        // Collect session and delegation info
         let session_event = events
             .iter()
             .find(|e| matches!(e, L1Event::SessionOpened { .. }))
@@ -967,7 +906,6 @@ mod portal_e2e_tests {
             panic!("Expected AccountDelegated");
         };
 
-        // Create ephemeral runtime - need to get the bank from bank_forks first
         let parent_bank = Arc::clone(&bank_ref);
 
         let settings = EphemeralRollupSettings {
@@ -992,13 +930,11 @@ mod portal_e2e_tests {
         )
         .expect("Failed to create ephemeral runtime");
 
-        // Verify delegated account is tracked
         assert!(
             runtime.delegated_accounts().contains(delegated_account),
             "Delegated account should be in runtime's delegated set"
         );
 
-        // Verify account is readable directly from bank
         let ephemeral_bank = runtime.bank();
         let account_opt = ephemeral_bank.get_account(delegated_account);
         assert!(
@@ -1006,7 +942,6 @@ mod portal_e2e_tests {
             "Delegated account should be readable on L2"
         );
 
-        // Debug: print account data
         let account = account_opt.unwrap();
         let account_data = account.data();
         eprintln!(
@@ -1014,14 +949,11 @@ mod portal_e2e_tests {
             account_data.len(),
             &account_data[..10.min(account_data.len())]
         );
-
-        // For now, just verify the account exists and has some data (not checking exact data)
         assert!(
             !account_data.is_empty(),
             "Delegated account should have data"
         );
 
-        // Verify account is readable via RPC
         std::thread::sleep(Duration::from_secs(2));
         let rpc_client = RpcClient::new(runtime.rpc_addr());
         let rpc_account = rpc_client
@@ -1033,8 +965,6 @@ mod portal_e2e_tests {
             &rpc_account[..10.min(rpc_account.len())]
         );
 
-        // Verify L1 is unaffected - check that delegated account still exists on L1 with original owner
-        // Use bank_ref instead of child_bank since child_bank was moved to BankForks
         let l1_account = bank_ref.get_account(delegated_account);
         assert!(
             l1_account.is_some(),
@@ -1054,23 +984,13 @@ mod portal_e2e_tests {
     fn test_e2e_handle_delegation_at_runtime() {
         setup();
 
-        // --- Set up L1 bank with portal program ---
-        let genesis_config = GenesisConfig::new(&[], &[]);
-        let genesis_bank = Bank::new_for_tests(&genesis_config);
-        let bank_forks = BankForks::new_rw_arc(genesis_bank);
-        let genesis_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
-        let program_id = deploy_portal_program(&genesis_bank);
+        let (bank, _bank_forks, program_id, mint_keypair) = setup_bank_with_portal();
 
         let owner_keypair = Keypair::new();
         let owner_pubkey = owner_keypair.pubkey();
-        fund_account(&genesis_bank, &owner_pubkey, 100_000_000_000);
+        bank.transfer(100_000_000_000, &mint_keypair, &owner_pubkey)
+            .unwrap();
 
-        let genesis_slot = genesis_bank.slot();
-        genesis_bank.freeze();
-
-        let child_bank = Bank::new_from_parent(genesis_bank, &Pubkey::default(), genesis_slot + 1);
-
-        // Create a delegated account with some data, owned by the portal program
         let delegated_account_pubkey = Pubkey::new_unique();
         let delegated_data = vec![0xDE; 64];
         let mut delegated_account =
@@ -1078,9 +998,8 @@ mod portal_e2e_tests {
         delegated_account
             .data_as_mut_slice()
             .copy_from_slice(&delegated_data);
-        child_bank.store_account(&delegated_account_pubkey, &delegated_account);
+        bank.store_account(&delegated_account_pubkey, &delegated_account);
 
-        // Open session on L1
         let grid_id = 1u64;
         let (session_pda, _) = find_session_pda(&program_id, &owner_pubkey, grid_id);
         let (fee_vault_pda, _) = find_fee_vault_pda(&program_id, &owner_pubkey);
@@ -1094,18 +1013,17 @@ mod portal_e2e_tests {
             1000,
             5_000_000_000,
         );
-        let blockhash = child_bank.last_blockhash();
+        let blockhash = bank.last_blockhash();
         let tx = Transaction::new_signed_with_payer(
             &[open_session_ix],
             Some(&owner_pubkey),
             &[&owner_keypair],
             blockhash,
         );
-        let _ = child_bank.process_transaction(&tx);
-        child_bank.freeze();
+        bank.process_transaction(&tx).unwrap();
+        bank.freeze();
 
-        // --- Create ER with NO initial delegations ---
-        let parent_bank = Arc::new(child_bank);
+        let parent_bank = bank;
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda,
@@ -1113,7 +1031,7 @@ mod portal_e2e_tests {
             grid_id,
             ttl_slots: 1000,
             fee_cap: 5_000_000_000,
-            delegated_accounts: vec![], // empty — no delegations at start
+            delegated_accounts: vec![],
         };
 
         let mut runtime = EphemeralRuntime::new(
@@ -1128,7 +1046,6 @@ mod portal_e2e_tests {
         )
         .expect("Failed to create ephemeral runtime");
 
-        // Verify account is NOT in delegated set yet
         assert!(
             !runtime
                 .delegated_accounts()
@@ -1136,13 +1053,11 @@ mod portal_e2e_tests {
             "Account should not be delegated yet"
         );
 
-        // --- Simulate L1 delegation event arriving at runtime ---
         let account_data = parent_bank
             .get_account(&delegated_account_pubkey)
             .expect("Account should exist on L1");
         runtime.handle_delegation(&delegated_account_pubkey, account_data.clone());
 
-        // Verify account IS in delegated set now
         assert!(
             runtime
                 .delegated_accounts()
@@ -1150,7 +1065,6 @@ mod portal_e2e_tests {
             "Account should be delegated after handle_delegation"
         );
 
-        // Verify account is readable on the ER bank
         let er_bank = runtime.bank();
         let er_account = er_bank
             .get_account(&delegated_account_pubkey)
@@ -1162,7 +1076,6 @@ mod portal_e2e_tests {
         );
         assert_eq!(er_account.lamports(), 5_000_000_000);
 
-        // Verify the account is readable via RPC
         std::thread::sleep(Duration::from_secs(2));
         let rpc_client = RpcClient::new(runtime.rpc_addr());
         let rpc_balance = rpc_client
@@ -1176,35 +1089,17 @@ mod portal_e2e_tests {
     fn test_e2e_deposit_fee_detected() {
         setup();
 
-        // Create genesis bank
-        let genesis_config = GenesisConfig::new(&[], &[]);
-        let genesis_bank = Bank::new_for_tests(&genesis_config);
+        let (bank, _bank_forks, program_id, mint_keypair) = setup_bank_with_portal();
 
-        // Create BankForks first to set up fork graph
-        let bank_forks = BankForks::new_rw_arc(genesis_bank);
-        let genesis_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
-
-        // Deploy portal program
-        let program_id = deploy_portal_program(&genesis_bank);
-
-        // Create owner keypair and fund them
         let owner_keypair = Keypair::new();
         let owner_pubkey = owner_keypair.pubkey();
-        fund_account(&genesis_bank, &owner_pubkey, 100_000_000_000);
+        bank.transfer(100_000_000_000, &mint_keypair, &owner_pubkey)
+            .unwrap();
 
-        // Freeze genesis bank and get slot before moving
-        let genesis_slot = genesis_bank.slot();
-        genesis_bank.freeze();
-
-        // Create child bank
-        let child_bank = Bank::new_from_parent(genesis_bank, &Pubkey::default(), genesis_slot + 1);
-
-        // Compute PDAs
         let grid_id = 1u64;
         let (session_pda, _) = find_session_pda(&program_id, &owner_pubkey, grid_id);
         let (fee_vault_pda, _) = find_fee_vault_pda(&program_id, &owner_pubkey);
 
-        // Execute OpenSession first
         let open_session_ix = build_open_session_ix(
             program_id,
             owner_pubkey,
@@ -1214,18 +1109,16 @@ mod portal_e2e_tests {
             1000,
             5_000_000_000,
         );
-
-        let blockhash = child_bank.last_blockhash();
+        let blockhash = bank.last_blockhash();
         let tx = Transaction::new_signed_with_payer(
             &[open_session_ix],
             Some(&owner_pubkey),
             &[&owner_keypair],
             blockhash,
         );
-        let _ = child_bank.process_transaction(&tx);
+        bank.process_transaction(&tx).unwrap();
 
-        // Execute DepositFee
-        let deposit_amount = 2_000_000_000u64; // 2 SOL
+        let deposit_amount = 2_000_000_000u64;
         let deposit_fee_ix = build_deposit_fee_ix(
             program_id,
             owner_pubkey,
@@ -1233,22 +1126,17 @@ mod portal_e2e_tests {
             owner_pubkey,
             deposit_amount,
         );
-
-        let blockhash = child_bank.last_blockhash();
+        let blockhash = bank.last_blockhash();
         let tx = Transaction::new_signed_with_payer(
             &[deposit_fee_ix],
             Some(&owner_pubkey),
             &[&owner_keypair],
             blockhash,
         );
-        let result = child_bank.process_transaction(&tx);
+        let result = bank.process_transaction(&tx);
         assert!(result.is_ok(), "DepositFee should succeed: {:?}", result);
 
-        // Create manager and detect events
-        let bank_forks = BankForks::new_rw_arc(child_bank);
-
-        // Get bank reference BEFORE moving into Manager
-        let bank_ref = bank_forks.read().unwrap().root_bank();
+        let bank_ref = bank;
 
         let manager_config = ManagerConfig {
             portal_program_id: program_id,
@@ -1258,7 +1146,6 @@ mod portal_e2e_tests {
 
         let events = manager.get_l1_events(&bank_ref);
 
-        // Verify FeeDeposited event
         let fee_events: Vec<_> = events
             .iter()
             .filter(|e| matches!(e, L1Event::FeeDeposited { .. }))
@@ -1268,7 +1155,6 @@ mod portal_e2e_tests {
             "Should detect at least one FeeDeposited event"
         );
 
-        // Find the deposit event (not the initial 0 balance)
         let deposit_event = fee_events.iter().find(|e| {
             if let L1Event::FeeDeposited {
                 delta, depositor, ..
@@ -1284,7 +1170,6 @@ mod portal_e2e_tests {
             "Should detect the 2 SOL deposit with delta and depositor"
         );
 
-        // Verify the deposit event details
         if let Some(L1Event::FeeDeposited {
             delta,
             depositor,
@@ -1309,47 +1194,25 @@ mod portal_e2e_tests {
     fn test_e2e_no_events_without_portal_activity() {
         setup();
 
-        // Create genesis bank
-        let genesis_config = GenesisConfig::new(&[], &[]);
-        let genesis_bank = Bank::new_for_tests(&genesis_config);
+        let (bank, _bank_forks, program_id, mint_keypair) = setup_bank_with_portal();
 
-        // Create BankForks first to set up fork graph
-        let bank_forks = BankForks::new_rw_arc(genesis_bank);
-        let genesis_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
-
-        // Deploy portal program
-        let program_id = deploy_portal_program(&genesis_bank);
-
-        // Create and fund two accounts
         let sender_keypair = Keypair::new();
         let sender_pubkey = sender_keypair.pubkey();
         let receiver_pubkey = Pubkey::new_unique();
-        fund_account(&genesis_bank, &sender_pubkey, 100_000_000_000);
+        bank.transfer(100_000_000_000, &mint_keypair, &sender_pubkey)
+            .unwrap();
 
-        // Freeze genesis bank and get slot before moving
-        let genesis_slot = genesis_bank.slot();
-        genesis_bank.freeze();
-
-        // Create child bank
-        let child_bank = Bank::new_from_parent(genesis_bank, &Pubkey::default(), genesis_slot + 1);
-
-        // Execute a plain SOL transfer (no portal involvement)
         let transfer_ix = transfer(&sender_pubkey, &receiver_pubkey, 1_000_000_000);
-
-        let blockhash = child_bank.last_blockhash();
+        let blockhash = bank.last_blockhash();
         let tx = Transaction::new_signed_with_payer(
             &[transfer_ix],
             Some(&sender_pubkey),
             &[&sender_keypair],
             blockhash,
         );
-        let _ = child_bank.process_transaction(&tx);
+        bank.process_transaction(&tx).unwrap();
 
-        // Create manager and detect events
-        let bank_forks = BankForks::new_rw_arc(child_bank);
-
-        // Get bank reference BEFORE moving into Manager
-        let bank_ref = bank_forks.read().unwrap().root_bank();
+        let bank_ref = bank;
 
         let manager_config = ManagerConfig {
             portal_program_id: program_id,
@@ -1359,7 +1222,6 @@ mod portal_e2e_tests {
 
         let events = manager.get_l1_events(&bank_ref);
 
-        // Verify no portal events detected
         assert!(
             events.is_empty(),
             "Should detect no portal events when there's no portal activity"
@@ -1371,40 +1233,22 @@ mod portal_e2e_tests {
     fn test_e2e_third_party_deposit_detected() {
         setup();
 
-        // Create genesis bank
-        let genesis_config = GenesisConfig::new(&[], &[]);
-        let genesis_bank = Bank::new_for_tests(&genesis_config);
+        let (bank, _bank_forks, program_id, mint_keypair) = setup_bank_with_portal();
 
-        // Create BankForks first to set up fork graph
-        let bank_forks = BankForks::new_rw_arc(genesis_bank);
-        let genesis_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
-
-        // Deploy portal program
-        let program_id = deploy_portal_program(&genesis_bank);
-
-        // Create owner keypair and fund them
         let owner_keypair = Keypair::new();
         let owner_pubkey = owner_keypair.pubkey();
-        fund_account(&genesis_bank, &owner_pubkey, 100_000_000_000);
+        bank.transfer(100_000_000_000, &mint_keypair, &owner_pubkey)
+            .unwrap();
 
-        // Create third-party depositor keypair and fund them
         let depositor_keypair = Keypair::new();
         let depositor_pubkey = depositor_keypair.pubkey();
-        fund_account(&genesis_bank, &depositor_pubkey, 100_000_000_000);
+        bank.transfer(100_000_000_000, &mint_keypair, &depositor_pubkey)
+            .unwrap();
 
-        // Freeze genesis bank and get slot before moving
-        let genesis_slot = genesis_bank.slot();
-        genesis_bank.freeze();
-
-        // Create child bank
-        let child_bank = Bank::new_from_parent(genesis_bank, &Pubkey::default(), genesis_slot + 1);
-
-        // Compute PDAs
         let grid_id = 1u64;
         let (session_pda, _) = find_session_pda(&program_id, &owner_pubkey, grid_id);
         let (fee_vault_pda, _) = find_fee_vault_pda(&program_id, &owner_pubkey);
 
-        // Execute OpenSession first
         let open_session_ix = build_open_session_ix(
             program_id,
             owner_pubkey,
@@ -1414,18 +1258,16 @@ mod portal_e2e_tests {
             1000,
             5_000_000_000,
         );
-
-        let blockhash = child_bank.last_blockhash();
+        let blockhash = bank.last_blockhash();
         let tx = Transaction::new_signed_with_payer(
             &[open_session_ix],
             Some(&owner_pubkey),
             &[&owner_keypair],
             blockhash,
         );
-        let _ = child_bank.process_transaction(&tx);
+        bank.process_transaction(&tx).unwrap();
 
-        // Third party (depositor) deposits into owner's session, credited to themselves
-        let deposit_amount = 3_000_000_000u64; // 3 SOL
+        let deposit_amount = 3_000_000_000u64;
         let deposit_fee_ix = build_deposit_fee_ix(
             program_id,
             depositor_pubkey,
@@ -1433,26 +1275,21 @@ mod portal_e2e_tests {
             depositor_pubkey,
             deposit_amount,
         );
-
-        let blockhash = child_bank.last_blockhash();
+        let blockhash = bank.last_blockhash();
         let tx = Transaction::new_signed_with_payer(
             &[deposit_fee_ix],
             Some(&depositor_pubkey),
             &[&depositor_keypair],
             blockhash,
         );
-        let result = child_bank.process_transaction(&tx);
+        let result = bank.process_transaction(&tx);
         assert!(
             result.is_ok(),
             "Third party DepositFee should succeed: {:?}",
             result
         );
 
-        // Create manager and detect events
-        let bank_forks = BankForks::new_rw_arc(child_bank);
-
-        // Get bank reference BEFORE moving into Manager
-        let bank_ref = bank_forks.read().unwrap().root_bank();
+        let bank_ref = bank;
 
         let manager_config = ManagerConfig {
             portal_program_id: program_id,
@@ -1462,7 +1299,6 @@ mod portal_e2e_tests {
 
         let events = manager.get_l1_events(&bank_ref);
 
-        // Verify FeeDeposited event with correct amount
         let fee_events: Vec<_> = events
             .iter()
             .filter(|e| matches!(e, L1Event::FeeDeposited { .. }))
@@ -1472,8 +1308,6 @@ mod portal_e2e_tests {
             "Should detect at least one FeeDeposited event"
         );
 
-        // Find the deposit event with the third party deposit amount
-        // With new design: depositor == recipient (the person who gets credited on L2)
         let deposit_event = fee_events.iter().find(|e| {
             if let L1Event::FeeDeposited {
                 delta, depositor, ..
@@ -1489,7 +1323,6 @@ mod portal_e2e_tests {
             "Should detect the 3 SOL third party deposit with correct delta and depositor"
         );
 
-        // Verify the delta equals the deposit amount, not cumulative balance
         if let Some(L1Event::FeeDeposited { delta, .. }) = deposit_event {
             assert_eq!(
                 *delta, deposit_amount,
@@ -1503,36 +1336,21 @@ mod portal_e2e_tests {
     fn test_e2e_deposit_delta_computed_correctly() {
         setup();
 
-        // Create genesis bank
-        let genesis_config = GenesisConfig::new(&[], &[]);
-        let genesis_bank = Bank::new_for_tests(&genesis_config);
+        let (bank, _bank_forks, program_id, mint_keypair) = setup_bank_with_portal();
 
-        // Create BankForks first to set up fork graph
-        let bank_forks = BankForks::new_rw_arc(genesis_bank);
-        let genesis_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
-
-        // Deploy portal program
-        let program_id = deploy_portal_program(&genesis_bank);
-
-        // Create owner keypair and fund them
         let owner_keypair = Keypair::new();
         let owner_pubkey = owner_keypair.pubkey();
-        fund_account(&genesis_bank, &owner_pubkey, 100_000_000_000);
+        bank.transfer(100_000_000_000, &mint_keypair, &owner_pubkey)
+            .unwrap();
 
-        // Freeze genesis bank and get slot before moving
-        let genesis_slot = genesis_bank.slot();
-        genesis_bank.freeze();
+        let bank_slot = bank.slot();
+        bank.freeze();
+        let child_bank = Bank::new_from_parent(bank, &Pubkey::default(), bank_slot + 1);
 
-        // Create child bank for slot N+1 (first deposit)
-        let child_bank =
-            Bank::new_from_parent(genesis_bank.clone(), &Pubkey::default(), genesis_slot + 1);
-
-        // Compute PDAs
         let grid_id = 1u64;
         let (session_pda, _) = find_session_pda(&program_id, &owner_pubkey, grid_id);
         let (fee_vault_pda, _) = find_fee_vault_pda(&program_id, &owner_pubkey);
 
-        // Execute OpenSession first
         let open_session_ix = build_open_session_ix(
             program_id,
             owner_pubkey,
@@ -1542,7 +1360,6 @@ mod portal_e2e_tests {
             1000,
             5_000_000_000,
         );
-
         let blockhash = child_bank.last_blockhash();
         let tx = Transaction::new_signed_with_payer(
             &[open_session_ix],
@@ -1550,9 +1367,8 @@ mod portal_e2e_tests {
             &[&owner_keypair],
             blockhash,
         );
-        let _ = child_bank.process_transaction(&tx);
+        child_bank.process_transaction(&tx).unwrap();
 
-        // First deposit: 2 SOL
         let deposit1_amount = 2_000_000_000u64;
         let deposit_fee_ix1 = build_deposit_fee_ix(
             program_id,
@@ -1561,7 +1377,6 @@ mod portal_e2e_tests {
             owner_pubkey,
             deposit1_amount,
         );
-
         let blockhash = child_bank.last_blockhash();
         let tx = Transaction::new_signed_with_payer(
             &[deposit_fee_ix1],
@@ -1569,14 +1384,12 @@ mod portal_e2e_tests {
             &[&owner_keypair],
             blockhash,
         );
-        let _ = child_bank.process_transaction(&tx);
+        child_bank.process_transaction(&tx).unwrap();
 
-        // Freeze the child bank and create a new child for slot N+2 (second deposit)
         child_bank.freeze();
         let child_bank =
-            Bank::new_from_parent(Arc::new(child_bank), &Pubkey::default(), genesis_slot + 2);
+            Bank::new_from_parent(Arc::new(child_bank), &Pubkey::default(), bank_slot + 2);
 
-        // Second deposit: 3 SOL more (total should be 5 SOL)
         let deposit2_amount = 3_000_000_000u64;
         let deposit_fee_ix2 = build_deposit_fee_ix(
             program_id,
@@ -1585,7 +1398,6 @@ mod portal_e2e_tests {
             owner_pubkey,
             deposit2_amount,
         );
-
         let blockhash = child_bank.last_blockhash();
         let tx = Transaction::new_signed_with_payer(
             &[deposit_fee_ix2],
@@ -1593,9 +1405,8 @@ mod portal_e2e_tests {
             &[&owner_keypair],
             blockhash,
         );
-        let _ = child_bank.process_transaction(&tx);
+        child_bank.process_transaction(&tx).unwrap();
 
-        // Create manager and detect events on the second child bank
         let bank_forks = BankForks::new_rw_arc(child_bank);
         let bank_ref = bank_forks.read().unwrap().root_bank();
 
@@ -1607,7 +1418,6 @@ mod portal_e2e_tests {
 
         let events = manager.get_l1_events(&bank_ref);
 
-        // Verify FeeDeposited event with correct delta (3 SOL, not 5 SOL)
         let fee_events: Vec<_> = events
             .iter()
             .filter(|e| matches!(e, L1Event::FeeDeposited { .. }))
@@ -1618,10 +1428,8 @@ mod portal_e2e_tests {
             "Should detect at least one FeeDeposited event"
         );
 
-        // Find the second deposit event
         let second_deposit_event = fee_events.iter().find(|e| {
             if let L1Event::FeeDeposited { delta, amount, .. } = e {
-                // Delta should be 3 SOL (the increment), amount should be 5 SOL (cumulative)
                 *delta == deposit2_amount && *amount == (deposit1_amount + deposit2_amount)
             } else {
                 false

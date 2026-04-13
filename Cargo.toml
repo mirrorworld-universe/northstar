@@ -12,6 +12,7 @@ members = [
     "bench-streamer",
     "bench-vote",
     "bloom",
+    "bls12-381",
     "bucket_map",
     "builtins",
     "builtins-default-costs",
@@ -28,7 +29,6 @@ members = [
     "connection-cache",
     "core",
     "cost-model",
-    "curves/curve25519",
     "download-utils",
     "entry",
     "faucet",
@@ -59,7 +59,6 @@ members = [
     "platform-tools-sdk/gen-headers",
     "poh",
     "poh-bench",
-    "poseidon",
     "precompiles",
     "program-binaries",
     "program-runtime",
@@ -200,8 +199,8 @@ used_underscore_binding = "deny"
 
 [workspace.dependencies]
 Inflector = "0.11.4"
-aes-gcm-siv = "0.11.1"
 agave-banking-stage-ingress-types = { path = "banking-stage-ingress-types", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
+agave-bls12-381 = { path = "bls12-381", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
 agave-cargo-registry = { path = "cargo-registry", version = "=4.0.0-alpha.0" }
 agave-feature-set = { path = "feature-set", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
 agave-fs = { path = "fs", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
@@ -227,8 +226,6 @@ anyhow = "1.0.100"
 aquamarine = "0.6.0"
 arbitrary = "1.4.2"
 arc-swap = "1.8.0"
-ark-bn254 = "0.5.0"
-ark-bn254-0-4 = { package = "ark-bn254", version = "0.4.0" }
 array-bytes = "=1.4.1"
 arrayref = "0.3.9"
 arrayvec = "0.7.6"
@@ -246,7 +243,9 @@ bencher = "0.1.5"
 bincode = "1.3.3"
 bitflags = { version = "2.10.0" }
 bitvec = { version = "1.0.1", features = ["serde"] }
-blake3 = "1.8.2"
+blake3 = "1.8.3"
+blst = "0.3.16"
+blstrs = "0.7.1"
 borsh = { version = "1.6.0", features = ["derive", "unstable__schema"] }
 bs58 = { version = "0.5.1", default-features = false }
 bv = "0.11.1"
@@ -259,7 +258,7 @@ caps = "0.5.6"
 cargo_metadata = "0.15.4"
 cfg-if = "1.0.4"
 cfg_eval = "0.1.2"
-chrono = { version = "0.4.42", default-features = false }
+chrono = { version = "0.4.43", default-features = false }
 chrono-humanize = "0.2.3"
 clap = "2.33.1"
 console = "0.16.2"
@@ -291,17 +290,19 @@ env_logger = "0.11.8"
 fast-math = "0.1"
 fd-lock = "4.0.4"
 five8_const = "0.1.4"
-flate2 = "1.0.31"
+flate2 = "1.1.8"
 fnv = "1.0.7"
 fs_extra = "1.3.0"
 futures = "0.3.31"
 futures-util = "0.3.29"
 gag = "1.0.0"
-gethostname = "1.0.2"
+gethostname = "1.1.0"
 getrandom = "0.3.4"
 goauth = "0.13.1"
 governor = "0.6.3"
+group = "0.13.0"
 hex = "0.4.3"
+hex-literal = "1.1.0"
 hidapi = { version = "2.6.4", default-features = false }
 histogram = "0.6.9"
 hmac = "0.12.1"
@@ -310,14 +311,14 @@ humantime = "2.3.0"
 hyper = "0.14.32"
 hyper-proxy = "0.9.1"
 im = "15.1.0"
-indexmap = "2.12.1"
+indexmap = "2.13.0"
 indicatif = "0.18.3"
 io-uring = { version = "0.7.11", features = ["io_safety"] }
 itertools = "0.14.0"
 jemallocator = { package = "tikv-jemallocator", version = "0.6.0", features = [
     "unprefixed_malloc_on_supported_platforms",
 ] }
-js-sys = "0.3.83"
+js-sys = "0.3.85"
 json5 = "1.3.0"
 jsonrpc-core = "18.0.0"
 jsonrpc-core-client = "18.0.0"
@@ -326,20 +327,17 @@ jsonrpc-http-server = "18.0.0"
 jsonrpc-ipc-server = "18.0.0"
 jsonrpc-pubsub = "18.0.0"
 lazy-lru = "0.1.3"
-libc = "0.2.179"
+libc = "0.2.180"
 libloading = "0.9.0"
 libsecp256k1 = { version = "0.6.0", default-features = false, features = [
     "std",
     "static-context",
 ] }
-light-poseidon = "0.4.0"
-light-poseidon-0-2 = { package = "light-poseidon", version = "0.2.0" }
 log = "0.4.29"
 lru = "0.7.7"
 lz4 = "1.28.1"
 memmap2 = "0.9.9"
 memoffset = "0.9.1"
-merlin = { version = "3", default-features = false }
 min-max-heap = "1.3.0"
 mockall = "0.14.0"
 modular-bitfield = "0.13.1"
@@ -350,6 +348,7 @@ num-traits = "0.2"
 num_cpus = "1.17.0"
 num_enum = "0.7.4"
 openssl = "0.10"
+pairing = "0.23.0"
 parking_lot = "0.12"
 pbkdf2 = { version = "0.12.2", default-features = false }
 pem = "1.1.1"
@@ -390,6 +389,7 @@ seqlock = "0.2.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde-big-array = "0.5.1"
 serde_bytes = "0.11.19"
+serde_derive = "1.0.226"
 serde_json = "1.0.149"
 serde_with = { version = "3.16.1", default-features = false }
 serde_yaml = "0.9.34"
@@ -411,7 +411,7 @@ solana-account-decoder-client-types = { path = "account-decoder-client-types", v
 solana-account-info = "3.1.0"
 solana-accounts-db = { path = "accounts-db", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
 solana-address = "2.0.0"
-solana-address-lookup-table-interface = "3.0.0"
+solana-address-lookup-table-interface = "3.0.1"
 solana-atomic-u64 = "3.0.0"
 solana-banks-client = { path = "banks-client", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
 solana-banks-interface = { path = "banks-interface", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
@@ -420,8 +420,8 @@ solana-big-mod-exp = "3.0.0"
 solana-bincode = "3.1.0"
 solana-blake3-hasher = "3.1.0"
 solana-bloom = { path = "bloom", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
-solana-bls-signatures = { version = "2.0.0-alpha.1", features = ["serde"] } #TODO: change to 2.0.0 before this gets into 4.0
-solana-bn254 = "3.1.2"
+solana-bls-signatures = { version = "3.0.0", features = ["serde"] }
+solana-bn254 = "3.2.1"
 solana-borsh = "3.0.0"
 solana-bpf-loader-program = { path = "programs/bpf_loader", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
 solana-bucket-map = { path = "bucket_map", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
@@ -446,8 +446,8 @@ solana-connection-cache = { path = "connection-cache", version = "=4.0.0-alpha.0
 solana-core = { path = "core", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
 solana-cost-model = { path = "cost-model", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
 solana-cpi = "3.1.0"
-solana-curve25519 = { path = "curves/curve25519", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
-solana-define-syscall = "4.0.1"
+solana-curve25519 = "4.0.0"
+solana-define-syscall = "5.0.0"
 solana-derivation-path = "3.0.0"
 solana-download-utils = { path = "download-utils", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
 solana-ed25519-program = "3.0.0"
@@ -463,7 +463,7 @@ solana-fee = { path = "fee", version = "=4.0.0-alpha.0", features = ["agave-unst
 solana-fee-calculator = "3.0.0"
 solana-fee-structure = "3.0.0"
 solana-file-download = "3.1.0"
-solana-frozen-abi = "3.1.1"
+solana-frozen-abi = "3.1.2"
 solana-frozen-abi-macro = "3.2.1"
 solana-genesis = { path = "genesis", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
 solana-genesis-config = "3.0.0"
@@ -502,7 +502,7 @@ solana-packet = "4.0.0"
 solana-perf = { path = "perf", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
 solana-poh = { path = "poh", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
 solana-poh-config = "3.0.0"
-solana-poseidon = { path = "poseidon", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
+solana-poseidon = "4.0.0"
 solana-precompile-error = "3.0.0"
 solana-presigner = "3.0.0"
 solana-program = { version = "3.0.0", default-features = false }
@@ -517,7 +517,6 @@ solana-program-test = { path = "program-test", version = "=4.0.0-alpha.0", featu
 solana-pubkey = { version = "4.0.0", default-features = false }
 solana-pubsub-client = { path = "pubsub-client", version = "=4.0.0-alpha.0" }
 solana-quic-client = { path = "quic-client", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
-solana-quic-definitions = "3.0.0"
 solana-rayon-threadlimit = { path = "rayon-threadlimit", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
 solana-remote-wallet = { path = "remote-wallet", version = "=4.0.0-alpha.0", default-features = false, features = ["agave-unstable-api"] }
 solana-rent = "3.0.0"
@@ -530,7 +529,7 @@ solana-rpc-client-types = { path = "rpc-client-types", version = "=4.0.0-alpha.0
 solana-runtime = { path = "runtime", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
 solana-runtime-transaction = { path = "runtime-transaction", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
 solana-sanitize = "3.0.1"
-solana-sbpf = { version = "=0.13.1", default-features = false }
+solana-sbpf = { version = "=0.14.0", default-features = false }
 solana-sdk-ids = "3.1.0"
 solana-secp256k1-program = "3.0.0"
 solana-secp256k1-recover = "3.1.0"
@@ -593,7 +592,7 @@ solana-vote-interface = "5.0.0"
 solana-vote-program = { path = "programs/vote", version = "=4.0.0-alpha.0", default-features = false, features = ["agave-unstable-api"] }
 solana-wen-restart = { path = "wen-restart", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
 solana-zk-elgamal-proof-program = { path = "programs/zk-elgamal-proof", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
-solana-zk-sdk = "4.0.0"
+solana-zk-sdk = "5.0.0"
 solana-zk-token-proof-program = { path = "programs/zk-token-proof", version = "=4.0.0-alpha.0", features = ["agave-unstable-api"] }
 spl-associated-token-account-interface = "2.0.0"
 spl-generic-token = "2.0.0"
@@ -606,9 +605,8 @@ spl-token-interface = "2.0.0"
 spl-token-metadata-interface = "0.8.0"
 static_assertions = "1.1.0"
 stream-cancel = "0.8.2"
-strum = "0.24"
-strum_macros = "0.24"
-subtle = "2.6.1"
+strum = "0.27.2"
+strum_macros = "0.27.2"
 symlink = "0.1.0"
 syn = "2.0"
 sys-info = "0.9.1"
@@ -618,7 +616,7 @@ tar = "0.4.44"
 tarpc = "0.29.0"
 tempfile = "3.24.0"
 test-case = "3.3.1"
-thiserror = "2.0.17"
+thiserror = "2.0.18"
 thread-priority = "3.0.0"
 tiny-bip39 = "2.0.0"
 tokio = "1.49.0"
@@ -626,7 +624,7 @@ tokio-serde = "0.8"
 tokio-stream = "0.1.18"
 tokio-tungstenite = "0.28.0"
 tokio-util = "0.7.18"
-toml = "0.9.10"
+toml = "0.9.11"
 tonic = "0.9.2"
 tonic-build = "0.9.2"
 tower = "0.5.2"
@@ -643,8 +641,7 @@ wasm-bindgen = "0.2"
 winapi = "0.3.8"
 wincode = { version = "0.2.5", features = ["derive", "solana-short-vec"] }
 winreg = "0.55"
-x509-parser = "0.17.0"
-zeroize = { version = "1.8", default-features = false }
+x509-parser = "0.18.0"
 zstd = "0.13.3"
 
 # Sonic
@@ -680,35 +677,3 @@ opt-level = 3
 [patch.crates-io]
 # for details, see https://github.com/anza-xyz/crossbeam/commit/fd279d707025f0e60951e429bf778b4813d1b6bf
 crossbeam-epoch = { git = "https://github.com/anza-xyz/crossbeam", rev = "fd279d707025f0e60951e429bf778b4813d1b6bf" }
-
-# We include the following crates as our dependencies above from crates.io:
-#
-#  * spl-associated-token-account-interface
-#  * spl-instruction-padding
-#  * spl-memo-interface
-#  * spl-pod
-#  * spl-token
-#  * spl-token-2022-interface
-#  * spl-token-metadata-interface
-#
-# They, in turn, depend on a number of crates that we also include directly
-# using `path` specifications.  For example, `spl-token` depends on
-# `solana-program`.  And we explicitly specify `solana-program` above as a local
-# path dependency:
-#
-#     solana-program = { path = "../../sdk/program", version = "=1.16.0" }
-#
-# Unfortunately, Cargo will try to resolve the `spl-token` `solana-program`
-# dependency only using what is available on crates.io.  Crates.io normally
-# contains a previous version of these crates, and we end up with two versions
-# of `solana-program` and all of their dependencies in our build tree.
-#
-# If you are developing downstream using non-crates-io solana-program (local or
-# forked repo, or from github rev, eg), duplicate the following patch statements
-# in your Cargo.toml. If you still hit duplicate-type errors with the patch
-# statements in place, run `cargo update -p solana-program` to remove extraneous
-# versions from your Cargo.lock file.
-#
-# There is a similar override in `programs/sbf/Cargo.toml`.  Please keep both
-# comments and the overrides in sync.
-solana-curve25519 = { path = "curves/curve25519" }

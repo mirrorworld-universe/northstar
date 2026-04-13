@@ -25,7 +25,6 @@ use {
         validator::{BlockProductionMethod, GeneratorConfig},
         vortexor_receiver_adapter::VortexorReceiverAdapter,
     },
-    bytes::Bytes,
     crossbeam_channel::{bounded, unbounded, Receiver},
     solana_clock::Slot,
     solana_gossip::cluster_info::ClusterInfo,
@@ -62,14 +61,14 @@ use {
     },
     std::{
         collections::HashMap,
-        net::{SocketAddr, UdpSocket},
+        net::UdpSocket,
         num::NonZeroUsize,
         path::PathBuf,
         sync::{atomic::AtomicBool, Arc, RwLock},
         thread::{self, JoinHandle},
         time::Duration,
     },
-    tokio::sync::{mpsc, mpsc::Sender as AsyncSender},
+    tokio::sync::mpsc,
     tokio_util::sync::CancellationToken,
 };
 
@@ -101,6 +100,10 @@ impl SigVerifier {
 
 // Conservatively allow 20 TPS per validator.
 pub const MAX_VOTES_PER_SECOND: u64 = 20;
+
+/// Size of the channel between streamer and TPU sigverify stage. The values have been selected to
+/// be conservative max of obsersed on mnb during high-load events.
+const TPU_CHANNEL_SIZE: usize = 50_000;
 
 pub struct Tpu {
     fetch_stage: FetchStage,
@@ -144,7 +147,6 @@ impl Tpu {
         bank_notification_sender: Option<BankNotificationSenderConfig>,
         duplicate_confirmed_slot_sender: DuplicateConfirmedSlotsSender,
         client: ForwardingClientOption,
-        turbine_quic_endpoint_sender: AsyncSender<(SocketAddr, Bytes)>,
         keypair: &Keypair,
         log_messages_bytes_limit: Option<usize>,
         staked_nodes: &Arc<RwLock<StakedNodes>>,
@@ -175,7 +177,7 @@ impl Tpu {
             vortexor_receivers,
         } = sockets;
 
-        let (packet_sender, packet_receiver) = unbounded();
+        let (packet_sender, packet_receiver) = bounded(TPU_CHANNEL_SIZE);
         let (vote_packet_sender, vote_packet_receiver) = unbounded();
         let (forwarded_packet_sender, forwarded_packet_receiver) = unbounded();
         let fetch_stage = FetchStage::new_with_sender(
@@ -381,7 +383,6 @@ impl Tpu {
             blockstore,
             bank_forks,
             shred_version,
-            turbine_quic_endpoint_sender,
             xdp_sender,
         );
 
