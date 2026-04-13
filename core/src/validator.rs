@@ -1351,7 +1351,12 @@ impl Validator {
                 };
 
             let (bank_notifications_for_northstar_sender, bank_notifications_for_northstar_recv) =
-                unbounded();
+                if config.portal.is_some() {
+                    let (s, r) = unbounded();
+                    (Some(s), Some(r))
+                } else {
+                    (None, None)
+                };
 
             let dependency_tracker = transaction_status_sender
                 .is_some()
@@ -1378,7 +1383,8 @@ impl Validator {
             let northstar_service_opt = config.portal.map(|portal_program_id| {
                 crate::northstar_service::NorthStarService::new(
                     bank_forks.clone(),
-                    bank_notifications_for_northstar_recv,
+                    bank_notifications_for_northstar_recv
+                        .expect("northstar receiver must exist when portal is set"),
                     northstar::ManagerConfig {
                         portal_program_id,
                         manager_account: identity_keypair.clone(),
