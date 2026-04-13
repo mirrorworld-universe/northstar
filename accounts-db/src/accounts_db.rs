@@ -38,9 +38,9 @@ use {
         account_storage_entry::AccountStorageEntry,
         accounts_cache::{AccountsCache, CachedAccount, SlotCache},
         accounts_db::stats::{
-            AccountsStats, CacheAccountStoreStats, CleanAccountsStats, FlushStats,
-            ObsoleteAccountsStats, PurgeStats, ShrinkAncientStats, ShrinkStats, ShrinkStatsSub,
-            StoreAccountsTiming,
+            AccountsStats, CleanAccountsStats, FlushStats, ObsoleteAccountsStats, PurgeStats,
+            ShrinkAncientStats, ShrinkStats, ShrinkStatsSub, StoreAccountsFrozenStats,
+            StoreAccountsTiming, StoreAccountsUnfrozenStats, WriteAccountsToCacheStats,
         },
         accounts_file::{AccountsFile, AccountsFileProvider, StorageAccess},
         accounts_hash::{AccountLtHash, AccountsLtHash, ZERO_LAMPORT_ACCOUNT_LT_HASH},
@@ -400,6 +400,8 @@ pub struct IndexGenerationInfo {
     /// The accounts lt hash calculated during index generation.
     /// Will be used when verifying accounts, after rebuilding a Bank.
     pub calculated_accounts_lt_hash: AccountsLtHash,
+    /// The capitalization, in lamports, calculated during index generation.
+    pub calculated_capitalization: u64,
 }
 
 /// Accumulator for the values produced while generating the index
@@ -421,6 +423,8 @@ struct IndexGenerationAccumulator {
     num_existed_on_disk: u64,
     /// The accounts lt hash for the set of accounts processed using this accumulator
     lt_hash: LtHash,
+    /// The capitalization for the set of accounts processed using this accumulator
+    capitalization: u64,
     /// The number of accounts in this slot that were skipped when generating the index as they
     /// were already marked obsolete in the account storage entry
     num_obsolete_accounts_skipped: u64,
@@ -440,6 +444,7 @@ impl IndexGenerationAccumulator {
             num_existed_in_mem: 0,
             num_existed_on_disk: 0,
             lt_hash: LtHash::identity(),
+            capitalization: 0,
             num_obsolete_accounts_skipped: 0,
             slot_arena: IndexGenerationSlotArena::default(),
         }
@@ -457,6 +462,10 @@ impl IndexGenerationAccumulator {
         self.num_existed_in_mem += other.num_existed_in_mem;
         self.num_existed_on_disk += other.num_existed_on_disk;
         self.lt_hash.mix_in(&other.lt_hash);
+        self.capitalization = self
+            .capitalization
+            .checked_add(other.capitalization)
+            .expect("capitalization cannot overflow");
         self.num_obsolete_accounts_skipped += other.num_obsolete_accounts_skipped;
         self.storage_info.append(&mut other.storage_info);
     }
@@ -937,6 +946,12 @@ pub struct AccountsDb {
 
     pub stats: AccountsStats,
 
+    /// Stats from storing accounts unfrozen
+    store_accounts_unfrozen_stats: StoreAccountsUnfrozenStats,
+
+    /// Stats from storing accounts frozen
+    store_accounts_frozen_stats: StoreAccountsFrozenStats,
+
     clean_accounts_stats: CleanAccountsStats,
 
     // Stats for purges called outside of clean_accounts()
@@ -1152,6 +1167,8 @@ impl AccountsDb {
             shrink_stats: ShrinkStats::default(),
             shrink_ancient_stats: ShrinkAncientStats::default(),
             stats: AccountsStats::default(),
+            store_accounts_unfrozen_stats: StoreAccountsUnfrozenStats::default(),
+            store_accounts_frozen_stats: StoreAccountsFrozenStats::default(),
             #[cfg(test)]
             load_delay: u64::default(),
             #[cfg(test)]
@@ -5467,49 +5484,46 @@ impl AccountsDb {
             return;
         }
 
-        let mut total_data = 0;
-        (0..accounts.len()).for_each(|index| {
-            total_data += accounts.data_len(index);
-        });
-
-        self.stats
-            .store_total_data
-            .fetch_add(total_data as u64, Ordering::Relaxed);
-
         // Store the accounts in the write cache
-        let mut store_accounts_time = Measure::start("store_accounts");
-        let (store_account, cache_account_store_stats) =
+        let write_accounts_time = Measure::start("write_accounts");
+        let (store_account, write_stats) =
             self.write_accounts_to_cache(accounts.target_slot(), &accounts, ancestors);
-        store_accounts_time.stop();
-        self.stats
-            .store_accounts_to_cache_us
-            .fetch_add(store_accounts_time.as_us(), Ordering::Relaxed);
+        let write_accounts_us = write_accounts_time.end_as_us();
 
         // Update the index
-        let mut update_index_time = Measure::start("update_index");
-
+        let update_index_time = Measure::start("update_index");
         self.update_index_cached_accounts(&accounts, &store_account, update_index_thread_selection);
+        let update_index_us = update_index_time.end_as_us();
 
-        update_index_time.stop();
-        self.stats
-            .store_update_index
-            .fetch_add(update_index_time.as_us(), Ordering::Relaxed);
-        self.stats.num_store_accounts_to_cache.fetch_add(
-            cache_account_store_stats.num_accounts_stored,
+        let stats = &self.store_accounts_unfrozen_stats;
+        stats
+            .write_to_cache_us
+            .fetch_add(write_accounts_us, Ordering::Relaxed);
+        stats
+            .update_index_us
+            .fetch_add(update_index_us, Ordering::Relaxed);
+        stats
+            .num_initial_accounts_to_store
+            .fetch_add(write_stats.num_initial_accounts_to_store, Ordering::Relaxed);
+        stats
+            .num_accounts_stored
+            .fetch_add(write_stats.num_accounts_stored, Ordering::Relaxed);
+        stats.num_duplicate_accounts_skipped.fetch_add(
+            write_stats.num_duplicate_accounts_skipped,
             Ordering::Relaxed,
         );
-        self.stats.num_ephemeral_accounts_skipped.fetch_add(
-            cache_account_store_stats.num_ephemeral_accounts_skipped,
+        stats.num_ephemeral_accounts_skipped.fetch_add(
+            write_stats.num_ephemeral_accounts_skipped,
             Ordering::Relaxed,
         );
-        self.stats.num_duplicate_accounts_skipped.fetch_add(
-            cache_account_store_stats.num_duplicate_accounts_skipped,
+        stats.num_ancestors_zero_lamport_skipped.fetch_add(
+            write_stats.num_ancestors_zero_lamport_skipped,
             Ordering::Relaxed,
         );
-        self.stats.num_ancestors_zero_lamport_skipped.fetch_add(
-            cache_account_store_stats.num_ancestors_zero_lamport_skipped,
-            Ordering::Relaxed,
-        );
+        stats
+            .account_data_bytes_stored
+            .fetch_add(write_stats.account_data_bytes_stored, Ordering::Relaxed);
+        stats.report();
         self.report_store_timings();
     }
 
@@ -5543,9 +5557,11 @@ impl AccountsDb {
         update_index_thread_selection: UpdateIndexThreadSelection,
     ) -> StoreAccountsTiming {
         let slot = accounts.target_slot();
-        let mut store_accounts_time = Measure::start("store_accounts");
+        let num_accounts_stored = accounts.len();
+        let stats = &self.store_accounts_frozen_stats;
 
         // Flush the read cache if necessary. This will occur during shrink or clean
+        let flush_read_cache_time = Measure::start("flush_read_cache");
         if self.read_only_accounts_cache.can_slot_be_in_cache(slot) {
             (0..accounts.len()).for_each(|index| {
                 // based on the patterns of how a validator writes accounts, it is almost always the case that there is no read only cache entry
@@ -5554,22 +5570,23 @@ impl AccountsDb {
                     .remove_assume_not_present(accounts.pubkey(index));
             });
         }
+        let flush_read_cache_us = flush_read_cache_time.end_as_us();
 
         // Write the accounts to storage
+        let write_accounts_time = Measure::start("write_accounts");
         let infos = self.write_accounts_to_storage(slot, storage, &accounts);
-        store_accounts_time.stop();
-        self.stats
-            .store_accounts_to_storage_us
-            .fetch_add(store_accounts_time.as_us(), Ordering::Relaxed);
+        let write_accounts_us = write_accounts_time.end_as_us();
 
-        self.mark_zero_lamport_single_ref_accounts(&infos, storage, reclaim_handling);
-
-        let mut update_index_time = Measure::start("update_index");
+        let mark_zero_lamport_time = Measure::start("mark_zero_lamport");
+        let num_zero_lamport_single_ref_accounts_marked =
+            self.mark_zero_lamport_single_ref_accounts(&infos, storage, reclaim_handling);
+        let mark_zero_lamport_us = mark_zero_lamport_time.end_as_us();
 
         // If the cache was flushed, then because `update_index` occurs
         // after the account are stored by the above `store_accounts_to`
         // call and all the accounts are stored, all reads after this point
         // will know to not check the cache anymore
+        let update_index_time = Measure::start("update_index");
         let reclaims = self.update_index_stored_accounts(
             infos,
             &accounts,
@@ -5577,29 +5594,17 @@ impl AccountsDb {
             update_index_thread_selection,
             &self.thread_pool_background,
         );
-
-        update_index_time.stop();
-        self.stats
-            .store_update_index
-            .fetch_add(update_index_time.as_us(), Ordering::Relaxed);
-        self.stats
-            .num_store_accounts_to_storage
-            .fetch_add(accounts.len() as u64, Ordering::Relaxed);
+        let update_index_us = update_index_time.end_as_us();
 
         // If there are any reclaims then they should be handled. Reclaims affect
         // all storages, and may result in the removal of dead storages.
-        let mut handle_reclaims_elapsed = 0;
-
         // since reclaims only contains non-empty SlotList<AccountInfo>, we
         // should skip handle_reclaims only when reclaims is empty. No need to
         // check the elements of reclaims are empty.
+        let handle_reclaims_time = Measure::start("handle_reclaims");
         if !reclaims.is_empty() {
             let reclaims_len = reclaims.iter().map(|r| r.len()).sum::<usize>();
-            self.stats
-                .num_reclaims
-                .fetch_add(reclaims_len as u64, Ordering::Relaxed);
             let purge_stats = PurgeStats::default();
-            let mut handle_reclaims_time = Measure::start("handle_reclaims");
             self.handle_reclaims(
                 reclaims.iter().flatten(),
                 None,
@@ -5607,27 +5612,50 @@ impl AccountsDb {
                 &purge_stats,
                 MarkAccountsObsolete::Yes(slot),
             );
-            handle_reclaims_time.stop();
-            handle_reclaims_elapsed = handle_reclaims_time.as_us();
-            self.stats.num_obsolete_slots_removed.fetch_add(
+            stats.num_obsolete_slots_removed.fetch_add(
                 purge_stats.num_stored_slots_removed.load(Ordering::Relaxed),
                 Ordering::Relaxed,
             );
-            self.stats.num_obsolete_bytes_removed.fetch_add(
+            stats.num_obsolete_bytes_removed.fetch_add(
                 purge_stats
                     .total_removed_stored_bytes
                     .load(Ordering::Relaxed),
                 Ordering::Relaxed,
             );
-            self.stats
-                .store_handle_reclaims
-                .fetch_add(handle_reclaims_elapsed, Ordering::Relaxed);
+            stats
+                .num_reclaims
+                .fetch_add(reclaims_len as u64, Ordering::Relaxed);
         }
+        let handle_reclaims_us = handle_reclaims_time.end_as_us();
+
+        stats
+            .flush_read_cache_us
+            .fetch_add(flush_read_cache_us, Ordering::Relaxed);
+        stats
+            .write_to_storage_us
+            .fetch_add(write_accounts_us, Ordering::Relaxed);
+        stats
+            .update_index_us
+            .fetch_add(update_index_us, Ordering::Relaxed);
+        stats
+            .mark_zero_lamport_single_ref_accounts_us
+            .fetch_add(mark_zero_lamport_us, Ordering::Relaxed);
+        stats
+            .handle_reclaims_us
+            .fetch_add(handle_reclaims_us, Ordering::Relaxed);
+        stats
+            .num_accounts_stored
+            .fetch_add(num_accounts_stored as u64, Ordering::Relaxed);
+        stats.num_zero_lamport_single_ref_accounts_marked.fetch_add(
+            num_zero_lamport_single_ref_accounts_marked,
+            Ordering::Relaxed,
+        );
+        stats.report();
 
         StoreAccountsTiming {
-            store_accounts_elapsed: store_accounts_time.as_us(),
-            update_index_elapsed: update_index_time.as_us(),
-            handle_reclaims_elapsed,
+            store_accounts_elapsed: write_accounts_us,
+            update_index_elapsed: update_index_us,
+            handle_reclaims_elapsed: handle_reclaims_us,
         }
     }
 
@@ -5641,10 +5669,13 @@ impl AccountsDb {
         slot: Slot,
         accounts_and_meta_to_store: &impl StorableAccounts<'b>,
         ancestors: Option<&Ancestors>,
-    ) -> (BitVec, CacheAccountStoreStats) {
+    ) -> (BitVec, WriteAccountsToCacheStats) {
         let len = accounts_and_meta_to_store.len();
         let mut pubkey_set = HashSet::with_capacity_and_hasher(len, PubkeyHasherBuilder::default());
-        let mut cache_account_store_stats = CacheAccountStoreStats::default();
+        let mut stats = WriteAccountsToCacheStats {
+            num_initial_accounts_to_store: len as u64,
+            ..Default::default()
+        };
         let mut store_account = BitVec::new_fill(false, len as u64);
 
         (0..len).rev().for_each(|index| {
@@ -5654,7 +5685,7 @@ impl AccountsDb {
                 if is_duplicate_account {
                     // If the same account is written multiple times in the same batch,
                     // only store the latest version
-                    cache_account_store_stats.num_duplicate_accounts_skipped += 1;
+                    stats.num_duplicate_accounts_skipped += 1;
                     return;
                 }
                 if account.is_zero_lamport() {
@@ -5667,29 +5698,32 @@ impl AccountsDb {
                             |(_, account)| account.is_zero_lamport(),
                         ) {
                             if is_zero_lamport {
-                                cache_account_store_stats.num_ancestors_zero_lamport_skipped += 1;
+                                stats.num_ancestors_zero_lamport_skipped += 1;
                                 return;
                             }
                         } else {
-                            cache_account_store_stats.num_ephemeral_accounts_skipped += 1;
+                            stats.num_ephemeral_accounts_skipped += 1;
                             return;
                         }
                     } else if self
                         .accounts_index
                         .get_and_then(pubkey, |account| (true, account.is_none()))
                     {
-                        cache_account_store_stats.num_ephemeral_accounts_skipped += 1;
+                        stats.num_ephemeral_accounts_skipped += 1;
                         return;
                     }
                 }
 
-                self.accounts_cache
-                    .store(slot, pubkey, account.take_account());
+                let account_shared_data = account.take_account();
+                let account_data_len = account_shared_data.data().len();
+                self.accounts_cache.store(slot, pubkey, account_shared_data);
                 store_account.set(index as u64, true);
+                stats.num_accounts_stored += 1;
+                stats.account_data_bytes_stored += account_data_len as u64;
             })
         });
 
-        (store_account, cache_account_store_stats)
+        (store_account, stats)
     }
 
     fn write_accounts_to_storage<'a>(
@@ -5699,14 +5733,10 @@ impl AccountsDb {
         accounts_and_meta_to_store: &impl StorableAccounts<'a>,
     ) -> Vec<AccountInfo> {
         let mut infos: Vec<AccountInfo> = Vec::with_capacity(accounts_and_meta_to_store.len());
-        let mut total_append_accounts_us = 0;
         while infos.len() < accounts_and_meta_to_store.len() {
-            let mut append_accounts = Measure::start("append_accounts");
             let stored_accounts_info = storage
                 .accounts
                 .write_accounts(accounts_and_meta_to_store, infos.len());
-            append_accounts.stop();
-            total_append_accounts_us += append_accounts.as_us();
             let Some(stored_accounts_info) = stored_accounts_info else {
                 // See if an account overflows the storage in the slot.
                 let data_len = accounts_and_meta_to_store.data_len(infos.len());
@@ -5738,38 +5768,34 @@ impl AccountsDb {
             );
         }
 
-        self.stats
-            .store_append_accounts
-            .fetch_add(total_append_accounts_us, Ordering::Relaxed);
-
         infos
     }
 
-    /// Marks zero lamport single reference accounts in the storage during store_accounts
+    /// Marks zero lamport single reference accounts in the storage during store_accounts_frozen
+    ///
+    /// Returns the number of accounts marked.
     fn mark_zero_lamport_single_ref_accounts(
         &self,
         account_infos: &[AccountInfo],
         storage: &AccountStorageEntry,
         reclaim_handling: UpsertReclaim,
-    ) {
+    ) -> u64 {
+        let mut num_marked = 0;
         // If the reclaim handling is `ReclaimOldSlots`, then all zero lamport accounts are single
         // ref accounts and they need to be inserted into the storages zero lamport single ref
         // accounts list
         // For other values of reclaim handling, there are no zero lamport single ref accounts
         // so nothing needs to be done in this function
         if reclaim_handling == UpsertReclaim::ReclaimOldSlots {
-            let mut add_zero_lamport_accounts = Measure::start("add_zero_lamport_accounts");
-            let mut num_zero_lamport_accounts_added = 0;
-
             for account_info in account_infos {
                 if account_info.is_zero_lamport() {
                     storage.insert_zero_lamport_single_ref_account_offset(account_info.offset());
-                    num_zero_lamport_accounts_added += 1;
+                    num_marked += 1;
                 }
             }
 
-            // If any zero lamport accounts were added, the storage may be valid for shrinking
-            if num_zero_lamport_accounts_added > 0
+            // If any zero lamport accounts were marked, the storage may be valid for shrinking
+            if num_marked > 0
                 && self.is_candidate_for_shrink(storage)
                 && Self::is_shrinking_productive(storage)
             {
@@ -5778,15 +5804,9 @@ impl AccountsDb {
                     .unwrap()
                     .insert(storage.slot);
             }
-
-            add_zero_lamport_accounts.stop();
-            self.stats
-                .add_zero_lamport_accounts_us
-                .fetch_add(add_zero_lamport_accounts.as_us(), Ordering::Relaxed);
-            self.stats
-                .num_zero_lamport_accounts_added
-                .fetch_add(num_zero_lamport_accounts_added, Ordering::Relaxed);
         }
+
+        num_marked
     }
 
     fn report_store_timings(&self) {
@@ -5795,63 +5815,10 @@ impl AccountsDb {
             datapoint_info!(
                 "accounts_db_store_timings",
                 (
-                    "store_accounts_to_cache_us",
-                    self.stats
-                        .store_accounts_to_cache_us
-                        .swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "store_accounts_to_storage_us",
-                    self.stats
-                        .store_accounts_to_storage_us
-                        .swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "update_index",
-                    self.stats.store_update_index.swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "handle_reclaims",
-                    self.stats.store_handle_reclaims.swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "append_accounts",
-                    self.stats.store_append_accounts.swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
                     "stakes_cache_check_and_store_us",
                     self.stats
                         .stakes_cache_check_and_store_us
                         .swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "num_store_accounts_to_cache",
-                    self.stats
-                        .num_store_accounts_to_cache
-                        .swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "num_store_accounts_to_storage",
-                    self.stats
-                        .num_store_accounts_to_storage
-                        .swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "total_data",
-                    self.stats.store_total_data.swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "num_reclaims",
-                    self.stats.num_reclaims.swap(0, Ordering::Relaxed),
                     i64
                 ),
                 (
@@ -5913,55 +5880,6 @@ impl AccountsDb {
                 (
                     "purge_exact_count",
                     self.stats.purge_exact_count.swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "num_obsolete_slots_removed",
-                    self.stats
-                        .num_obsolete_slots_removed
-                        .swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "num_obsolete_bytes_removed",
-                    self.stats
-                        .num_obsolete_bytes_removed
-                        .swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "add_zero_lamport_accounts_us",
-                    self.stats
-                        .add_zero_lamport_accounts_us
-                        .swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "num_zero_lamport_accounts_added",
-                    self.stats
-                        .num_zero_lamport_accounts_added
-                        .swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "num_ephemeral_accounts_skipped",
-                    self.stats
-                        .num_ephemeral_accounts_skipped
-                        .swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "num_duplicate_accounts_skipped",
-                    self.stats
-                        .num_duplicate_accounts_skipped
-                        .swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "num_ancestors_zero_lamport_skipped",
-                    self.stats
-                        .num_ancestors_zero_lamport_skipped
-                        .swap(0, Ordering::Relaxed),
                     i64
                 ),
             );
@@ -6109,6 +6027,11 @@ impl AccountsDb {
 
                 let account_lt_hash = Self::lt_hash_account(&account, account.pubkey());
                 accum.lt_hash.mix_in(&account_lt_hash.0);
+
+                accum.capitalization = accum
+                    .capitalization
+                    .checked_add(account.lamports())
+                    .expect("capitalization cannot overflow");
 
                 if let Some(geyser_notifier) = geyser_notifier {
                     debug_assert!(geyser_notifier.snapshot_notifications_enabled());
@@ -6400,6 +6323,7 @@ impl AccountsDb {
             accounts_data_len_from_duplicates: u64,
             num_duplicate_accounts: u64,
             duplicates_lt_hash: Box<DuplicatesLtHash>,
+            capitalization_from_duplicates: u64,
         }
         impl DuplicatePubkeysVisitedInfo {
             fn reduce(mut self, other: Self) -> Self {
@@ -6408,6 +6332,10 @@ impl AccountsDb {
                 self.duplicates_lt_hash
                     .0
                     .mix_in(&other.duplicates_lt_hash.0);
+                self.capitalization_from_duplicates = self
+                    .capitalization_from_duplicates
+                    .checked_add(other.capitalization_from_duplicates)
+                    .expect("capitalization cannot overflow");
                 self
             }
         }
@@ -6423,6 +6351,7 @@ impl AccountsDb {
             accounts_data_len_from_duplicates,
             num_duplicate_accounts,
             duplicates_lt_hash,
+            capitalization_from_duplicates,
         } = unique_pubkeys_by_bin
             .par_iter()
             .fold(
@@ -6435,11 +6364,13 @@ impl AccountsDb {
                                 accounts_data_len_from_duplicates,
                                 accounts_duplicates_num,
                                 duplicates_lt_hash,
+                                capitalization_from_duplicates,
                             ) = self.visit_duplicate_pubkeys_during_startup(pubkeys);
                             let intermediate = DuplicatePubkeysVisitedInfo {
                                 accounts_data_len_from_duplicates,
                                 num_duplicate_accounts: accounts_duplicates_num,
                                 duplicates_lt_hash,
+                                capitalization_from_duplicates,
                             };
                             DuplicatePubkeysVisitedInfo::reduce(accum, intermediate)
                         })
@@ -6459,6 +6390,10 @@ impl AccountsDb {
         timings.num_duplicate_accounts = num_duplicate_accounts;
 
         total_accum.lt_hash.mix_out(&duplicates_lt_hash.0);
+        total_accum.capitalization = total_accum
+            .capitalization
+            .checked_sub(capitalization_from_duplicates)
+            .expect("capitalization cannot underflow");
         total_accum.accounts_data_len -= accounts_data_len_from_duplicates;
         info!("accounts data len: {}", total_accum.accounts_data_len);
 
@@ -6527,6 +6462,7 @@ impl AccountsDb {
         IndexGenerationInfo {
             accounts_data_len: total_accum.accounts_data_len,
             calculated_accounts_lt_hash: AccountsLtHash(total_accum.lt_hash),
+            calculated_capitalization: total_accum.capitalization,
         }
     }
 
@@ -6645,7 +6581,7 @@ impl AccountsDb {
     }
 
     /// Used during generate_index() to:
-    /// 1. get the _duplicate_ accounts data len from the given pubkeys
+    /// 1. get the _duplicate_ accounts from the given pubkeys
     /// 2. get the slots that contained duplicate pubkeys
     /// 3. build up the duplicates lt hash
     ///
@@ -6655,13 +6591,15 @@ impl AccountsDb {
     /// - data len sum of all older duplicates
     /// - number of duplicate accounts
     /// - lt hash of duplicates
+    /// - capitalization of duplicates
     fn visit_duplicate_pubkeys_during_startup(
         &self,
         pubkeys: &[Pubkey],
-    ) -> (u64, u64, Box<DuplicatesLtHash>) {
+    ) -> (u64, u64, Box<DuplicatesLtHash>, u64) {
         let mut accounts_data_len_from_duplicates = 0;
         let mut num_duplicate_accounts = 0_u64;
         let mut duplicates_lt_hash = Box::new(DuplicatesLtHash::default());
+        let mut capitalization_from_duplicates = 0_u64;
         self.accounts_index.scan(
             pubkeys.iter(),
             |pubkey, slots_refs| {
@@ -6686,13 +6624,17 @@ impl AccountsDb {
                             );
                             accessor.check_and_get_loaded_account(|loaded_account| {
                                 let data_len = loaded_account.data_len();
-                                if loaded_account.lamports() > 0 {
+                                let lamports = loaded_account.lamports();
+                                if lamports > 0 {
                                     accounts_data_len_from_duplicates += data_len;
                                 }
                                 num_duplicate_accounts += 1;
                                 let account_lt_hash =
                                     Self::lt_hash_account(&loaded_account, pubkey);
                                 duplicates_lt_hash.0.mix_in(&account_lt_hash.0);
+                                capitalization_from_duplicates = capitalization_from_duplicates
+                                    .checked_add(lamports)
+                                    .expect("capitalization cannot overflow");
                             });
                         });
                     }
@@ -6706,6 +6648,7 @@ impl AccountsDb {
             accounts_data_len_from_duplicates as u64,
             num_duplicate_accounts,
             duplicates_lt_hash,
+            capitalization_from_duplicates,
         )
     }
 

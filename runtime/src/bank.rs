@@ -95,7 +95,7 @@ use {
         accounts_hash::AccountsLtHash,
         accounts_index::{IndexKey, ScanConfig, ScanResult},
         accounts_update_notifier_interface::AccountsUpdateNotifier,
-        ancestors::{Ancestors, AncestorsForSerialization},
+        ancestors::Ancestors,
         blockhash_queue::BlockhashQueue,
         storable_accounts::StorableAccounts,
         utils::create_account_shared_data,
@@ -455,7 +455,6 @@ impl TransactionLogCollector {
 #[derive(Clone, Debug)]
 pub struct BankFieldsToDeserialize {
     pub(crate) blockhash_queue: BlockhashQueue,
-    pub(crate) ancestors: AncestorsForSerialization,
     pub(crate) hash: Hash,
     pub(crate) parent_hash: Hash,
     pub(crate) parent_slot: Slot,
@@ -474,7 +473,6 @@ pub struct BankFieldsToDeserialize {
     pub(crate) epoch: Epoch,
     pub(crate) block_height: u64,
     pub(crate) leader_id: Pubkey,
-    pub(crate) collector_fees: u64,
     pub(crate) fee_rate_governor: FeeRateGovernor,
     pub(crate) rent_collector: RentCollector,
     pub(crate) epoch_schedule: EpochSchedule,
@@ -500,7 +498,6 @@ pub struct BankFieldsToDeserialize {
 #[derive(Debug)]
 pub struct BankFieldsToSerialize {
     pub blockhash_queue: BlockhashQueue,
-    pub ancestors: AncestorsForSerialization,
     pub hash: Hash,
     pub parent_hash: Hash,
     pub parent_slot: Slot,
@@ -519,7 +516,6 @@ pub struct BankFieldsToSerialize {
     pub epoch: Epoch,
     pub block_height: u64,
     pub leader_id: Pubkey,
-    pub collector_fees: u64,
     pub fee_rate_governor: FeeRateGovernor,
     pub rent_collector: RentCollector,
     pub epoch_schedule: EpochSchedule,
@@ -568,7 +564,6 @@ impl PartialEq for Bank {
             epoch,
             block_height,
             leader_id,
-            collector_fees,
             fee_rate_governor,
             rent_collector,
             epoch_schedule,
@@ -630,7 +625,6 @@ impl PartialEq for Bank {
             && epoch == &other.epoch
             && block_height == &other.block_height
             && leader_id == &other.leader_id
-            && collector_fees.load(Relaxed) == other.collector_fees.load(Relaxed)
             && fee_rate_governor == &other.fee_rate_governor
             && rent_collector == &other.rent_collector
             && epoch_schedule == &other.epoch_schedule
@@ -654,7 +648,6 @@ impl BankFieldsToSerialize {
     pub fn default_for_tests() -> Self {
         Self {
             blockhash_queue: BlockhashQueue::default(),
-            ancestors: AncestorsForSerialization::default(),
             hash: Hash::default(),
             parent_hash: Hash::default(),
             parent_slot: Slot::default(),
@@ -673,7 +666,6 @@ impl BankFieldsToSerialize {
             epoch: Epoch::default(),
             block_height: u64::default(),
             leader_id: Pubkey::default(),
-            collector_fees: u64::default(),
             fee_rate_governor: FeeRateGovernor::default(),
             rent_collector: RentCollector::default(),
             epoch_schedule: EpochSchedule::default(),
@@ -839,9 +831,6 @@ pub struct Bank {
 
     /// The validator identity of the leader who produced this block.
     leader_id: Pubkey,
-
-    /// Fees that have been collected
-    collector_fees: AtomicU64,
 
     /// Track cluster signature throughput and adjust fee rate
     pub(crate) fee_rate_governor: FeeRateGovernor,
@@ -1127,7 +1116,6 @@ impl Bank {
             epoch: Epoch::default(),
             block_height: u64::default(),
             leader_id: Pubkey::default(),
-            collector_fees: AtomicU64::default(),
             fee_rate_governor: FeeRateGovernor::default(),
             rent_collector: RentCollector::default(),
             epoch_schedule: EpochSchedule::default(),
@@ -1370,7 +1358,6 @@ impl Bank {
             parent_hash: parent.hash(),
             parent_slot: parent.slot(),
             leader_id: *leader_id,
-            collector_fees: AtomicU64::new(0),
             ancestors: Ancestors::default(),
             hash: RwLock::new(Hash::default()),
             is_delta: AtomicBool::new(false),
@@ -1856,7 +1843,8 @@ impl Bank {
         epoch_stakes: HashMap<Epoch, VersionedEpochStakes>,
     ) -> Self {
         let now = Instant::now();
-        let ancestors = Ancestors::from(&fields.ancestors);
+        let slot = fields.slot;
+        let ancestors = Ancestors::from(vec![slot]);
         // For backward compatibility, we can only serialize and deserialize
         // Stakes<Delegation> in BankFieldsTo{Serialize,Deserialize}. But Bank
         // caches Stakes<StakeAccount>. Below Stakes<StakeAccount> is obtained
@@ -1912,12 +1900,11 @@ impl Bank {
             ns_per_slot: fields.ns_per_slot,
             genesis_creation_time: fields.genesis_creation_time,
             slots_per_year: fields.slots_per_year,
-            slot: fields.slot,
+            slot,
             bank_id: 0,
             epoch: fields.epoch,
             block_height: fields.block_height,
             leader_id: fields.leader_id,
-            collector_fees: AtomicU64::new(fields.collector_fees),
             fee_rate_governor: fields.fee_rate_governor,
             // clone()-ing is needed to consider a gated behavior in rent_collector
             rent_collector: Self::get_rent_collector_from(&fields.rent_collector, fields.epoch),
@@ -2019,7 +2006,6 @@ impl Bank {
     pub(crate) fn get_fields_to_serialize(&self) -> BankFieldsToSerialize {
         BankFieldsToSerialize {
             blockhash_queue: self.blockhash_queue.read().unwrap().clone(),
-            ancestors: AncestorsForSerialization::from(&self.ancestors),
             hash: *self.hash.read().unwrap(),
             parent_hash: self.parent_hash,
             parent_slot: self.parent_slot,
@@ -2038,7 +2024,6 @@ impl Bank {
             epoch: self.epoch,
             block_height: self.block_height,
             leader_id: self.leader_id,
-            collector_fees: self.collector_fees.load(Relaxed),
             fee_rate_governor: self.fee_rate_governor.clone(),
             rent_collector: self.rent_collector.clone(),
             epoch_schedule: self.epoch_schedule.clone(),
@@ -4886,10 +4871,6 @@ impl Bank {
             self.capitalization(),
         );
         hash
-    }
-
-    pub fn collector_fees(&self) -> u64 {
-        self.collector_fees.load(Relaxed)
     }
 
     /// Used by ledger tool to run a final hash calculation once all ledger replay has completed.

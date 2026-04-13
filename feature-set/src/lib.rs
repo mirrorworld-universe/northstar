@@ -105,8 +105,10 @@ impl FeatureSet {
         SVMFeatureSet {
             move_precompile_verification_to_svm: self
                 .is_active(&move_precompile_verification_to_svm::id()),
-            stricter_abi_and_runtime_constraints: self
-                .is_active(&stricter_abi_and_runtime_constraints::id()),
+            syscall_parameter_address_restrictions: self
+                .is_active(&syscall_parameter_address_restrictions::id()),
+            virtual_address_space_adjustments: self
+                .is_active(&virtual_address_space_adjustments::id()),
             account_data_direct_mapping: self.is_active(&account_data_direct_mapping::id()),
             enable_bpf_loader_set_authority_checked_ix: self
                 .is_active(&enable_bpf_loader_set_authority_checked_ix::id()),
@@ -768,12 +770,16 @@ pub mod apply_cost_tracker_during_replay {
     solana_pubkey::declare_id!("2ry7ygxiYURULZCrypHhveanvP5tzZ4toRwVp89oCNSj");
 }
 
-pub mod stricter_abi_and_runtime_constraints {
-    solana_pubkey::declare_id!("StricterAbiAndRuntimeConstraints11111111111");
+pub mod syscall_parameter_address_restrictions {
+    solana_pubkey::declare_id!("EDGMC5kxFxGk4ixsNkGt8bW7QL5hDMXnbwaZvYMwNfzF");
+}
+
+pub mod virtual_address_space_adjustments {
+    solana_pubkey::declare_id!("7VgiehxNxu53KdxgLspGQY8myE6f7UokaWa4jsGcaSz");
 }
 
 pub mod account_data_direct_mapping {
-    solana_pubkey::declare_id!("AccountDataDirectMapping1111111111111111111");
+    solana_pubkey::declare_id!("CR3dVN2Yoo95Y96kLSTaziWDAQT2MNEpiWh5cqVq2pNE");
 }
 
 pub mod add_set_tx_loaded_accounts_data_size_instruction {
@@ -1285,12 +1291,12 @@ pub mod set_lamports_per_byte_to_696 {
     pub const LAMPORTS_PER_BYTE: u64 = 696;
 }
 
-pub mod stop_use_static_simple_vote_tx_cost {
-    solana_pubkey::declare_id!("NSVt1s8oP1A9NjEc6UNcj2voeCcfzHaq4jZTiUL2Mf5");
+pub mod remove_simple_vote_from_cost_model {
+    solana_pubkey::declare_id!("2GCrNXbzmt4xrwdcKS2RdsLzsgu4V5zHAemW57pcHT6a");
 }
 
 pub mod limit_instruction_accounts {
-    solana_pubkey::declare_id!("DqbnFPASg7tHmZ6qfpdrt2M6MWoSeiicWPXxPhxqFCQ");
+    solana_pubkey::declare_id!("6aHuNsUmwSzCEMjrBzBCYaxHAyAcQBjVES92JigHBDuC");
 }
 
 pub mod block_revenue_sharing {
@@ -1877,8 +1883,12 @@ pub static FEATURE_NAMES: LazyLock<AHashMap<Pubkey, &'static str>> = LazyLock::n
             "checked arithmetic in fee validation #31273",
         ),
         (
-            stricter_abi_and_runtime_constraints::id(),
-            "SIMD-0219: Stricter ABI and Runtime Constraints",
+            syscall_parameter_address_restrictions::id(),
+            "SIMD-0459: Syscall Parameter Address Restrictions",
+        ),
+        (
+            virtual_address_space_adjustments::id(),
+            "SIMD-0460: Virtual Address Space Adjustments",
         ),
         (
             account_data_direct_mapping::id(),
@@ -2314,7 +2324,7 @@ pub static FEATURE_NAMES: LazyLock<AHashMap<Pubkey, &'static str>> = LazyLock::n
             "SIMD-0437-5: Set lamports per byte to 696",
         ),
         (
-            stop_use_static_simple_vote_tx_cost::id(),
+            remove_simple_vote_from_cost_model::id(),
             "stop use static SimpleVote transaction cost, issue #10227",
         ),
         (
