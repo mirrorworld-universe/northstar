@@ -37,7 +37,10 @@ use {
     solana_account::ReadableAccount,
     solana_address_lookup_table_interface::state::AddressLookupTable,
     solana_clock::{Slot, UnixTimestamp, DEFAULT_TICKS_PER_SECOND},
-    solana_entry::entry::{create_ticks, Entry, MaxDataShredsLen},
+    solana_entry::{
+        block_component::BlockComponent,
+        entry::{create_ticks, Entry, MaxDataShredsLen},
+    },
     solana_genesis_config::{GenesisConfig, DEFAULT_GENESIS_ARCHIVE, DEFAULT_GENESIS_FILE},
     solana_hash::Hash,
     solana_keypair::Keypair,
@@ -3523,14 +3526,13 @@ impl Blockstore {
             .map(|x| x.0)
     }
 
-    /// Returns the entry vector for the slot starting with `shred_start_index`, the number of
-    /// shreds that comprise the entry vector, and whether the slot is full (consumed all shreds).
-    pub fn get_slot_entries_with_shred_info(
+    /// Helper function that contains the common logic for getting slot data with shred info
+    fn get_slot_data_with_shred_info_common(
         &self,
         slot: Slot,
         start_index: u64,
         allow_dead_slots: bool,
-    ) -> Result<(Vec<Entry>, u64, bool)> {
+    ) -> Result<Option<(CompletedRanges, SlotMeta, u64)>> {
         let (completed_ranges, slot_meta) = self.get_completed_ranges(slot, start_index)?;
 
         // Check if the slot is dead *after* fetching completed ranges to avoid a race
@@ -3540,7 +3542,7 @@ impl Blockstore {
         if self.is_dead(slot) && !allow_dead_slots {
             return Err(BlockstoreError::DeadSlot);
         } else if completed_ranges.is_empty() {
-            return Ok((vec![], 0, false));
+            return Ok(None);
         }
 
         let slot_meta = slot_meta.unwrap();
@@ -3549,8 +3551,46 @@ impl Blockstore {
             .map(|&Range { end, .. }| u64::from(end) - start_index)
             .unwrap_or(0);
 
-        let entries = self.get_slot_entries_in_block(slot, completed_ranges, Some(&slot_meta))?;
+        Ok(Some((completed_ranges, slot_meta, num_shreds)))
+    }
+
+    /// Returns the entry vector for the slot starting with `shred_start_index`, the number of
+    /// shreds that comprise the entry vector, and whether the slot is full (consumed all shreds).
+    pub fn get_slot_entries_with_shred_info(
+        &self,
+        slot: Slot,
+        start_index: u64,
+        allow_dead_slots: bool,
+    ) -> Result<(Vec<Entry>, u64, bool)> {
+        let Some((completed_ranges, slot_meta, num_shreds)) =
+            self.get_slot_data_with_shred_info_common(slot, start_index, allow_dead_slots)?
+        else {
+            return Ok((vec![], 0, false));
+        };
+
+        let entries = self.get_slot_entries_in_block(slot, &completed_ranges, Some(&slot_meta))?;
         Ok((entries, num_shreds, slot_meta.is_full()))
+    }
+
+    /// Returns the components vector for the slot starting with `shred_start_index`, the number of
+    /// shreds that comprise the components vector, and whether the slot is full (consumed all
+    /// shreds).
+    pub fn get_slot_components_with_shred_info(
+        &self,
+        slot: Slot,
+        start_index: u64,
+        allow_dead_slots: bool,
+    ) -> Result<(Vec<BlockComponent>, Vec<Range<u32>>, bool)> {
+        let Some((completed_ranges, slot_meta, _)) =
+            self.get_slot_data_with_shred_info_common(slot, start_index, allow_dead_slots)?
+        else {
+            return Ok((vec![], vec![], false));
+        };
+
+        let components =
+            self.get_slot_components_in_block(slot, &completed_ranges, Some(&slot_meta))?;
+        debug_assert_eq!(completed_ranges.len(), components.len());
+        Ok((components, completed_ranges, slot_meta.is_full()))
     }
 
     /// Gets accounts used in transactions in the slot range [starting_slot, ending_slot].
@@ -3656,18 +3696,19 @@ impl Blockstore {
             .collect()
     }
 
-    /// Fetch the entries corresponding to all of the shred indices in `completed_ranges`
+    /// Fetch the data corresponding to all of the shred indices in `completed_ranges`
     /// This function takes advantage of the fact that `completed_ranges` are both
     /// contiguous and in sorted order. To clarify, suppose completed_ranges is as follows:
     ///   completed_ranges = [..., (s_i..e_i), (s_i+1..e_i+1), ...]
     /// Then, the following statements are true:
     ///   s_i < e_i == s_i+1 < e_i+1
-    fn get_slot_entries_in_block(
+    fn get_slot_data_in_block<T>(
         &self,
         slot: Slot,
-        completed_ranges: CompletedRanges,
+        completed_ranges: &CompletedRanges,
         slot_meta: Option<&SlotMeta>,
-    ) -> Result<Vec<Entry>> {
+        mut deserialize: impl FnMut(Vec<u8>) -> Result<Vec<T>>,
+    ) -> Result<Vec<T>> {
         debug_assert!(completed_ranges
             .iter()
             .tuple_windows()
@@ -3698,7 +3739,7 @@ impl Blockstore {
                     })
                 });
         completed_ranges
-            .into_iter()
+            .iter()
             .map(|Range { start, end }| end - start)
             .map(|num_shreds| {
                 shreds
@@ -3707,19 +3748,48 @@ impl Blockstore {
                     .process_results(|shreds| Shredder::deshred(shreds))?
                     .map_err(|e| {
                         BlockstoreError::InvalidShredData(Box::new(bincode::ErrorKind::Custom(
-                            format!("could not reconstruct entries buffer from shreds: {e:?}"),
+                            format!("could not reconstruct data buffer from shreds: {e:?}"),
                         )))
                     })
-                    .and_then(|payload| {
-                        <WincodeVec<Entry, MaxDataShredsLen>>::deserialize(&payload).map_err(|e| {
-                            BlockstoreError::InvalidShredData(Box::new(bincode::ErrorKind::Custom(
-                                format!("could not reconstruct entries: {e:?}"),
-                            )))
-                        })
-                    })
+                    .and_then(&mut deserialize)
             })
             .flatten_ok()
             .collect()
+    }
+
+    /// Fetch the components corresponding to all of the shred indices in `completed_ranges`.
+    /// Note that one range in CompletedRanges corresponds to one BlockComponent.
+    fn get_slot_components_in_block(
+        &self,
+        slot: Slot,
+        completed_ranges: &CompletedRanges,
+        slot_meta: Option<&SlotMeta>,
+    ) -> Result<Vec<BlockComponent>> {
+        self.get_slot_data_in_block(slot, completed_ranges, slot_meta, |payload| {
+            wincode::deserialize(&payload)
+                .map(|component| vec![component])
+                .map_err(|e| {
+                    BlockstoreError::InvalidShredData(Box::new(bincode::ErrorKind::Custom(
+                        format!("could not reconstruct block component: {e:?}"),
+                    )))
+                })
+        })
+    }
+
+    /// Fetch the entries corresponding to all of the shred indices in `completed_ranges`.
+    fn get_slot_entries_in_block(
+        &self,
+        slot: Slot,
+        completed_ranges: &CompletedRanges,
+        slot_meta: Option<&SlotMeta>,
+    ) -> Result<Vec<Entry>> {
+        self.get_slot_data_in_block(slot, completed_ranges, slot_meta, |payload| {
+            <WincodeVec<Entry, MaxDataShredsLen>>::deserialize(&payload).map_err(|e| {
+                BlockstoreError::InvalidShredData(Box::new(bincode::ErrorKind::Custom(format!(
+                    "could not reconstruct entries: {e:?}"
+                ))))
+            })
+        })
     }
 
     pub fn get_entries_in_data_block(
@@ -3728,7 +3798,7 @@ impl Blockstore {
         range: Range<u32>,
         slot_meta: Option<&SlotMeta>,
     ) -> Result<Vec<Entry>> {
-        self.get_slot_entries_in_block(slot, vec![range], slot_meta)
+        self.get_slot_entries_in_block(slot, &vec![range], slot_meta)
     }
 
     /// Performs checks on the last fec set of a replayed slot, and returns the block_id.
@@ -7709,10 +7779,7 @@ pub mod tests {
         let blockstore = Blockstore::open(ledger_path.path()).unwrap();
 
         // slot 5 does not exist, iter should be ok and should be a noop
-        blockstore
-            .slot_meta_iterator(5)
-            .unwrap()
-            .for_each(|_| panic!());
+        assert_eq!(blockstore.slot_meta_iterator(5).unwrap().next(), None);
     }
 
     #[test]
@@ -9747,7 +9814,7 @@ pub mod tests {
 
         for i in 0..num_entries {
             let mut expected_samples = perf_samples[num_entries - 1 - i..].to_vec();
-            expected_samples.sort_by(|a, b| b.0.cmp(&a.0));
+            expected_samples.sort_by_key(|b| cmp::Reverse(b.0));
             assert_eq!(
                 blockstore.get_recent_perf_samples(i + 1).unwrap(),
                 expected_samples
@@ -9781,7 +9848,7 @@ pub mod tests {
 
         for i in 0..num_entries {
             let mut expected_samples = perf_samples[num_entries - 1 - i..].to_vec();
-            expected_samples.sort_by(|a, b| b.0.cmp(&a.0));
+            expected_samples.sort_by_key(|b| cmp::Reverse(b.0));
             assert_eq!(
                 blockstore.get_recent_perf_samples(i + 1).unwrap(),
                 expected_samples
@@ -9828,7 +9895,7 @@ pub mod tests {
 
         for i in 0..num_entries {
             let mut expected_samples = perf_samples[num_entries - 1 - i..].to_vec();
-            expected_samples.sort_by(|a, b| b.0.cmp(&a.0));
+            expected_samples.sort_by_key(|b| cmp::Reverse(b.0));
             assert_eq!(
                 blockstore.get_recent_perf_samples(i + 1).unwrap(),
                 expected_samples
@@ -9858,7 +9925,7 @@ pub mod tests {
 
         for x in 0..num_entries {
             let mut expected_samples = perf_samples[num_entries - 1 - x..].to_vec();
-            expected_samples.sort_by(|a, b| b.0.cmp(&a.0));
+            expected_samples.sort_by_key(|b| cmp::Reverse(b.0));
             assert_eq!(
                 blockstore.get_recent_perf_samples(x + 1).unwrap(),
                 expected_samples

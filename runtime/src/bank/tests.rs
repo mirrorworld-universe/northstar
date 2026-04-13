@@ -119,7 +119,7 @@ use {
         vote_instruction,
         vote_state::{
             self, create_bls_pubkey_and_proof_of_possession, create_v4_account_with_authorized,
-            BlockTimestamp, VoteAuthorize, VoteInit, VoteInitV2, VoteStateV4, VoteStateVersions,
+            BlockTimestamp, VoteAuthorize, VoteInit, VoteStateV4, VoteStateVersions,
             VoterWithBLSArgs, MAX_LOCKOUT_HISTORY,
         },
     },
@@ -3226,22 +3226,13 @@ fn test_bank_inherit_fee_rate_governor() {
     );
 }
 
-#[test_case(true; "bls_feature_active")]
-#[test_case(false; "bls_feature_inactive")]
-fn test_bank_vote_accounts(bls_feature_active: bool) {
+#[test]
+fn test_bank_vote_accounts() {
     let GenesisConfigInfo {
-        mut genesis_config,
+        genesis_config,
         mint_keypair,
         ..
     } = create_genesis_config_with_leader(500, &solana_pubkey::new_rand(), 1);
-
-    if !bls_feature_active {
-        genesis_utils::deactivate_features(
-            &mut genesis_config,
-            &vec![feature_set::bls_pubkey_management_in_vote_account::id()],
-        );
-    }
-
     let (bank, _bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
 
     let vote_accounts = bank.vote_accounts();
@@ -3249,43 +3240,21 @@ fn test_bank_vote_accounts(bls_feature_active: bool) {
                                         // to have a vote account
 
     let vote_keypair = Keypair::new();
-    let instructions = if bls_feature_active {
-        let (bls_pubkey, bls_proof_of_possession) =
-            create_bls_pubkey_and_proof_of_possession(&vote_keypair.pubkey());
-        vote_instruction::create_account_with_config_v2(
-            &mint_keypair.pubkey(),
-            &vote_keypair.pubkey(),
-            &VoteInitV2 {
-                node_pubkey: mint_keypair.pubkey(),
-                authorized_voter: vote_keypair.pubkey(),
-                authorized_voter_bls_pubkey: bls_pubkey,
-                authorized_voter_bls_proof_of_possession: bls_proof_of_possession,
-                authorized_withdrawer: vote_keypair.pubkey(),
-                ..Default::default()
-            },
-            10,
-            vote_instruction::CreateVoteAccountConfig {
-                space: VoteStateV4::size_of() as u64,
-                ..vote_instruction::CreateVoteAccountConfig::default()
-            },
-        )
-    } else {
-        vote_instruction::create_account_with_config(
-            &mint_keypair.pubkey(),
-            &vote_keypair.pubkey(),
-            &VoteInit {
-                node_pubkey: mint_keypair.pubkey(),
-                authorized_voter: vote_keypair.pubkey(),
-                authorized_withdrawer: vote_keypair.pubkey(),
-                ..VoteInit::default()
-            },
-            10,
-            vote_instruction::CreateVoteAccountConfig {
-                space: VoteStateV4::size_of() as u64,
-                ..vote_instruction::CreateVoteAccountConfig::default()
-            },
-        )
-    };
+    let instructions = vote_instruction::create_account_with_config(
+        &mint_keypair.pubkey(),
+        &vote_keypair.pubkey(),
+        &VoteInit {
+            node_pubkey: mint_keypair.pubkey(),
+            authorized_voter: vote_keypair.pubkey(),
+            authorized_withdrawer: vote_keypair.pubkey(),
+            commission: 0,
+        },
+        10,
+        vote_instruction::CreateVoteAccountConfig {
+            space: VoteStateV4::size_of() as u64,
+            ..vote_instruction::CreateVoteAccountConfig::default()
+        },
+    );
 
     let message = Message::new(&instructions, Some(&mint_keypair.pubkey()));
     let transaction = Transaction::new(
@@ -3353,18 +3322,14 @@ fn test_bank_cloned_stake_delegations() {
     };
 
     let vote_keypair = Keypair::new();
-    let (bls_pubkey, bls_proof_of_possession) =
-        create_bls_pubkey_and_proof_of_possession(&vote_keypair.pubkey());
-    let mut instructions = vote_instruction::create_account_with_config_v2(
+    let mut instructions = vote_instruction::create_account_with_config(
         &mint_keypair.pubkey(),
         &vote_keypair.pubkey(),
-        &VoteInitV2 {
+        &VoteInit {
             node_pubkey: mint_keypair.pubkey(),
             authorized_voter: vote_keypair.pubkey(),
-            authorized_voter_bls_pubkey: bls_pubkey,
-            authorized_voter_bls_proof_of_possession: bls_proof_of_possession,
             authorized_withdrawer: vote_keypair.pubkey(),
-            ..Default::default()
+            commission: 0,
         },
         vote_balance,
         vote_instruction::CreateVoteAccountConfig {
@@ -3668,16 +3633,12 @@ fn test_add_builtin() {
 
     let mock_account = Keypair::new();
     let mock_validator_identity = Keypair::new();
-    let (bls_pubkey, bls_proof_of_possession) =
-        create_bls_pubkey_and_proof_of_possession(&mock_account.pubkey());
-    let mut instructions = vote_instruction::create_account_with_config_v2(
+    let mut instructions = vote_instruction::create_account_with_config(
         &mint_keypair.pubkey(),
         &mock_account.pubkey(),
-        &VoteInitV2 {
+        &VoteInit {
             node_pubkey: mock_validator_identity.pubkey(),
-            authorized_voter_bls_pubkey: bls_pubkey,
-            authorized_voter_bls_proof_of_possession: bls_proof_of_possession,
-            ..Default::default()
+            ..VoteInit::default()
         },
         1,
         vote_instruction::CreateVoteAccountConfig {
@@ -3719,16 +3680,12 @@ fn test_add_duplicate_static_program() {
 
     let mock_account = Keypair::new();
     let mock_validator_identity = Keypair::new();
-    let (bls_pubkey, bls_proof_of_possession) =
-        create_bls_pubkey_and_proof_of_possession(&mock_account.pubkey());
-    let instructions = vote_instruction::create_account_with_config_v2(
+    let instructions = vote_instruction::create_account_with_config(
         &mint_keypair.pubkey(),
         &mock_account.pubkey(),
-        &VoteInitV2 {
+        &VoteInit {
             node_pubkey: mock_validator_identity.pubkey(),
-            authorized_voter_bls_pubkey: bls_pubkey,
-            authorized_voter_bls_proof_of_possession: bls_proof_of_possession,
-            ..Default::default()
+            ..VoteInit::default()
         },
         1,
         vote_instruction::CreateVoteAccountConfig {
@@ -6077,11 +6034,7 @@ fn test_bank_load_program() {
     let instruction = Instruction::new_with_bytes(program_key, &[], Vec::new());
     let invocation_message = Message::new(&[instruction], Some(&mint_keypair.pubkey()));
     let binding = mint_keypair.insecure_clone();
-    let transaction = Transaction::new(
-        &[&binding],
-        invocation_message.clone(),
-        bank.last_blockhash(),
-    );
+    let transaction = Transaction::new(&[&binding], invocation_message, bank.last_blockhash());
     assert!(bank.process_transaction(&transaction).is_ok());
 
     {
@@ -6148,7 +6101,7 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
     // after creating the program, the new transaction created below with the
     // same `invocation_message` as above doesn't return `AlreadyProcessed` when
     // processed.
-    goto_end_of_slot(bank.clone());
+    goto_end_of_slot(bank);
     let bank = bank_client
         .advance_slot(1, bank_forks.as_ref(), &mint_keypair.pubkey())
         .unwrap();
@@ -6340,7 +6293,7 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
     }
 
     // Advance the bank so that the program becomes effective
-    goto_end_of_slot(bank.clone());
+    goto_end_of_slot(bank);
     let bank = bank_client
         .advance_slot(1, bank_forks.as_ref(), &mint_keypair.pubkey())
         .unwrap();
@@ -8494,20 +8447,16 @@ fn test_vote_epoch_panic() {
     let (bank, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
 
     let vote_keypair = keypair_from_seed(&[1u8; 32]).unwrap();
-    let (bls_pubkey, bls_proof_of_possession) =
-        create_bls_pubkey_and_proof_of_possession(&vote_keypair.pubkey());
 
     let mut setup_ixs = Vec::new();
-    setup_ixs.extend(vote_instruction::create_account_with_config_v2(
+    setup_ixs.extend(vote_instruction::create_account_with_config(
         &mint_keypair.pubkey(),
         &vote_keypair.pubkey(),
-        &VoteInitV2 {
+        &VoteInit {
             node_pubkey: mint_keypair.pubkey(),
             authorized_voter: vote_keypair.pubkey(),
-            authorized_voter_bls_pubkey: bls_pubkey,
-            authorized_voter_bls_proof_of_possession: bls_proof_of_possession,
             authorized_withdrawer: mint_keypair.pubkey(),
-            ..Default::default()
+            commission: 0,
         },
         1_000_000_000,
         vote_instruction::CreateVoteAccountConfig {
@@ -11827,7 +11776,7 @@ fn test_deploy_last_epoch_slot() {
         Some(&payer_keypair.pubkey()),
     );
     let signers = &[&payer_keypair, &upgrade_authority_keypair];
-    let transaction = Transaction::new(signers, message.clone(), bank.last_blockhash());
+    let transaction = Transaction::new(signers, message, bank.last_blockhash());
     let ret = bank.process_transaction(&transaction);
     assert!(ret.is_ok(), "ret: {ret:?}");
     goto_end_of_slot(bank.clone());
@@ -11931,8 +11880,7 @@ fn test_loader_v3_to_v4_migration() {
         Some(&payer_keypair.pubkey()),
     );
     let signers = &[&payer_keypair, &program_keypair];
-    let finalized_migration_transaction =
-        Transaction::new(signers, message.clone(), bank.last_blockhash());
+    let finalized_migration_transaction = Transaction::new(signers, message, bank.last_blockhash());
 
     let mut upgradeable_programdata_account = AccountSharedData::new(
         0,
@@ -11966,7 +11914,7 @@ fn test_loader_v3_to_v4_migration() {
     );
     let signers = &[&payer_keypair, &upgrade_authority_keypair];
     let upgradeable_migration_transaction =
-        Transaction::new(signers, message.clone(), bank.last_blockhash());
+        Transaction::new(signers, message, bank.last_blockhash());
 
     let payer_account = AccountSharedData::new(LAMPORTS_PER_SOL, 0, &system_program::id());
     bank.store_account(
@@ -11990,19 +11938,15 @@ fn test_loader_v3_to_v4_migration() {
         Some(&payer_keypair.pubkey()),
     );
     let signers = &[&payer_keypair];
-    let transaction = Transaction::new(signers, message.clone(), bank.last_blockhash());
+    let transaction = Transaction::new(signers, message, bank.last_blockhash());
     let error = bank.process_transaction(&transaction).unwrap_err();
     assert_eq!(
         error,
         TransactionError::InstructionError(0, InstructionError::InvalidArgument)
     );
 
-    let bank = Bank::new_from_parent_with_bank_forks(
-        &bank_forks,
-        bank.clone(),
-        &Pubkey::default(),
-        next_slot,
-    );
+    let bank =
+        Bank::new_from_parent_with_bank_forks(&bank_forks, bank, &Pubkey::default(), next_slot);
     next_slot += 1;
 
     // All other error cases

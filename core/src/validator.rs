@@ -153,9 +153,9 @@ use {
     solana_unified_scheduler_pool::{DefaultSchedulerPool, SupportedSchedulingMode},
     solana_validator_exit::Exit,
     solana_vote_program::vote_state::VoteStateV4,
-    solana_wen_restart::wen_restart::{wait_for_wen_restart, WenRestartConfig},
     std::{
         borrow::Cow,
+        cmp,
         collections::{HashMap, HashSet},
         net::SocketAddr,
         num::{NonZeroU64, NonZeroUsize},
@@ -177,16 +177,10 @@ use {
 
 const MAX_COMPLETED_DATA_SETS_IN_CHANNEL: usize = 100_000;
 const WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT: u64 = 80;
-// Right now since we reuse the wait for supermajority code, the
-// following threshold should always greater than or equal to
-// WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT.
-const WAIT_FOR_WEN_RESTART_SUPERMAJORITY_THRESHOLD_PERCENT: u64 =
-    WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT;
 
 #[derive(Clone, EnumCount, EnumIter, EnumString, VariantNames, Default, IntoStaticStr, Display)]
 #[strum(serialize_all = "kebab-case")]
 pub enum BlockVerificationMethod {
-    BlockstoreProcessor,
     #[default]
     UnifiedScheduler,
 }
@@ -330,10 +324,6 @@ pub fn supported_scheduling_mode(
         (BlockVerificationMethod::UnifiedScheduler, _) => {
             SupportedSchedulingMode::Either(SchedulingMode::BlockVerification)
         }
-        (_, BlockProductionMethod::UnifiedScheduler) => {
-            SupportedSchedulingMode::Either(SchedulingMode::BlockProduction)
-        }
-        _ => unreachable!("seems unified scheduler is disabled"),
     }
 }
 
@@ -410,8 +400,6 @@ pub struct ValidatorConfig {
     pub enable_scheduler_bindings: bool,
     pub generator_config: Option<GeneratorConfig>,
     pub use_snapshot_archives_at_startup: UseSnapshotArchivesAtStartup,
-    pub wen_restart_proto_path: Option<PathBuf>,
-    pub wen_restart_coordinator: Option<Pubkey>,
     pub unified_scheduler_handler_threads: Option<usize>,
     pub ip_echo_server_threads: NonZeroUsize,
     pub rayon_global_threads: NonZeroUsize,
@@ -502,8 +490,6 @@ impl ValidatorConfig {
             enable_scheduler_bindings: false,
             generator_config: None,
             use_snapshot_archives_at_startup: UseSnapshotArchivesAtStartup::default(),
-            wen_restart_proto_path: None,
-            wen_restart_coordinator: None,
             unified_scheduler_handler_threads: None,
             ip_echo_server_threads: NonZeroUsize::new(1).expect("1 is non-zero"),
             rayon_global_threads: max_thread_count,
@@ -624,6 +610,8 @@ pub struct ValidatorTpuConfig {
     pub tpu_fwd_quic_server_config: SwQosQuicStreamerConfig,
     /// QUIC server config for Vote
     pub vote_quic_server_config: SimpleQosQuicStreamerConfig,
+    /// Number of threads to use for signature verification
+    pub sigverify_threads: NonZeroUsize,
 }
 
 impl ValidatorTpuConfig {
@@ -658,12 +646,16 @@ impl ValidatorTpuConfig {
             qos_config: SimpleQosConfig::default(),
         };
 
+        // Two threads is reasonable for tests; benches are free to set more
+        let sigverify_threads = NonZeroUsize::new(2).expect("2 is non-zero");
+
         ValidatorTpuConfig {
             vote_use_quic: DEFAULT_VOTE_USE_QUIC,
             tpu_connection_pool_size: DEFAULT_TPU_CONNECTION_POOL_SIZE,
             tpu_quic_server_config,
             tpu_fwd_quic_server_config,
             vote_quic_server_config,
+            sigverify_threads,
         }
     }
 }
@@ -779,6 +771,7 @@ impl Validator {
             tpu_quic_server_config,
             tpu_fwd_quic_server_config,
             vote_quic_server_config,
+            sigverify_threads: tpu_sigverify_threads,
         } = tpu_config;
 
         let start_time = Instant::now();
@@ -1032,7 +1025,7 @@ impl Validator {
 
         let (snapshot_request_sender, snapshot_request_receiver) = unbounded();
         let snapshot_controller = Arc::new(SnapshotController::new(
-            snapshot_request_sender.clone(),
+            snapshot_request_sender,
             config.snapshot_config.clone(),
             bank_forks.read().unwrap().root(),
         ));
@@ -1124,8 +1117,7 @@ impl Validator {
             &config.block_verification_method,
             &config.block_production_method,
         ) {
-            methods @ (BlockVerificationMethod::UnifiedScheduler, _)
-            | methods @ (_, BlockProductionMethod::UnifiedScheduler) => {
+            methods @ (BlockVerificationMethod::UnifiedScheduler, _) => {
                 let scheduler_pool = DefaultSchedulerPool::new(
                     supported_scheduling_mode(methods),
                     config.unified_scheduler_handler_threads,
@@ -1146,15 +1138,6 @@ impl Validator {
                     .write()
                     .unwrap()
                     .install_scheduler_pool(scheduler_pool);
-            }
-            _ => {
-                info!("no scheduler pool is installed for block verification/production...");
-                if let Some(count) = config.unified_scheduler_handler_threads {
-                    warn!(
-                        "--unified-scheduler-handler-threads={count} is ignored because unified \
-                         scheduler isn't enabled"
-                    );
-                }
             }
         }
 
@@ -1644,12 +1627,6 @@ impl Validator {
             exit.clone(),
         );
 
-        let in_wen_restart = config.wen_restart_proto_path.is_some() && !waited_for_supermajority;
-        let wen_restart_repair_slots = if in_wen_restart {
-            Some(Arc::new(RwLock::new(Vec::new())))
-        } else {
-            None
-        };
         let tower = match process_blockstore.process_to_create_tower() {
             Ok(tower) => {
                 info!("Tower state: {tower:?}");
@@ -1665,7 +1642,6 @@ impl Validator {
             VoteHistory::restore(config.vote_history_storage.as_ref(), &cluster_info.id())
                 .unwrap_or(VoteHistory::new(cluster_info.id(), 0));
         migration_status.log_phase();
-        let last_vote = tower.last_vote();
 
         let outstanding_repair_requests =
             Arc::<RwLock<repair::repair_service::OutstandingShredRepairs>>::default();
@@ -1756,7 +1732,6 @@ impl Validator {
             ancestor_hashes_response_quic_receiver,
             outstanding_repair_requests.clone(),
             cluster_slots.clone(),
-            wen_restart_repair_slots.clone(),
             slot_status_notifier,
             vote_connection_cache,
             AlpenglowInitializationState {
@@ -1773,26 +1748,6 @@ impl Validator {
             },
         )
         .map_err(ValidatorError::Other)?;
-
-        if in_wen_restart {
-            info!("Waiting for wen_restart to finish");
-            wait_for_wen_restart(WenRestartConfig {
-                wen_restart_path: config.wen_restart_proto_path.clone().unwrap(),
-                wen_restart_coordinator: config.wen_restart_coordinator.unwrap(),
-                last_vote,
-                blockstore: blockstore.clone(),
-                cluster_info: cluster_info.clone(),
-                bank_forks: bank_forks.clone(),
-                wen_restart_repair_slots: wen_restart_repair_slots.clone(),
-                wait_for_supermajority_threshold_percent:
-                    WAIT_FOR_WEN_RESTART_SUPERMAJORITY_THRESHOLD_PERCENT,
-                snapshot_controller: Some(snapshot_controller.clone()),
-                abs_status: accounts_background_service.status().clone(),
-                genesis_config_hash: genesis_config.hash(),
-                exit: exit.clone(),
-            })?;
-            return Err(ValidatorError::WenRestartFinished.into());
-        }
 
         let tpu_forwaring_client_config = {
             let runtime_handle = tpu_client_next_runtime
@@ -1822,7 +1777,7 @@ impl Validator {
                 vote_quic: node.sockets.tpu_vote_quic,
                 vote_forwarding_client: node.sockets.tpu_vote_forwarding_client,
             },
-            rpc_subscriptions.clone(),
+            rpc_subscriptions,
             transaction_status_sender,
             entry_notification_sender,
             blockstore.clone(),
@@ -1849,6 +1804,7 @@ impl Validator {
             tpu_fwd_quic_server_config,
             vote_quic_server_config,
             prioritization_fee_cache,
+            tpu_sigverify_threads,
             config.block_production_method.clone(),
             config.block_production_num_workers,
             config.block_production_scheduler_config.clone(),
@@ -2320,23 +2276,9 @@ fn load_blockstore(
     info!("loading ledger from {ledger_path:?}...");
     *start_progress.write().unwrap() = ValidatorStartProgress::LoadingLedger;
 
-    let blockstore = Blockstore::open_with_options(ledger_path, config.blockstore_options.clone())
-        .map_err(|err| format!("Failed to open Blockstore: {err:?}"))?;
-
-    let (ledger_signal_sender, ledger_signal_receiver) = bounded(MAX_REPLAY_WAKE_UP_SIGNALS);
-    blockstore.add_new_shred_signal(ledger_signal_sender);
-
-    // following boot sequence (esp BankForks) could set root. so stash the original value
-    // of blockstore root away here as soon as possible.
-    let original_blockstore_root = blockstore.max_root();
-
-    let blockstore = Arc::new(blockstore);
-    let blockstore_root_scan = BlockstoreRootScan::new(config, blockstore.clone(), exit.clone());
-    let halt_at_slot = blockstore.highest_slot().unwrap_or(None);
-
-    let process_options = blockstore_processor::ProcessOptions {
+    let mut process_options = blockstore_processor::ProcessOptions {
         run_verification: config.run_verification,
-        halt_at_slot,
+        halt_at_slot: None,
         new_hard_forks: config.new_hard_forks.clone(),
         debug_keys: config.debug_keys.clone(),
         accounts_db_config: config.accounts_db_config.clone(),
@@ -2346,6 +2288,33 @@ fn load_blockstore(
         use_snapshot_archives_at_startup: config.use_snapshot_archives_at_startup,
         ..blockstore_processor::ProcessOptions::default()
     };
+
+    let (blockstore, bank_from_snapshot_opt) = thread::scope(|scope| {
+        let load_snapshot_handle = thread::Builder::new()
+            .name("solBnkFrkSnap".into())
+            .spawn_scoped(scope, || {
+                bank_forks_utils::try_load_bank_forks_from_snapshot(
+                    genesis_config,
+                    &config.account_paths,
+                    &config.snapshot_config,
+                    &process_options,
+                    accounts_update_notifier.clone(),
+                    exit.clone(),
+                )
+            })
+            .expect("should spawn thread");
+        let blockstore =
+            Blockstore::open_with_options(ledger_path, config.blockstore_options.clone())
+                .map_err(|err| format!("Failed to open Blockstore: {err:?}"))?;
+        let bank_from_snapshot_result = load_snapshot_handle.join().expect("join thread");
+
+        Ok::<_, String>((Arc::new(blockstore), bank_from_snapshot_result.transpose()))
+    })?;
+
+    // following boot sequence (esp BankForks) could set root. so stash the original value
+    // of blockstore root away here as soon as possible.
+    let original_blockstore_root = blockstore.max_root();
+    process_options.halt_at_slot = blockstore.highest_slot().unwrap_or(None);
 
     let enable_rpc_transaction_history =
         config.rpc_addrs.is_some() && config.rpc_config.enable_rpc_transaction_history;
@@ -2367,22 +2336,24 @@ fn load_blockstore(
     let entry_notifier_service = entry_notifier
         .map(|entry_notifier| EntryNotifierService::new(entry_notifier, exit.clone()));
 
-    let (bank_forks, starting_snapshot_hashes) = bank_forks_utils::load_bank_forks(
-        genesis_config,
-        &blockstore,
-        config.account_paths.clone(),
-        &config.snapshot_config,
-        &process_options,
-        transaction_history_services
-            .transaction_status_sender
-            .as_ref(),
-        entry_notifier_service
-            .as_ref()
-            .map(|service| service.sender()),
-        accounts_update_notifier,
-        exit,
-    )
-    .map_err(|err| err.to_string())?;
+    let (bank_forks, starting_snapshot_hashes) = bank_from_snapshot_opt
+        .unwrap_or_else(|| {
+            bank_forks_utils::load_bank_forks_from_genesis(
+                genesis_config,
+                &blockstore,
+                config.account_paths.clone(),
+                &process_options,
+                transaction_history_services
+                    .transaction_status_sender
+                    .as_ref(),
+                entry_notifier_service
+                    .as_ref()
+                    .map(|service| service.sender()),
+                accounts_update_notifier,
+                exit.clone(),
+            )
+        })
+        .map_err(|err| err.to_string())?;
 
     let mut leader_schedule_cache =
         LeaderScheduleCache::new_from_bank(&bank_forks.read().unwrap().root_bank());
@@ -2395,6 +2366,10 @@ fn load_blockstore(
     // is processing the dropped banks from the `pruned_banks_receiver` channel.
     let pruned_banks_receiver =
         AccountsBackgroundService::setup_bank_drop_callback(bank_forks.clone());
+
+    let blockstore_root_scan = BlockstoreRootScan::new(config, blockstore.clone(), exit);
+    let (ledger_signal_sender, ledger_signal_receiver) = bounded(MAX_REPLAY_WAKE_UP_SIGNALS);
+    blockstore.add_new_shred_signal(ledger_signal_sender);
 
     Ok((
         bank_forks,
@@ -2790,10 +2765,10 @@ fn initialize_rpc_transaction_history_services(
         max_complete_transaction_status_slot.clone(),
         enable_rpc_transaction_history,
         transaction_notifier,
-        blockstore.clone(),
+        blockstore,
         enable_extended_tx_metadata_storage,
         dependency_tracker,
-        exit.clone(),
+        exit,
     ));
 
     TransactionHistoryServices {
@@ -2839,9 +2814,6 @@ pub enum ValidatorError {
 
     #[error(transparent)]
     TraceError(#[from] TraceError),
-
-    #[error("Wen Restart finished, please continue with --wait-for-supermajority")]
-    WenRestartFinished,
 }
 
 // Return if the validator waited on other nodes to start. In this case
@@ -2980,7 +2952,7 @@ fn get_stake_percent_in_gossip(bank: &Bank, cluster_info: &ClusterInfo, log: boo
                 "{:.3}% of active stake is not visible in gossip",
                 (offline_stake as f64 / total_activated_stake as f64) * 100.
             );
-            offline_nodes.sort_by(|b, a| a.0.cmp(&b.0)); // sort by reverse stake weight
+            offline_nodes.sort_by_key(|a| cmp::Reverse(a.0)); // sort by reverse stake weight
             for (stake, identity) in offline_nodes {
                 info!(
                     "    {:.3}% - {}",

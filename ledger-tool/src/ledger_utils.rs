@@ -338,18 +338,29 @@ pub fn load_and_process_ledger(
             (transaction_status_sender, None)
         };
 
-    let (bank_forks, starting_snapshot_hashes) = bank_forks_utils::load_bank_forks(
-        genesis_config,
-        blockstore.as_ref(),
-        account_paths,
-        &snapshot_config,
-        &process_options,
-        transaction_status_sender.as_ref(),
-        None, // Maybe support this later, though
-        accounts_update_notifier,
-        exit.clone(),
-    )
-    .map_err(LoadAndProcessLedgerError::LoadBankForks)?;
+    let (bank_forks, starting_snapshot_hashes) =
+        bank_forks_utils::try_load_bank_forks_from_snapshot(
+            genesis_config,
+            &account_paths,
+            &snapshot_config,
+            &process_options,
+            accounts_update_notifier.clone(),
+            exit.clone(),
+        )
+        .transpose()
+        .unwrap_or_else(|| {
+            bank_forks_utils::load_bank_forks_from_genesis(
+                genesis_config,
+                &blockstore,
+                account_paths,
+                &process_options,
+                transaction_status_sender.as_ref(),
+                None, // Maybe support this later, though
+                accounts_update_notifier,
+                exit.clone(),
+            )
+        })
+        .map_err(LoadAndProcessLedgerError::LoadBankForks)?;
     let leader_schedule_cache =
         LeaderScheduleCache::new_from_bank(&bank_forks.read().unwrap().root_bank());
 
@@ -380,8 +391,7 @@ pub fn load_and_process_ledger(
     let unified_scheduler_handler_threads =
         value_t!(arg_matches, "unified_scheduler_handler_threads", usize).ok();
     let unified_scheduler_pool = match (&block_verification_method, &block_production_method) {
-        methods @ (BlockVerificationMethod::UnifiedScheduler, _)
-        | methods @ (_, BlockProductionMethod::UnifiedScheduler) => {
+        methods @ (BlockVerificationMethod::UnifiedScheduler, _) => {
             let no_replay_vote_sender = None;
 
             let pool = DefaultSchedulerPool::new(
@@ -397,16 +407,6 @@ pub fn load_and_process_ledger(
                 .unwrap()
                 .install_scheduler_pool(pool.clone());
             Some(pool)
-        }
-        _ => {
-            info!("no scheduler pool is installed for block verification/production...");
-            if let Some(count) = unified_scheduler_handler_threads {
-                warn!(
-                    "--unified-scheduler-handler-threads={count} is ignored because unified \
-                     scheduler isn't enabled"
-                );
-            }
-            None
         }
     };
 

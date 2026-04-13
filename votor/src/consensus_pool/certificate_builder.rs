@@ -18,7 +18,7 @@ const MAXIMUM_VALIDATORS: usize = 4096;
 
 /// Different types of errors that can be returned from the [`CertificateBuilder::aggregate()`] function.
 #[derive(Debug, Error, PartialEq, Eq)]
-pub(super) enum AggregateError {
+pub enum AggregateError {
     #[error("BLS error: {0}")]
     Bls(#[from] BlsError),
     #[error("Invalid rank: {0}")]
@@ -28,8 +28,8 @@ pub(super) enum AggregateError {
 }
 
 /// Different types of errors that can be returned from the [`CertificateBuilder::build()`] function.
-#[derive(Debug, Error, PartialEq)]
-pub(crate) enum BuildError {
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum BuildError {
     #[error("Encoding failed: {0:?}")]
     Encode(EncodeError),
     #[error("BLS error: {0}")]
@@ -157,8 +157,9 @@ impl BuilderType {
                         try_set_bitmap(bitmap0, msg.rank)?;
                     } else {
                         assert_eq!(vote_type, vote_types[1]);
-                        let (_, bitmap) = sig_and_bitmap1
-                            .get_or_insert((SignatureProjective::identity(), default_bitvec()));
+                        let (_, bitmap) = sig_and_bitmap1.get_or_insert_with(|| {
+                            (SignatureProjective::identity(), default_bitvec())
+                        });
                         try_set_bitmap(bitmap, msg.rank)?;
                     }
                 }
@@ -188,7 +189,7 @@ impl BuilderType {
                         try_set_bitmap(bitmap0, msg.rank)?;
                     } else {
                         assert_eq!(vote_type, vote_types[1]);
-                        let bitmap = bitmap1.get_or_insert(default_bitvec());
+                        let bitmap = bitmap1.get_or_insert_with(default_bitvec);
                         try_set_bitmap(bitmap, msg.rank)?;
                     }
                 }
@@ -240,14 +241,14 @@ impl BuilderType {
 }
 
 /// Builder for creating [`Certificate`] by using BLS signature aggregation.
-pub(super) struct CertificateBuilder {
+pub struct CertificateBuilder {
     builder_type: BuilderType,
     cert_type: CertificateType,
 }
 
 impl CertificateBuilder {
     /// Creates a new instance of the builder.
-    pub(super) fn new(cert_type: CertificateType) -> Self {
+    pub fn new(cert_type: CertificateType) -> Self {
         let builder_type = BuilderType::new(&cert_type);
         Self {
             builder_type,
@@ -256,12 +257,12 @@ impl CertificateBuilder {
     }
 
     /// Aggregates new [`VoteMessage`]s into the builder.
-    pub(super) fn aggregate(&mut self, msgs: &[VoteMessage]) -> Result<(), AggregateError> {
+    pub fn aggregate(&mut self, msgs: &[VoteMessage]) -> Result<(), AggregateError> {
         self.builder_type.aggregate(&self.cert_type, msgs)
     }
 
     /// Builds a [`Certificate`] from the builder.
-    pub(super) fn build(self) -> Result<Certificate, BuildError> {
+    pub fn build(self) -> Result<Certificate, BuildError> {
         self.builder_type.build(self.cert_type)
     }
 }

@@ -8,7 +8,6 @@ use {
         transaction_balances::compile_collected_balances,
         use_snapshot_archives_at_startup::UseSnapshotArchivesAtStartup,
     },
-    agave_snapshots::snapshot_config::SnapshotConfig,
     agave_votor_messages::migration::MigrationStatus,
     chrono_humanize::{Accuracy, HumanTime, Tense},
     crossbeam_channel::Sender,
@@ -61,6 +60,7 @@ use {
     solana_vote::{vote_account::VoteAccountsHashMap, vote_parser::is_valid_vote_only_transaction},
     std::{
         borrow::Cow,
+        cmp,
         collections::{HashMap, HashSet},
         num::Saturating,
         ops::Index,
@@ -665,21 +665,7 @@ fn process_entries(
                 // If it's a tick, save it for later
                 tick_hashes.push(hash);
                 if bank.is_block_boundary(bank.tick_height() + tick_hashes.len() as u64) {
-                    // If it's a tick that will cause a new blockhash to be created,
-                    // execute the group and register the tick
-                    process_batches(
-                        bank,
-                        replay_tx_thread_pool,
-                        batches.drain(..),
-                        transaction_status_sender,
-                        replay_vote_sender,
-                        batch_timing,
-                        log_messages_bytes_limit,
-                        prioritization_fee_cache,
-                    )?;
-                    for hash in tick_hashes.drain(..) {
-                        bank.register_tick(&hash);
-                    }
+                    break;
                 }
             }
             EntryType::Transactions(transactions) => {
@@ -862,11 +848,10 @@ pub fn test_process_blockstore(
     opts: &ProcessOptions,
     exit: Arc<AtomicBool>,
 ) -> (Arc<RwLock<BankForks>>, LeaderScheduleCache) {
-    let (bank_forks, _) = crate::bank_forks_utils::load_bank_forks(
+    let (bank_forks, _) = crate::bank_forks_utils::load_bank_forks_from_genesis(
         genesis_config,
         blockstore,
         Vec::new(),
-        &SnapshotConfig::new_disabled(),
         opts,
         None,
         None,
@@ -1396,7 +1381,7 @@ impl ReplaySlotStats {
                 .per_program_timings
                 .iter()
                 .collect();
-            per_pubkey_timings.sort_by(|a, b| b.1.accumulated_us.cmp(&a.1.accumulated_us));
+            per_pubkey_timings.sort_by_key(|b| cmp::Reverse(b.1.accumulated_us));
             let (total_us, total_units, total_count, total_errored_units, total_errored_count) =
                 per_pubkey_timings.iter().fold(
                     (0, 0, 0, 0, 0),
@@ -1804,7 +1789,7 @@ fn process_next_slots(
     }
 
     // Reverse sort by slot, so the next slot to be processed can be popped
-    pending_slots.sort_by(|a, b| b.1.slot().cmp(&a.1.slot()));
+    pending_slots.sort_by_key(|b| cmp::Reverse(b.1.slot()));
     Ok(())
 }
 
@@ -2095,7 +2080,7 @@ fn supermajority_root_from_vote_accounts(
         .collect();
 
     // Sort from greatest to smallest slot
-    roots_stakes.sort_unstable_by(|a, b| a.0.cmp(&b.0).reverse());
+    roots_stakes.sort_unstable_by_key(|a| cmp::Reverse(a.0));
 
     // Find latest root
     supermajority_root(&roots_stakes, total_epoch_stake)
@@ -4345,33 +4330,6 @@ pub mod tests {
             let slot = bank.slot() + rng().random_range(1..3);
             bank = Arc::new(Bank::new_from_parent(bank, &Pubkey::default(), slot));
         }
-    }
-
-    #[test]
-    fn test_process_ledger_ticks_ordering() {
-        let GenesisConfigInfo {
-            genesis_config,
-            mint_keypair,
-            ..
-        } = create_genesis_config(100);
-        let (bank0, _bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
-        let genesis_hash = genesis_config.hash();
-        let keypair = Keypair::new();
-
-        // Simulate a slot of virtual ticks, creates a new blockhash
-        let mut entries = create_ticks(genesis_config.ticks_per_slot, 1, genesis_hash);
-
-        // The new blockhash is going to be the hash of the last tick in the block
-        let new_blockhash = entries.last().unwrap().hash;
-        // Create an transaction that references the new blockhash, should still
-        // be able to find the blockhash if we process transactions all in the same
-        // batch
-        let tx = system_transaction::transfer(&mint_keypair, &keypair.pubkey(), 1, new_blockhash);
-        let entry = next_entry(&new_blockhash, 1, vec![tx]);
-        entries.push(entry);
-
-        process_entries_for_tests_without_scheduler(&bank0, entries).unwrap();
-        assert_eq!(bank0.get_balance(&keypair.pubkey()), 1)
     }
 
     fn get_epoch_schedule(genesis_config: &GenesisConfig) -> EpochSchedule {

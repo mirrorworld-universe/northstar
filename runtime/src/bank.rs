@@ -44,7 +44,8 @@ use {
         },
         bank_forks::BankForks,
         epoch_stakes::{
-            DeserializableVersionedEpochStakes, NodeVoteAccounts, VersionedEpochStakes,
+            BLSPubkeyToRankMap, DeserializableVersionedEpochStakes, NodeVoteAccounts,
+            VersionedEpochStakes,
         },
         inflation_rewards::points::InflationPointCalculationEvent,
         installed_scheduler_pool::{BankWithScheduler, InstalledSchedulerRwLock},
@@ -62,6 +63,7 @@ use {
         transaction_batch::{OwnedOrBorrowed, TransactionBatch},
     },
     accounts_lt_hash::{CacheValue as AccountsLtHashCacheValue, Stats as AccountsLtHashStats},
+    agave_bls_cert_verify::cert_verify::{self, Error as CertVerifyError},
     agave_feature_set::{
         self as feature_set, increase_cpi_account_info_limit, raise_cpi_nesting_limit_to_8,
         relax_programdata_account_check_migration, FeatureSet,
@@ -174,7 +176,10 @@ use {
         transaction::TransactionReturnData, transaction_accounts::KeyedAccountSharedData,
     },
     solana_transaction_error::{TransactionError, TransactionResult as Result},
-    solana_vote::vote_account::{VoteAccount, VoteAccounts, VoteAccountsHashMap},
+    solana_vote::{
+        vote_account::{VoteAccount, VoteAccounts, VoteAccountsHashMap},
+        vote_parser,
+    },
     std::{
         collections::{HashMap, HashSet},
         fmt,
@@ -585,6 +590,7 @@ impl PartialEq for Bank {
             cache_for_accounts_lt_hash: _,
             stats_for_accounts_lt_hash: _,
             block_id,
+            expected_bank_hash: _,
             bank_hash_stats: _,
             epoch_rewards_calculation_cache: _,
             // Ignore new fields explicitly if they do not impact PartialEq.
@@ -927,6 +933,10 @@ pub struct Bank {
     /// until bankless leader. Can be computed directly from shreds without needing to execute transactions.
     block_id: RwLock<Option<Hash>>,
 
+    /// Expected bank hash provided by block footer (if any). Set when processing footer; verified
+    /// later when the bank is frozen.
+    expected_bank_hash: RwLock<Option<Hash>>,
+
     /// Accounts stats for computing the bank hash
     bank_hash_stats: AtomicBankHashStats,
 
@@ -1140,6 +1150,7 @@ impl Bank {
             cache_for_accounts_lt_hash: DashMap::default(),
             stats_for_accounts_lt_hash: AccountsLtHashStats::default(),
             block_id: RwLock::new(None),
+            expected_bank_hash: RwLock::new(None),
             bank_hash_stats: AtomicBankHashStats::default(),
             epoch_rewards_calculation_cache: Arc::new(Mutex::new(HashMap::default())),
         };
@@ -1387,6 +1398,7 @@ impl Bank {
             cache_for_accounts_lt_hash: DashMap::default(),
             stats_for_accounts_lt_hash: AccountsLtHashStats::default(),
             block_id: RwLock::new(None),
+            expected_bank_hash: RwLock::new(None),
             bank_hash_stats: AtomicBankHashStats::default(),
             epoch_rewards_calculation_cache: parent.epoch_rewards_calculation_cache.clone(),
         };
@@ -1930,6 +1942,7 @@ impl Bank {
             block_id: RwLock::new(None),
             bank_hash_stats: AtomicBankHashStats::new(&fields.bank_hash_stats),
             epoch_rewards_calculation_cache: Arc::new(Mutex::new(HashMap::default())),
+            expected_bank_hash: RwLock::new(None),
         };
 
         // Sanity assertions between bank snapshot and genesis config
@@ -2085,6 +2098,18 @@ impl Bank {
                 .saturating_mul(self.ns_per_slot)
                 .saturating_div(1_000_000_000) as i64,
         )
+    }
+
+    /// Returns a reference to the [`VersionedEpochStakes`] corresponding to the given [`Slot`].
+    fn epoch_stakes_from_slot(&self, slot: Slot) -> Option<&VersionedEpochStakes> {
+        let epoch = self.epoch_schedule().get_epoch(slot);
+        self.epoch_stakes(epoch)
+    }
+
+    /// Returns a reference to [`BLSPubkeyToRankMap`] for the given `slot`.
+    pub fn get_rank_map(&self, slot: Slot) -> Option<&Arc<BLSPubkeyToRankMap>> {
+        self.epoch_stakes_from_slot(slot)
+            .map(|stake| stake.bls_pubkey_to_rank_map())
     }
 
     fn update_sysvar_account<F>(&self, pubkey: &Pubkey, updater: F)
@@ -2572,6 +2597,31 @@ impl Bank {
             *hash = self.hash_internal_state();
             self.rc.accounts.accounts_db.mark_slot_frozen(self.slot());
         }
+    }
+
+    /// Freeze the bank and verify its computed bank hash against the expected bank hash,
+    /// If hashes do not match, return Err with (expected_hash, computed_hash)
+    pub fn freeze_and_verify_bank_hash(&self) -> std::result::Result<(), (Hash, Hash)> {
+        self.freeze();
+        let computed_hash = self.hash();
+
+        if let Some(expected_hash) = self.expected_bank_hash() {
+            if expected_hash != computed_hash {
+                return Err((expected_hash, computed_hash));
+            }
+        }
+        Ok(())
+    }
+
+    /// Set the expected bank hash (from an external footer).  This is stored for later verification
+    /// when the bank is frozen.
+    pub fn set_expected_bank_hash(&self, hash: Hash) {
+        *self.expected_bank_hash.write().unwrap() = Some(hash);
+    }
+
+    /// Returns the expected bank hash if any.
+    pub fn expected_bank_hash(&self) -> Option<Hash> {
+        *self.expected_bank_hash.read().unwrap()
     }
 
     // dangerous; don't use this; this is only needed for ledger-tool's special command
@@ -3151,6 +3201,10 @@ impl Bank {
         sanitized_epoch: Epoch,
         alt_invalidation_slot: Slot,
     ) -> Result<()> {
+        if self.vote_only_bank() && !vote_parser::is_valid_vote_only_transaction(transaction) {
+            return Err(TransactionError::SanitizeFailure);
+        }
+
         // If the transaction was sanitized before this bank's epoch,
         // additional checks are necessary.
         if self.epoch() != sanitized_epoch {
@@ -3879,7 +3933,7 @@ impl Bank {
             .accounts_db
             .get_pubkey_account_for_slot(self.slot());
         // Sort the accounts by pubkey to make diff deterministic.
-        accounts.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        accounts.sort_unstable_by_key(|a| a.0);
         accounts
     }
 
@@ -4330,6 +4384,14 @@ impl Bank {
                 .write()
                 .unwrap()
                 .register(new_hard_fork_slot);
+        }
+    }
+
+    pub fn register_hard_forks(&self, new_hard_fork_slots: Option<&Vec<Slot>>) {
+        if let Some(slots) = new_hard_fork_slots {
+            slots
+                .iter()
+                .for_each(|hard_fork_slot| self.register_hard_fork(*hard_fork_slot));
         }
     }
 
@@ -5100,6 +5162,29 @@ impl Bank {
     /// Get the EpochStakes for a given epoch
     pub fn epoch_stakes(&self, epoch: Epoch) -> Option<&VersionedEpochStakes> {
         self.epoch_stakes.get(&epoch)
+    }
+
+    /// Verify a BLS certificate's signature using this bank's epoch stakes.
+    ///
+    /// Returns (stake present in certificate, total stake in validator set) on success.
+    pub fn verify_certificate(
+        &self,
+        cert: &Certificate,
+    ) -> std::result::Result<(u64, u64), CertVerifyError> {
+        let slot = cert.cert_type.slot();
+        let epoch_stakes = self
+            .epoch_stakes_from_slot(slot)
+            .ok_or(CertVerifyError::MissingRankMap)?;
+        let key_to_rank_map = epoch_stakes.bls_pubkey_to_rank_map();
+        let total_stake = epoch_stakes.total_stake();
+
+        let stake = cert_verify::verify_certificate(cert, key_to_rank_map.len(), |rank| {
+            key_to_rank_map
+                .get_pubkey_stake_entry(rank)
+                .map(|entry| (entry.stake, entry.bls_pubkey))
+        })?;
+
+        Ok((stake, total_stake))
     }
 
     pub fn epoch_stakes_map(&self) -> &HashMap<Epoch, VersionedEpochStakes> {

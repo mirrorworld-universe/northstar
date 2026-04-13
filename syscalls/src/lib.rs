@@ -2751,7 +2751,7 @@ mod tests {
             with_mock_invoke_context!($invoke_context, transaction_context, transaction_accounts);
             $invoke_context
                 .transaction_context
-                .configure_next_instruction_for_tests(1, vec![], vec![])
+                .configure_top_level_instruction_for_tests(1, vec![], vec![])
                 .unwrap();
             $invoke_context.push().unwrap();
         };
@@ -2778,7 +2778,7 @@ mod tests {
             );
             $invoke_context
                 .transaction_context
-                .configure_next_instruction_for_tests(1, vec![], vec![])
+                .configure_top_level_instruction_for_tests(1, vec![], vec![])
                 .unwrap();
             $invoke_context.push().unwrap();
         };
@@ -4107,7 +4107,8 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
+    #[expect(deprecated)]
+    #[expect(clippy::redundant_clone)]
     fn test_syscall_get_sysvar() {
         let config = Config::default();
 
@@ -5008,7 +5009,7 @@ mod tests {
                 )];
                 invoke_context
                     .transaction_context
-                    .configure_next_instruction_for_tests(
+                    .configure_top_level_instruction_for_tests(
                         0,
                         instruction_accounts,
                         vec![index_in_trace as u8],

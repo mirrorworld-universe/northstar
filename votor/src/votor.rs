@@ -110,11 +110,11 @@ pub struct VotorConfig {
     pub leader_window_info_sender: Sender<LeaderWindowInfo>,
     pub highest_parent_ready: Arc<RwLock<(Slot, (Slot, Hash))>>,
     pub event_sender: VotorEventSender,
-    pub own_vote_sender: Sender<ConsensusMessage>,
+    pub own_vote_sender: Sender<Vec<ConsensusMessage>>,
 
     // Receivers
     pub event_receiver: VotorEventReceiver,
-    pub consensus_message_receiver: Receiver<ConsensusMessage>,
+    pub consensus_message_receiver: Receiver<Vec<ConsensusMessage>>,
     pub consensus_metrics_receiver: ConsensusMetricsEventReceiver,
 }
 
@@ -161,13 +161,13 @@ impl Votor {
             event_sender,
             own_vote_sender,
             event_receiver,
-            consensus_message_receiver: bls_receiver,
+            consensus_message_receiver,
             consensus_metrics_sender,
             consensus_metrics_receiver,
         } = config;
 
         let migration_status = bank_forks.read().unwrap().migration_status();
-        let identity_keypair = cluster_info.keypair().clone();
+        let identity_keypair = cluster_info.keypair();
         let has_new_vote_been_rooted = !wait_for_vote_to_start_leader;
 
         // Get the sharable root bank
@@ -175,7 +175,7 @@ impl Votor {
 
         let shared_context = SharedContext {
             blockstore: blockstore.clone(),
-            bank_forks: bank_forks.clone(),
+            bank_forks,
             cluster_info: cluster_info.clone(),
             rpc_subscriptions,
             highest_parent_ready,
@@ -186,7 +186,7 @@ impl Votor {
         let voting_context = VotingContext {
             vote_history,
             vote_account_pubkey: vote_account,
-            identity_keypair: identity_keypair.clone(),
+            identity_keypair,
             authorized_voter_keypairs,
             derived_bls_keypairs: HashMap::new(),
             has_new_vote_been_rooted,
@@ -195,7 +195,7 @@ impl Votor {
             commitment_sender: commitment_sender.clone(),
             wait_to_vote_slot,
             sharable_banks: sharable_banks.clone(),
-            consensus_metrics_sender: consensus_metrics_sender.clone(),
+            consensus_metrics_sender,
         };
 
         let root_context = RootContext {
@@ -226,22 +226,19 @@ impl Votor {
         let consensus_pool_context = ConsensusPoolContext {
             exit: exit.clone(),
             migration_status,
-            cluster_info: cluster_info.clone(),
+            cluster_info,
             my_vote_pubkey: vote_account,
             blockstore,
             sharable_banks,
             leader_schedule_cache,
-            consensus_message_receiver: bls_receiver,
+            consensus_message_receiver,
             bls_sender,
             event_sender,
             commitment_sender,
         };
 
-        let metrics = ConsensusMetrics::start_metrics_loop(
-            epoch_schedule,
-            consensus_metrics_receiver,
-            exit.clone(),
-        );
+        let metrics =
+            ConsensusMetrics::start_metrics_loop(epoch_schedule, consensus_metrics_receiver, exit);
         let event_handler = EventHandler::new(event_handler_context);
         let consensus_pool_service = ConsensusPoolService::new(consensus_pool_context);
 

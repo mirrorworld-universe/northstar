@@ -328,7 +328,7 @@ pub enum CliCommand {
         authorized_withdrawer: Pubkey,
         // VoteInit (v1) args.
         commission: Option<u8>,
-        // VoteInitV2 args (SIMD-0387).
+        // VoteInitV2 args (SIMD-0464).
         use_v2_instruction: bool,
         inflation_rewards_commission_bps: Option<u16>,
         inflation_rewards_collector: Option<Pubkey>,
@@ -377,6 +377,7 @@ pub enum CliCommand {
         vote_account_pubkey: Pubkey,
         new_authorized_pubkey: Pubkey,
         vote_authorize: VoteAuthorize,
+        use_v2_instruction: bool,
         sign_only: bool,
         dump_transaction_message: bool,
         blockhash_query: BlockhashQuery,
@@ -1691,6 +1692,7 @@ pub async fn process_command(config: &CliConfig<'_>) -> ProcessResult {
             vote_account_pubkey,
             new_authorized_pubkey,
             vote_authorize,
+            use_v2_instruction,
             sign_only,
             dump_transaction_message,
             blockhash_query,
@@ -1708,6 +1710,7 @@ pub async fn process_command(config: &CliConfig<'_>) -> ProcessResult {
                 vote_account_pubkey,
                 new_authorized_pubkey,
                 *vote_authorize,
+                *use_v2_instruction,
                 *authorized,
                 *new_authorized,
                 *sign_only,
@@ -2305,7 +2308,7 @@ mod tests {
             }),
         });
         // Use MocksMap to queue multiple GetAccountInfo responses:
-        // 1. SIMD-0387 feature account (returns null = feature inactive)
+        // 1. SIMD-0464 feature account (returns null = feature inactive)
         // 2. Vote account
         let mut mocks = MocksMap::default();
         mocks.insert(RpcRequest::GetAccountInfo, feature_check_response);
@@ -2369,6 +2372,7 @@ mod tests {
             vote_account_pubkey: bob_pubkey,
             new_authorized_pubkey,
             vote_authorize: VoteAuthorize::Withdrawer,
+            use_v2_instruction: false,
             sign_only: false,
             dump_transaction_message: false,
             blockhash_query: BlockhashQuery::Rpc(Source::Cluster),
@@ -2629,6 +2633,7 @@ mod tests {
             vote_account_pubkey: bob_pubkey,
             new_authorized_pubkey: bob_pubkey,
             vote_authorize: VoteAuthorize::Voter,
+            use_v2_instruction: false,
             sign_only: false,
             dump_transaction_message: false,
             blockhash_query: BlockhashQuery::Rpc(Source::Cluster),

@@ -187,8 +187,8 @@ fn run_generate_index_duplicates_within_slot_test(db: AccountsDb, reverse: bool)
     assert!(!db.accounts_index.contains(&pubkey));
     let storage = db.get_storage_for_slot(slot0).unwrap();
     let mut reader = append_vec::new_scan_accounts_reader();
-    let mut state = IndexGenerationThreadState::default();
-    db.generate_index_for_slot(&mut reader, &mut state, &storage);
+    let mut accum = IndexGenerationAccumulator::with_slots_capacity(1);
+    db.generate_index_for_slot(&mut reader, &mut accum, 0, &storage);
 }
 
 define_accounts_db_test!(
@@ -4846,10 +4846,10 @@ define_accounts_db_test!(test_calculate_storage_count_and_alive_bytes, |accounts
 
     let storage = accounts.storage.get_slot_storage_entry(slot0).unwrap();
     let mut reader = append_vec::new_scan_accounts_reader();
-    let mut state = IndexGenerationThreadState::default();
-    accounts.generate_index_for_slot(&mut reader, &mut state, &storage);
-    assert_eq!(state.storage_info.len(), 1);
-    for (slot, value) in state.storage_info {
+    let mut accum = IndexGenerationAccumulator::with_slots_capacity(1);
+    accounts.generate_index_for_slot(&mut reader, &mut accum, 0, &storage);
+    assert_eq!(accum.storage_info.len(), 1);
+    for (slot, value) in accum.storage_info {
         let expected_stored_size =
             if accounts.accounts_file_provider == AccountsFileProvider::HotStorage {
                 33
@@ -4870,9 +4870,9 @@ define_accounts_db_test!(
         // empty store
         let storage = accounts.create_and_insert_store(0, 1, "test");
         let mut reader = append_vec::new_scan_accounts_reader();
-        let mut state = IndexGenerationThreadState::default();
-        accounts.generate_index_for_slot(&mut reader, &mut state, &storage);
-        assert!(state.storage_info.is_empty());
+        let mut accum = IndexGenerationAccumulator::with_slots_capacity(1);
+        accounts.generate_index_for_slot(&mut reader, &mut accum, 0, &storage);
+        assert!(accum.storage_info.is_empty());
     }
 );
 
@@ -4907,10 +4907,10 @@ define_accounts_db_test!(
         );
 
         let mut reader = append_vec::new_scan_accounts_reader();
-        let mut state = IndexGenerationThreadState::default();
-        accounts.generate_index_for_slot(&mut reader, &mut state, &storage);
-        assert_eq!(state.storage_info.len(), 1);
-        for (slot, value) in state.storage_info {
+        let mut accum = IndexGenerationAccumulator::with_slots_capacity(1);
+        accounts.generate_index_for_slot(&mut reader, &mut accum, 0, &storage);
+        assert_eq!(accum.storage_info.len(), 1);
+        for (slot, value) in accum.storage_info {
             let expected_stored_size =
                 if accounts.accounts_file_provider == AccountsFileProvider::HotStorage {
                     1065
@@ -4975,14 +4975,14 @@ fn test_calculate_storage_count_and_alive_bytes_obsolete_account(
         .mark_accounts_obsolete(accounts_to_mark_obsolete.iter().cloned(), slot0 + 1);
 
     let mut reader = append_vec::new_scan_accounts_reader();
-    let mut state = IndexGenerationThreadState::default();
-    let info = accounts.generate_index_for_slot(&mut reader, &mut state, &storage);
+    let mut accum = IndexGenerationAccumulator::with_slots_capacity(1);
+    accounts.generate_index_for_slot(&mut reader, &mut accum, 0, &storage);
     assert_eq!(
-        info.num_obsolete_accounts_skipped,
+        accum.num_obsolete_accounts_skipped,
         num_accounts_to_mark_obsolete as u64
     );
     assert_eq!(
-        state.storage_info.len(),
+        accum.storage_info.len(),
         if num_accounts_to_mark_obsolete < account_sizes.len() {
             1
         } else {
@@ -4990,7 +4990,7 @@ fn test_calculate_storage_count_and_alive_bytes_obsolete_account(
         }
     );
 
-    for (slot, value) in state.storage_info {
+    for (slot, value) in accum.storage_info {
         // Sum up the stored size of all non obsolete accounts
         let expected_stored_size: usize = accounts_to_keep
             .iter()
@@ -5024,13 +5024,13 @@ define_accounts_db_test!(test_set_storage_count_and_alive_bytes, |accounts| {
     let count = 1;
 
     // populate based on made up data
-    let storage_info = vec![vec![(
+    let storage_info = vec![(
         0,
         StorageSizeAndCount {
             stored_size: 2,
             count,
         },
-    )]];
+    )];
 
     for (_, store) in accounts.storage.iter() {
         assert_eq!(store.count(), 0);
@@ -5068,16 +5068,23 @@ define_accounts_db_test!(test_purge_alive_unrooted_slots_after_clean, |accounts|
     // Simulate adding dirty pubkeys on bank freeze, set root
     accounts.add_root_and_flush_write_cache(slot1);
 
-    // The later rooted zero-lamport update to `shared_key` cannot be cleaned
-    // because it is kept alive by the unrooted slot.
+    // Account is referenced in the zero lamport slot. Since the other copy is in an unflushed slot,
+    // it does not count as a reference.
+    accounts.assert_ref_count(&shared_key, 1);
+
+    // The later rooted zero-lamport update to 'shared_key' can be purged
+    // as there are no rooted ancestors
+    // The key itself cannot be purged as it is still contained in the unrooted slot
     accounts.clean_accounts_for_tests();
     assert!(accounts.accounts_index.contains(&shared_key));
+
+    // Account now has a reference count of zero as it is not contained in any storages
+    accounts.assert_ref_count(&shared_key, 0);
 
     // Simulate purge_slot() all from AccountsBackgroundService
     accounts.purge_slot(slot0, 0, true);
 
-    // Now clean should clean up the remaining key
-    accounts.clean_accounts_for_tests();
+    // Now the key and slot are purged from the index
     assert!(!accounts.accounts_index.contains(&shared_key));
     assert_no_storages_at_slot(&accounts, slot0);
 });

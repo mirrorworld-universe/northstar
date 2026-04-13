@@ -70,23 +70,26 @@ pub struct ValidatorVoteKeypairs {
     pub node_keypair: Keypair,
     pub vote_keypair: Keypair,
     pub stake_keypair: Keypair,
+    pub bls_keypair: BLSKeypair,
 }
 
 impl ValidatorVoteKeypairs {
     pub fn new(node_keypair: Keypair, vote_keypair: Keypair, stake_keypair: Keypair) -> Self {
+        let bls_keypair =
+            BLSKeypair::derive_from_signer(&vote_keypair, BLS_KEYPAIR_DERIVE_SEED).unwrap();
         Self {
             node_keypair,
             vote_keypair,
             stake_keypair,
+            bls_keypair,
         }
     }
 
     pub fn new_rand() -> Self {
-        Self {
-            node_keypair: Keypair::new(),
-            vote_keypair: Keypair::new(),
-            stake_keypair: Keypair::new(),
-        }
+        let node_keypair = Keypair::new();
+        let vote_keypair = Keypair::new();
+        let stake_keypair = Keypair::new();
+        Self::new(node_keypair, vote_keypair, stake_keypair)
     }
 }
 
@@ -155,12 +158,13 @@ pub fn create_genesis_config_with_vote_accounts_and_cluster_type(
 
     let validator_pubkey = voting_keypairs[0].borrow().node_keypair.pubkey();
     let validator_bls_pubkey = if is_alpenglow {
-        let bls_keypair = BLSKeypair::derive_from_signer(
-            &voting_keypairs[0].borrow().vote_keypair,
-            BLS_KEYPAIR_DERIVE_SEED,
+        Some(
+            voting_keypairs[0]
+                .borrow()
+                .bls_keypair
+                .public
+                .to_bytes_compressed(),
         )
-        .unwrap();
-        Some(bls_keypair.public.to_bytes_compressed())
     } else {
         None
     };
@@ -199,12 +203,11 @@ pub fn create_genesis_config_with_vote_accounts_and_cluster_type(
         // Create accounts
         let node_account = Account::new(VALIDATOR_LAMPORTS, 0, &system_program::id());
         let bls_pubkey_compressed = if is_alpenglow {
-            let bls_keypair = BLSKeypair::derive_from_signer(
-                &validator_voting_keypairs.borrow().vote_keypair,
-                BLS_KEYPAIR_DERIVE_SEED,
-            )
-            .unwrap();
-            bls_keypair.public.to_bytes_compressed()
+            validator_voting_keypairs
+                .borrow()
+                .bls_keypair
+                .public
+                .to_bytes_compressed()
         } else {
             [0u8; BLS_PUBLIC_KEY_COMPRESSED_SIZE]
         };
@@ -334,7 +337,12 @@ pub fn activate_all_features(genesis_config: &mut GenesisConfig) {
 fn do_activate_all_features<const IS_ALPENGLOW: bool>(genesis_config: &mut GenesisConfig) {
     // Activate all features at genesis in development mode
     for feature_id in FeatureSet::default().inactive() {
-        if IS_ALPENGLOW || *feature_id != agave_feature_set::alpenglow::id() {
+        if (IS_ALPENGLOW || *feature_id != agave_feature_set::alpenglow::id())
+            // TODO: Remove me once SIMD-0464 is no longer hard-coded as `false` in
+            // `FeatureSet::runtime_features` and omitted from `FEATURE_NAMES` in
+            // agave-feature-set.
+            && *feature_id != agave_feature_set::vote_account_initialize_v2::id()
+        {
             activate_feature(genesis_config, *feature_id);
         }
     }
@@ -506,6 +514,12 @@ pub fn create_genesis_config_with_leader_ex(
     for feature_id in feature_set.active().keys() {
         // Skip alpenglow (existing behavior)
         if *feature_id == agave_feature_set::alpenglow::id() {
+            continue;
+        }
+        // TODO: Remove me once SIMD-0464 is no longer hard-coded as `false` in
+        // `FeatureSet::runtime_features` and omitted from `FEATURE_NAMES` in
+        // agave-feature-set.
+        if *feature_id == agave_feature_set::vote_account_initialize_v2::id() {
             continue;
         }
         activate_feature(&mut genesis_config, *feature_id);

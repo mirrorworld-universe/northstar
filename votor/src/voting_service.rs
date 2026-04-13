@@ -4,7 +4,6 @@ use {
         vote_history_storage::{SavedVoteHistoryVersions, VoteHistoryStorage},
     },
     agave_votor_messages::consensus_message::{Certificate, ConsensusMessage},
-    bincode::serialize,
     crossbeam_channel::Receiver,
     solana_client::connection_cache::ConnectionCache,
     solana_clock::Slot,
@@ -142,10 +141,7 @@ impl VotingService {
                 );
 
                 info!("AlpenglowVotingService has started");
-                loop {
-                    let Ok(bls_op) = bls_receiver.recv() else {
-                        break;
-                    };
+                while let Ok(bls_op) = bls_receiver.recv() {
                     Self::handle_bls_op(
                         &cluster_info,
                         vote_history_storage.as_ref(),
@@ -169,7 +165,7 @@ impl VotingService {
         additional_listeners: &[SocketAddr],
         staked_validators_cache: &mut StakedValidatorsCache,
     ) {
-        let buf = match serialize(message) {
+        let buf = match wincode::serialize(message) {
             Ok(buf) => buf,
             Err(err) => {
                 error!("Failed to serialize alpenglow message: {err:?}");
@@ -312,7 +308,7 @@ mod tests {
                     "TestAlpenglowConnectionCache",
                     10,
                 )),
-                bank_forks.clone(),
+                bank_forks,
                 Some(VotingServiceOverride {
                     additional_listeners: vec![listener],
                     alpenglow_port_override: AlpenglowPortOverride::default(),

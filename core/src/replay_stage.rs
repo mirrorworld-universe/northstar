@@ -304,7 +304,7 @@ pub struct ReplaySenders {
     pub block_metadata_notifier: Option<BlockMetadataNotifierArc>,
     pub dumped_slots_sender: Sender<Vec<(u64, Hash)>>,
     pub votor_event_sender: VotorEventSender,
-    pub own_vote_sender: Sender<ConsensusMessage>,
+    pub own_vote_sender: Sender<Vec<ConsensusMessage>>,
     pub lockouts_sender: Sender<TowerCommitmentAggregationData>,
 }
 
@@ -630,7 +630,7 @@ impl ReplayStage {
 
         trace!("replay stage");
 
-        let mut identity_keypair = cluster_info.keypair().clone();
+        let mut identity_keypair = cluster_info.keypair();
         let mut my_pubkey = identity_keypair.pubkey();
 
         let mut highest_frozen_slot = bank_forks
@@ -1435,7 +1435,7 @@ impl ReplayStage {
         vote_account: Pubkey,
         identity_keypair: &Arc<Keypair>,
         authorized_voter_keypairs: &Arc<std::sync::RwLock<Vec<Arc<Keypair>>>>,
-        own_vote_sender: &Sender<ConsensusMessage>,
+        own_vote_sender: &Sender<Vec<ConsensusMessage>>,
         bls_sender: &Sender<BLSOp>,
     ) -> bool {
         let Some((slot, block_id)) = migration_status.eligible_genesis_block() else {
@@ -1460,7 +1460,7 @@ impl ReplayStage {
                     identity_keypair.pubkey()
                 );
                 // If sending fails that means the channel is disconnected and we are shutting down
-                let _ = own_vote_sender.send(message.clone());
+                let _ = own_vote_sender.send(vec![message.clone()]);
                 let _ = bls_sender.send(BLSOp::PushVote {
                     message: Arc::new(message),
                     slot,
@@ -8250,7 +8250,7 @@ pub(crate) mod tests {
         // 2) The blockheight is still eligible for a refresh
         // This will still not refresh because `MAX_VOTE_REFRESH_INTERVAL_MILLIS` has not expired yet
         let expired_bank_sibling = {
-            let mut parent_bank = bank2.clone();
+            let mut parent_bank = bank2;
             for i in 0..expired_bank_child_slot {
                 let slot = expired_bank_child.slot() + i + 1;
                 parent_bank = Bank::new_from_parent_with_bank_forks(

@@ -19,6 +19,7 @@ Release channels have their own copy of this changelog:
 * `--public-tpu-address` and `--public-tpu-forwards-address` CLI arguments and `setPublicTpuForwardsAddress`, `setPublicTpuAddress` RPC methods now specify QUIC ports, not UDP.
 #### Changes
 * Added `--enable-scheduler-bindings` which binds an IPC server at `<ledger-path>/scheduler_bindings.ipc` for external schedulers to connect to.
+* Added `clientId` field to each node in `getClusterNodes` response
 ### Validator
 #### Breaking
 * Removed deprecated arguments
@@ -32,6 +33,7 @@ Release channels have their own copy of this changelog:
   * `--wait-for-exit` (`exit` subcommand)
   * `--tpu-disable-quic`
   * `--tpu-enable-udp`
+* `--block-verification-method blockstore-processor` is no longer supported. Remove the argument or switch to `--block-verification-method unified-scheduler` instead.
 * Removed support for ingestion of transactions via UDP. QUIC is now the only option.
 * All monorepo crates falling outside the
 [backward compatibility policy](https://docs.anza.xyz/backwards-compatibility) are now part

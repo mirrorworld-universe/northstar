@@ -3663,12 +3663,16 @@ pub mod rpc_full {
                             .map(|addr| socket_addr_space.check(&addr))
                             .unwrap_or_default()
                     {
-                        let (version, feature_set) = if let Some(version) =
+                        let (version, feature_set, client_id) = if let Some(version) =
                             cluster_info.get_node_version(contact_info.pubkey())
                         {
-                            (Some(version.to_string()), Some(version.feature_set))
+                            (
+                                Some(version.to_string()),
+                                Some(version.feature_set),
+                                Some(version.client),
+                            )
                         } else {
-                            (None, None)
+                            (None, None, None)
                         };
                         Some(RpcContactInfo {
                             pubkey: contact_info.pubkey().to_string(),
@@ -3697,6 +3701,7 @@ pub mod rpc_full {
                                 .rpc_pubsub()
                                 .filter(|addr| socket_addr_space.check(addr)),
                             version,
+                            client_id,
                             feature_set,
                             shred_version: Some(my_shred_version),
                         })
@@ -5196,6 +5201,7 @@ pub mod tests {
             "pubsub": format!("127.0.0.1:8900"),
             "version": format!("{version}"),
             "featureSet": version.feature_set,
+            "clientId": 3u16,
         }, {
             "pubkey": rpc.leader_pubkey().to_string(),
             "gossip": "127.0.0.1:1235",
@@ -5211,6 +5217,7 @@ pub mod tests {
             "pubsub": format!("127.0.0.1:8900"),
             "version": format!("{version}"),
             "featureSet": version.feature_set,
+            "clientId": 3u16,
         }]);
         assert_eq!(result, expected);
     }

@@ -80,6 +80,7 @@ use {
     solana_stake_interface::{self as stake, state::NEW_WARMUP_COOLDOWN_RATE},
     solana_system_interface::program as system_program,
     solana_system_transaction as system_transaction,
+    solana_transaction_error::TransportError,
     solana_turbine::broadcast_stage::{
         broadcast_duplicates_run::{BroadcastDuplicatesConfig, ClusterPartition},
         BroadcastStageType,
@@ -2349,10 +2350,9 @@ fn create_snapshot_to_hard_fork(
     let ledger_path = blockstore.ledger_path();
     let genesis_config = open_genesis_config(ledger_path, u64::MAX).unwrap();
     let snapshot_config = create_simple_snapshot_config(ledger_path);
-    let (bank_forks, _) = bank_forks_utils::load_bank_forks(
+    let (bank_forks, _) = bank_forks_utils::try_load_bank_forks_from_snapshot(
         &genesis_config,
-        blockstore,
-        vec![
+        &[
             create_accounts_run_and_snapshot_dirs(ledger_path.join("accounts"))
                 .unwrap()
                 .0,
@@ -2360,11 +2360,10 @@ fn create_snapshot_to_hard_fork(
         &snapshot_config,
         &process_options,
         None,
-        None,
-        None,
         Arc::default(),
     )
-    .expect("must load bank forks");
+    .expect("must load bank forks")
+    .expect("load from snapshot must be available");
 
     let leader_schedule_cache =
         LeaderScheduleCache::new_from_bank(&bank_forks.read().unwrap().root_bank());
@@ -2884,13 +2883,17 @@ fn test_oc_bad_signatures() {
                     &bad_authorized_signer_keypair,
                     None,
                 );
-                LocalCluster::send_transaction_with_retries(
-                    &client,
-                    &[&node_keypair, &bad_authorized_signer_keypair],
-                    &mut vote_tx,
-                    5,
-                )
-                .unwrap();
+
+                // Send the bad vote and expect transaction error.
+                assert_matches!(
+                    LocalCluster::send_transaction_with_retries(
+                        &client,
+                        &[&node_keypair, &bad_authorized_signer_keypair],
+                        &mut vote_tx,
+                        5,
+                    ),
+                    Err(TransportError::TransactionError(_))
+                );
 
                 num_votes_simulated.fetch_add(1, Ordering::Relaxed);
             }

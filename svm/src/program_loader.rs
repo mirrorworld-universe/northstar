@@ -1,3 +1,5 @@
+#[cfg(feature = "metrics")]
+use solana_program_runtime::loaded_programs::LoadProgramMetrics;
 use {
     solana_account::{AccountSharedData, ReadableAccount, state_traits::StateMut},
     solana_clock::Slot,
@@ -5,9 +7,8 @@ use {
     solana_loader_v3_interface::state::UpgradeableLoaderState,
     solana_loader_v4_interface::state::{LoaderV4State, LoaderV4Status},
     solana_program_runtime::loaded_programs::{
-        DELAY_VISIBILITY_SLOT_OFFSET, LoadProgramMetrics, ProgramCacheEntry,
-        ProgramCacheEntryOwner, ProgramCacheEntryType, ProgramRuntimeEnvironment,
-        ProgramRuntimeEnvironments,
+        DELAY_VISIBILITY_SLOT_OFFSET, ProgramCacheEntry, ProgramCacheEntryOwner,
+        ProgramCacheEntryType, ProgramRuntimeEnvironments,
     },
     solana_pubkey::Pubkey,
     solana_sdk_ids::{bpf_loader, bpf_loader_deprecated, bpf_loader_upgradeable, loader_v4},
@@ -24,25 +25,6 @@ pub(crate) enum ProgramAccountLoadResult {
     ProgramOfLoaderV2(AccountSharedData),
     ProgramOfLoaderV3(AccountSharedData, AccountSharedData, Slot),
     ProgramOfLoaderV4(AccountSharedData, Slot),
-}
-
-pub(crate) fn load_program_from_bytes(
-    load_program_metrics: &mut LoadProgramMetrics,
-    programdata: &[u8],
-    loader_key: &Pubkey,
-    account_size: usize,
-    deployment_slot: Slot,
-    program_runtime_environment: ProgramRuntimeEnvironment,
-) -> std::result::Result<ProgramCacheEntry, Box<dyn std::error::Error>> {
-    ProgramCacheEntry::new(
-        loader_key,
-        program_runtime_environment,
-        deployment_slot,
-        deployment_slot.saturating_add(DELAY_VISIBILITY_SLOT_OFFSET),
-        programdata,
-        account_size,
-        load_program_metrics,
-    )
 }
 
 pub(crate) fn load_program_accounts<CB: TransactionProcessingCallback>(
@@ -111,10 +93,13 @@ pub fn load_program_with_pubkey<CB: TransactionProcessingCallback>(
     current_slot: Slot,
     execute_timings: &mut ExecuteTimings,
 ) -> Option<(Arc<ProgramCacheEntry>, Slot)> {
+    #[cfg(feature = "metrics")]
     let mut load_program_metrics = LoadProgramMetrics {
         program_id: pubkey.to_string(),
         ..LoadProgramMetrics::default()
     };
+    #[cfg(not(feature = "metrics"))]
+    let _ = execute_timings;
 
     let (load_result, last_modification_slot) = load_program_accounts(callbacks, pubkey)?;
     let loaded_program = match load_result {
@@ -122,23 +107,27 @@ pub fn load_program_with_pubkey<CB: TransactionProcessingCallback>(
             ProgramCacheEntry::new_tombstone(current_slot, owner, ProgramCacheEntryType::Closed),
         ),
 
-        ProgramAccountLoadResult::ProgramOfLoaderV1(program_account) => load_program_from_bytes(
-            &mut load_program_metrics,
-            program_account.data(),
+        ProgramAccountLoadResult::ProgramOfLoaderV1(program_account) => ProgramCacheEntry::new(
             program_account.owner(),
-            program_account.data().len(),
-            0,
             environments.program_runtime_v1.clone(),
+            0,
+            DELAY_VISIBILITY_SLOT_OFFSET,
+            program_account.data(),
+            program_account.data().len(),
+            #[cfg(feature = "metrics")]
+            &mut load_program_metrics,
         )
         .map_err(|_| (0, ProgramCacheEntryOwner::LoaderV1)),
 
-        ProgramAccountLoadResult::ProgramOfLoaderV2(program_account) => load_program_from_bytes(
-            &mut load_program_metrics,
-            program_account.data(),
+        ProgramAccountLoadResult::ProgramOfLoaderV2(program_account) => ProgramCacheEntry::new(
             program_account.owner(),
-            program_account.data().len(),
-            0,
             environments.program_runtime_v1.clone(),
+            0,
+            DELAY_VISIBILITY_SLOT_OFFSET,
+            program_account.data(),
+            program_account.data().len(),
+            #[cfg(feature = "metrics")]
+            &mut load_program_metrics,
         )
         .map_err(|_| (0, ProgramCacheEntryOwner::LoaderV2)),
 
@@ -151,16 +140,18 @@ pub fn load_program_with_pubkey<CB: TransactionProcessingCallback>(
             .get(UpgradeableLoaderState::size_of_programdata_metadata()..)
             .ok_or(Box::new(InstructionError::InvalidAccountData).into())
             .and_then(|programdata| {
-                load_program_from_bytes(
-                    &mut load_program_metrics,
-                    programdata,
+                ProgramCacheEntry::new(
                     program_account.owner(),
+                    environments.program_runtime_v1.clone(),
+                    deployment_slot,
+                    deployment_slot.saturating_add(DELAY_VISIBILITY_SLOT_OFFSET),
+                    programdata,
                     program_account
                         .data()
                         .len()
                         .saturating_add(programdata_account.data().len()),
-                    deployment_slot,
-                    environments.program_runtime_v1.clone(),
+                    #[cfg(feature = "metrics")]
+                    &mut load_program_metrics,
                 )
             })
             .map_err(|_| (deployment_slot, ProgramCacheEntryOwner::LoaderV3)),
@@ -171,13 +162,15 @@ pub fn load_program_with_pubkey<CB: TransactionProcessingCallback>(
                 .get(LoaderV4State::program_data_offset()..)
                 .ok_or(Box::new(InstructionError::InvalidAccountData).into())
                 .and_then(|elf_bytes| {
-                    load_program_from_bytes(
-                        &mut load_program_metrics,
-                        elf_bytes,
+                    ProgramCacheEntry::new(
                         &loader_v4::id(),
-                        program_account.data().len(),
-                        deployment_slot,
                         environments.program_runtime_v1.clone(),
+                        deployment_slot,
+                        deployment_slot.saturating_add(DELAY_VISIBILITY_SLOT_OFFSET),
+                        elf_bytes,
+                        program_account.data().len(),
+                        #[cfg(feature = "metrics")]
+                        &mut load_program_metrics,
                     )
                 })
                 .map_err(|_| (deployment_slot, ProgramCacheEntryOwner::LoaderV4))
@@ -192,6 +185,7 @@ pub fn load_program_with_pubkey<CB: TransactionProcessingCallback>(
         )
     });
 
+    #[cfg(feature = "metrics")]
     load_program_metrics.submit_datapoint(&mut execute_timings.details);
     loaded_program.update_access_slot(current_slot);
     Some((Arc::new(loaded_program), last_modification_slot))
@@ -241,7 +235,9 @@ mod tests {
         crate::transaction_processor::TransactionBatchProcessor,
         solana_account::WritableAccount,
         solana_program_runtime::{
-            loaded_programs::{BlockRelation, ForkGraph, ProgramRuntimeEnvironments},
+            loaded_programs::{
+                BlockRelation, ForkGraph, ProgramRuntimeEnvironment, ProgramRuntimeEnvironments,
+            },
             solana_sbpf::program::BuiltinProgram,
         },
         solana_sdk_ids::{bpf_loader, bpf_loader_upgradeable},
@@ -460,19 +456,22 @@ mod tests {
     fn test_load_program_from_bytes() {
         let buffer = load_test_program();
 
+        #[cfg(feature = "metrics")]
         let mut metrics = LoadProgramMetrics::default();
         let loader = bpf_loader_upgradeable::id();
         let size = buffer.len();
-        let slot = 2;
+        let slot: Slot = 2;
         let environment = ProgramRuntimeEnvironment::new(BuiltinProgram::new_mock());
 
-        let result = load_program_from_bytes(
-            &mut metrics,
-            &buffer,
+        let result = ProgramCacheEntry::new(
             &loader,
-            size,
-            slot,
             environment.clone(),
+            slot,
+            slot.saturating_add(DELAY_VISIBILITY_SLOT_OFFSET),
+            &buffer,
+            size,
+            #[cfg(feature = "metrics")]
+            &mut metrics,
         );
 
         assert!(result.is_ok());
@@ -574,13 +573,15 @@ mod tests {
         );
 
         let environments = ProgramRuntimeEnvironments::default();
-        let expected = load_program_from_bytes(
-            &mut LoadProgramMetrics::default(),
-            account_data.data(),
+        let expected = ProgramCacheEntry::new(
             account_data.owner(),
-            account_data.data().len(),
-            0,
             environments.program_runtime_v1.clone(),
+            0,
+            DELAY_VISIBILITY_SLOT_OFFSET,
+            account_data.data(),
+            account_data.data().len(),
+            #[cfg(feature = "metrics")]
+            &mut LoadProgramMetrics::default(),
         );
 
         assert_eq!(result.unwrap(), (Arc::new(expected.unwrap()), 0));
@@ -666,13 +667,15 @@ mod tests {
             .set_data(data[UpgradeableLoaderState::size_of_programdata_metadata()..].to_vec());
 
         let environments = ProgramRuntimeEnvironments::default();
-        let expected = load_program_from_bytes(
-            &mut LoadProgramMetrics::default(),
-            account_data.data(),
+        let expected = ProgramCacheEntry::new(
             account_data.owner(),
-            account_data.data().len(),
-            0,
             environments.program_runtime_v1.clone(),
+            0,
+            DELAY_VISIBILITY_SLOT_OFFSET,
+            account_data.data(),
+            account_data.data().len(),
+            #[cfg(feature = "metrics")]
+            &mut LoadProgramMetrics::default(),
         );
         assert_eq!(result.unwrap(), (Arc::new(expected.unwrap()), 0));
     }
@@ -749,13 +752,15 @@ mod tests {
             .insert(key, (account_data.clone(), 0));
 
         let environments = ProgramRuntimeEnvironments::default();
-        let expected = load_program_from_bytes(
-            &mut LoadProgramMetrics::default(),
-            account_data.data(),
+        let expected = ProgramCacheEntry::new(
             account_data.owner(),
-            account_data.data().len(),
-            0,
             environments.program_runtime_v1.clone(),
+            0,
+            DELAY_VISIBILITY_SLOT_OFFSET,
+            account_data.data(),
+            account_data.data().len(),
+            #[cfg(feature = "metrics")]
+            &mut LoadProgramMetrics::default(),
         );
         assert_eq!(result.unwrap(), (Arc::new(expected.unwrap()), 0));
     }
