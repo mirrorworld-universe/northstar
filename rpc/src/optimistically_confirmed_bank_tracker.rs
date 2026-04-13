@@ -106,7 +106,7 @@ impl OptimisticallyConfirmedBankTracker {
         dependency_tracker: Option<Arc<DependencyTracker>>,
 
         // Sonic:
-        sender: BankNotificationSender,
+        sender: Option<BankNotificationSender>,
     ) -> Self {
         let mut pending_optimistically_confirmed_banks = HashSet::new();
         let mut last_notified_confirmed_slot: Slot = 0;
@@ -155,7 +155,7 @@ impl OptimisticallyConfirmedBankTracker {
         dependency_tracker: &Option<Arc<DependencyTracker>>,
 
         // Sonic:
-        sender: &BankNotificationSender,
+        sender: &Option<BankNotificationSender>,
     ) -> Result<(), RecvTimeoutError> {
         let notification = receiver.recv_timeout(Duration::from_secs(1))?;
         Self::process_notification(
@@ -173,7 +173,9 @@ impl OptimisticallyConfirmedBankTracker {
         );
 
         // Sonic: TODO: can it be processed by northstar before optimistic confirmed bank tracker?
-        let _ = sender.send(notification);
+        if let Some(sender) = sender {
+            let _ = sender.send(notification);
+        }
 
         Ok(())
     }
