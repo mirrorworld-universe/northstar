@@ -22,12 +22,12 @@ use {
         utils::create_account_shared_data,
     },
     agave_fs::{
+        FileInfo, FileSize,
         buffered_reader::{
             BufReaderWithOverflow, BufferedReader, FileBufRead as _, RequiredLenBufFileRead,
             RequiredLenBufRead as _,
         },
         file_io::{read_into_buffer, write_buffer_to_file},
-        FileInfo,
     },
     log::*,
     memmap2::MmapMut,
@@ -38,14 +38,14 @@ use {
     std::{
         self,
         convert::TryFrom,
-        fs::{remove_file, File, OpenOptions},
+        fs::{File, OpenOptions, remove_file},
         io::{self, BufRead, Seek, SeekFrom, Write},
         mem::{self, MaybeUninit},
         path::{Path, PathBuf},
         ptr, slice,
         sync::{
-            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
             Arc, Mutex, MutexGuard,
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         },
     },
     thiserror::Error,
@@ -89,16 +89,16 @@ pub enum AppendVecError {
 /// A slice whose contents are known to be valid.
 /// The slice contains no undefined bytes.
 #[derive(Debug, Copy, Clone)]
-pub(crate) struct ValidSlice<'a>(&'a [u8]);
+struct ValidSlice<'a>(&'a [u8]);
 
 impl<'a> ValidSlice<'a> {
     #[inline(always)]
-    pub(crate) fn new(data: &'a [u8]) -> Self {
+    fn new(data: &'a [u8]) -> Self {
         Self(data)
     }
 
     #[inline(always)]
-    pub(crate) fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.0.len()
     }
 }
@@ -702,10 +702,11 @@ impl AppendVec {
                 // 4096 was just picked to be a single page size
                 let mut buf = [MaybeUninit::<u8>::uninit(); PAGE_SIZE];
                 // SAFETY: `read_into_buffer` will only write to uninitialized memory.
-                let bytes_read = read_into_buffer(file, self.len(), offset, unsafe {
-                    slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, buf.len())
-                })
-                .ok()?;
+                let bytes_read =
+                    read_into_buffer(file, self.len() as FileSize, offset as FileSize, unsafe {
+                        slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, buf.len())
+                    })
+                    .ok()?;
                 // SAFETY: we only read the initialized portion.
                 let valid_bytes = ValidSlice(unsafe {
                     slice::from_raw_parts(buf.as_ptr() as *const u8, bytes_read)
@@ -734,9 +735,17 @@ impl AppendVec {
                     // instead, we could piece together what we already read here. Maybe we just needed 1 more byte.
                     // Note here `next` is a 0-based offset from the beginning of this account.
                     // SAFETY: `read_into_buffer` will only write to uninitialized memory.
-                    let bytes_read = read_into_buffer(file, self.len(), offset + next, unsafe {
-                        slice::from_raw_parts_mut(data.as_mut_ptr() as *mut u8, data_len as usize)
-                    })
+                    let bytes_read = read_into_buffer(
+                        file,
+                        self.len() as FileSize,
+                        (offset + next) as FileSize,
+                        unsafe {
+                            slice::from_raw_parts_mut(
+                                data.as_mut_ptr() as *mut u8,
+                                data_len as usize,
+                            )
+                        },
+                    )
                     .ok()?;
                     if bytes_read < data_len as usize {
                         // eof or otherwise couldn't read all the data
@@ -782,10 +791,11 @@ impl AppendVec {
             AppendVecFileBacking::File(file) => {
                 let mut buf = [MaybeUninit::<u8>::uninit(); STORE_META_OVERHEAD];
                 // SAFETY: `read_into_buffer` will only write to uninitialized memory.
-                let bytes_read = read_into_buffer(file, self.len(), offset, unsafe {
-                    slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, buf.len())
-                })
-                .ok()?;
+                let bytes_read =
+                    read_into_buffer(file, self.len() as FileSize, offset as FileSize, unsafe {
+                        slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, buf.len())
+                    })
+                    .ok()?;
                 // SAFETY: we only read the initialized portion.
                 let valid_bytes = ValidSlice(unsafe {
                     slice::from_raw_parts(buf.as_ptr() as *const u8, bytes_read)
@@ -816,8 +826,10 @@ impl AppendVec {
             AppendVecFileBacking::File(file) => {
                 let mut buf = MaybeUninit::<[u8; PAGE_SIZE]>::uninit();
                 let bytes_read =
-                    read_into_buffer(file, self.len(), offset, unsafe { &mut *buf.as_mut_ptr() })
-                        .ok()?;
+                    read_into_buffer(file, self.len() as FileSize, offset as FileSize, unsafe {
+                        &mut *buf.as_mut_ptr()
+                    })
+                    .ok()?;
                 // SAFETY: we only read the initialized portion.
                 let valid_bytes = ValidSlice(unsafe {
                     slice::from_raw_parts(buf.as_ptr() as *const u8, bytes_read)
@@ -847,9 +859,17 @@ impl AppendVec {
                     let slice = data.spare_capacity_mut();
                     // Note here `next` is a 0-based offset from the beginning of this account.
                     // SAFETY: `read_into_buffer` will only write to uninitialized memory.
-                    let bytes_read = read_into_buffer(file, self.len(), offset + next, unsafe {
-                        slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u8, data_len as usize)
-                    })
+                    let bytes_read = read_into_buffer(
+                        file,
+                        self.len() as FileSize,
+                        (offset + next) as FileSize,
+                        unsafe {
+                            slice::from_raw_parts_mut(
+                                slice.as_mut_ptr() as *mut u8,
+                                data_len as usize,
+                            )
+                        },
+                    )
                     .ok()?;
                     if bytes_read < data_len as usize {
                         // eof or otherwise couldn't read all the data
@@ -890,9 +910,10 @@ impl AppendVec {
             Some((pubkey, create_account_shared_data(&r_callback)))
         });
         if result.is_none() {
-            assert!(self
-                .get_stored_account_meta_callback(offset, |_| {})
-                .is_none());
+            assert!(
+                self.get_stored_account_meta_callback(offset, |_| {})
+                    .is_none()
+            );
             assert!(self.get_account_shared_data(offset).is_none());
             // it has different rules for checking len and returning None
             assert_eq!(sizes, 0);
@@ -1001,11 +1022,11 @@ impl AppendVec {
                 {}
             }
             AppendVecFileBacking::File(file) => {
-                reader.set_file(file, self.len())?;
+                reader.set_file(file, self.len() as FileSize)?;
 
                 let mut min_buf_len = STORE_META_OVERHEAD;
                 loop {
-                    let offset = reader.get_file_offset();
+                    let offset = reader.get_file_offset() as usize;
                     let bytes = match reader.fill_buf_required(min_buf_len) {
                         Ok([]) => break,
                         Ok(bytes) => ValidSlice::new(bytes),
@@ -1106,13 +1127,15 @@ impl AppendVec {
                 let mut buffer = [MaybeUninit::<u8>::uninit(); mem::size_of::<StoredMeta>()];
                 for &offset in sorted_offsets {
                     // SAFETY: `read_into_buffer` will only write to uninitialized memory.
-                    let Some(bytes_read) = read_into_buffer(file, self_len, offset, unsafe {
-                        slice::from_raw_parts_mut(
-                            buffer.as_mut_ptr() as *mut u8,
-                            mem::size_of::<StoredMeta>(),
-                        )
-                    })
-                    .ok() else {
+                    let Some(bytes_read) =
+                        read_into_buffer(file, self_len as FileSize, offset as FileSize, unsafe {
+                            slice::from_raw_parts_mut(
+                                buffer.as_mut_ptr() as *mut u8,
+                                mem::size_of::<StoredMeta>(),
+                            )
+                        })
+                        .ok()
+                    else {
                         break;
                     };
                     // SAFETY: we only read the initialized portion.
@@ -1153,11 +1176,7 @@ impl AppendVec {
             AppendVecFileBacking::Mmap(mmap) => {
                 let mut offset = 0;
                 let slice = self.get_valid_slice_from_mmap(mmap);
-                loop {
-                    let Some((stored_meta, next)) = Self::get_type::<StoredMeta>(slice, offset)
-                    else {
-                        break;
-                    };
+                while let Some((stored_meta, next)) = Self::get_type::<StoredMeta>(slice, offset) {
                     let Some((account_meta, _)) = Self::get_type::<AccountMeta>(slice, next) else {
                         break;
                     };
@@ -1186,11 +1205,12 @@ impl AppendVec {
             AppendVecFileBacking::File(file) => {
                 // Heuristic observed in benchmarking that maintains a reasonable balance between syscalls and data waste
                 const BUFFER_SIZE: usize = PAGE_SIZE * 4;
-                let mut reader = BufferedReader::<BUFFER_SIZE>::new().with_file(file, self_len);
+                let mut reader =
+                    BufferedReader::<BUFFER_SIZE>::new().with_file(file, self_len as FileSize);
                 const REQUIRED_READ_LEN: usize =
                     mem::size_of::<StoredMeta>() + mem::size_of::<AccountMeta>();
                 loop {
-                    let offset = reader.get_file_offset();
+                    let offset = reader.get_file_offset() as usize;
                     let bytes = match reader.fill_buf_required(REQUIRED_READ_LEN) {
                         Ok([]) => break,
                         Ok(bytes) => ValidSlice::new(bytes),
@@ -1349,7 +1369,7 @@ mod tests {
         memoffset::offset_of,
         rand::{prelude::*, rng},
         rand_chacha::ChaChaRng,
-        solana_account::{accounts_equal, AccountSharedData, WritableAccount},
+        solana_account::{AccountSharedData, WritableAccount, accounts_equal},
         solana_clock::Slot,
         std::{mem::ManuallyDrop, time::Instant},
         test_case::{test_case, test_matrix},

@@ -5,14 +5,15 @@ use {
         blockstore_meta::{self},
     },
     bincode::Options as BincodeOptions,
-    serde::{de::DeserializeOwned, Serialize},
+    serde::{Serialize, de::DeserializeOwned},
     solana_clock::{Slot, UnixTimestamp},
-    solana_pubkey::{Pubkey, PUBKEY_BYTES},
-    solana_signature::{Signature, SIGNATURE_BYTES},
+    solana_pubkey::{PUBKEY_BYTES, Pubkey},
+    solana_signature::{SIGNATURE_BYTES, Signature},
     solana_storage_proto::convert::generated,
 };
 
 pub(crate) const DEPRECATED_PROGRAM_COSTS_COLUMN_NAME: &str = "program_costs";
+pub(crate) const DEPRECATED_TRANSACTION_STATUS_INDEX_NAME: &str = "transaction_status_index";
 
 // To add a new column, declare the type below and implement the applicable
 // traits for it. At the very least, Column and ColumnName will be necessary.
@@ -25,7 +26,7 @@ pub mod columns {
     // This avoids relatively obvious `super::` qualifications required for all non-trivial type
     // references in the column doc-comments.
     #[cfg(doc)]
-    use super::{blockstore_meta, generated, Pubkey, Signature, Slot, SlotColumn, UnixTimestamp};
+    use super::{Pubkey, Signature, Slot, SlotColumn, UnixTimestamp, blockstore_meta, generated};
 
     #[derive(Debug)]
     /// The slot metadata column.
@@ -150,16 +151,9 @@ pub mod columns {
     #[derive(Debug)]
     /// The transaction memos column
     ///
-    /// * index type: [`Signature`]
+    /// * index type: `(`[`Signature`]`, `[`Slot`])`
     /// * value type: [`String`]
     pub struct TransactionMemos;
-
-    #[derive(Debug)]
-    /// The transaction status index column.
-    ///
-    /// * index type: `u64` (see [`SlotColumn`])
-    /// * value type: [`blockstore_meta::TransactionStatusIndexMeta`]
-    pub struct TransactionStatusIndex;
 
     #[derive(Debug)]
     /// The rewards column
@@ -276,42 +270,12 @@ pub enum IndexError {
     UnpackError,
 }
 
-/// Helper trait to transition primary indexes out from the columns that are using them.
-pub trait ColumnIndexDeprecation: Column {
-    const CURRENT_INDEX_LEN: usize;
-    type DeprecatedIndex;
-    type DeprecatedKey: AsRef<[u8]>;
-
-    fn deprecated_key(index: Self::DeprecatedIndex) -> Self::DeprecatedKey;
-    fn try_deprecated_index(key: &[u8]) -> std::result::Result<Self::DeprecatedIndex, IndexError>;
-
-    fn try_current_index(key: &[u8]) -> std::result::Result<Self::Index, IndexError>;
-    fn convert_index(deprecated_index: Self::DeprecatedIndex) -> Self::Index;
-
-    fn index(key: &[u8]) -> Self::Index {
-        if let Ok(index) = Self::try_current_index(key) {
-            index
-        } else if let Ok(index) = Self::try_deprecated_index(key) {
-            Self::convert_index(index)
-        } else {
-            // Way back in the day, we broke the TransactionStatus column key. This fallback
-            // preserves the existing logic for ancient keys, but realistically should never be
-            // executed.
-            Self::as_index(0)
-        }
-    }
-}
-
 impl TypedColumn for columns::AddressSignatures {
     type Type = blockstore_meta::AddressSignatureMeta;
 }
 
 impl TypedColumn for columns::TransactionMemos {
     type Type = String;
-}
-
-impl TypedColumn for columns::TransactionStatusIndex {
-    type Type = blockstore_meta::TransactionStatusIndexMeta;
 }
 
 impl<T: SlotColumn> Column for T {
@@ -351,7 +315,10 @@ impl Column for columns::TransactionStatus {
     }
 
     fn index(key: &[u8]) -> (Signature, Slot) {
-        <columns::TransactionStatus as ColumnIndexDeprecation>::index(key)
+        convert_column_key_bytes_to_index!(key,
+             0..64 => Signature::from,
+            64..72 => Slot::from_be_bytes,
+        )
     }
 
     fn slot(index: Self::Index) -> Slot {
@@ -369,46 +336,6 @@ impl ColumnName for columns::TransactionStatus {
 }
 impl ProtobufColumn for columns::TransactionStatus {
     type Type = generated::TransactionStatusMeta;
-}
-
-impl ColumnIndexDeprecation for columns::TransactionStatus {
-    const CURRENT_INDEX_LEN: usize = 72;
-    type DeprecatedIndex = (u64, Signature, Slot);
-    type DeprecatedKey = [u8; 80];
-
-    fn deprecated_key((index, signature, slot): Self::DeprecatedIndex) -> Self::DeprecatedKey {
-        convert_column_index_to_key_bytes!(DeprecatedKey,
-              ..8  => &index.to_be_bytes(),
-             8..72 => signature.as_ref(),
-            72..   => &slot.to_be_bytes(),
-        )
-    }
-
-    fn try_deprecated_index(key: &[u8]) -> std::result::Result<Self::DeprecatedIndex, IndexError> {
-        if key.len() != std::mem::size_of::<Self::DeprecatedKey>() {
-            return Err(IndexError::UnpackError);
-        }
-        Ok(convert_column_key_bytes_to_index!(key,
-             0..8  => u64::from_be_bytes,  // primary index
-             8..72 => Signature::from,
-            72..80 => Slot::from_be_bytes,
-        ))
-    }
-
-    fn try_current_index(key: &[u8]) -> std::result::Result<Self::Index, IndexError> {
-        if key.len() != Self::CURRENT_INDEX_LEN {
-            return Err(IndexError::UnpackError);
-        }
-        Ok(convert_column_key_bytes_to_index!(key,
-             0..64 => Signature::from,
-            64..72 => Slot::from_be_bytes,
-        ))
-    }
-
-    fn convert_index(deprecated_index: Self::DeprecatedIndex) -> Self::Index {
-        let (_primary_index, signature, slot) = deprecated_index;
-        (signature, slot)
-    }
 }
 
 impl Column for columns::AddressSignatures {
@@ -429,7 +356,12 @@ impl Column for columns::AddressSignatures {
     }
 
     fn index(key: &[u8]) -> Self::Index {
-        <columns::AddressSignatures as ColumnIndexDeprecation>::index(key)
+        convert_column_key_bytes_to_index!(key,
+             0..32  => Pubkey::from,
+            32..40  => Slot::from_be_bytes,
+            40..44  => u32::from_be_bytes,  // transaction index
+            44..108 => Signature::from,
+        )
     }
 
     fn slot(index: Self::Index) -> Slot {
@@ -446,52 +378,6 @@ impl ColumnName for columns::AddressSignatures {
     const NAME: &'static str = "address_signatures";
 }
 
-impl ColumnIndexDeprecation for columns::AddressSignatures {
-    const CURRENT_INDEX_LEN: usize = 108;
-    type DeprecatedIndex = (u64, Pubkey, Slot, Signature);
-    type DeprecatedKey = [u8; 112];
-
-    fn deprecated_key(
-        (primary_index, pubkey, slot, signature): Self::DeprecatedIndex,
-    ) -> Self::DeprecatedKey {
-        convert_column_index_to_key_bytes!(DeprecatedKey,
-              ..8  => &primary_index.to_be_bytes(),
-             8..40 => pubkey.as_ref(),
-            40..48 => &slot.to_be_bytes(),
-            48..   => signature.as_ref(),
-        )
-    }
-
-    fn try_deprecated_index(key: &[u8]) -> std::result::Result<Self::DeprecatedIndex, IndexError> {
-        if key.len() != std::mem::size_of::<Self::DeprecatedKey>() {
-            return Err(IndexError::UnpackError);
-        }
-        Ok(convert_column_key_bytes_to_index!(key,
-             0..8   => u64::from_be_bytes,  // primary index
-             8..40  => Pubkey::from,
-            40..48  => Slot::from_be_bytes,
-            48..112 => Signature::from,
-        ))
-    }
-
-    fn try_current_index(key: &[u8]) -> std::result::Result<Self::Index, IndexError> {
-        if key.len() != Self::CURRENT_INDEX_LEN {
-            return Err(IndexError::UnpackError);
-        }
-        Ok(convert_column_key_bytes_to_index!(key,
-             0..32  => Pubkey::from,
-            32..40  => Slot::from_be_bytes,
-            40..44  => u32::from_be_bytes,  // transaction index
-            44..108 => Signature::from,
-        ))
-    }
-
-    fn convert_index(deprecated_index: Self::DeprecatedIndex) -> Self::Index {
-        let (_primary_index, pubkey, slot, signature) = deprecated_index;
-        (pubkey, slot, 0, signature)
-    }
-}
-
 impl Column for columns::TransactionMemos {
     type Index = (Signature, Slot);
     type Key = [u8; SIGNATURE_BYTES + std::mem::size_of::<Slot>()];
@@ -505,7 +391,10 @@ impl Column for columns::TransactionMemos {
     }
 
     fn index(key: &[u8]) -> Self::Index {
-        <columns::TransactionMemos as ColumnIndexDeprecation>::index(key)
+        convert_column_key_bytes_to_index!(key,
+             0..64 => Signature::from,
+            64..72 => Slot::from_be_bytes,
+        )
     }
 
     fn slot(index: Self::Index) -> Slot {
@@ -518,59 +407,6 @@ impl Column for columns::TransactionMemos {
 }
 impl ColumnName for columns::TransactionMemos {
     const NAME: &'static str = "transaction_memos";
-}
-
-impl ColumnIndexDeprecation for columns::TransactionMemos {
-    const CURRENT_INDEX_LEN: usize = 72;
-    type DeprecatedIndex = Signature;
-    type DeprecatedKey = [u8; 64];
-
-    fn deprecated_key(signature: Self::DeprecatedIndex) -> Self::DeprecatedKey {
-        Self::DeprecatedKey::from(signature)
-    }
-
-    fn try_deprecated_index(key: &[u8]) -> std::result::Result<Self::DeprecatedIndex, IndexError> {
-        Signature::try_from(&key[..64]).map_err(|_| IndexError::UnpackError)
-    }
-
-    fn try_current_index(key: &[u8]) -> std::result::Result<Self::Index, IndexError> {
-        if key.len() != Self::CURRENT_INDEX_LEN {
-            return Err(IndexError::UnpackError);
-        }
-        Ok(convert_column_key_bytes_to_index!(key,
-             0..64 => Signature::from,
-            64..72 => Slot::from_be_bytes,
-        ))
-    }
-
-    fn convert_index(deprecated_index: Self::DeprecatedIndex) -> Self::Index {
-        (deprecated_index, 0)
-    }
-}
-
-impl Column for columns::TransactionStatusIndex {
-    type Index = u64;
-    type Key = [u8; std::mem::size_of::<u64>()];
-
-    #[inline]
-    fn key(index: &Self::Index) -> Self::Key {
-        index.to_be_bytes()
-    }
-
-    fn index(key: &[u8]) -> Self::Index {
-        convert_column_key_bytes_to_index!(key, 0..8 => u64::from_be_bytes)
-    }
-
-    fn slot(_index: Self::Index) -> Slot {
-        unimplemented!()
-    }
-
-    fn as_index(slot: u64) -> u64 {
-        slot
-    }
-}
-impl ColumnName for columns::TransactionStatusIndex {
-    const NAME: &'static str = "transaction_status_index";
 }
 
 impl SlotColumn for columns::Rewards {}
@@ -672,20 +508,7 @@ impl TypedColumn for columns::Index {
             .with_fixint_encoding()
             .reject_trailing_bytes();
 
-        // Migration strategy for new column format:
-        // 1. Release 1: Add ability to read new format as fallback, keep writing old format
-        // 2. Release 2: Switch to writing new format, keep reading old format as fallback
-        // 3. Release 3: Remove old format support once stable
-        // This allows safe downgrade to Release 1 since it can read both formats
-        // https://github.com/anza-xyz/agave/issues/3570
-        let index: bincode::Result<blockstore_meta::Index> = config.deserialize(data);
-        match index {
-            Ok(index) => Ok(index),
-            Err(_) => {
-                let index: blockstore_meta::IndexFallback = config.deserialize(data)?;
-                Ok(index.into())
-            }
-        }
+        Ok(config.deserialize(data)?)
     }
 }
 
@@ -735,30 +558,6 @@ impl ColumnName for columns::SlotMeta {
 }
 impl TypedColumn for columns::SlotMeta {
     type Type = blockstore_meta::SlotMeta;
-
-    fn deserialize(data: &[u8]) -> Result<Self::Type> {
-        // SlotMeta is being migrated to a new `completed_data_indexes` format.
-        //
-        // Ensure that reject trailing bytes is enabled to prevent false postivies in deserialization.
-        let config = bincode::DefaultOptions::new()
-            // `bincode::serialize` uses fixint encoding by default, so we need to use the same here
-            .with_fixint_encoding()
-            .reject_trailing_bytes();
-
-        // Migration strategy for new column format:
-        // 1. Release 1: Add ability to read new format as fallback, keep writing old format
-        // 2. Release 2: Switch to writing new format, keep reading old format as fallback
-        // 3. Release 3: Remove old format support once stable
-        // This allows safe downgrade to Release 1 since it can read both formats
-        let index: bincode::Result<blockstore_meta::SlotMeta> = config.deserialize(data);
-        match index {
-            Ok(index) => Ok(index),
-            Err(_) => {
-                let index: blockstore_meta::SlotMetaFallback = config.deserialize(data)?;
-                Ok(index.into())
-            }
-        }
-    }
 }
 
 impl Column for columns::ErasureMeta {
@@ -836,4 +635,66 @@ impl ColumnName for columns::MerkleRootMeta {
 }
 impl TypedColumn for columns::MerkleRootMeta {
     type Type = blockstore_meta::MerkleRootMeta;
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::*,
+        crate::blockstore_meta::{ConnectedFlags, SlotMetaV3},
+        solana_hash::Hash,
+    };
+
+    #[test]
+    fn test_slot_meta_column_roundtrip() {
+        let meta = blockstore_meta::SlotMeta {
+            slot: 42,
+            consumed: 10,
+            received: 15,
+            first_shred_timestamp: 1234567890,
+            last_index: Some(14),
+            parent_slot: Some(41),
+            next_slots: vec![43, 44],
+            connected_flags: ConnectedFlags::CONNECTED | ConnectedFlags::PARENT_CONNECTED,
+            completed_data_indexes: [0u32, 5, 10].into_iter().collect(),
+        };
+
+        let bytes = <columns::SlotMeta as TypedColumn>::serialize(&meta).unwrap();
+        let deserialized = <columns::SlotMeta as TypedColumn>::deserialize(&bytes).unwrap();
+        assert_eq!(meta, deserialized);
+    }
+
+    #[test]
+    fn test_slot_meta_column_deserialize_v2_from_v3_bytes() {
+        use bincode::Options;
+
+        let meta_v3 = SlotMetaV3 {
+            slot: 42,
+            consumed: 10,
+            received: 15,
+            first_shred_timestamp: 1234567890,
+            last_index: Some(14),
+            parent_slot: Some(41),
+            next_slots: vec![43, 44],
+            connected_flags: ConnectedFlags::CONNECTED | ConnectedFlags::PARENT_CONNECTED,
+            completed_data_indexes: [0u32, 5, 10].into_iter().collect(),
+            parent_block_id: Hash::new_unique(),
+            replay_fec_set_index: 7,
+        };
+        let v3_bytes = bincode::serialize(&meta_v3).unwrap();
+
+        let expected = blockstore_meta::SlotMeta::from(meta_v3);
+
+        let config = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .reject_trailing_bytes();
+        assert!(
+            config
+                .deserialize::<blockstore_meta::SlotMeta>(&v3_bytes)
+                .is_err()
+        );
+
+        let deserialized = <columns::SlotMeta as TypedColumn>::deserialize(&v3_bytes).unwrap();
+        assert_eq!(expected, deserialized);
+    }
 }

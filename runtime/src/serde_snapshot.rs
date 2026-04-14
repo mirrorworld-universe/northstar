@@ -6,35 +6,34 @@ use std::{
 use {
     crate::{
         bank::{Bank, BankFieldsToDeserialize, BankFieldsToSerialize, BankHashStats, BankRc},
-        epoch_stakes::VersionedEpochStakes,
+        epoch_stakes::{DeserializableVersionedEpochStakes, VersionedEpochStakes},
         rent_collector::RentCollector,
         runtime_config::RuntimeConfig,
         snapshot_utils::StorageAndNextAccountsFileId,
         stake_account::StakeAccount,
-        stakes::{serialize_stake_accounts_to_delegation_format, Stakes},
+        stakes::{DeserializableStakes, Stakes, serialize_stake_accounts_to_delegation_format},
     },
     agave_fs::FileInfo,
     agave_snapshots::error::SnapshotError,
-    bincode::{self, config::Options, Error},
+    bincode::{self, Error, config::Options},
     log::*,
-    serde::{de::DeserializeOwned, Deserialize, Serialize},
+    serde::{Deserialize, Serialize, de::DeserializeOwned},
     smallvec::SmallVec,
     solana_accounts_db::{
+        ObsoleteAccounts,
+        account_storage_entry::AccountStorageEntry,
         accounts::Accounts,
         accounts_db::{
-            AccountStorageEntry, AccountsDb, AccountsDbConfig, AccountsFileId,
-            AtomicAccountsFileId, IndexGenerationInfo,
+            AccountsDb, AccountsDbConfig, AccountsFileId, AtomicAccountsFileId, IndexGenerationInfo,
         },
         accounts_file::{AccountsFile, StorageAccess},
         accounts_hash::AccountsLtHash,
         accounts_update_notifier_interface::AccountsUpdateNotifier,
-        ancestors::AncestorsForSerialization,
         blockhash_queue::BlockhashQueue,
-        ObsoleteAccounts,
     },
     solana_clock::{Epoch, Slot, UnixTimestamp},
     solana_epoch_schedule::EpochSchedule,
-    solana_fee_calculator::{FeeCalculator, FeeRateGovernor},
+    solana_fee_calculator::FeeRateGovernor,
     solana_genesis_config::GenesisConfig,
     solana_hard_forks::HardForks,
     solana_hash::Hash,
@@ -50,9 +49,10 @@ use {
         path::PathBuf,
         result::Result,
         sync::{
-            atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
+        thread,
         time::Instant,
     },
     storage::SerializableStorage,
@@ -78,7 +78,7 @@ const MAX_STREAM_SIZE: u64 = 32 * 1024 * 1024 * 1024;
 #[derive(Debug, Deserialize)]
 pub(crate) struct AccountsDbFields<T>(
     Vec<(Slot, SmallVec<[T; 1]>)>,
-    u64, // obsolete, formerly write_version
+    u64, // unused, formerly write_version
     Slot,
     BankHashInfo,
     /// all slots that were roots within the last epoch
@@ -124,7 +124,7 @@ impl<T: SerializableStorage> AccountsDbFields<T> {
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[cfg_attr(feature = "dev-context-only-utils", derive(Default, PartialEq))]
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ObsoleteIncrementalSnapshotPersistence {
+pub struct UnusedIncrementalSnapshotPersistence {
     pub full_slot: u64,
     pub full_hash: [u8; 32],
     pub full_capitalization: u64,
@@ -135,8 +135,8 @@ pub struct ObsoleteIncrementalSnapshotPersistence {
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct BankHashInfo {
-    obsolete_accounts_delta_hash: [u8; 32],
-    obsolete_accounts_hash: [u8; 32],
+    unused_accounts_delta_hash: [u8; 32],
+    unused_accounts_hash: [u8; 32],
     stats: BankHashStats,
 }
 
@@ -154,7 +154,7 @@ struct UnusedAccounts {
 #[derive(Clone, Deserialize)]
 struct DeserializableVersionedBank {
     blockhash_queue: BlockhashQueue,
-    ancestors: AncestorsForSerialization,
+    _unused_ancestors: HashMap<Slot, usize>,
     hash: Hash,
     parent_hash: Hash,
     parent_slot: Slot,
@@ -171,19 +171,18 @@ struct DeserializableVersionedBank {
     slots_per_year: f64,
     accounts_data_len: u64,
     slot: Slot,
-    epoch: Epoch,
+    _unused_epoch: Epoch,
     block_height: u64,
     leader_id: Pubkey,
-    collector_fees: u64,
-    _fee_calculator: FeeCalculator,
+    _unused_collector_fees: u64,
+    _unused_fee_calculator: u64,
     fee_rate_governor: FeeRateGovernor,
-    _collected_rent: u64,
-    rent_collector: RentCollector,
+    _unused_collected_rent: u64,
+    _unused_rent_collector: RentCollector,
     epoch_schedule: EpochSchedule,
     inflation: Inflation,
-    stakes: Stakes<Delegation>,
-    #[allow(dead_code)]
-    unused_accounts: UnusedAccounts,
+    stakes: DeserializableStakes<Delegation>,
+    _unused_accounts: UnusedAccounts,
     unused_epoch_stakes: HashMap<Epoch, ()>,
     is_delta: bool,
 }
@@ -195,7 +194,6 @@ impl From<DeserializableVersionedBank> for BankFieldsToDeserialize {
         const LT_HASH_CANARY: LtHash = LtHash([0xCAFE; LtHash::NUM_ELEMENTS]);
         BankFieldsToDeserialize {
             blockhash_queue: dvb.blockhash_queue,
-            ancestors: dvb.ancestors,
             hash: dvb.hash,
             parent_hash: dvb.parent_hash,
             parent_slot: dvb.parent_slot,
@@ -212,17 +210,14 @@ impl From<DeserializableVersionedBank> for BankFieldsToDeserialize {
             slots_per_year: dvb.slots_per_year,
             accounts_data_len: dvb.accounts_data_len,
             slot: dvb.slot,
-            epoch: dvb.epoch,
             block_height: dvb.block_height,
             leader_id: dvb.leader_id,
-            collector_fees: dvb.collector_fees,
             fee_rate_governor: dvb.fee_rate_governor,
-            rent_collector: dvb.rent_collector,
             epoch_schedule: dvb.epoch_schedule,
             inflation: dvb.inflation,
             stakes: dvb.stakes,
             is_delta: dvb.is_delta,
-            versioned_epoch_stakes: HashMap::default(), // populated from ExtraFieldsToDeserialize
+            versioned_epoch_stakes: vec![], // populated from ExtraFieldsToDeserialize
             accounts_lt_hash: AccountsLtHash(LT_HASH_CANARY), // populated from ExtraFieldsToDeserialize
             bank_hash_stats: BankHashStats::default(),        // populated from AccountsDbFields
         }
@@ -234,7 +229,7 @@ impl From<DeserializableVersionedBank> for BankFieldsToDeserialize {
 #[derive(Serialize)]
 struct SerializableVersionedBank {
     blockhash_queue: BlockhashQueue,
-    ancestors: AncestorsForSerialization,
+    unused_ancestors: HashMap<Slot, usize>,
     hash: Hash,
     parent_hash: Hash,
     parent_slot: Slot,
@@ -254,10 +249,10 @@ struct SerializableVersionedBank {
     epoch: Epoch,
     block_height: u64,
     leader_id: Pubkey,
-    collector_fees: u64,
-    fee_calculator: FeeCalculator,
+    unused_collector_fees: u64,
+    unused_fee_calculator: u64,
     fee_rate_governor: FeeRateGovernor,
-    collected_rent: u64,
+    unused_collected_rent: u64,
     rent_collector: RentCollector,
     epoch_schedule: EpochSchedule,
     inflation: Inflation,
@@ -272,7 +267,7 @@ impl From<BankFieldsToSerialize> for SerializableVersionedBank {
     fn from(rhs: BankFieldsToSerialize) -> Self {
         Self {
             blockhash_queue: rhs.blockhash_queue,
-            ancestors: rhs.ancestors,
+            unused_ancestors: HashMap::default(),
             hash: rhs.hash,
             parent_hash: rhs.parent_hash,
             parent_slot: rhs.parent_slot,
@@ -292,10 +287,10 @@ impl From<BankFieldsToSerialize> for SerializableVersionedBank {
             epoch: rhs.epoch,
             block_height: rhs.block_height,
             leader_id: rhs.leader_id,
-            collector_fees: rhs.collector_fees,
-            fee_calculator: FeeCalculator::default(),
+            unused_collector_fees: 0,
+            unused_fee_calculator: 0,
             fee_rate_governor: rhs.fee_rate_governor,
-            collected_rent: u64::default(),
+            unused_collected_rent: u64::default(),
             rent_collector: rhs.rent_collector,
             epoch_schedule: rhs.epoch_schedule,
             inflation: rhs.inflation,
@@ -416,19 +411,28 @@ where
 /// added to this struct a minor release before they are added to the serialize
 /// struct.
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
-#[cfg_attr(feature = "dev-context-only-utils", derive(PartialEq))]
 #[derive(Clone, Debug, Deserialize)]
 struct ExtraFieldsToDeserialize {
     #[serde(deserialize_with = "default_on_eof")]
     lamports_per_signature: u64,
     #[serde(deserialize_with = "default_on_eof")]
-    _obsolete_incremental_snapshot_persistence: Option<ObsoleteIncrementalSnapshotPersistence>,
+    _unused_incremental_snapshot_persistence: Option<UnusedIncrementalSnapshotPersistence>,
     #[serde(deserialize_with = "default_on_eof")]
-    _obsolete_epoch_accounts_hash: Option<Hash>,
+    _unused_epoch_accounts_hash: Option<Hash>,
     #[serde(deserialize_with = "default_on_eof")]
-    versioned_epoch_stakes: HashMap<u64, VersionedEpochStakes>,
+    versioned_epoch_stakes: Vec<(u64, DeserializableVersionedEpochStakes)>,
     #[serde(deserialize_with = "default_on_eof")]
     accounts_lt_hash: Option<SerdeAccountsLtHash>,
+    /// In order to maintain snapshot compatibility between adjacent versions
+    /// (edge <-> beta, and beta <-> stable), we must be able to deserialize
+    /// (and ignore) this new field (block id) in adjacent versions *before*
+    /// we serialize the new field into snapshots.
+    /// Hence the annotation to allow dead code.
+    /// This code is not truly dead though, as it enables newer versions to
+    /// populate this field and have older versions still load the snapshot.
+    #[allow(dead_code)]
+    #[serde(deserialize_with = "default_on_eof")]
+    block_id: Option<Hash>,
 }
 
 /// Extra fields that are serialized at the end of snapshots.
@@ -442,8 +446,8 @@ struct ExtraFieldsToDeserialize {
 #[derive(Debug, Serialize)]
 pub struct ExtraFieldsToSerialize {
     pub lamports_per_signature: u64,
-    pub obsolete_incremental_snapshot_persistence: Option<ObsoleteIncrementalSnapshotPersistence>,
-    pub obsolete_epoch_accounts_hash: Option<Hash>,
+    pub unused_incremental_snapshot_persistence: Option<UnusedIncrementalSnapshotPersistence>,
+    pub unused_epoch_accounts_hash: Option<Hash>,
     pub versioned_epoch_stakes: HashMap<u64, VersionedEpochStakes>,
     pub accounts_lt_hash: Option<SerdeAccountsLtHash>,
 }
@@ -473,10 +477,11 @@ where
     // Process extra fields
     let ExtraFieldsToDeserialize {
         lamports_per_signature,
-        _obsolete_incremental_snapshot_persistence,
-        _obsolete_epoch_accounts_hash,
+        _unused_incremental_snapshot_persistence,
+        _unused_epoch_accounts_hash,
         versioned_epoch_stakes,
         accounts_lt_hash,
+        block_id: _,
     } = extra_fields;
 
     bank_fields.fee_rate_governor = bank_fields
@@ -669,8 +674,8 @@ impl Serialize for SerializableBankAndStorage<'_> {
             },
             ExtraFieldsToSerialize {
                 lamports_per_signature,
-                obsolete_incremental_snapshot_persistence: None,
-                obsolete_epoch_accounts_hash: None,
+                unused_incremental_snapshot_persistence: None,
+                unused_epoch_accounts_hash: None,
                 versioned_epoch_stakes,
                 accounts_lt_hash,
             },
@@ -742,8 +747,8 @@ impl Serialize for SerializableAccountsDb<'_> {
             )
         }));
         let bank_hash_info = BankHashInfo {
-            obsolete_accounts_delta_hash: [0; 32],
-            obsolete_accounts_hash: [0; 32],
+            unused_accounts_delta_hash: [0; 32],
+            unused_accounts_hash: [0; 32],
             stats: self.bank_hash_stats.clone(),
         };
 
@@ -753,7 +758,7 @@ impl Serialize for SerializableAccountsDb<'_> {
         let mut serialize_account_storage_timer = Measure::start("serialize_account_storage_ms");
         let result = (
             entries,
-            0u64, // obsolete, formerly write_version
+            0u64, // unused, formerly write_version
             self.slot,
             bank_hash_info,
             historical_roots,
@@ -779,6 +784,8 @@ pub(crate) struct ReconstructedBankInfo {
     /// The accounts lt hash calculated during index generation.
     /// Will be used when verifying accounts, after rebuilding a Bank.
     pub(crate) calculated_accounts_lt_hash: AccountsLtHash,
+    /// The capitalization, in lamports, calculated during index generation.
+    pub(crate) calculated_capitalization: u64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -800,6 +807,16 @@ where
     E: SerializableStorage + std::marker::Sync,
 {
     let mut bank_fields = bank_fields.collapse_into();
+    // Epoch stakes take several seconds to reconstruct, do it in parallel with loading accountsdb
+    let deserializable_epoch_stakes = std::mem::take(&mut bank_fields.versioned_epoch_stakes);
+    let epoch_stakes_handle = thread::Builder::new()
+        .name("solRctEpochStk".into())
+        .spawn(|| {
+            deserializable_epoch_stakes
+                .into_iter()
+                .map(|(epoch, stakes)| (epoch, stakes.into()))
+                .collect()
+        })?;
     let (accounts_db, reconstructed_accounts_db_info) = reconstruct_accountsdb_from_fields(
         snapshot_accounts_db_fields,
         account_paths,
@@ -814,6 +831,7 @@ where
 
     let bank_rc = BankRc::new(Accounts::new(Arc::new(accounts_db)));
     let runtime_config = Arc::new(runtime_config.clone());
+    let epoch_stakes = epoch_stakes_handle.join().expect("calculate epoch stakes");
 
     let bank = Bank::new_from_snapshot(
         bank_rc,
@@ -822,6 +840,7 @@ where
         bank_fields,
         debug_keys,
         reconstructed_accounts_db_info.accounts_data_len,
+        epoch_stakes,
     );
 
     info!("rent_collector: {:?}", bank.rent_collector());
@@ -829,6 +848,7 @@ where
         bank,
         ReconstructedBankInfo {
             calculated_accounts_lt_hash: reconstructed_accounts_db_info.calculated_accounts_lt_hash,
+            calculated_capitalization: reconstructed_accounts_db_info.calculated_capitalization,
         },
     ))
 }
@@ -881,7 +901,7 @@ pub(crate) fn remap_append_vec_file(
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     let append_vec_path_cstr = cstring_from_path(&append_vec_file_info.path)?;
 
-    let mut remapped_append_vec_path = append_vec_file_info.path.to_path_buf();
+    let mut remapped_append_vec_path = append_vec_file_info.path.clone();
 
     // Break out of the loop in the following situations:
     // 1. The new ID is the same as the original ID.  This means we do not need to
@@ -984,6 +1004,8 @@ pub struct ReconstructedAccountsDbInfo {
     /// The accounts lt hash calculated during index generation.
     /// Will be used when verifying accounts, after rebuilding a Bank.
     pub calculated_accounts_lt_hash: AccountsLtHash,
+    /// The capitalization, in lamports, calculated during index generation.
+    pub calculated_capitalization: u64,
     pub bank_hash_stats: BankHashStats,
 }
 
@@ -1044,6 +1066,7 @@ where
     let IndexGenerationInfo {
         accounts_data_len,
         calculated_accounts_lt_hash,
+        calculated_capitalization,
     } = accounts_db.generate_index(limit_load_slot_count_from_snapshot, verify_index);
     info!("Building accounts index... Done in {:?}", start.elapsed());
 
@@ -1052,6 +1075,7 @@ where
         ReconstructedAccountsDbInfo {
             accounts_data_len,
             calculated_accounts_lt_hash,
+            calculated_capitalization,
             bank_hash_stats: snapshot_bank_hash_info.stats,
         },
     ))

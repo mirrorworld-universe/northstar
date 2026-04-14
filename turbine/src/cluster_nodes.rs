@@ -3,7 +3,7 @@ use {
     agave_feature_set::{self as feature_set},
     itertools::Either,
     lazy_lru::LruCache,
-    rand::{seq::SliceRandom, Rng, RngCore, SeedableRng},
+    rand::{Rng, RngCore, SeedableRng, seq::SliceRandom},
     rand_chacha::{ChaCha8Rng, ChaChaRng},
     solana_clock::{Epoch, Slot},
     solana_cluster_type::ClusterType,
@@ -68,7 +68,6 @@ enum NodeId {
 pub(crate) struct ContactInfo {
     pubkey: Pubkey,
     wallclock: u64,
-    tvu_quic: Option<SocketAddr>,
     tvu_udp: Option<SocketAddr>,
 }
 
@@ -140,7 +139,7 @@ impl ContactInfo {
     #[inline]
     pub(crate) fn tvu(&self, protocol: Protocol) -> Option<SocketAddr> {
         match protocol {
-            Protocol::QUIC => self.tvu_quic,
+            Protocol::QUIC => None,
             Protocol::UDP => self.tvu_udp,
         }
     }
@@ -150,9 +149,7 @@ impl ContactInfo {
     #[inline]
     fn remove_tvu_addr(&mut self, protocol: Protocol) {
         match protocol {
-            Protocol::QUIC => {
-                self.tvu_quic = None;
-            }
+            Protocol::QUIC => {}
             Protocol::UDP => {
                 self.tvu_udp = None;
             }
@@ -290,7 +287,7 @@ impl ClusterNodes<RetransmitStage> {
             let protocol = get_broadcast_protocol(shred);
             let peers = peers
                 .filter_map(|k| self.nodes[k].contact_info()?.tvu(protocol))
-                .filter(|addr| socket_addr_space.check(addr))
+                .filter(|addr| !addr.is_ipv6() && socket_addr_space.check(addr))
                 .collect();
             let root_distance = get_root_distance(index, fanout);
             Ok((root_distance, peers))
@@ -451,7 +448,7 @@ const MAX_NUM_NODES_PER_IP_ADDRESS: usize = 1;
 /// same TVU socket-addr, we only send shreds to one of them.
 /// Additionally limits number of nodes at the same IP address to 1
 fn dedup_tvu_addrs(nodes: &mut Vec<Node>) {
-    const TVU_PROTOCOLS: [Protocol; 2] = [Protocol::UDP, Protocol::QUIC];
+    const TVU_PROTOCOLS: [Protocol; 1] = [Protocol::UDP];
     let capacity = nodes.len().saturating_mul(2);
     // Tracks (Protocol, SocketAddr) tuples already observed.
     let mut addrs = HashSet::with_capacity(capacity);
@@ -647,7 +644,6 @@ impl From<&GossipContactInfo> for ContactInfo {
         Self {
             pubkey: *node.pubkey(),
             wallclock: node.wallclock(),
-            tvu_quic: node.tvu(Protocol::QUIC),
             tvu_udp: node.tvu(Protocol::UDP),
         }
     }

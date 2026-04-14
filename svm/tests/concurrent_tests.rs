@@ -1,12 +1,13 @@
 #![cfg(feature = "shuttle-test")]
 
 use {
-    crate::mock_bank::{create_custom_loader, deploy_program, register_builtins, MockForkGraph},
+    crate::mock_bank::{MockForkGraph, create_custom_loader, deploy_program, register_builtins},
     assert_matches::assert_matches,
     mock_bank::MockBankCallback,
     shuttle::{
+        Runner,
         sync::{Arc, RwLock},
-        thread, Runner,
+        thread,
     },
     solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
     solana_clock::Slot,
@@ -28,7 +29,7 @@ use {
     },
     solana_svm_feature_set::SVMFeatureSet,
     solana_svm_timings::ExecuteTimings,
-    solana_transaction::{sanitized::SanitizedTransaction, Transaction},
+    solana_transaction::{Transaction, sanitized::SanitizedTransaction},
     std::collections::{HashMap, HashSet},
 };
 
@@ -158,7 +159,7 @@ fn svm_concurrent() {
     const TRANSACTIONS_PER_THREAD: usize = 3;
     const AMOUNT: u64 = 50;
     const CAPACITY: usize = THREADS * TRANSACTIONS_PER_THREAD;
-    const BALANCE: u64 = 500000;
+    const BALANCE: u64 = 10_000_000;
 
     let mut transactions = vec![Vec::new(); THREADS];
     let mut check_data = vec![Vec::new(); THREADS];

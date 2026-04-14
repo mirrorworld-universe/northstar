@@ -1,41 +1,50 @@
 use {
     crate::{
-        netlink::{parse_rtm_newneigh, parse_rtm_newroute, NetlinkMessage, NetlinkSocket},
-        route::Router,
+        netlink::{
+            NetlinkMessage, NetlinkSocket, parse_rtm_ifinfomsg, parse_rtm_newneigh,
+            parse_rtm_newroute,
+        },
+        route::{Router, RoutingTables},
     },
     arc_swap::ArcSwap,
     libc::{
-        self, pollfd, POLLERR, POLLHUP, POLLIN, POLLNVAL, RTMGRP_IPV4_ROUTE, RTMGRP_NEIGH,
-        RTM_DELNEIGH, RTM_DELROUTE, RTM_NEWNEIGH, RTM_NEWROUTE,
+        self, POLLERR, POLLHUP, POLLIN, POLLNVAL, RTM_DELLINK, RTM_DELNEIGH, RTM_DELROUTE,
+        RTM_NEWLINK, RTM_NEWNEIGH, RTM_NEWROUTE, RTMGRP_IPV4_ROUTE, RTMGRP_LINK, RTMGRP_NEIGH,
+        pollfd,
     },
     log::*,
     std::{
         io::{Error, ErrorKind},
         net::IpAddr,
         sync::{
-            atomic::{AtomicBool, Ordering},
             Arc,
+            atomic::{AtomicBool, Ordering},
         },
         thread,
         time::{Duration, Instant},
     },
 };
+
 pub struct RouteMonitor;
 
 impl RouteMonitor {
-    /// Subscribes to RTMGRP_IPV4_ROUTE | RTMGRP_NEIGH multicast groups
+    /// Subscribes to RTMGRP_IPV4_ROUTE | RTMGRP_NEIGH | RTMGRP_LINK multicast groups
     /// Waits for updates to arrive on the netlink socket
     /// Publishes the updated routing table every `update_interval` if needed
-    pub fn start(
+    pub fn start<F: FnOnce() + Send + Sync + 'static>(
         atomic_router: Arc<ArcSwap<Router>>,
+        tables: RoutingTables,
         exit: Arc<AtomicBool>,
         update_interval: Duration,
+        on_thread_start: F,
     ) -> thread::JoinHandle<()> {
         thread::Builder::new()
             .name("solRouteMon".to_string())
             .spawn(move || {
-                let mut state =
-                    RouteMonitorState::new(Router::new().expect("error creating Router"));
+                // MUST remain first to run here
+                on_thread_start();
+
+                let mut state = RouteMonitorState::new(tables);
 
                 let timeout = Duration::from_millis(10);
                 while !exit.load(Ordering::Relaxed) {
@@ -75,7 +84,7 @@ impl RouteMonitor {
                     // Drain channel
                     match state.sock.recv() {
                         Ok(msgs) => {
-                            state.dirty |= Self::process_netlink_updates(&mut state.router, &msgs);
+                            state.dirty |= Self::process_netlink_updates(&mut state.tables, &msgs);
                         }
                         Err(e) => {
                             error!("netlink recv error: {e}");
@@ -89,32 +98,42 @@ impl RouteMonitor {
     }
 
     #[inline]
-    fn process_netlink_updates(router: &mut Router, msgs: &[NetlinkMessage]) -> bool {
+    fn process_netlink_updates(tables: &mut RoutingTables, msgs: &[NetlinkMessage]) -> bool {
         let mut dirty = false;
         for m in msgs {
             match m.header.nlmsg_type {
                 RTM_NEWROUTE => {
                     if let Some(r) = parse_rtm_newroute(m) {
-                        dirty |= router.upsert_route(r);
+                        dirty |= tables.upsert_route(r);
                     }
                 }
                 RTM_DELROUTE => {
                     if let Some(r) = parse_rtm_newroute(m) {
-                        dirty |= router.remove_route(r);
+                        dirty |= tables.remove_route(r);
                     }
                 }
                 RTM_NEWNEIGH => {
                     if let Some(n) = parse_rtm_newneigh(m, None) {
                         if let Some(IpAddr::V4(_)) = n.destination {
-                            dirty |= router.upsert_neighbor(n);
+                            dirty |= tables.upsert_neighbor(n);
                         }
                     }
                 }
                 RTM_DELNEIGH => {
                     if let Some(n) = parse_rtm_newneigh(m, None) {
                         if let Some(IpAddr::V4(ip)) = n.destination {
-                            dirty |= router.remove_neighbor(ip, n.ifindex as u32);
+                            dirty |= tables.remove_neighbor(ip, n.ifindex as u32);
                         }
+                    }
+                }
+                RTM_NEWLINK => {
+                    if let Some(interface_info) = parse_rtm_ifinfomsg(m) {
+                        dirty |= tables.upsert_interface(interface_info);
+                    }
+                }
+                RTM_DELLINK => {
+                    if let Some(interface_info) = parse_rtm_ifinfomsg(m) {
+                        dirty |= tables.remove_interface(interface_info.if_index);
                     }
                 }
                 _ => {}
@@ -126,18 +145,18 @@ impl RouteMonitor {
 
 struct RouteMonitorState {
     sock: NetlinkSocket,
-    router: Router,
+    tables: RoutingTables,
     dirty: bool,
     last_publish: Instant,
 }
 
 impl RouteMonitorState {
     /// Creates a new RouteMonitorState with a bounded netlink socket
-    fn new(router: Router) -> Self {
+    fn new(tables: RoutingTables) -> Self {
         Self {
-            sock: NetlinkSocket::bind((RTMGRP_IPV4_ROUTE | RTMGRP_NEIGH) as u32)
+            sock: NetlinkSocket::bind((RTMGRP_IPV4_ROUTE | RTMGRP_NEIGH | RTMGRP_LINK) as u32)
                 .expect("error creating netlink socket"),
-            router,
+            tables,
             dirty: false,
             last_publish: Instant::now(),
         }
@@ -146,8 +165,11 @@ impl RouteMonitorState {
     /// Resets the route monitor state by creating a new router and reinitializing
     /// the netlink socket. Used when errors occur to recover to a clean state
     fn reset(&mut self, atomic_router: &Arc<ArcSwap<Router>>) {
-        atomic_router.store(Arc::new(Router::new().expect("error creating Router")));
-        *self = Self::new(Arc::unwrap_or_clone(atomic_router.load_full()));
+        let tables = RoutingTables::from_netlink(self.tables.routes.table)
+            .expect("error creating RoutingTables");
+        let router = Router::from_tables(tables.clone()).expect("error creating Router");
+        atomic_router.store(Arc::new(router));
+        *self = Self::new(tables);
     }
 
     /// Publishes the updated router if there are new route/neighbor updates
@@ -158,7 +180,10 @@ impl RouteMonitorState {
         update_interval: Duration,
     ) {
         if self.dirty && self.last_publish.elapsed() >= update_interval {
-            atomic_router.store(Arc::new(self.router.clone()));
+            match Router::from_tables(self.tables.clone()) {
+                Ok(router) => atomic_router.store(Arc::new(router)),
+                Err(e) => log::warn!("failed to build router before publish: {e:?}"),
+            }
             self.last_publish = Instant::now();
             self.dirty = false;
         }

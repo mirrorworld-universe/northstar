@@ -1,5 +1,6 @@
 use {
     super::{
+        BankingStageStats, SLOT_BOUNDARY_CHECK_PERIOD,
         consumer::Consumer,
         decision_maker::{BufferedPacketsDecision, DecisionMaker},
         latest_validator_vote_packet::VoteSource,
@@ -8,7 +9,6 @@ use {
         },
         vote_packet_receiver::VotePacketReceiver,
         vote_storage::VoteStorage,
-        BankingStageStats, SLOT_BOUNDARY_CHECK_PERIOD,
     },
     crate::banking_stage::{
         consumer::{ExecuteAndCommitTransactionsOutput, ProcessTransactionBatchOutput},
@@ -38,11 +38,12 @@ use {
     solana_transaction_error::TransactionError,
     std::{
         sync::{
-            atomic::{AtomicBool, Ordering},
             Arc, RwLock,
+            atomic::{AtomicBool, Ordering},
         },
         time::Instant,
     },
+    tokio_util::sync::CancellationToken,
 };
 
 mod transaction {
@@ -56,6 +57,7 @@ pub const UNPROCESSED_BUFFER_STEP_SIZE: usize = 16;
 
 pub struct VoteWorker {
     exit: Arc<AtomicBool>,
+    shutdown_signal: CancellationToken,
     decision_maker: DecisionMaker,
     tpu_receiver: VotePacketReceiver,
     gossip_receiver: VotePacketReceiver,
@@ -67,6 +69,7 @@ pub struct VoteWorker {
 impl VoteWorker {
     pub fn new(
         exit: Arc<AtomicBool>,
+        shutdown_signal: CancellationToken,
         decision_maker: DecisionMaker,
         tpu_receiver: VotePacketReceiver,
         gossip_receiver: VotePacketReceiver,
@@ -76,6 +79,7 @@ impl VoteWorker {
     ) -> Self {
         Self {
             exit,
+            shutdown_signal,
             decision_maker,
             tpu_receiver,
             gossip_receiver,
@@ -95,8 +99,11 @@ impl VoteWorker {
             if !self.storage.is_empty()
                 || last_metrics_update.elapsed() >= SLOT_BOUNDARY_CHECK_PERIOD
             {
-                let (_, process_buffered_packets_us) = measure_us!(self
-                    .process_buffered_packets(&mut banking_stage_stats, &mut slot_metrics_tracker));
+                let (_, process_buffered_packets_us) =
+                    measure_us!(self.process_buffered_packets(
+                        &mut banking_stage_stats,
+                        &mut slot_metrics_tracker
+                    ));
                 slot_metrics_tracker
                     .increment_process_buffered_packets_us(process_buffered_packets_us);
                 last_metrics_update = Instant::now();
@@ -110,7 +117,11 @@ impl VoteWorker {
                 VoteSource::Tpu,
             ) {
                 Ok(()) | Err(RecvTimeoutError::Timeout) => (),
-                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.shutdown_signal.cancel();
+
+                    break;
+                }
             }
             // Check for new packets from the gossip receiver
             match self.gossip_receiver.receive_and_buffer_packets(
@@ -120,7 +131,11 @@ impl VoteWorker {
                 VoteSource::Gossip,
             ) {
                 Ok(()) | Err(RecvTimeoutError::Timeout) => (),
-                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.shutdown_signal.cancel();
+
+                    break;
+                }
             }
             banking_stage_stats.report(1000);
         }
@@ -294,8 +309,8 @@ impl VoteWorker {
             return None;
         }
 
-        let (process_transactions_summary, process_packets_transactions_us) = measure_us!(self
-            .process_packets_transactions(
+        let (process_transactions_summary, process_packets_transactions_us) =
+            measure_us!(self.process_packets_transactions(
                 bank,
                 sanitized_transactions,
                 banking_stage_stats,
@@ -417,17 +432,18 @@ impl VoteWorker {
         total_transaction_counts
             .accumulate(&transaction_counts, commit_transactions_result.is_ok());
 
-        let reached_max_poh_height = match (commit_transactions_result, bank.is_complete()) {
-            (Err(PohRecorderError::MaxHeightReached), _) | (_, true) => {
-                info!(
-                    "process transactions: max height reached slot: {} height: {}",
-                    bank.slot(),
-                    bank.tick_height()
-                );
-                true
-            }
-            _ => false,
-        };
+        let reached_max_poh_height = matches!(
+            commit_transactions_result,
+            Err(PohRecorderError::MaxHeightReached)
+        );
+
+        if reached_max_poh_height {
+            info!(
+                "process transactions: max height reached slot: {} height: {}",
+                bank.slot(),
+                bank.tick_height()
+            );
+        }
 
         ProcessTransactionsSummary {
             reached_max_poh_height,
@@ -574,9 +590,12 @@ mod tests {
     };
 
     fn to_runtime_transaction_view(packet: BytesPacket) -> RuntimeTransactionView {
-        let tx =
-            SanitizedTransactionView::try_new_sanitized(Arc::new(packet.buffer().to_vec()), false)
-                .unwrap();
+        let tx = SanitizedTransactionView::try_new_sanitized(
+            Arc::new(packet.buffer().to_vec()),
+            false,
+            true,
+        )
+        .unwrap();
         let tx = RuntimeTransaction::<SanitizedTransactionView<_>>::try_new(
             tx,
             MessageHash::Compute,
@@ -720,7 +739,7 @@ mod tests {
     #[test]
     fn test_has_reached_end_of_slot() {
         let GenesisConfigInfo { genesis_config, .. } = create_slow_genesis_config(10_000);
-        let (bank, _bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
+        let (bank, _bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
 
         assert!(!has_reached_end_of_slot(false, &bank));
         assert!(has_reached_end_of_slot(true, &bank));
@@ -739,7 +758,7 @@ mod tests {
             mint_keypair,
             ..
         } = create_slow_genesis_config(10_000);
-        let (bank, _bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
+        let (bank, _bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
 
         // Sanity.
         assert!(!bank.is_complete());

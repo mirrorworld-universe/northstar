@@ -2,8 +2,7 @@
 
 use {
     crate::{
-        bank::{bank_hash_details, Bank, SquashTiming},
-        bank_hash_cache::DumpedSlotSubscription,
+        bank::{Bank, SquashTiming, bank_hash_details},
         installed_scheduler_pool::{
             BankWithScheduler, InstalledSchedulerPoolArc, SchedulingContext,
         },
@@ -19,11 +18,11 @@ use {
     solana_program_runtime::loaded_programs::{BlockRelation, ForkGraph},
     solana_unified_scheduler_logic::SchedulingMode,
     std::{
-        collections::{hash_map::Entry, HashMap, HashSet},
+        collections::{HashMap, HashSet, hash_map::Entry},
         ops::Index,
         sync::{
-            atomic::{AtomicBool, AtomicU64, Ordering},
             Arc, RwLock,
+            atomic::{AtomicU64, Ordering},
         },
         time::Instant,
     },
@@ -99,10 +98,8 @@ pub struct BankForks {
     root: Arc<AtomicSlot>,
     working_slot: Slot,
     sharable_banks: SharableBanks,
-    in_vote_only_mode: Arc<AtomicBool>,
     highest_slot_at_startup: Slot,
     scheduler_pool: Option<InstalledSchedulerPoolArc>,
-    dumped_slot_subscribers: Vec<DumpedSlotSubscription>,
 
     /// The status tracker for the Alpenglow migration. Initialized via either
     /// the genesis or snapshot bank and then updated via block replay.
@@ -159,10 +156,8 @@ impl BankForks {
             },
             banks,
             descendants,
-            in_vote_only_mode: Arc::new(AtomicBool::new(false)),
             highest_slot_at_startup: 0,
             scheduler_pool: None,
-            dumped_slot_subscribers: vec![],
             migration_status,
         }));
 
@@ -185,10 +180,6 @@ impl BankForks {
 
     pub fn banks(&self) -> &HashMap<Slot, BankWithScheduler> {
         &self.banks
-    }
-
-    pub fn get_vote_only_mode_signal(&self) -> Arc<AtomicBool> {
-        self.in_vote_only_mode.clone()
     }
 
     pub fn migration_status(&self) -> Arc<MigrationStatus> {
@@ -401,25 +392,11 @@ impl BankForks {
         self.banks[&self.highest_slot()].clone_with_scheduler()
     }
 
-    /// Register to be notified when a bank has been dumped (due to duplicate block handling)
-    /// from bank_forks.
-    pub fn register_dumped_slot_subscriber(&mut self, notifier: DumpedSlotSubscription) {
-        self.dumped_slot_subscribers.push(notifier);
-    }
-
-    /// Clears associated banks from BankForks and notifies subscribers that a dump has occurred.
+    /// Clears associated banks from BankForks.
     pub fn dump_slots<'a, I>(&mut self, slots: I) -> (Vec<(Slot, BankId)>, Vec<BankWithScheduler>)
     where
         I: Iterator<Item = &'a Slot>,
     {
-        // Notify subscribers. It is fine that the lock is immediately released, since the bank_forks
-        // lock is held until the end of this function, so subscribers will not be able to interact
-        // with bank_forks anyway.
-        for subscriber in &self.dumped_slot_subscribers {
-            let mut lock = subscriber.lock().unwrap();
-            *lock = true;
-        }
-
         slots
             .map(|slot| {
                 // Clear the banks from BankForks
@@ -473,6 +450,13 @@ impl BankForks {
                  {root}"
             );
             root_bank.clear_epoch_rewards_cache();
+
+            // If we have rooted a block in the new epoch since Alpenglow has been activated, advance MigrationStatus
+            if self.migration_status.is_alpenglow_enabled()
+                && !self.migration_status.is_full_alpenglow_epoch()
+            {
+                self.migration_status.alpenglow_rooted_new_epoch(new_epoch);
+            }
         }
         let root_tx_count = root_bank
             .parents()
@@ -690,19 +674,8 @@ impl BankForks {
         // We want to collect timing separately, and the 2nd collect requires
         // a unique borrow to self which is already borrowed by self.banks
         let mut prune_slots_time = Measure::start("prune_slots");
-        let highest_super_majority_root = highest_super_majority_root.unwrap_or(root);
         let prune_slots: Vec<_> = self
-            .banks
-            .keys()
-            .copied()
-            .filter(|slot| {
-                let keep = *slot == root
-                    || self.descendants[&root].contains(slot)
-                    || (*slot < root
-                        && *slot >= highest_super_majority_root
-                        && self.descendants[slot].contains(&root));
-                !keep
-            })
+            .get_non_rooted(root, highest_super_majority_root)
             .collect();
         prune_slots_time.stop();
 
@@ -718,6 +691,22 @@ impl BankForks {
             prune_slots_time.as_ms(),
             prune_remove_time.as_ms(),
         )
+    }
+
+    pub fn get_non_rooted(
+        &self,
+        root: Slot,
+        highest_super_majority_root: Option<Slot>,
+    ) -> impl Iterator<Item = Slot> + '_ {
+        let highest_super_majority_root = highest_super_majority_root.unwrap_or(root);
+        self.banks.keys().copied().filter(move |slot| {
+            let keep = *slot == root
+                || self.descendants[&root].contains(slot)
+                || (*slot < root
+                    && *slot >= highest_super_majority_root
+                    && self.descendants[slot].contains(&root));
+            !keep
+        })
     }
 }
 
@@ -767,14 +756,23 @@ mod tests {
         crate::{
             bank::test_utils::update_vote_account_timestamp,
             genesis_utils::{
-                create_genesis_config, create_genesis_config_with_leader, GenesisConfigInfo,
+                GenesisConfigInfo, create_genesis_config, create_genesis_config_with_leader,
             },
         },
+        agave_feature_set::FeatureSet,
+        agave_votor_messages::{
+            consensus_message::{Certificate, CertificateType},
+            migration::{GENESIS_CERTIFICATE_ACCOUNT, MIGRATION_SLOT_OFFSET},
+        },
         assert_matches::assert_matches,
+        solana_account::Account,
+        solana_bls_signatures::Signature as BLSSignature,
         solana_clock::UnixTimestamp,
         solana_epoch_schedule::EpochSchedule,
         solana_keypair::Keypair,
         solana_pubkey::Pubkey,
+        solana_rent::Rent,
+        solana_sdk_ids::system_program,
         solana_signer::Signer,
         solana_vote_program::vote_state::BlockTimestamp,
     };
@@ -813,6 +811,140 @@ mod tests {
         bank_forks.insert(child_bank);
         assert_eq!(bank_forks[1u64].tick_height(), 1);
         assert_eq!(bank_forks.working_bank().tick_height(), 1);
+    }
+
+    fn make_root_bank_for_migration_status_test(
+        root_slot: Slot,
+        ff_activation_slot: Option<Slot>,
+        genesis_cert: Option<Certificate>,
+    ) -> Bank {
+        let GenesisConfigInfo {
+            mut genesis_config, ..
+        } = create_genesis_config(10_000);
+        genesis_config.epoch_schedule = EpochSchedule::new(32);
+
+        if let Some(genesis_cert) = genesis_cert.as_ref() {
+            let cert_data = wincode::serialize(genesis_cert).unwrap();
+            let lamports = Rent::default().minimum_balance(cert_data.len());
+            let mut cert_account = Account::new(lamports, cert_data.len(), &system_program::ID);
+            cert_account.data = cert_data;
+            genesis_config
+                .accounts
+                .insert(*GENESIS_CERTIFICATE_ACCOUNT, cert_account);
+        }
+
+        let mut root_bank = if root_slot == 0 {
+            Bank::new_for_tests(&genesis_config)
+        } else {
+            let bank0 = Arc::new(Bank::new_for_tests(&genesis_config));
+            bank0.freeze();
+            Bank::new_from_parent(bank0, &Pubkey::default(), root_slot)
+        };
+
+        let mut feature_set = FeatureSet::default();
+        if let Some(ff_activation_slot) = ff_activation_slot {
+            feature_set.activate(&agave_feature_set::alpenglow::id(), ff_activation_slot);
+        }
+        root_bank.feature_set = Arc::new(feature_set);
+
+        root_bank.squash();
+
+        root_bank
+    }
+
+    #[test]
+    fn test_initialize_migration_status() {
+        let ff_activation_slot = 5;
+        let genesis_cert = Certificate {
+            cert_type: CertificateType::Finalize(1),
+            signature: BLSSignature::default(),
+            bitmap: vec![],
+        };
+
+        let root_bank = make_root_bank_for_migration_status_test(0, None, None);
+        let migration_status = BankForks::initialize_migration_status(&root_bank);
+        assert!(migration_status.is_pre_feature_activation());
+
+        let root_bank = make_root_bank_for_migration_status_test(0, Some(ff_activation_slot), None);
+        let migration_status = BankForks::initialize_migration_status(&root_bank);
+        assert!(migration_status.is_in_migration());
+        assert_eq!(
+            migration_status.migration_slot(),
+            Some(ff_activation_slot + MIGRATION_SLOT_OFFSET)
+        );
+
+        let root_bank = make_root_bank_for_migration_status_test(
+            10,
+            Some(ff_activation_slot),
+            Some(genesis_cert.clone()),
+        );
+        assert_eq!(
+            root_bank.get_alpenglow_genesis_certificate(),
+            Some(genesis_cert.clone())
+        );
+        let migration_status = BankForks::initialize_migration_status(&root_bank);
+        assert!(migration_status.is_alpenglow_enabled());
+        assert!(!migration_status.is_full_alpenglow_epoch());
+
+        let root_bank = make_root_bank_for_migration_status_test(
+            64,
+            Some(ff_activation_slot),
+            Some(genesis_cert),
+        );
+        assert!(root_bank.get_alpenglow_genesis_certificate().is_some());
+        let migration_status = BankForks::initialize_migration_status(&root_bank);
+        assert!(migration_status.is_alpenglow_enabled());
+        assert!(migration_status.is_full_alpenglow_epoch());
+    }
+
+    /// The offchain address at which the genesis certificate will be stored is known in advance
+    /// Make sure that if someone prefunds this address, there is no change to behavior
+    #[test]
+    fn test_initialize_migration_status_genesis_acct_prefunded() {
+        let GenesisConfigInfo {
+            genesis_config,
+            mint_keypair,
+            ..
+        } = create_genesis_config(10_000);
+        let bank_forks = BankForks::new_rw_arc(Bank::new_for_tests(&genesis_config));
+        let root_bank = bank_forks.read().unwrap().root_bank();
+
+        let prefund_lamports = 100;
+        root_bank
+            .transfer(
+                prefund_lamports,
+                &mint_keypair,
+                &GENESIS_CERTIFICATE_ACCOUNT,
+            )
+            .unwrap();
+
+        assert!(
+            root_bank
+                .get_account(&GENESIS_CERTIFICATE_ACCOUNT)
+                .is_some()
+        );
+        assert_eq!(
+            root_bank.get_balance(&GENESIS_CERTIFICATE_ACCOUNT),
+            prefund_lamports,
+        );
+
+        let migration_status = BankForks::initialize_migration_status(&root_bank);
+        assert!(migration_status.is_pre_feature_activation());
+        assert!(!migration_status.is_in_migration());
+        assert_eq!(migration_status.migration_slot(), None);
+
+        // Migration can still succeed
+        let mut bank = Bank::new_from_parent(root_bank, &Pubkey::default(), 10);
+        let genesis_cert = Certificate {
+            cert_type: CertificateType::Finalize(1),
+            signature: BLSSignature::default(),
+            bitmap: vec![],
+        };
+        bank.activate_feature(&agave_feature_set::alpenglow::id());
+        bank.set_alpenglow_genesis_certificate(&genesis_cert);
+
+        let migration_status = BankForks::initialize_migration_status(&bank);
+        assert!(migration_status.is_alpenglow_enabled());
     }
 
     #[test]

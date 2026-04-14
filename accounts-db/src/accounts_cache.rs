@@ -8,8 +8,8 @@ use {
         collections::BTreeSet,
         ops::Deref,
         sync::{
-            atomic::{AtomicBool, AtomicU64, Ordering},
             Arc, RwLock,
+            atomic::{AtomicBool, AtomicU64, Ordering},
         },
     },
 };
@@ -230,6 +230,10 @@ impl AccountsCache {
         self.maybe_unflushed_roots.write().unwrap().insert(root);
     }
 
+    pub fn num_unflushed_roots(&self) -> usize {
+        self.maybe_unflushed_roots.read().unwrap().len()
+    }
+
     pub fn clear_roots(&self, max_root: Option<Slot>) -> BTreeSet<Slot> {
         let mut w_maybe_unflushed_roots = self.maybe_unflushed_roots.write().unwrap();
         if let Some(max_root) = max_root {
@@ -273,7 +277,7 @@ impl AccountsCache {
 }
 
 #[cfg(test)]
-pub mod tests {
+mod tests {
     use super::*;
 
     impl AccountsCache {

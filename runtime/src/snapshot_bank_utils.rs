@@ -4,8 +4,8 @@ use {
         bank::BankFieldsToDeserialize,
         serde_snapshot::fields_from_streams,
         snapshot_utils::{
-            deserialize_snapshot_data_files, verify_unpacked_snapshots_dir_and_version,
-            SnapshotRootPaths, UnpackedSnapshotsDirAndVersion,
+            SnapshotRootPaths, UnpackedSnapshotsDirAndVersion, deserialize_snapshot_data_files,
+            verify_unpacked_snapshots_dir_and_version,
         },
     },
     tempfile::TempDir,
@@ -16,17 +16,18 @@ use {
         epoch_stakes::VersionedEpochStakes,
         runtime_config::RuntimeConfig,
         serde_snapshot::{
-            self, reconstruct_bank_from_fields, SnapshotAccountsDbFields, SnapshotBankFields,
+            self, SnapshotAccountsDbFields, SnapshotBankFields, reconstruct_bank_from_fields,
         },
         snapshot_package::SnapshotPackage,
         snapshot_utils::{
-            self, rebuild_storages_from_snapshot_dir, verify_and_unarchive_snapshots,
-            BankSnapshotInfo, StorageAndNextAccountsFileId, UnarchivedSnapshots,
+            self, BankSnapshotInfo, StorageAndNextAccountsFileId, UnarchivedSnapshots,
+            rebuild_storages_from_snapshot_dir, verify_and_unarchive_snapshots,
         },
         status_cache,
     },
     agave_fs::dirs,
     agave_snapshots::{
+        ArchiveFormat, SnapshotArchiveKind, SnapshotKind, SnapshotVersion,
         error::{
             SnapshotError, VerifyEpochStakesError, VerifySlotDeltasError, VerifySlotHistoryError,
         },
@@ -39,7 +40,6 @@ use {
         },
         snapshot_config::SnapshotConfig,
         snapshot_hash::SnapshotHash,
-        ArchiveFormat, SnapshotArchiveKind, SnapshotKind, SnapshotVersion,
     },
     log::*,
     solana_accounts_db::{
@@ -55,7 +55,7 @@ use {
         collections::{HashMap, HashSet},
         ops::RangeInclusive,
         path::{Path, PathBuf},
-        sync::{atomic::AtomicBool, Arc},
+        sync::{Arc, atomic::AtomicBool},
     },
 };
 
@@ -208,6 +208,18 @@ pub fn bank_from_snapshot_archives(
     )?;
     measure_rebuild.stop();
     info!("{measure_rebuild}");
+
+    if bank.capitalization() != info.calculated_capitalization {
+        // When limit_load_slot_count is set, ignore capitalization mismatches.
+        // Because skipped slots may have changed the calculated capitalization,
+        // causing a mismatch with the bank's capitalization.
+        if limit_load_slot_count_from_snapshot.is_none() {
+            return Err(SnapshotError::MismatchedCapitalization(
+                bank.capitalization(),
+                info.calculated_capitalization,
+            ));
+        }
+    }
 
     verify_epoch_stakes(&bank)?;
 
@@ -393,6 +405,18 @@ pub fn bank_from_snapshot_dir(
         "rebuild bank from snapshot"
     );
     info!("{measure_rebuild_bank}");
+
+    if bank.capitalization() != info.calculated_capitalization {
+        // When limit_load_slot_count is set, ignore capitalization mismatches.
+        // Because skipped slots may have changed the calculated capitalization,
+        // causing a mismatch with the bank's capitalization.
+        if limit_load_slot_count_from_snapshot.is_none() {
+            return Err(SnapshotError::MismatchedCapitalization(
+                bank.capitalization(),
+                info.calculated_capitalization,
+            ));
+        }
+    }
 
     verify_epoch_stakes(&bank)?;
 
@@ -791,7 +815,7 @@ mod tests {
     use {
         super::*,
         crate::{
-            bank::{tests::create_simple_test_bank, BankTestConfig},
+            bank::{BankTestConfig, tests::create_simple_test_bank},
             snapshot_package::BankSnapshotPackage,
             snapshot_utils::{
                 clean_orphaned_account_snapshot_dirs, create_tmp_accounts_dir_for_tests,
@@ -806,7 +830,7 @@ mod tests {
         agave_snapshots::{error::VerifySlotDeltasError, paths::get_bank_snapshot_dir},
         semver::Version,
         solana_accounts_db::{
-            accounts_db::{MarkObsoleteAccounts, ACCOUNTS_DB_CONFIG_FOR_TESTING},
+            accounts_db::{ACCOUNTS_DB_CONFIG_FOR_TESTING, MarkObsoleteAccounts},
             accounts_file::StorageAccess,
         },
         solana_genesis_config::create_genesis_config,
@@ -817,7 +841,7 @@ mod tests {
         solana_transaction::sanitized::SanitizedTransaction,
         std::{
             fs, slice,
-            sync::{atomic::Ordering, Arc},
+            sync::{Arc, atomic::Ordering},
         },
         test_case::test_case,
     };
@@ -1334,6 +1358,63 @@ mod tests {
         assert_eq!(deserialized_bank, *bank4);
     }
 
+    /// Ensure bank_from_snapshot_archives() catches a snapshot with incorrect capitalization.
+    #[test]
+    fn test_bank_from_snapshot_archives_bad_capitalization() {
+        let genesis_config = GenesisConfig::default();
+        let bank = Bank::new_for_tests(&genesis_config);
+        bank.fill_bank_with_ticks_for_tests();
+
+        // freeze the bank before mucking with capitalization, since
+        // freezing also changes capitalization (fees, incinerator, etc).
+        bank.freeze();
+
+        let good_capitalization = bank.capitalization();
+        let bad_capitalization = good_capitalization + 1;
+        bank.set_capitalization_for_tests(bad_capitalization);
+
+        let snapshot_dir = tempfile::TempDir::new().unwrap();
+        let full_snapshot_archive_info = bank_to_full_snapshot_archive(
+            &snapshot_dir,
+            &bank,
+            None,
+            &snapshot_dir,
+            &snapshot_dir,
+            SnapshotConfig::default().archive_format,
+        )
+        .unwrap();
+
+        let (_tmp_dir, accounts_dir) = create_tmp_accounts_dir_for_tests();
+        let bank_snapshots_dir = tempfile::TempDir::new().unwrap();
+        let error = bank_from_snapshot_archives(
+            &[accounts_dir],
+            &bank_snapshots_dir,
+            &full_snapshot_archive_info,
+            None,
+            &genesis_config,
+            &RuntimeConfig::default(),
+            None,
+            None,
+            false,
+            false,
+            false,
+            ACCOUNTS_DB_CONFIG_FOR_TESTING,
+            None,
+            Arc::default(),
+        )
+        .unwrap_err();
+
+        match error {
+            SnapshotError::MismatchedCapitalization(expected, calculated) => {
+                assert_eq!(expected, bad_capitalization);
+                assert_eq!(calculated, good_capitalization);
+            }
+            _ => {
+                panic!("wrong error");
+            }
+        }
+    }
+
     /// Test that cleaning works well in the edge cases of zero-lamport accounts and snapshots.
     /// Here's the scenario:
     ///
@@ -1744,9 +1825,11 @@ mod tests {
         fs::remove_dir_all(snapshot_dir_slot_2).unwrap();
 
         // verify the orphaned account snapshot hardlink directories are still there
-        assert!(hardlink_dirs_slot_2
-            .iter()
-            .all(|dir| fs::metadata(dir).is_ok()));
+        assert!(
+            hardlink_dirs_slot_2
+                .iter()
+                .all(|dir| fs::metadata(dir).is_ok())
+        );
 
         let account_snapshot_paths: Vec<PathBuf> = hardlink_dirs_slot_2
             .iter()
@@ -1756,9 +1839,11 @@ mod tests {
         clean_orphaned_account_snapshot_dirs(&bank_snapshots_dir, &account_snapshot_paths).unwrap();
 
         // verify the hardlink directories are gone
-        assert!(hardlink_dirs_slot_2
-            .iter()
-            .all(|dir| fs::metadata(dir).is_err()));
+        assert!(
+            hardlink_dirs_slot_2
+                .iter()
+                .all(|dir| fs::metadata(dir).is_err())
+        );
     }
 
     // Ensure that `clean_orphaned_account_snapshot_dirs()` works correctly for bank snapshots
@@ -2082,7 +2167,7 @@ mod tests {
 
     #[test_case(#[allow(deprecated)] StorageAccess::Mmap)]
     #[test_case(StorageAccess::File)]
-    fn test_bank_from_snapshot_dir(storage_access: StorageAccess) {
+    fn test_bank_from_snapshot_dir_good(storage_access: StorageAccess) {
         let genesis_config = GenesisConfig::default();
         let bank_snapshots_dir = tempfile::TempDir::new().unwrap();
         let bank = Bank::new_for_tests(&genesis_config);
@@ -2133,6 +2218,57 @@ mod tests {
         }
         let next_id = bank.accounts().accounts_db.next_id.load(Ordering::Relaxed) as usize;
         assert_eq!(max_id, next_id - 1);
+    }
+
+    /// Ensure bank_from_snapshot_dir() catches a snapshot with incorrect capitalization.
+    #[test]
+    fn test_bank_from_snapshot_dir_bad_capitalization() {
+        let genesis_config = GenesisConfig::default();
+        let bank_snapshots_dir = tempfile::TempDir::new().unwrap();
+        let bank = Bank::new_for_tests(&genesis_config);
+        bank.fill_bank_with_ticks_for_tests();
+
+        // freeze the bank before mucking with capitalization, since
+        // freezing also changes capitalization (fees, incinerator, etc).
+        bank.freeze();
+
+        let good_capitalization = bank.capitalization();
+        let bad_capitalization = good_capitalization + 1;
+        bank.set_capitalization_for_tests(bad_capitalization);
+
+        create_bank_snapshot_from_bank(
+            &bank_snapshots_dir,
+            &bank,
+            SnapshotVersion::default(),
+            true,
+        )
+        .unwrap();
+
+        let bank_snapshot = get_highest_bank_snapshot(&bank_snapshots_dir).unwrap();
+        let account_paths = &bank.rc.accounts.accounts_db.paths;
+        let error = bank_from_snapshot_dir(
+            account_paths,
+            &bank_snapshot,
+            &genesis_config,
+            &RuntimeConfig::default(),
+            None,
+            None,
+            false,
+            ACCOUNTS_DB_CONFIG_FOR_TESTING,
+            None,
+            Arc::default(),
+        )
+        .unwrap_err();
+
+        match error {
+            SnapshotError::MismatchedCapitalization(expected, calculated) => {
+                assert_eq!(expected, bad_capitalization);
+                assert_eq!(calculated, good_capitalization);
+            }
+            _ => {
+                panic!("wrong error");
+            }
+        }
     }
 
     #[test_case(false)]

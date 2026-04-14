@@ -4,12 +4,12 @@ use {
         cluster_info_vote_listener::VoteTracker,
         cluster_slots_service::cluster_slots::ClusterSlots,
         consensus::{
-            fork_choice::{select_vote_and_reset_forks, SelectVoteAndResetForkResult},
+            Tower,
+            fork_choice::{SelectVoteAndResetForkResult, select_vote_and_reset_forks},
             heaviest_subtree_fork_choice::HeaviestSubtreeForkChoice,
             latest_validator_votes_for_frozen_banks::LatestValidatorVotesForFrozenBanks,
             progress_map::{ForkProgress, LockoutInterval, ProgressMap},
             tower_vote_state::TowerVoteState,
-            Tower,
         },
         repair::cluster_slot_state_verifier::{
             DuplicateConfirmedSlots, DuplicateSlotsTracker, EpochSlotsFrozenSlots,
@@ -26,7 +26,7 @@ use {
         bank::Bank,
         bank_forks::BankForks,
         genesis_utils::{
-            create_genesis_config_with_vote_accounts, GenesisConfigInfo, ValidatorVoteKeypairs,
+            GenesisConfigInfo, ValidatorVoteKeypairs, create_genesis_config_with_vote_accounts,
         },
     },
     solana_signer::Signer,
@@ -36,7 +36,7 @@ use {
         collections::{HashMap, HashSet, VecDeque},
         sync::{Arc, RwLock},
     },
-    trees::{tr, Tree, TreeWalk},
+    trees::{Tree, TreeWalk, tr},
 };
 
 pub struct VoteSimulator {
@@ -104,7 +104,7 @@ impl VoteSimulator {
                 .clone_without_scheduler();
             self.progress
                 .entry(slot)
-                .or_insert_with(|| ForkProgress::new(Hash::default(), None, None, 0, 0));
+                .or_insert_with(|| ForkProgress::new(Hash::default(), None, None, 0, 0, None));
             for (pubkey, vote) in cluster_votes.iter() {
                 if vote.contains(&parent) {
                     let keypairs = self.validator_keypairs.get(pubkey).unwrap();
@@ -144,9 +144,11 @@ impl VoteSimulator {
                         .get_vote_account(&keypairs.vote_keypair.pubkey())
                         .unwrap();
                     let vote_state_view = vote_account.vote_state_view();
-                    assert!(vote_state_view
-                        .votes_iter()
-                        .any(|lockout| lockout.slot() == parent));
+                    assert!(
+                        vote_state_view
+                            .votes_iter()
+                            .any(|lockout| lockout.slot() == parent)
+                    );
                 }
             }
 
@@ -186,6 +188,7 @@ impl VoteSimulator {
             .map(|(_slot, bank)| bank)
             .collect();
         let mut vote_slots = HashSet::default();
+        let migration_status = self.bank_forks.read().unwrap().migration_status();
         let _ = ReplayStage::compute_bank_stats(
             my_pubkey,
             &ancestors,
@@ -198,6 +201,7 @@ impl VoteSimulator {
             &mut self.tbft_structs.heaviest_subtree_fork_choice,
             &mut self.latest_validator_votes_for_frozen_banks,
             &mut vote_slots,
+            migration_status.as_ref(),
         );
 
         let vote_bank = self
@@ -283,7 +287,7 @@ impl VoteSimulator {
     ) {
         self.progress
             .entry(slot)
-            .or_insert_with(|| ForkProgress::new(Hash::default(), None, None, 0, 0))
+            .or_insert_with(|| ForkProgress::new(Hash::default(), None, None, 0, 0, None))
             .fork_stats
             .lockout_intervals
             .push(LockoutInterval {
@@ -296,7 +300,7 @@ impl VoteSimulator {
     pub fn clear_lockout_intervals(&mut self, slot: Slot) {
         self.progress
             .entry(slot)
-            .or_insert_with(|| ForkProgress::new(Hash::default(), None, None, 0, 0))
+            .or_insert_with(|| ForkProgress::new(Hash::default(), None, None, 0, 0, None))
             .fork_stats
             .lockout_intervals
             .clear()
@@ -410,7 +414,15 @@ pub fn initialize_state(
     let mut progress = ProgressMap::default();
     progress.insert(
         0,
-        ForkProgress::new_from_bank(&bank0, bank0.leader_id(), &Pubkey::default(), None, 0, 0),
+        ForkProgress::new_from_bank(
+            &bank0,
+            bank0.leader_id(),
+            &Pubkey::default(),
+            None,
+            0,
+            0,
+            None,
+        ),
     );
     let heaviest_subtree_fork_choice =
         HeaviestSubtreeForkChoice::new_from_bank_forks(bank_forks.clone());

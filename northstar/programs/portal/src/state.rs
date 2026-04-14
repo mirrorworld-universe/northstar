@@ -1,12 +1,9 @@
-use {
-    borsh::{BorshDeserialize, BorshSerialize},
-    pinocchio::pubkey::Pubkey,
-};
+use borsh::{BorshDeserialize, BorshSerialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Session {
     pub discriminator: u8,
-    pub owner: Pubkey,
+    pub owner: [u8; 32],
     pub grid_id: u64,
     pub ttl_slots: u64,
     pub fee_cap: u64,
@@ -39,7 +36,7 @@ pub struct FeeVault {
 }
 
 impl FeeVault {
-    pub const LEN: usize = 34; // 1 + 32 + 1
+    pub const LEN: usize = 34;
     pub const SEED_PREFIX: &[u8] = b"fee_vault";
     pub const DISCRIMINATOR: u8 = 2;
 
@@ -52,7 +49,7 @@ impl FeeVault {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct DelegationRecord {
     pub discriminator: u8,
-    pub owner_program: Pubkey,
+    pub owner_program: [u8; 32],
     pub grid_id: u64,
     pub bump: u8,
 }
@@ -71,14 +68,14 @@ impl DelegationRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct DepositReceipt {
     pub discriminator: u8,
-    pub session: Pubkey,
-    pub recipient: Pubkey,
+    pub session: [u8; 32],
+    pub recipient: [u8; 32],
     pub balance: u64,
     pub bump: u8,
 }
 
 impl DepositReceipt {
-    pub const LEN: usize = 74; // 1 + 32 + 32 + 8 + 1
+    pub const LEN: usize = 74;
     pub const SEED_PREFIX: &[u8] = b"deposit_receipt";
     pub const DISCRIMINATOR: u8 = 4;
 

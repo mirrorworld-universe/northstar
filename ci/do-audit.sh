@@ -18,8 +18,6 @@ while [[ -n $1 ]]; do
 done
 
 cargo_audit_ignores=(
-  # === main repo ===
-  #
   # Crate:     ed25519-dalek
   # Version:   1.0.1
   # Title:     Double Public Key Signing Function Oracle Attack on `ed25519-dalek`
@@ -40,8 +38,6 @@ cargo_audit_ignores=(
   # jsonrpc-core-client v18.0.0 -> jsonrpc-client-transports v18.0.0 -> url v1.7.2 -> idna v0.1.5
   --ignore RUSTSEC-2024-0421
 
-  # === programs/sbf ===
-  #
   # Crate:     curve25519-dalek
   # Version:   3.2.1
   # Title:     Timing variability in `curve25519-dalek`'s `Scalar29::sub`/`Scalar52::sub`
@@ -59,6 +55,17 @@ cargo_audit_ignores=(
   # URL:       https://rustsec.org/advisories/RUSTSEC-2024-0376
   # Solution:  Upgrade to >=0.12.3
   --ignore RUSTSEC-2024-0376
+
+  # Crate:     rustls-webpki
+  # Version:   0.101.7
+  # Title:     CRLs not considered authoritative by Distribution Point due to faulty matching logic
+  # Date:      2026-03-20
+  # ID:        RUSTSEC-2026-0049
+  # URL:       https://rustsec.org/advisories/RUSTSEC-2026-0049
+  # Solution:  Upgrade to >=0.103.10
+  #
+  # NOTE: we took the fix for 0.103.6 dependents. here we ignore for those on incompatible 0.101.7
+  --ignore RUSTSEC-2026-0049
 )
 scripts/cargo-for-all-lock-files.sh audit "${cargo_audit_ignores[@]}" | $dep_tree_filter
 # we want the `cargo audit` exit code, not `$dep_tree_filter`'s

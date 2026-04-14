@@ -19,10 +19,10 @@ use {
         authorized_voters::AuthorizedVoters,
         error::VoteError,
         state::{
-            BlockTimestamp, LandedVote, Lockout, VoteInit, VoteInitV2, VoteState1_14_11,
-            VoteStateV3, VoteStateV4, VoteStateVersions, BLS_PUBLIC_KEY_COMPRESSED_SIZE,
+            BLS_PUBLIC_KEY_COMPRESSED_SIZE, BlockTimestamp, LandedVote, Lockout,
             MAX_EPOCH_CREDITS_HISTORY, MAX_LOCKOUT_HISTORY, VOTE_CREDITS_GRACE_SLOTS,
-            VOTE_CREDITS_MAXIMUM_PER_SLOT,
+            VOTE_CREDITS_MAXIMUM_PER_SLOT, VoteInit, VoteInitV2, VoteState1_14_11, VoteStateV3,
+            VoteStateV4, VoteStateVersions,
         },
     },
     std::collections::VecDeque,
@@ -56,11 +56,21 @@ pub trait VoteStateHandle {
 
     fn set_commission(&mut self, commission: u8);
 
+    fn set_inflation_rewards_commission_bps(&mut self, commission_bps: u16);
+
+    fn set_block_revenue_commission_bps(&mut self, commission_bps: u16);
+
     fn node_pubkey(&self) -> &Pubkey;
 
     fn set_node_pubkey(&mut self, node_pubkey: Pubkey);
 
+    fn set_inflation_rewards_collector(&mut self, collector: Pubkey);
+
     fn set_block_revenue_collector(&mut self, collector: Pubkey);
+
+    fn pending_delegator_rewards(&self) -> u64;
+
+    fn add_pending_delegator_rewards(&mut self, amount: u64) -> Result<(), InstructionError>;
 
     fn votes(&self) -> &VecDeque<LandedVote>;
 
@@ -277,7 +287,7 @@ impl VoteStateHandle for VoteStateV3 {
         if bls_pubkey.is_some() {
             // We should not be able to reach here because we only call this function
             // when both Vote State V4 and BLS features are enabled.
-            // See `is_bls_pubkey_feature_enabled` in vote_processor.rs.
+            // See `is_vote_authorize_with_bls_enabled` in vote_processor.rs.
             return Err(InstructionError::InvalidAccountData);
         }
 
@@ -352,6 +362,16 @@ impl VoteStateHandle for VoteStateV3 {
         self.commission = commission;
     }
 
+    fn set_inflation_rewards_commission_bps(&mut self, _commission_bps: u16) {
+        // No-op. We can never reach this callsite, since SIMD-0291 depends on
+        // SIMD-0185: the activation of VoteStateV4.
+    }
+
+    fn set_block_revenue_commission_bps(&mut self, _commission_bps: u16) {
+        // No-op. We can never reach this callsite, since SIMD-0123 depends on
+        // SIMD-0185: the activation of VoteStateV4.
+    }
+
     fn node_pubkey(&self) -> &Pubkey {
         &self.node_pubkey
     }
@@ -360,8 +380,23 @@ impl VoteStateHandle for VoteStateV3 {
         self.node_pubkey = node_pubkey;
     }
 
+    fn set_inflation_rewards_collector(&mut self, _collector: Pubkey) {
+        // No-op for v3: field does not exist.
+    }
+
     fn set_block_revenue_collector(&mut self, _collector: Pubkey) {
         // No-op for v3: field does not exist.
+    }
+
+    fn pending_delegator_rewards(&self) -> u64 {
+        // V3 doesn't have this field.
+        0
+    }
+
+    fn add_pending_delegator_rewards(&mut self, _amount: u64) -> Result<(), InstructionError> {
+        // No-op. We can never reach this callsite, since SIMD-0123 depends on
+        // SIMD-0185: the activation of VoteStateV4.
+        Ok(())
     }
 
     fn votes(&self) -> &VecDeque<LandedVote> {
@@ -523,6 +558,14 @@ impl VoteStateHandle for VoteStateV4 {
         self.inflation_rewards_commission_bps = (commission as u16) * 100;
     }
 
+    fn set_inflation_rewards_commission_bps(&mut self, commission_bps: u16) {
+        self.inflation_rewards_commission_bps = commission_bps;
+    }
+
+    fn set_block_revenue_commission_bps(&mut self, commission_bps: u16) {
+        self.block_revenue_commission_bps = commission_bps;
+    }
+
     fn node_pubkey(&self) -> &Pubkey {
         &self.node_pubkey
     }
@@ -531,8 +574,24 @@ impl VoteStateHandle for VoteStateV4 {
         self.node_pubkey = node_pubkey;
     }
 
+    fn set_inflation_rewards_collector(&mut self, collector: Pubkey) {
+        self.inflation_rewards_collector = collector;
+    }
+
     fn set_block_revenue_collector(&mut self, collector: Pubkey) {
         self.block_revenue_collector = collector;
+    }
+
+    fn pending_delegator_rewards(&self) -> u64 {
+        self.pending_delegator_rewards
+    }
+
+    fn add_pending_delegator_rewards(&mut self, amount: u64) -> Result<(), InstructionError> {
+        self.pending_delegator_rewards = self
+            .pending_delegator_rewards
+            .checked_add(amount)
+            .ok_or(InstructionError::ArithmeticOverflow)?;
+        Ok(())
     }
 
     fn votes(&self) -> &VecDeque<LandedVote> {
@@ -719,6 +778,20 @@ impl VoteStateHandle for VoteStateHandler {
         }
     }
 
+    fn set_inflation_rewards_commission_bps(&mut self, commission_bps: u16) {
+        match &mut self.target_state {
+            TargetVoteState::V3(v3) => v3.set_inflation_rewards_commission_bps(commission_bps),
+            TargetVoteState::V4(v4) => v4.set_inflation_rewards_commission_bps(commission_bps),
+        }
+    }
+
+    fn set_block_revenue_commission_bps(&mut self, commission_bps: u16) {
+        match &mut self.target_state {
+            TargetVoteState::V3(v3) => v3.set_block_revenue_commission_bps(commission_bps),
+            TargetVoteState::V4(v4) => v4.set_block_revenue_commission_bps(commission_bps),
+        }
+    }
+
     fn node_pubkey(&self) -> &Pubkey {
         match &self.target_state {
             TargetVoteState::V3(v3) => v3.node_pubkey(),
@@ -733,10 +806,31 @@ impl VoteStateHandle for VoteStateHandler {
         }
     }
 
+    fn set_inflation_rewards_collector(&mut self, collector: Pubkey) {
+        match &mut self.target_state {
+            TargetVoteState::V3(v3) => v3.set_inflation_rewards_collector(collector),
+            TargetVoteState::V4(v4) => v4.set_inflation_rewards_collector(collector),
+        }
+    }
+
     fn set_block_revenue_collector(&mut self, collector: Pubkey) {
         match &mut self.target_state {
             TargetVoteState::V3(v3) => v3.set_block_revenue_collector(collector),
             TargetVoteState::V4(v4) => v4.set_block_revenue_collector(collector),
+        }
+    }
+
+    fn pending_delegator_rewards(&self) -> u64 {
+        match &self.target_state {
+            TargetVoteState::V3(v3) => v3.pending_delegator_rewards(),
+            TargetVoteState::V4(v4) => v4.pending_delegator_rewards(),
+        }
+    }
+
+    fn add_pending_delegator_rewards(&mut self, amount: u64) -> Result<(), InstructionError> {
+        match &mut self.target_state {
+            TargetVoteState::V3(v3) => v3.add_pending_delegator_rewards(amount),
+            TargetVoteState::V4(v4) => v4.add_pending_delegator_rewards(amount),
         }
     }
 
@@ -878,7 +972,7 @@ impl VoteStateHandler {
             VoteStateTargetVersion::V3 => {
                 // We should not be able to reach here because we only call this function
                 // when both Vote State V4 and BLS features are enabled.
-                // See `is_bls_pubkey_feature_enabled` in vote_processor.rs.
+                // See `is_vote_authorize_with_bls_enabled` in vote_processor.rs.
                 Err(InstructionError::InvalidInstructionData)
             }
             VoteStateTargetVersion::V4 => {
@@ -1040,11 +1134,11 @@ mod tests {
         solana_rent::Rent,
         solana_sdk_ids::native_loader,
         solana_transaction_context::{
-            instruction_accounts::InstructionAccount, TransactionContext,
+            instruction_accounts::InstructionAccount, transaction::TransactionContext,
         },
         solana_vote_interface::{
             authorized_voters::AuthorizedVoters,
-            state::{BlockTimestamp, VoteInit, MAX_EPOCH_CREDITS_HISTORY, MAX_LOCKOUT_HISTORY},
+            state::{BlockTimestamp, MAX_EPOCH_CREDITS_HISTORY, MAX_LOCKOUT_HISTORY, VoteInit},
         },
         std::collections::VecDeque,
         test_case::test_case,
@@ -1064,9 +1158,10 @@ mod tests {
             rent,
             0,
             0,
+            1,
         );
         transaction_context
-            .configure_next_instruction_for_tests(
+            .configure_top_level_instruction_for_tests(
                 0,
                 vec![InstructionAccount::new(1, false, true)],
                 vec![],
@@ -1322,10 +1417,12 @@ mod tests {
         // purged and no longer queryable
         assert_eq!(vote_state.authorized_voters().len(), 1);
         for i in 0..5 {
-            assert!(vote_state
-                .authorized_voters()
-                .get_authorized_voter(i)
-                .is_none());
+            assert!(
+                vote_state
+                    .authorized_voters()
+                    .get_authorized_voter(i)
+                    .is_none()
+            );
         }
 
         // Set an authorized voter change at slot 7
@@ -1394,10 +1491,12 @@ mod tests {
         // be purged, but only because we didn't cache an entry for current - 1.
         assert_eq!(vote_state.authorized_voters().len(), 1);
         for i in 0..5 {
-            assert!(vote_state
-                .authorized_voters()
-                .get_authorized_voter(i)
-                .is_none());
+            assert!(
+                vote_state
+                    .authorized_voters()
+                    .get_authorized_voter(i)
+                    .is_none()
+            );
         }
 
         // Say we're in epoch 7. Cache entries for both epochs 6 and 7.
@@ -1415,10 +1514,12 @@ mod tests {
 
         // 0..=5 should still be purged.
         for i in 0..=5 {
-            assert!(vote_state
-                .authorized_voters()
-                .get_authorized_voter(i)
-                .is_none());
+            assert!(
+                vote_state
+                    .authorized_voters()
+                    .get_authorized_voter(i)
+                    .is_none()
+            );
         }
 
         // Set an authorized voter change at epoch 9.
@@ -1735,7 +1836,7 @@ mod tests {
         rent: Rent,
         expected_version: ExpectedVoteStateVersion,
     ) {
-        let transaction_context = mock_transaction_context(vote_pubkey, vote_account, rent.clone());
+        let transaction_context = mock_transaction_context(vote_pubkey, vote_account, rent);
         let instruction_context = transaction_context.get_next_instruction_context().unwrap();
         let mut vote_account = instruction_context
             .try_borrow_instruction_account(0)
@@ -1770,7 +1871,7 @@ mod tests {
         vote_account: AccountSharedData,
         rent: Rent,
     ) {
-        let transaction_context = mock_transaction_context(vote_pubkey, vote_account, rent.clone());
+        let transaction_context = mock_transaction_context(vote_pubkey, vote_account, rent);
         let instruction_context = transaction_context.get_next_instruction_context().unwrap();
         let mut vote_account = instruction_context
             .try_borrow_instruction_account(0)
@@ -2055,7 +2156,7 @@ mod tests {
                 authorized_withdrawer,
                 commission,
                 authorized_voters: AuthorizedVoters::new(0, authorized_voter),
-                votes: votes_deque.clone(),
+                votes: votes_deque,
                 epoch_credits: epoch_credits.clone(),
                 root_slot,
                 ..VoteState1_14_11::default()
@@ -2131,7 +2232,7 @@ mod tests {
                 pending_delegator_rewards: 999,
                 bls_pubkey_compressed: Some([42; BLS_PUBLIC_KEY_COMPRESSED_SIZE]),
                 authorized_voters: AuthorizedVoters::new(0, authorized_voter),
-                epoch_credits: epoch_credits.clone(),
+                epoch_credits,
                 root_slot,
                 ..VoteStateV4::default()
             };
@@ -2202,7 +2303,7 @@ mod tests {
         let mut vote_account = AccountSharedData::new(lamports, account_size, &id());
         vote_account.set_data_from_slice(&vec![0; account_size]);
 
-        let transaction_context = mock_transaction_context(vote_pubkey, vote_account, rent.clone());
+        let transaction_context = mock_transaction_context(vote_pubkey, vote_account, rent);
         let instruction_context = transaction_context.get_next_instruction_context().unwrap();
         let mut vote_account_borrowed = instruction_context
             .try_borrow_instruction_account(0)
@@ -2277,5 +2378,41 @@ mod tests {
             Some(newer_bls_pubkey_compressed)
         );
         assert!(vote_state.has_bls_pubkey());
+    }
+
+    #[test]
+    fn test_set_inflation_rewards_commission_bps() {
+        // V3: try to set various values - should all be no-ops.
+        let mut handler = VoteStateHandler::new_v3(VoteStateV3::default());
+        let original_commission = handler.commission();
+
+        handler.set_inflation_rewards_commission_bps(500);
+        assert_eq!(handler.commission(), original_commission);
+
+        handler.set_inflation_rewards_commission_bps(10_000);
+        assert_eq!(handler.commission(), original_commission);
+
+        handler.set_inflation_rewards_commission_bps(15_000);
+        assert_eq!(handler.commission(), original_commission);
+
+        // V4: actual live updates.
+        let mut handler = VoteStateHandler::new_v4(VoteStateV4::default());
+
+        // First test some "normal" values.
+        for bps in [0, 100, 500, 1_000, 5_000, 10_000] {
+            handler.set_inflation_rewards_commission_bps(bps);
+            let v4 = handler.as_ref_v4();
+            assert_eq!(v4.inflation_rewards_commission_bps, bps);
+            // commission() should return bps / 100
+            assert_eq!(handler.commission(), (bps / 100) as u8);
+        }
+
+        // Now test values > 10,000 are allowed at program level.
+        // Capping happens during reward calculation, not storage.
+        for bps in [10_001, 15_000, u16::MAX] {
+            handler.set_inflation_rewards_commission_bps(bps);
+            let v4 = handler.as_ref_v4();
+            assert_eq!(v4.inflation_rewards_commission_bps, bps);
+        }
     }
 }

@@ -1,18 +1,18 @@
 use {
     crate::{StoredExtendedRewards, StoredTransactionError, StoredTransactionStatusMeta},
-    solana_account_decoder::parse_token::{real_number_string_trimmed, UiTokenAmount},
-    solana_hash::{Hash, HASH_BYTES},
+    solana_account_decoder::parse_token::{UiTokenAmount, real_number_string_trimmed},
+    solana_hash::{HASH_BYTES, Hash},
     solana_instruction::error::InstructionError,
     solana_message::{
+        MessageHeader, VersionedMessage,
         compiled_instruction::CompiledInstruction,
         legacy::Message as LegacyMessage,
         v0::{self, LoadedAddresses, MessageAddressTableLookup},
-        MessageHeader, VersionedMessage,
     },
     solana_pubkey::Pubkey,
     solana_signature::Signature,
-    solana_transaction::{versioned::VersionedTransaction, Transaction},
-    solana_transaction_context::TransactionReturnData,
+    solana_transaction::{Transaction, versioned::VersionedTransaction},
+    solana_transaction_context::transaction::TransactionReturnData,
     solana_transaction_error::TransactionError,
     solana_transaction_status::{
         ConfirmedBlock, EntrySummary, InnerInstruction, InnerInstructions, Reward, RewardType,
@@ -121,6 +121,10 @@ impl From<Reward> for generated::Reward {
                 Some(RewardType::Voting) => generated::RewardType::Voting,
             } as i32,
             commission: reward.commission.map(|c| c.to_string()).unwrap_or_default(),
+            commission_bps: reward
+                .commission_bps
+                .map(|bps| bps.to_string())
+                .unwrap_or_default(),
         }
     }
 }
@@ -140,6 +144,7 @@ impl From<generated::Reward> for Reward {
                 _ => None,
             },
             commission: reward.commission.parse::<u8>().ok(),
+            commission_bps: reward.commission_bps.parse::<u16>().ok(),
         }
     }
 }
@@ -1292,6 +1297,7 @@ mod test {
             post_balance: 321,
             reward_type: None,
             commission: None,
+            commission_bps: None,
         };
         let gen_reward: generated::Reward = reward.clone().into();
         assert_eq!(reward, gen_reward.into());

@@ -10,10 +10,10 @@ use {
         transaction_version::TransactionVersion, transaction_view::SanitizedTransactionView,
     },
     solana_message::{
-        compiled_instruction::CompiledInstruction,
-        v0::{LoadedAddresses, LoadedMessage, MessageAddressTableLookup},
         LegacyMessage, MessageHeader, SanitizedMessage, TransactionSignatureDetails,
         VersionedMessage,
+        compiled_instruction::CompiledInstruction,
+        v0::{LoadedAddresses, LoadedMessage, MessageAddressTableLookup},
     },
     solana_pubkey::Pubkey,
     solana_svm_transaction::svm_message::SVMMessage,
@@ -210,6 +210,10 @@ impl<D: TransactionData> TransactionWithMeta for RuntimeTransaction<ResolvedTran
             message,
         }
     }
+
+    fn serialized_size(&self) -> usize {
+        self.transaction.data().len()
+    }
 }
 
 #[cfg(test)]
@@ -219,7 +223,7 @@ mod tests {
         agave_reserved_account_keys::ReservedAccountKeys,
         solana_hash::Hash,
         solana_keypair::Keypair,
-        solana_message::{v0, AddressLookupTableAccount, SimpleAddressLoader},
+        solana_message::{AddressLookupTableAccount, SimpleAddressLoader, v0},
         solana_signature::Signature,
         solana_system_interface::instruction as system_instruction,
         solana_system_transaction as system_transaction,
@@ -240,7 +244,8 @@ mod tests {
 
         let hash = Hash::new_unique();
         let transaction =
-            SanitizedTransactionView::try_new_sanitized(&serialized_transaction[..], true).unwrap();
+            SanitizedTransactionView::try_new_sanitized(&serialized_transaction[..], true, true)
+                .unwrap();
         let static_runtime_transaction =
             RuntimeTransaction::<SanitizedTransactionView<_>>::try_new(
                 transaction,
@@ -273,7 +278,7 @@ mod tests {
         ) {
             let bytes = bincode::serialize(&original_transaction).unwrap();
             let transaction_view =
-                SanitizedTransactionView::try_new_sanitized(&bytes[..], true).unwrap();
+                SanitizedTransactionView::try_new_sanitized(&bytes[..], true, true).unwrap();
             let runtime_transaction = RuntimeTransaction::<SanitizedTransactionView<_>>::try_new(
                 transaction_view,
                 MessageHash::Compute,
@@ -340,7 +345,7 @@ mod tests {
             let bytes =
                 bincode::serialize(&original_transaction.to_versioned_transaction()).unwrap();
             let transaction_view =
-                SanitizedTransactionView::try_new_sanitized(&bytes[..], true).unwrap();
+                SanitizedTransactionView::try_new_sanitized(&bytes[..], true, true).unwrap();
             let runtime_transaction = RuntimeTransaction::<SanitizedTransactionView<_>>::try_new(
                 transaction_view,
                 MessageHash::Compute,
@@ -414,6 +419,38 @@ mod tests {
             sanitized_transaction,
             Some(loaded_addresses),
             &reserved_key_set,
+        );
+    }
+
+    #[test]
+    fn test_serialized_size() {
+        let serialized_transaction =
+            bincode::serialize(&VersionedTransaction::from(system_transaction::transfer(
+                &Keypair::new(),
+                &Pubkey::new_unique(),
+                1,
+                Hash::new_unique(),
+            )))
+            .unwrap();
+        let transaction_view =
+            SanitizedTransactionView::try_new_sanitized(&serialized_transaction[..], true, true)
+                .unwrap();
+        let runtime_transaction = RuntimeTransaction::<SanitizedTransactionView<_>>::try_new(
+            transaction_view,
+            MessageHash::Compute,
+            None,
+        )
+        .unwrap();
+        let runtime_transaction = RuntimeTransaction::<ResolvedTransactionView<_>>::try_new(
+            runtime_transaction,
+            None,
+            &ReservedAccountKeys::empty_key_set(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            runtime_transaction.serialized_size(),
+            serialized_transaction.len()
         );
     }
 }

@@ -11,7 +11,7 @@ solana-hash.workspace = true
 solana-keypair.workspace = true
 solana-message.workspace = true
 solana-pubkey = { workspace = true, default-features = false }
-solana-quic-definitions.workspace = true
+solana-tls-utils.workspace = true
 solana-rpc = { workspace = true, features = ["agave-unstable-api"] }
 solana-runtime = { workspace = true, features = ["agave-unstable-api"] }
 solana-sdk-ids.workspace = true
@@ -51,6 +51,7 @@ northstar-portal.workspace = true
 borsh = { workspace = true }
 
 [dev-dependencies]
+solana-rent.workspace = true
 serde_json = { workspace = true }
 solana-ledger = { workspace = true, features = ["agave-unstable-api"] }
 solana-runtime = { workspace = true, features = ["agave-unstable-api", "dev-context-only-utils"] }

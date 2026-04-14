@@ -1,13 +1,14 @@
 #![allow(clippy::arithmetic_side_effects)]
 use {
     agave_feature_set::{
-        alpenglow, increase_cpi_account_info_limit, raise_cpi_nesting_limit_to_8, FeatureSet,
-        FEATURE_NAMES,
+        FEATURE_NAMES, FeatureSet, alpenglow, increase_cpi_account_info_limit,
+        raise_cpi_nesting_limit_to_8,
     },
     agave_snapshots::{
-        paths::BANK_SNAPSHOTS_DIR, snapshot_config::SnapshotConfig, SnapshotInterval,
+        SnapshotInterval, paths::BANK_SNAPSHOTS_DIR, snapshot_config::SnapshotConfig,
     },
-    base64::{prelude::BASE64_STANDARD, Engine},
+    agave_syscalls::create_program_runtime_environment_v1,
+    base64::{Engine, prelude::BASE64_STANDARD},
     crossbeam_channel::Receiver,
     log::*,
     solana_account::{Account, AccountSharedData, ReadableAccount, WritableAccount},
@@ -16,7 +17,7 @@ use {
         utils::create_accounts_run_and_snapshot_dirs,
     },
     solana_cli_output::CliAccount,
-    solana_clock::{Slot, DEFAULT_MS_PER_SLOT},
+    solana_clock::{DEFAULT_MS_PER_SLOT, Slot},
     solana_commitment_config::CommitmentConfig,
     solana_compute_budget::compute_budget::ComputeBudget,
     solana_core::{
@@ -28,7 +29,7 @@ use {
     solana_fee_calculator::FeeRateGovernor,
     solana_genesis_utils::MAX_GENESIS_ARCHIVE_UNPACKED_SIZE,
     solana_geyser_plugin_manager::{
-        geyser_plugin_manager::GeyserPluginManager, GeyserPluginManagerRequest,
+        GeyserPluginManagerRequest, geyser_plugin_manager::GeyserPluginManager,
     },
     solana_gossip::{
         cluster_info::{ClusterInfo, NodeConfig},
@@ -37,7 +38,7 @@ use {
     },
     solana_inflation::Inflation,
     solana_instruction::{AccountMeta, Instruction},
-    solana_keypair::{read_keypair_file, write_keypair_file, Keypair},
+    solana_keypair::{Keypair, read_keypair_file, write_keypair_file},
     solana_ledger::{
         blockstore::create_new_ledger, blockstore_options::LedgerColumnOptions,
         create_new_tmp_ledger,
@@ -46,7 +47,10 @@ use {
     solana_message::Message,
     solana_native_token::LAMPORTS_PER_SOL,
     solana_net_utils::{
-        find_available_ports_in_range, multihomed_sockets::BindIpAddrs, PortRange, SocketAddrSpace,
+        PortRange, SocketAddrSpace, find_available_ports_in_range, multihomed_sockets::BindIpAddrs,
+    },
+    solana_program_runtime::{
+        execution_budget::SVMTransactionExecutionBudget, invoke_context::InvokeContext,
     },
     solana_pubkey::Pubkey,
     solana_rent::Rent,
@@ -56,10 +60,10 @@ use {
         client_error::Error as RpcClientError, request::MAX_MULTIPLE_ACCOUNTS,
     },
     solana_runtime::{
-        bank_forks::BankForks,
-        genesis_utils::{self, create_genesis_config_with_leader_ex_no_features},
+        bank_forks::BankForks, genesis_utils::create_genesis_config_with_leader_ex_no_features,
         runtime_config::RuntimeConfig,
     },
+    solana_sbpf::{elf::Executable, verifier::RequisiteVerifier},
     solana_sdk_ids::address_lookup_table,
     solana_signer::Signer,
     solana_streamer::quic::DEFAULT_QUIC_ENDPOINTS,
@@ -69,7 +73,7 @@ use {
         collections::{HashMap, HashSet},
         ffi::OsStr,
         fmt::Display,
-        fs::{self, remove_dir_all, File},
+        fs::{self, File, remove_dir_all},
         io::Read,
         net::{IpAddr, Ipv4Addr, SocketAddr},
         num::{NonZero, NonZeroU64},
@@ -843,7 +847,6 @@ pub struct TestValidator {
     preserve_ledger: bool,
     rpc_pubsub_url: String,
     rpc_url: String,
-    tpu: SocketAddr,
     tpu_quic: SocketAddr,
     gossip: SocketAddr,
     validator: Option<Validator>,
@@ -982,14 +985,26 @@ impl TestValidator {
         let mint_lamports = 500_000_000 * LAMPORTS_PER_SOL;
 
         // Only activate features which are not explicitly deactivated.
-        let mut feature_set = FeatureSet::default().inactive().clone();
+        let mut feature_set = FeatureSet::all_enabled();
         for feature in &config.deactivate_feature_set {
-            if feature_set.remove(feature) {
-                info!("Feature for {feature:?} deactivated")
+            if FEATURE_NAMES.contains_key(feature) {
+                feature_set.deactivate(feature);
+                info!("Feature for {feature:?} deactivated");
             } else {
                 warn!("Feature {feature:?} set for deactivation is not a known Feature public key",)
             }
         }
+
+        let runtime_features = feature_set.runtime_features();
+        let program_runtime_environment = create_program_runtime_environment_v1(
+            &runtime_features,
+            &SVMTransactionExecutionBudget::new_with_defaults(
+                runtime_features.raise_cpi_nesting_limit_to_8,
+            ),
+            true,
+            false,
+        )?;
+        let program_runtime_environment = Arc::new(program_runtime_environment);
 
         let mut accounts = config.accounts.clone();
         for (address, account) in solana_program_binaries::spl_programs(&config.rent) {
@@ -997,13 +1012,20 @@ impl TestValidator {
         }
         for (address, account) in
             solana_program_binaries::core_bpf_programs(&config.rent, |feature_id| {
-                feature_set.contains(feature_id)
+                feature_set.is_active(feature_id)
             })
         {
             accounts.entry(address).or_insert(account);
         }
         for upgradeable_program in &config.upgradeable_programs {
             let data = solana_program_test::read_file(&upgradeable_program.program_path);
+            let executable =
+                Executable::<InvokeContext>::from_elf(&data, program_runtime_environment.clone())
+                    .map_err(|err| format!("ELF error: {err}"))?;
+            executable
+                .verify::<RequisiteVerifier>()
+                .map_err(|err| format!("ELF error: {err}"))?;
+
             let (programdata_address, _) = Pubkey::find_program_address(
                 &[upgradeable_program.program_id.as_ref()],
                 &upgradeable_program.loader,
@@ -1097,6 +1119,7 @@ impl TestValidator {
             config.fee_rate_governor.clone(),
             config.rent.clone(),
             solana_cluster_type::ClusterType::Development,
+            &feature_set,
             accounts.into_iter().collect(),
         );
         genesis_config.epoch_schedule = config
@@ -1111,13 +1134,6 @@ impl TestValidator {
 
         if let Some(inflation) = config.inflation {
             genesis_config.inflation = inflation;
-        }
-
-        for feature in feature_set {
-            // TODO: remove after cli change for bls_pubkey_management_in_vote_account is checked in
-            if feature != agave_feature_set::bls_pubkey_management_in_vote_account::id() {
-                genesis_utils::activate_feature(&mut genesis_config, feature);
-            }
         }
 
         let ledger_path = match &config.ledger_path {
@@ -1205,7 +1221,6 @@ impl TestValidator {
                 num_tvu_retransmit_sockets: NonZero::new(1).unwrap(),
                 num_quic_endpoints: NonZero::new(DEFAULT_QUIC_ENDPOINTS)
                     .expect("Number of QUIC endpoints can not be zero"),
-                vortexor_receiver_addr: None,
             };
             let mut node =
                 Node::new_with_external_ip(&validator_identity.pubkey(), validator_node_config);
@@ -1225,8 +1240,7 @@ impl TestValidator {
         let vote_account_address = validator_vote_account.pubkey();
         let rpc_url = format!("http://{}", node.info.rpc().unwrap());
         let rpc_pubsub_url = format!("ws://{}/", node.info.rpc_pubsub().unwrap());
-        let tpu = node.info.tpu(Protocol::UDP).unwrap();
-        let tpu_quic = node.info.tpu(Protocol::QUIC).unwrap_or(tpu);
+        let tpu_quic = node.info.tpu(Protocol::QUIC).unwrap();
         let gossip = node.info.gossip().unwrap();
 
         {
@@ -1330,6 +1344,7 @@ impl TestValidator {
             socket_addr_space,
             ValidatorTpuConfig::new_for_tests(),
             config.admin_rpc_service_post_init.clone(),
+            None,
         )?);
 
         let test_validator = TestValidator {
@@ -1337,7 +1352,6 @@ impl TestValidator {
             preserve_ledger,
             rpc_pubsub_url,
             rpc_url,
-            tpu,
             tpu_quic,
             gossip,
             validator,
@@ -1469,11 +1483,6 @@ impl TestValidator {
         panic!("Timeout waiting for program to become usable");
     }
 
-    /// Return the validator's TPU address
-    pub fn tpu(&self) -> &SocketAddr {
-        &self.tpu
-    }
-
     /// Return the validator's TPU QUIC address
     pub fn tpu_quic(&self) -> &SocketAddr {
         &self.tpu_quic
@@ -1586,9 +1595,11 @@ mod test {
             blockhash,
         );
 
-        assert!(rpc_client
-            .send_and_confirm_transaction(&transaction)
-            .is_ok());
+        assert!(
+            rpc_client
+                .send_and_confirm_transaction(&transaction)
+                .is_ok()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1612,10 +1623,12 @@ mod test {
             blockhash,
         );
 
-        assert!(rpc_client
-            .send_and_confirm_transaction(&transaction)
-            .await
-            .is_ok());
+        assert!(
+            rpc_client
+                .send_and_confirm_transaction(&transaction)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1634,6 +1647,8 @@ mod test {
             agave_feature_set::disable_fees_sysvar::id(),
             alpenglow::id(),
             agave_feature_set::bls_pubkey_management_in_vote_account::id(),
+            agave_feature_set::vote_account_initialize_v2::id(),
+            agave_feature_set::validator_admission_ticket::id(),
         ]
         .into_iter()
         .for_each(|feature| {

@@ -1,12 +1,13 @@
 use {
     crate::{
-        instruction_accounts::BorrowedInstructionAccount,
+        IndexOfAccount,
+        instruction_accounts::{BorrowedInstructionAccount, InstructionAccount},
+        transaction::TransactionContext,
         vm_addresses::{
             GUEST_INSTRUCTION_ACCOUNT_BASE_ADDRESS, GUEST_INSTRUCTION_DATA_BASE_ADDRESS,
             GUEST_REGION_SIZE,
         },
         vm_slice::VmSlice,
-        IndexOfAccount, InstructionAccount, TransactionContext,
     },
     solana_account::ReadableAccount,
     solana_instruction::error::InstructionError,
@@ -24,7 +25,7 @@ pub struct InstructionFrame {
     pub nesting_level: u16,
     /// This is the index of the parent instruction if this is a CPI and u16::MAX if this is a
     /// top-level instruction
-    pub index_of_parent_instruction: u16,
+    pub index_of_caller_instruction: u16,
     pub instruction_accounts: VmSlice<InstructionAccount>,
     pub instruction_data: VmSlice<u8>,
 }
@@ -34,7 +35,7 @@ impl Default for InstructionFrame {
         InstructionFrame {
             nesting_level: 0,
             program_account_index_in_tx: 0,
-            index_of_parent_instruction: u16::MAX,
+            index_of_caller_instruction: u16::MAX,
             // Using u64::MAX as the default pointer value, since it shall never be accessible.
             instruction_accounts: VmSlice::new(0, 0),
             instruction_data: VmSlice::new(0, 0),
@@ -43,6 +44,7 @@ impl Default for InstructionFrame {
     }
 }
 
+#[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
 impl InstructionFrame {
     pub fn configure_vm_slices(
         &mut self,
@@ -73,6 +75,7 @@ pub struct InstructionContext<'a, 'ix_data> {
     // The rest of the fields are redundant shortcuts
     pub(crate) index_in_trace: usize,
     pub(crate) nesting_level: usize,
+    pub(crate) index_of_caller_instruction: usize,
     pub(crate) program_account_index_in_tx: IndexOfAccount,
     pub(crate) instruction_accounts: &'a [InstructionAccount],
     pub(crate) dedup_map: &'a [u16],
@@ -83,6 +86,11 @@ impl<'a> InstructionContext<'a, '_> {
     /// How many Instructions were on the trace before this one was pushed
     pub fn get_index_in_trace(&self) -> usize {
         self.index_in_trace
+    }
+
+    /// Returns the index of the instruction that called into this one.
+    pub fn get_index_of_caller(&self) -> usize {
+        self.index_of_caller_instruction
     }
 
     /// How many Instructions were on the stack after this one was pushed

@@ -23,10 +23,10 @@ use {
     },
     itertools::Itertools,
     rand::{
-        distr::{weighted::WeightedIndex, Distribution},
         Rng,
+        distr::{Distribution, weighted::WeightedIndex},
     },
-    rayon::{prelude::*, ThreadPool},
+    rayon::{ThreadPool, prelude::*},
     serde::{Deserialize, Serialize},
     solana_bloom::bloom::{Bloom, ConcurrentBloom},
     solana_hash::Hash,
@@ -43,8 +43,8 @@ use {
         net::SocketAddr,
         ops::Index,
         sync::{
-            atomic::{AtomicI64, AtomicUsize, Ordering},
             LazyLock, Mutex, RwLock,
+            atomic::{AtomicI64, AtomicUsize, Ordering},
         },
         time::Duration,
     },
@@ -680,7 +680,7 @@ pub(crate) mod tests {
             protocol::Protocol,
         },
         itertools::Itertools,
-        rand::{prelude::IndexedRandom as _, SeedableRng},
+        rand::{SeedableRng, prelude::IndexedRandom as _},
         rand_chacha::ChaChaRng,
         rayon::ThreadPoolBuilder,
         solana_hash::HASH_BYTES,
@@ -1571,7 +1571,7 @@ pub(crate) mod tests {
         };
         {
             let caller: CrdsValue = CrdsValue::new(CrdsData::from(&node), &keypair);
-            assert_eq!(get_max_bloom_filter_bytes(&caller), 1175);
+            assert_eq!(get_max_bloom_filter_bytes(&caller), 1184);
             verify_get_max_bloom_filter_bytes(&mut rng, &caller, num_items);
         }
         let node = {
@@ -1583,7 +1583,7 @@ pub(crate) mod tests {
         };
         {
             let caller = CrdsValue::new(CrdsData::from(&node), &keypair);
-            assert_eq!(get_max_bloom_filter_bytes(&caller), 1155);
+            assert_eq!(get_max_bloom_filter_bytes(&caller), 1165);
             verify_get_max_bloom_filter_bytes(&mut rng, &caller, num_items);
         }
     }

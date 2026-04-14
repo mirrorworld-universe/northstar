@@ -11,9 +11,9 @@ use {
         result::{Error, Result},
     },
     agave_feature_set as feature_set,
-    crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender},
-    rayon::{prelude::*, ThreadPool},
-    solana_clock::{Slot, DEFAULT_MS_PER_SLOT},
+    crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded},
+    rayon::{ThreadPool, prelude::*},
+    solana_clock::{DEFAULT_MS_PER_SLOT, Slot},
     solana_gossip::cluster_info::ClusterInfo,
     solana_ledger::{
         blockstore::{Blockstore, BlockstoreInsertionMetrics, PossibleDuplicateShred},
@@ -30,8 +30,8 @@ use {
         borrow::Cow,
         net::UdpSocket,
         sync::{
-            atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc, RwLock,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         thread::{self, Builder, JoinHandle},
         time::{Duration, Instant},
@@ -118,8 +118,8 @@ fn run_check_duplicate(
             root_bank = bank_forks.read().unwrap().root_bank();
         }
         let shred_slot = shred.slot();
-        let chained_merkle_conflict_duplicate_proofs = cluster_nodes::check_feature_activation(
-            &feature_set::chained_merkle_conflict_duplicate_proofs::id(),
+        let validate_chained_block_id = cluster_nodes::check_feature_activation(
+            &feature_set::validate_chained_block_id::id(),
             shred_slot,
             &root_bank,
         );
@@ -127,23 +127,13 @@ fn run_check_duplicate(
             PossibleDuplicateShred::LastIndexConflict(shred, conflict)
             | PossibleDuplicateShred::ErasureConflict(shred, conflict)
             | PossibleDuplicateShred::MerkleRootConflict(shred, conflict) => (shred, conflict),
-            PossibleDuplicateShred::ChainedMerkleRootConflict(shred, conflict) => {
-                if chained_merkle_conflict_duplicate_proofs {
-                    // Although this proof can be immediately stored on detection, we wait until
-                    // here in order to check the feature flag, as storage in blockstore can
-                    // preclude the detection of other duplicate proofs in this slot
-                    if blockstore.has_duplicate_shreds_in_slot(shred_slot) {
-                        return Ok(());
-                    }
-                    blockstore.store_duplicate_slot(
-                        shred_slot,
-                        conflict.clone(),
-                        shred.clone().into_payload(),
-                    )?;
-                    (shred, conflict)
-                } else {
-                    return Ok(());
+            PossibleDuplicateShred::ChainedMerkleRootConflict(_shred, _conflict) => {
+                if validate_chained_block_id {
+                    // Although chained merkle roots are not necessary for agave duplicate resolution protocols,
+                    // We still need to mark the block as dead for other client teams.
+                    blockstore.set_dead_slot(shred_slot)?;
                 }
+                return Ok(());
             }
             PossibleDuplicateShred::Exists(shred) => {
                 // Unlike the other cases we have to wait until here to decide to handle the duplicate and store
@@ -189,7 +179,6 @@ fn run_insert<F>(
     completed_data_sets_sender: Option<&CompletedDataSetsSender>,
     retransmit_sender: &EvictingSender<Vec<shred::Payload>>,
     reed_solomon_cache: &ReedSolomonCache,
-    accept_repairs_only: bool,
 ) -> Result<()>
 where
     F: Fn(PossibleDuplicateShred),
@@ -202,9 +191,6 @@ where
     ws_metrics.shred_receiver_elapsed_us += shred_receiver_elapsed.as_us();
     ws_metrics.run_insert_count += 1;
     let handle_shred = |(shred, repair): (shred::Payload, bool)| {
-        if accept_repairs_only && !repair {
-            return None;
-        }
         if repair {
             ws_metrics.num_repairs.fetch_add(1, Ordering::Relaxed);
         }
@@ -284,10 +270,6 @@ impl WindowService {
         let cluster_info = repair_info.cluster_info.clone();
         let bank_forks = repair_info.bank_forks.clone();
 
-        // In wen_restart, we discard all shreds from Turbine and keep only those from repair to
-        // avoid new shreds make validator OOM before wen_restart is over.
-        let accept_repairs_only = repair_info.wen_restart_repair_slots.is_some();
-
         let WindowServiceChannels {
             verified_receiver,
             retransmit_sender,
@@ -302,7 +284,7 @@ impl WindowService {
             repair_socket,
             ancestor_hashes_socket,
             repair_info,
-            outstanding_repair_requests.clone(),
+            outstanding_repair_requests,
             repair_service_channels,
         );
 
@@ -325,7 +307,6 @@ impl WindowService {
             duplicate_sender,
             completed_data_sets_sender,
             retransmit_sender,
-            accept_repairs_only,
         );
 
         WindowService {
@@ -374,7 +355,6 @@ impl WindowService {
         check_duplicate_sender: Sender<PossibleDuplicateShred>,
         completed_data_sets_sender: Option<CompletedDataSetsSender>,
         retransmit_sender: EvictingSender<Vec<shred::Payload>>,
-        accept_repairs_only: bool,
     ) -> JoinHandle<()> {
         let handle_error = || {
             inc_new_counter_error!("solana-window-insert-error", 1, 1);
@@ -410,7 +390,6 @@ impl WindowService {
                         completed_data_sets_sender.as_ref(),
                         &retransmit_sender,
                         &reed_solomon_cache,
-                        accept_repairs_only,
                     ) {
                         ws_metrics.record_error(&e);
                         if Self::should_exit_on_error(e, &handle_error) {
@@ -458,12 +437,12 @@ mod test {
     use {
         super::*,
         rand::Rng,
-        solana_entry::entry::{create_ticks, Entry},
+        solana_entry::entry::{Entry, create_ticks},
         solana_gossip::contact_info::ContactInfo,
         solana_hash::Hash,
         solana_keypair::Keypair,
         solana_ledger::{
-            blockstore::{make_many_slot_entries, Blockstore},
+            blockstore::{Blockstore, make_many_slot_entries},
             genesis_utils::create_genesis_config,
             get_tmp_ledger_path_auto_delete,
             shred::{ProcessShredsStats, Shredder},
