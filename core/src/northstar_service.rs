@@ -91,7 +91,7 @@ impl NorthStarService {
                     for event in l1_events {
                         match event {
                             L1Event::SessionOpened {
-                                session_pda: _,
+                                session_pda,
                                 owner: _,
                                 grid_id: _,
                                 ttl_slots: _,
@@ -99,17 +99,24 @@ impl NorthStarService {
                             } if !manager.has_active_runtime() => {
                                 info!(
                                     "SessionOpened detected at slot {}, activating ephemeral \
-                                     runtime",
+                                     runtime (PDA={session_pda})",
                                     bank.slot()
                                 );
-                                // Sonic: Re-fork from CURRENT L1 root bank
                                 let l1_root = bank_forks.read().unwrap().root_bank();
                                 trace!(
                                     "L1 root for ER activation: slot={}, epoch={}",
                                     l1_root.slot(),
                                     l1_root.epoch(),
                                 );
-                                manager.activate_session(l1_root);
+                                manager.activate_session(l1_root, session_pda);
+                            }
+                            L1Event::SessionClosed { session_pda, .. } => {
+                                info!(
+                                    "SessionClosed at slot {}, deactivating ER (PDA={})",
+                                    bank.slot(),
+                                    session_pda,
+                                );
+                                manager.deactivate_session();
                             }
                             L1Event::AccountDelegated {
                                 delegated_account, ..

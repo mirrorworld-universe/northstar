@@ -254,6 +254,8 @@ pub struct JsonRpcRequestProcessor {
     runtime: Arc<Runtime>,
     /// Sonic: Optional set of delegated account pubkeys for ephemeral rollup RPC.
     pub(crate) delegated_accounts: Option<Arc<RwLock<HashSet<Pubkey>>>>,
+    /// Sonic: Optional session PDA for ephemeral rollup RPC.
+    pub(crate) session_pda: Option<Arc<RwLock<Option<Pubkey>>>>,
 }
 impl Metadata for JsonRpcRequestProcessor {}
 
@@ -440,6 +442,7 @@ impl JsonRpcRequestProcessor {
                 prioritization_fee_cache,
                 runtime,
                 delegated_accounts: None,
+                session_pda: None,
             },
             transaction_receiver,
         )
@@ -448,6 +451,11 @@ impl JsonRpcRequestProcessor {
     /// Sonic: Set the delegated accounts for ephemeral rollup RPC.
     pub fn set_delegated_accounts(&mut self, accounts: Arc<RwLock<HashSet<Pubkey>>>) {
         self.delegated_accounts = Some(accounts);
+    }
+
+    /// Sonic: Set the session PDA for ephemeral rollup RPC.
+    pub fn set_session_pda(&mut self, pda: Arc<RwLock<Option<Pubkey>>>) {
+        self.session_pda = Some(pda);
     }
 
     #[cfg(test)]
@@ -529,6 +537,7 @@ impl JsonRpcRequestProcessor {
             prioritization_fee_cache: Some(Arc::new(PrioritizationFeeCache::default())),
             runtime,
             delegated_accounts: None,
+            session_pda: None,
         }
     }
 

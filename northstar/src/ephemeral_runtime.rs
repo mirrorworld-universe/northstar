@@ -70,6 +70,8 @@ pub struct EphemeralRuntime {
     /// Sonic: When false, the tx_client rejects all transactions.
     /// Set to true when an ephemeral session is active.
     active: Arc<AtomicBool>,
+    /// Sonic: Current session PDA, shared with the RPC handler.
+    session_pda: Arc<RwLock<Option<Pubkey>>>,
     _portal_program_id: Pubkey,
 
     _tx_client: EphemeralTransactionClient,
@@ -180,6 +182,7 @@ impl EphemeralRuntime {
         let touched_accounts = Arc::new(RwLock::new(HashSet::new()));
         // Sonic: Starts inactive — transactions rejected until activate() is called
         let active = Arc::new(AtomicBool::new(false));
+        let session_pda: Arc<RwLock<Option<Pubkey>>> = Arc::new(RwLock::new(None));
         let tx_client = EphemeralTransactionClient::new(
             bank_forks.clone(),
             delegated_set.clone(),
@@ -260,6 +263,7 @@ impl EphemeralRuntime {
             None,
             runtime.clone(),
             Some(delegated_set.clone()),
+            Some(session_pda.clone()),
         )?;
 
         // Sonic: Start PubSub WebSocket service
@@ -303,17 +307,8 @@ impl EphemeralRuntime {
             initial_bank.slot()
         );
 
-        let slot_advancer = crate::slot_advancer::SlotAdvancer::new(
-            bank_forks.clone(),
-            block_commitment_cache.clone(),
-            initial_bank,
-            crate::slot_advancer::Config {
-                slot_duration: Duration::from_millis(400),
-                manager_account: Pubkey::default(),
-            },
-            advancer_exit.clone(),
-            Some(rpc_subscriptions.clone()),
-        );
+        // Slot advancer is NOT started here — it will be started
+        // when activate() is called (session opened).
 
         Ok(Self {
             bank_forks,
@@ -329,11 +324,12 @@ impl EphemeralRuntime {
             tpu_addr: actual_tpu_addr,
             rpc_exit,
             advancer_exit,
-            slot_advancer: Some(slot_advancer),
+            slot_advancer: None,
             initial_account_snapshots,
             delegated_accounts: delegated_set,
             touched_accounts,
             active,
+            session_pda,
             _portal_program_id: portal_program_id,
 
             _settings: settings,
@@ -357,21 +353,60 @@ impl EphemeralRuntime {
         self.tpu_addr
     }
 
-    /// Sonic: Activate the ephemeral rollup — transactions will be accepted.
-    pub fn activate(&self) {
+    /// Sonic: Activate the ephemeral rollup — starts slot advancer
+    /// and begins accepting transactions.
+    pub fn activate(&mut self) {
         info!("Activating ephemeral rollup at {}", self.rpc_addr);
         self.active.store(true, Ordering::Relaxed);
+
+        // Start slot advancer if not already running
+        if self.slot_advancer.is_none() {
+            let advancer_exit = Arc::new(AtomicBool::new(false));
+            self.advancer_exit = advancer_exit.clone();
+            let initial_bank = self.bank_forks.read().unwrap().working_bank();
+            self.slot_advancer = Some(crate::slot_advancer::SlotAdvancer::new(
+                self.bank_forks.clone(),
+                self.block_commitment_cache.clone(),
+                initial_bank,
+                crate::slot_advancer::Config {
+                    slot_duration: Duration::from_millis(400),
+                    manager_account: Pubkey::default(),
+                },
+                advancer_exit,
+                Some(self.rpc_subscriptions.clone()),
+            ));
+        }
     }
 
-    /// Sonic: Deactivate the ephemeral rollup — transactions will be rejected.
-    pub fn deactivate(&self) {
+    /// Sonic: Deactivate the ephemeral rollup — stops slot advancer
+    /// and rejects transactions.
+    pub fn deactivate(&mut self) {
         info!("Deactivating ephemeral rollup at {}", self.rpc_addr);
         self.active.store(false, Ordering::Relaxed);
+
+        // Stop slot advancer
+        self.advancer_exit.store(true, Ordering::Relaxed);
+        if let Some(advancer) = self.slot_advancer.take() {
+            advancer.join();
+        }
+
+        // Clear session PDA
+        *self.session_pda.write().unwrap() = None;
     }
 
     /// Sonic: Check if the ephemeral rollup is accepting transactions.
     pub fn is_active(&self) -> bool {
         self.active.load(Ordering::Relaxed)
+    }
+
+    /// Sonic: Set the current session PDA.
+    pub fn set_session_pda(&self, pda: Pubkey) {
+        *self.session_pda.write().unwrap() = Some(pda);
+    }
+
+    /// Sonic: Get a clone of the session PDA Arc for sharing with RPC.
+    pub fn session_pda(&self) -> Arc<RwLock<Option<Pubkey>>> {
+        self.session_pda.clone()
     }
 
     pub fn bank(&self) -> Arc<Bank> {

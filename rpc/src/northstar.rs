@@ -7,6 +7,9 @@ pub trait NorthStar {
 
     #[rpc(meta, name = "getDelegatedAccounts")]
     fn get_delegated_accounts(&self, meta: Self::Metadata) -> Result<Vec<String>>;
+
+    #[rpc(meta, name = "getSessionPda")]
+    fn get_session_pda(&self, meta: Self::Metadata) -> Result<Option<String>>;
 }
 
 pub struct NorthStarImpl;
@@ -23,6 +26,21 @@ impl NorthStar for NorthStarImpl {
             None => Err(jsonrpc_core::Error {
                 code: jsonrpc_core::ErrorCode::InvalidRequest,
                 message: "getDelegatedAccounts is not available on this node".to_string(),
+                data: None,
+            }),
+        }
+    }
+
+    fn get_session_pda(&self, meta: Self::Metadata) -> Result<Option<String>> {
+        debug!("get_session_pda rpc request received");
+        match &meta.session_pda {
+            Some(pda_lock) => {
+                let pda = pda_lock.read().unwrap();
+                Ok(pda.map(|p| p.to_string()))
+            }
+            None => Err(jsonrpc_core::Error {
+                code: jsonrpc_core::ErrorCode::InvalidRequest,
+                message: "getSessionPda is not available on this node".to_string(),
                 data: None,
             }),
         }
