@@ -328,6 +328,13 @@ impl Manager {
             return Ok(());
         }
 
+        trace!(
+            "init_runtime: root_bank slot={}, epoch={}, slots_per_epoch={}",
+            root_bank.slot(),
+            root_bank.epoch(),
+            root_bank.get_slots_in_epoch(root_bank.epoch()),
+        );
+
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::default(),
             owner: Pubkey::default(),
@@ -364,8 +371,14 @@ impl Manager {
     /// and starts accepting transactions.
     pub fn activate_session(&mut self, root_bank: Arc<Bank>) {
         if let Some(runtime) = &mut self.runtime {
+            trace!(
+                "activate_session: resetting to L1 root slot={}, epoch={}",
+                root_bank.slot(),
+                root_bank.epoch(),
+            );
             runtime.reset_to_new_parent(root_bank);
             runtime.activate();
+            info!("Ephemeral session activated");
         } else {
             warn!("Cannot activate session: runtime not initialized");
         }

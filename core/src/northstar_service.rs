@@ -104,6 +104,11 @@ impl NorthStarService {
                                 );
                                 // Sonic: Re-fork from CURRENT L1 root bank
                                 let l1_root = bank_forks.read().unwrap().root_bank();
+                                trace!(
+                                    "L1 root for ER activation: slot={}, epoch={}",
+                                    l1_root.slot(),
+                                    l1_root.epoch(),
+                                );
                                 manager.activate_session(l1_root);
                             }
                             L1Event::AccountDelegated {

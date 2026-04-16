@@ -165,6 +165,55 @@ impl BankForks {
         bank_forks
     }
 
+    /// Create BankForks for an ephemeral rollup.
+    ///
+    /// Unlike [`new_rw_arc`], this only sets the fork-graph reference in
+    /// the `ProgramCache` when one isn't already present. In production
+    /// the ER bank inherits its parent's `ProgramCache` which already
+    /// points to the L1 `BankForks`; overwriting it would cause L1
+    /// banking threads to panic when `Weak::upgrade()` fails.
+    /// In unit tests the bank is standalone so no fork-graph exists yet
+    /// and we must install one.
+    pub fn new_rw_arc_ephemeral(root_bank: Bank) -> Arc<RwLock<Self>> {
+        let has_fork_graph = root_bank.has_fork_graph_in_program_cache();
+
+        let root_bank = Arc::new(root_bank);
+        let root_slot = root_bank.slot();
+
+        let mut banks = HashMap::new();
+        banks.insert(
+            root_slot,
+            BankWithScheduler::new_without_scheduler(root_bank.clone()),
+        );
+
+        let mut descendants = HashMap::<_, HashSet<_>>::new();
+        descendants.entry(root_slot).or_default();
+
+        let migration_status = Arc::new(Self::initialize_migration_status(&root_bank));
+
+        let bank_forks = Arc::new(RwLock::new(Self {
+            root: Arc::new(AtomicSlot::new(root_slot)),
+            working_slot: root_slot,
+            sharable_banks: SharableBanks {
+                root_bank: Arc::new(ArcSwap::from(root_bank.clone())),
+                working_bank: Arc::new(ArcSwap::from(root_bank.clone())),
+            },
+            banks,
+            descendants,
+            highest_slot_at_startup: 0,
+            scheduler_pool: None,
+            migration_status,
+        }));
+
+        if !has_fork_graph {
+            // Standalone bank (unit tests) — install ourselves as fork graph.
+            root_bank.set_fork_graph_in_program_cache(Arc::downgrade(&bank_forks));
+        }
+        // Otherwise: production ER — keep L1's fork graph intact.
+
+        bank_forks
+    }
+
     /// Based on the current feature flag activation and genesis certificate account in the root bank,
     /// determine which phase of the migration we are in and initialize accordingly.
     fn initialize_migration_status(root_bank: &Bank) -> MigrationStatus {
