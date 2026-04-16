@@ -219,9 +219,20 @@ impl Manager {
     }
 
     pub fn get_l1_events(&self, bank: &Bank) -> Vec<L1Event> {
-        bank.get_program_accounts_modified_since_parent(&self.config.portal_program_id)
+        bank.get_all_accounts_modified_since_parent()
             .into_iter()
-            .filter_map(|(pubkey, account)| self.parse_event(bank, pubkey, account))
+            .filter_map(|(pubkey, account)| {
+                if account.owner() == &self.config.portal_program_id {
+                    self.parse_event(bank, pubkey, account)
+                } else {
+                    bank.parent()
+                        .and_then(|parent| parent.get_account(&pubkey))
+                        .filter(|parent_account| {
+                            parent_account.owner() == &self.config.portal_program_id
+                        })
+                        .and_then(|_| self.parse_zeroed_account(bank, &pubkey))
+                }
+            })
             .collect()
     }
 

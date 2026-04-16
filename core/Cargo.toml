@@ -201,9 +201,12 @@ criterion = { workspace = true }
 fs_extra = { workspace = true }
 serde_json = { workspace = true }
 serial_test = { workspace = true }
+borsh = { workspace = true }
+northstar-portal = { workspace = true }
 solana-account = { workspace = true, features = ["dev-context-only-utils"] }
 solana-bpf-loader-program = { workspace = true }
 solana-client = { workspace = true, features = ["dev-context-only-utils"] }
+solana-commitment-config = { workspace = true }
 solana-compute-budget-interface = { workspace = true }
 solana-compute-budget-program = { workspace = true }
 # See order-crates-for-publishing.py for using this unusual `path = "."`
@@ -216,6 +219,7 @@ solana-poh = { workspace = true, features = ["dev-context-only-utils"] }
 solana-program-binaries = { workspace = true }
 solana-program-runtime = { workspace = true, features = ["metrics"] }
 solana-rpc = { workspace = true, features = ["dev-context-only-utils"] }
+solana-rpc-client-api = { workspace = true }
 solana-system-program = { workspace = true }
 solana-unified-scheduler-pool = { workspace = true, features = [
     "dev-context-only-utils",
