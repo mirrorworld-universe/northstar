@@ -1473,3 +1473,257 @@ mod portal_e2e_tests {
         );
     }
 }
+
+/// Regression coverage for the AccountsBackgroundService panic in
+/// `purge_slot_cache_pubkeys` that devnet hit on Apr 17 2026:
+///
+/// ```text
+/// thread 'solAcctsBgSvc' panicked at accounts-db/src/accounts_db.rs:4229:9:
+/// assertion failed: self.storage
+///     .get_slot_storage_entry_shrinking_in_progress_ok(purged_slot)
+///     .is_none()
+/// ```
+///
+/// The root cause is ER + L1 sharing a single `AccountsDb`. If the ER ever
+/// commits accounts at a slot the L1 later roots, the L1's background
+/// flush trips the invariant. The fix is twofold:
+///
+/// 1. ER banks are constructed via `Bank::new_from_parent_ephemeral`, which
+///    suppresses all epoch-boundary side effects that would poison shared
+///    consensus state.
+/// 2. `EphemeralRuntime::er_slot_for` places ER banks at `parent.slot + 2^40`
+///    so the L1 cannot realistically catch up.
+///
+/// This test runs a real `AccountsBackgroundService` against an L1
+/// `BankForks` while an `EphemeralRuntime` commits transactions on the same
+/// `AccountsDb`, advances L1 roots, and asserts ABS stays healthy.
+#[cfg(test)]
+mod ephemeral_accounts_background_service_regression {
+    use {
+        super::{EphemeralRollupSettings, ephemeral_runtime::EphemeralRuntime},
+        agave_logger::setup,
+        agave_snapshots::{SnapshotInterval, snapshot_config::SnapshotConfig},
+        crossbeam_channel::unbounded,
+        solana_genesis_config::GenesisConfig,
+        solana_gossip::{cluster_info::ClusterInfo, contact_info::ContactInfo},
+        solana_keypair::Keypair,
+        solana_message::Message,
+        solana_net_utils::SocketAddrSpace,
+        solana_pubkey::Pubkey,
+        solana_runtime::{
+            accounts_background_service::{
+                AbsRequestHandlers, AccountsBackgroundService, PendingSnapshotPackages,
+                PrunedBanksRequestHandler, SendDroppedBankCallback, SnapshotRequestHandler,
+            },
+            bank::Bank,
+            snapshot_controller::SnapshotController,
+        },
+        solana_sdk_ids::system_program,
+        solana_signer::Signer,
+        solana_svm::transaction_processor::ExecutionRecordingConfig,
+        solana_system_interface::instruction::transfer,
+        solana_transaction::Transaction,
+        std::{
+            net::TcpListener,
+            num::NonZeroU64,
+            sync::{
+                Arc, Mutex,
+                atomic::{AtomicBool, Ordering},
+            },
+            thread::sleep,
+            time::Duration,
+        },
+        tempfile::TempDir,
+    };
+
+    fn find_free_addr() -> std::net::SocketAddr {
+        TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+    }
+
+    fn cluster_info() -> Arc<ClusterInfo> {
+        let keypair = Arc::new(Keypair::new());
+        Arc::new(ClusterInfo::new(
+            ContactInfo::new_localhost(&keypair.pubkey(), 0),
+            keypair,
+            SocketAddrSpace::Unspecified,
+        ))
+    }
+
+    #[test]
+    fn abs_does_not_panic_while_er_shares_accounts_db() {
+        setup();
+
+        // Fund a sender on the L1 root bank, wrap in BankForks.
+        let genesis_config = GenesisConfig::new(&[], &[]);
+        let (root_bank, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
+        let sender = Keypair::new();
+        let initial_lamports = 100_000_000_000u64;
+        root_bank.store_account(
+            &sender.pubkey(),
+            &solana_account::AccountSharedData::new(initial_lamports, 0, &system_program::id()),
+        );
+        root_bank.fill_bank_with_ticks_for_tests();
+        root_bank.freeze();
+
+        // Wire ABS drop-callback plumbing against the L1 BankForks.
+        root_bank
+            .rc
+            .accounts
+            .accounts_db
+            .enable_bank_drop_callback();
+        let (pruned_banks_sender, pruned_banks_receiver) = unbounded();
+        for bank in bank_forks.read().unwrap().banks().values() {
+            bank.set_callback(Some(Box::new(SendDroppedBankCallback::new(
+                pruned_banks_sender.clone(),
+            ))));
+        }
+
+        // Start ER against the current L1 root.
+        let l1_parent = bank_forks.read().unwrap().root_bank();
+        let er_settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 10_000,
+            fee_cap: 1_000,
+            delegated_accounts: vec![],
+        };
+        let mut er_runtime = EphemeralRuntime::new(
+            l1_parent.clone(),
+            cluster_info(),
+            er_settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        let initial_er_slot = er_runtime.bank().slot();
+
+        // Commit a handful of transactions on the ER. Each commit writes to
+        // the shared AccountsDb at the ER slot, populating its slot cache
+        // and (on freeze/flush) its storage.
+        for i in 0..8u64 {
+            let er_bank = er_runtime.bank();
+            let blockhash = er_bank.last_blockhash();
+            let recipient = Pubkey::new_unique();
+            let tx = Transaction::new_unsigned(Message::new_with_blockhash(
+                &[transfer(&sender.pubkey(), &recipient, 1_000 + i)],
+                Some(&sender.pubkey()),
+                &blockhash,
+            ));
+            let batch = er_bank.prepare_batch_for_tests(vec![tx]);
+            let mut timings = solana_svm_timings::ExecuteTimings::default();
+            let _ = er_bank.load_execute_and_commit_transactions(
+                &batch,
+                solana_clock::MAX_PROCESSING_AGE,
+                ExecutionRecordingConfig::default(),
+                &mut timings,
+                None,
+            );
+        }
+
+        // Spin up AccountsBackgroundService on the L1 BankForks.
+        let (snapshot_request_sender, snapshot_request_receiver) = unbounded();
+        let pending_snapshot_packages = Arc::new(Mutex::new(PendingSnapshotPackages::default()));
+        let full_dir = TempDir::new().unwrap();
+        let incr_dir = TempDir::new().unwrap();
+        let bank_snap_dir = TempDir::new().unwrap();
+        let snapshot_config = SnapshotConfig {
+            full_snapshot_archive_interval: SnapshotInterval::Slots(NonZeroU64::new(4).unwrap()),
+            incremental_snapshot_archive_interval: SnapshotInterval::Slots(
+                NonZeroU64::new(2).unwrap(),
+            ),
+            full_snapshot_archives_dir: full_dir.path().to_path_buf(),
+            incremental_snapshot_archives_dir: incr_dir.path().to_path_buf(),
+            bank_snapshots_dir: bank_snap_dir.path().to_path_buf(),
+            ..SnapshotConfig::default()
+        };
+        let snapshot_controller = Arc::new(SnapshotController::new(
+            snapshot_request_sender,
+            snapshot_config,
+            bank_forks.read().unwrap().root(),
+        ));
+        let abs_handlers = AbsRequestHandlers {
+            snapshot_request_handler: SnapshotRequestHandler {
+                snapshot_controller: snapshot_controller.clone(),
+                snapshot_request_receiver,
+                pending_snapshot_packages,
+            },
+            pruned_banks_request_handler: PrunedBanksRequestHandler {
+                pruned_banks_receiver,
+            },
+        };
+        let exit = Arc::new(AtomicBool::new(false));
+        let abs = AccountsBackgroundService::new(bank_forks.clone(), exit.clone(), abs_handlers);
+
+        // Advance L1 through many slots and set roots regularly. On the old
+        // `er_slot_for` implementation (ER placed inside the parent's epoch)
+        // L1 would catch up to the ER's slot here and ABS would panic in
+        // `purge_slot_cache_pubkeys`.
+        const LAST_SLOT: u64 = 64;
+        const SET_ROOT_EVERY: u64 = 4;
+        for slot in 1..=LAST_SLOT {
+            let parent = bank_forks.read().unwrap().get(slot - 1).unwrap();
+            let child = Bank::new_from_parent(parent, &Pubkey::default(), slot);
+            let child = bank_forks
+                .write()
+                .unwrap()
+                .insert(child)
+                .clone_without_scheduler();
+            // A tiny tx per slot so the cache has real work to flush.
+            let recipient = Pubkey::new_unique();
+            let tx = Transaction::new_signed_with_payer(
+                &[transfer(&sender.pubkey(), &recipient, 1)],
+                Some(&sender.pubkey()),
+                &[&sender],
+                child.last_blockhash(),
+            );
+            let _ = child.process_transaction(&tx);
+            child.fill_bank_with_ticks_for_tests();
+            child.freeze();
+
+            if slot % SET_ROOT_EVERY == 0 {
+                bank_forks
+                    .write()
+                    .unwrap()
+                    .set_root(slot, Some(&snapshot_controller), None);
+            }
+
+            // Let ABS observe each batch.
+            sleep(Duration::from_millis(20));
+            assert!(
+                abs.status().is_running(),
+                "AccountsBackgroundService exited unexpectedly at slot {slot} — likely the \
+                 shared-AccountsDb purge_slot_cache_pubkeys panic",
+            );
+        }
+
+        // Shut everything down cleanly.
+        exit.store(true, Ordering::Relaxed);
+        abs.join()
+            .expect("AccountsBackgroundService thread panicked");
+
+        // Invariant: ER slots must be far enough ahead of any L1 slot the
+        // validator will realistically reach, so the shared AccountsDb
+        // never sees overlapping cache/storage entries. Require that the
+        // furthest ER slot is at least 2^30 slots ahead of the furthest L1
+        // slot we advanced to in this test.
+        const MIN_SLOT_GAP: u64 = 1u64 << 30;
+        let final_er_slot = er_runtime.bank().slot();
+        assert!(
+            initial_er_slot.saturating_sub(LAST_SLOT) >= MIN_SLOT_GAP,
+            "initial ER slot {initial_er_slot} is too close to L1 last slot {LAST_SLOT}",
+        );
+        assert!(
+            final_er_slot.saturating_sub(LAST_SLOT) >= MIN_SLOT_GAP,
+            "final ER slot {final_er_slot} is too close to L1 last slot {LAST_SLOT}",
+        );
+
+        er_runtime.shutdown();
+    }
+}

@@ -117,8 +117,11 @@ impl SlotAdvancer {
 
             current_slot += 1;
             let current_bank_slot = current_bank.slot();
-            let next_bank =
-                Bank::new_from_parent(current_bank, &config.manager_account, current_slot);
+            let next_bank = Bank::new_from_parent_ephemeral(
+                current_bank,
+                &config.manager_account,
+                current_slot,
+            );
 
             let next_bank_arc = {
                 let mut bank_forks_write = bank_forks.write().unwrap();

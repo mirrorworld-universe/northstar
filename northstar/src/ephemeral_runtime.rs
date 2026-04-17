@@ -89,25 +89,27 @@ impl EphemeralRuntime {
     /// We use 1 trillion which is unreachable by L1 in practice
     /// (at 2.5 slots/sec it would take ~14,000 years) but small enough to avoid
     /// arithmetic overflows in tick-height calculations.
-    /// Compute ER slot that stays in the same epoch as the parent.
+    /// Compute the ER slot used when spinning up an ephemeral fork.
     ///
-    /// The ER and L1 share the same AccountsDb; `Bank::new_from_parent`
-    /// triggers epoch-rewards distribution whenever the child slot falls
-    /// in a different epoch than the parent. To avoid that, we place the
-    /// ER slot within the parent's epoch but far enough ahead to never
-    /// collide with L1 slots.
+    /// The ER and L1 share the same `AccountsDb`. If an ER slot ever coincides
+    /// with a slot the L1 later reaches, the L1's `AccountsBackgroundService`
+    /// will panic in `purge_slot_cache_pubkeys` (the shared `AccountsStorage`
+    /// already has an entry for that slot, produced by the ER).
+    ///
+    /// We therefore place the ER at `parent.slot + ER_SLOT_OFFSET`, where the
+    /// offset is large enough that L1 can never catch up in any realistic
+    /// timeframe (2^40 slots ≈ 1.4e13 years at 2.5 slots/s) while still being
+    /// far below `Slot::MAX` so tick-height / block-height arithmetic never
+    /// overflows.
+    ///
+    /// Epoch safety is handled separately: ER banks are constructed with
+    /// `Bank::new_from_parent_ephemeral`, which suppresses all epoch-boundary
+    /// side effects (stake-history rebuild, `begin_partitioned_rewards`,
+    /// `update_epoch_stakes`, `distribute_partitioned_epoch_rewards`). That
+    /// makes it safe for the ER slot to land in an arbitrarily distant epoch.
     fn er_slot_for(parent: &Bank) -> u64 {
-        let slots_per_epoch = parent.get_slots_in_epoch(parent.epoch());
-        let epoch_start = parent.epoch() * slots_per_epoch;
-        // Use the last quarter of the epoch, well past any L1 slot
-        let er_base = epoch_start + slots_per_epoch * 3 / 4;
-        // If parent slot is already past er_base (very long-running),
-        // just go one slot ahead (same epoch guaranteed for small advance)
-        if parent.slot() >= er_base {
-            parent.slot() + 1
-        } else {
-            er_base + 1
-        }
+        const ER_SLOT_OFFSET: u64 = 1u64 << 40;
+        parent.slot().saturating_add(ER_SLOT_OFFSET)
     }
 
     pub fn new(
@@ -131,7 +133,11 @@ impl EphemeralRuntime {
             parent_bank.epoch(),
             parent_bank.get_slots_in_epoch(parent_bank.epoch()),
         );
-        let bank = Bank::new_from_parent(parent_bank.clone(), &Pubkey::default(), ephemeral_slot);
+        let bank = Bank::new_from_parent_ephemeral(
+            parent_bank.clone(),
+            &Pubkey::default(),
+            ephemeral_slot,
+        );
         info!(
             "EphemeralRuntime::new: ER bank created, slot={}, epoch={}",
             bank.slot(),
@@ -454,7 +460,7 @@ impl EphemeralRuntime {
             ephemeral_slot,
             parent_bank.epoch(),
         );
-        let bank = Bank::new_from_parent(parent_bank, &Pubkey::default(), ephemeral_slot);
+        let bank = Bank::new_from_parent_ephemeral(parent_bank, &Pubkey::default(), ephemeral_slot);
         info!(
             "reset_to_new_parent: ER bank created, slot={}, epoch={}",
             bank.slot(),
@@ -1411,5 +1417,72 @@ mod tests {
         assert!(account_set.contains(&delegated2.to_string()));
 
         runtime.shutdown();
+    }
+
+    /// Regression: https://linear / devnet panic observed at
+    /// `accounts-db/src/accounts_db.rs:4229` — `purge_slot_cache_pubkeys`
+    /// asserts that the purged slot has no backing storage entry. On a
+    /// long-running devnet validator the L1 eventually reaches a slot that
+    /// the ER has already populated in the shared `AccountsDb`, and the
+    /// assertion fires.
+    ///
+    /// `er_slot_for` must place the ER far enough ahead of the parent that
+    /// L1 can never realistically catch up during a session. The old
+    /// implementation only kept the ER within the parent's epoch and fell
+    /// through to `parent.slot() + 1` once the parent was past the
+    /// "last quarter of the epoch" watermark — i.e. zero effective gap.
+    #[test]
+    fn test_er_slot_stays_far_ahead_of_parent() {
+        use solana_genesis_config::GenesisConfig;
+        // Minimum gap ER must keep from L1. At 2.5 slots/s, 2^30 slots is
+        // ~13 years of continuous L1 advancement. Anything smaller is
+        // reachable on a real long-running network.
+        const MIN_GAP: u64 = 1u64 << 30;
+
+        // Case 1: fresh parent bank at slot 0.
+        let fresh_parent = Arc::new(create_test_bank());
+        let er_slot = EphemeralRuntime::er_slot_for(&fresh_parent);
+        assert!(
+            er_slot.saturating_sub(fresh_parent.slot()) >= MIN_GAP,
+            "fresh parent: ER slot {} is only {} slots ahead of parent slot {}; need at least {}",
+            er_slot,
+            er_slot - fresh_parent.slot(),
+            fresh_parent.slot(),
+            MIN_GAP,
+        );
+
+        // Case 2: parent bank deep into an epoch — simulates a long-running
+        // mainnet/devnet validator. We construct a chain of child banks
+        // whose final slot lands past the old `er_base` watermark
+        // (`epoch_start + slots_per_epoch * 3 / 4`) which is where the old
+        // implementation collapsed the gap to 1.
+        let genesis_config = GenesisConfig::new(&[], &[]);
+        let root_bank = Arc::new(Bank::new_for_tests(&genesis_config));
+        let slots_per_epoch = root_bank.get_slots_in_epoch(root_bank.epoch());
+        // Pick a target slot in the final quarter of epoch 0 so that the
+        // old `er_base = slots_per_epoch * 3 / 4` is exceeded.
+        let target_slot = slots_per_epoch - 4;
+        let mut parent = root_bank;
+        for s in 1..=target_slot {
+            let next = Bank::new_from_parent(parent, &Pubkey::default(), s);
+            parent = Arc::new(next);
+        }
+        assert!(
+            parent.slot() > slots_per_epoch * 3 / 4,
+            "test setup: parent.slot {} should be past 3/4 of epoch {}",
+            parent.slot(),
+            slots_per_epoch
+        );
+
+        let er_slot = EphemeralRuntime::er_slot_for(&parent);
+        assert!(
+            er_slot.saturating_sub(parent.slot()) >= MIN_GAP,
+            "late-epoch parent: ER slot {} is only {} slots ahead of parent slot {}; need at \
+             least {} to avoid L1/ER AccountsDb collisions",
+            er_slot,
+            er_slot - parent.slot(),
+            parent.slot(),
+            MIN_GAP,
+        );
     }
 }

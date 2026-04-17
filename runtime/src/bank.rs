@@ -967,6 +967,14 @@ type RewardCommissions = HashMap<Pubkey, RewardCommission, PubkeyHasherBuilder>;
 #[derive(Debug, Default)]
 pub struct NewBankOptions {
     pub vote_only_bank: bool,
+    // Northstar: when set, the new bank is treated as an **ephemeral** fork of
+    // its parent: epoch-boundary side effects (`process_new_epoch`,
+    // `begin_partitioned_rewards`, `update_epoch_stakes`,
+    // `distribute_partitioned_epoch_rewards`) are all skipped. Those paths
+    // would otherwise mutate the shared `AccountsDb` with L1 consensus state
+    // (stake history, vote accounts, `EpochRewards` sysvar), which an ER fork
+    // has no business touching.
+    pub ephemeral: bool,
 }
 
 #[cfg(feature = "dev-context-only-utils")]
@@ -1243,6 +1251,27 @@ impl Bank {
         )
     }
 
+    // Northstar: create a bank as an ephemeral fork of `parent`.
+    //
+    // The resulting bank can live at an arbitrary future slot (even across
+    // epoch boundaries) without poisoning the shared `AccountsDb`: the
+    // epoch-transition side effects (`process_new_epoch`,
+    // `begin_partitioned_rewards`, `update_epoch_stakes`,
+    // `distribute_partitioned_epoch_rewards`) are all suppressed. Intended
+    // exclusively for the Northstar ephemeral rollup fork.
+    pub fn new_from_parent_ephemeral(parent: Arc<Bank>, leader_id: &Pubkey, slot: Slot) -> Self {
+        Self::_new_from_parent(
+            parent,
+            leader_id,
+            slot,
+            null_tracer(),
+            NewBankOptions {
+                vote_only_bank: false,
+                ephemeral: true,
+            },
+        )
+    }
+
     pub fn new_from_parent_with_options(
         parent: Arc<Bank>,
         leader_id: &Pubkey,
@@ -1279,7 +1308,11 @@ impl Bank {
         new_bank_options: NewBankOptions,
     ) -> Self {
         let mut time = Measure::start("bank::new_from_parent");
-        let NewBankOptions { vote_only_bank } = new_bank_options;
+        let NewBankOptions {
+            vote_only_bank,
+            // Northstar: ephemeral-fork flag; see usage below.
+            ephemeral,
+        } = new_bank_options;
 
         parent.freeze();
         assert_ne!(slot, parent.slot());
@@ -1423,7 +1456,30 @@ impl Bank {
 
         // Following code may touch AccountsDb, requiring proper ancestors
         let (_, update_epoch_time_us) = measure_us!({
-            if parent.epoch() < new.epoch() {
+            if ephemeral {
+                // Northstar: ephemeral forks (rollup banks) must not mutate any
+                // shared epoch / rewards / stake state in the L1 AccountsDb.
+                // Skip `process_new_epoch` and
+                // `distribute_partitioned_epoch_rewards` outright.
+                //
+                // We still need to populate `epoch_stakes` for the ER bank's
+                // own leader-schedule epoch, because callers (e.g. transaction
+                // processing via `current_epoch_stakes()`) expect it to be
+                // present. Clone the parent's most recent entry into the ER's
+                // epoch — no AccountsDb writes.
+                let leader_schedule_epoch = new.epoch_schedule().get_leader_schedule_epoch(slot);
+                if !new.epoch_stakes.contains_key(&leader_schedule_epoch) {
+                    let parent_leader_schedule_epoch = parent
+                        .epoch_schedule()
+                        .get_leader_schedule_epoch(parent.slot());
+                    if let Some(parent_stakes) =
+                        new.epoch_stakes.get(&parent_leader_schedule_epoch).cloned()
+                    {
+                        new.epoch_stakes
+                            .insert(leader_schedule_epoch, parent_stakes);
+                    }
+                }
+            } else if parent.epoch() < new.epoch() {
                 new.process_new_epoch(
                     parent.epoch(),
                     parent.slot(),
@@ -1435,7 +1491,12 @@ impl Bank {
                 let leader_schedule_epoch = new.epoch_schedule().get_leader_schedule_epoch(slot);
                 new.update_epoch_stakes(leader_schedule_epoch);
             }
-            new.distribute_partitioned_epoch_rewards();
+            // Northstar: ER banks never enter `EpochRewardStatus::Active`, but
+            // skip defensively to keep the no-AccountsDb-writes invariant
+            // explicit at the call site.
+            if !ephemeral {
+                new.distribute_partitioned_epoch_rewards();
+            }
         });
 
         let (_, cache_preparation_time_us) =
