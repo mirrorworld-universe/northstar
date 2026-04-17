@@ -1530,6 +1530,16 @@ impl Bank {
             .set_fork_graph(fork_graph);
     }
 
+    /// Check whether the program cache already has a fork graph installed.
+    pub fn has_fork_graph_in_program_cache(&self) -> bool {
+        self.transaction_processor
+            .global_program_cache
+            .read()
+            .unwrap()
+            .fork_graph
+            .is_some()
+    }
+
     fn prepare_program_cache_for_upcoming_feature_set(&self) {
         let (_epoch, slot_index) = self.epoch_schedule.get_epoch_and_slot_index(self.slot);
         let slots_in_epoch = self.epoch_schedule.get_slots_in_epoch(self.epoch);

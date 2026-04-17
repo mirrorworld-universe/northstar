@@ -133,6 +133,11 @@ impl Manager {
         self.runtime.as_ref().map(|r| r.ws_addr())
     }
 
+    /// Get the session PDA Arc, if runtime initialized
+    pub fn session_pda(&self) -> Option<Arc<std::sync::RwLock<Option<Pubkey>>>> {
+        self.runtime.as_ref().map(|r| r.session_pda())
+    }
+
     /// Sonic: Shutdown the always-on runtime (called at validator exit)
     pub fn shutdown_runtime(&mut self) {
         if let Some(mut runtime) = self.runtime.take() {
@@ -214,9 +219,20 @@ impl Manager {
     }
 
     pub fn get_l1_events(&self, bank: &Bank) -> Vec<L1Event> {
-        bank.get_program_accounts_modified_since_parent(&self.config.portal_program_id)
+        bank.get_all_accounts_modified_since_parent()
             .into_iter()
-            .filter_map(|(pubkey, account)| self.parse_event(bank, pubkey, account))
+            .filter_map(|(pubkey, account)| {
+                if account.owner() == &self.config.portal_program_id {
+                    self.parse_event(bank, pubkey, account)
+                } else {
+                    bank.parent()
+                        .and_then(|parent| parent.get_account(&pubkey))
+                        .filter(|parent_account| {
+                            parent_account.owner() == &self.config.portal_program_id
+                        })
+                        .and_then(|_| self.parse_zeroed_account(bank, &pubkey))
+                }
+            })
             .collect()
     }
 
@@ -328,6 +344,13 @@ impl Manager {
             return Ok(());
         }
 
+        trace!(
+            "init_runtime: root_bank slot={}, epoch={}, slots_per_epoch={}",
+            root_bank.slot(),
+            root_bank.epoch(),
+            root_bank.get_slots_in_epoch(root_bank.epoch()),
+        );
+
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::default(),
             owner: Pubkey::default(),
@@ -362,10 +385,17 @@ impl Manager {
 
     /// Sonic: Activate the ephemeral session — resets bank to current L1 root
     /// and starts accepting transactions.
-    pub fn activate_session(&mut self, root_bank: Arc<Bank>) {
+    pub fn activate_session(&mut self, root_bank: Arc<Bank>, session_pda: Pubkey) {
         if let Some(runtime) = &mut self.runtime {
+            trace!(
+                "activate_session: resetting to L1 root slot={}, epoch={}",
+                root_bank.slot(),
+                root_bank.epoch(),
+            );
             runtime.reset_to_new_parent(root_bank);
+            runtime.set_session_pda(session_pda);
             runtime.activate();
+            info!("Ephemeral session activated, PDA={session_pda}");
         } else {
             warn!("Cannot activate session: runtime not initialized");
         }
@@ -373,8 +403,9 @@ impl Manager {
 
     /// Sonic: Deactivate the ephemeral session — transactions will be rejected.
     pub fn deactivate_session(&mut self) {
-        if let Some(runtime) = &self.runtime {
+        if let Some(runtime) = &mut self.runtime {
             runtime.deactivate();
+            info!("Ephemeral session deactivated");
         } else {
             warn!("Cannot deactivate session: runtime not initialized");
         }
@@ -397,7 +428,7 @@ impl Manager {
             return Ok(());
         }
 
-        let runtime = EphemeralRuntime::new(
+        let mut runtime = EphemeralRuntime::new(
             root_bank,
             cluster_info,
             settings,

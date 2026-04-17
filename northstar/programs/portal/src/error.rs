@@ -1,4 +1,4 @@
-use pinocchio::error::ProgramError;
+use pinocchio::program_error::ProgramError;
 
 #[repr(u32)]
 pub enum PortalError {

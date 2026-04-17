@@ -70,6 +70,8 @@ pub struct EphemeralRuntime {
     /// Sonic: When false, the tx_client rejects all transactions.
     /// Set to true when an ephemeral session is active.
     active: Arc<AtomicBool>,
+    /// Sonic: Current session PDA, shared with the RPC handler.
+    session_pda: Arc<RwLock<Option<Pubkey>>>,
     _portal_program_id: Pubkey,
 
     _tx_client: EphemeralTransactionClient,
@@ -87,7 +89,26 @@ impl EphemeralRuntime {
     /// We use 1 trillion which is unreachable by L1 in practice
     /// (at 2.5 slots/sec it would take ~14,000 years) but small enough to avoid
     /// arithmetic overflows in tick-height calculations.
-    const ER_SLOT_OFFSET: u64 = 1000000000000;
+    /// Compute ER slot that stays in the same epoch as the parent.
+    ///
+    /// The ER and L1 share the same AccountsDb; `Bank::new_from_parent`
+    /// triggers epoch-rewards distribution whenever the child slot falls
+    /// in a different epoch than the parent. To avoid that, we place the
+    /// ER slot within the parent's epoch but far enough ahead to never
+    /// collide with L1 slots.
+    fn er_slot_for(parent: &Bank) -> u64 {
+        let slots_per_epoch = parent.get_slots_in_epoch(parent.epoch());
+        let epoch_start = parent.epoch() * slots_per_epoch;
+        // Use the last quarter of the epoch, well past any L1 slot
+        let er_base = epoch_start + slots_per_epoch * 3 / 4;
+        // If parent slot is already past er_base (very long-running),
+        // just go one slot ahead (same epoch guaranteed for small advance)
+        if parent.slot() >= er_base {
+            parent.slot() + 1
+        } else {
+            er_base + 1
+        }
+    }
 
     pub fn new(
         parent_bank: Arc<Bank>,
@@ -101,17 +122,30 @@ impl EphemeralRuntime {
     ) -> Result<Self, String> {
         // Place ER slots far above L1 slots so the shared AccountsDb root
         // tracker never sees an out-of-order add_root from either side.
-        let ephemeral_slot = Self::ER_SLOT_OFFSET + parent_bank.slot() + 1;
+        let ephemeral_slot = Self::er_slot_for(&parent_bank);
+        info!(
+            "EphemeralRuntime::new: parent_slot={}, ephemeral_slot={}, parent_epoch={}, \
+             slots_per_epoch={}",
+            parent_bank.slot(),
+            ephemeral_slot,
+            parent_bank.epoch(),
+            parent_bank.get_slots_in_epoch(parent_bank.epoch()),
+        );
         let bank = Bank::new_from_parent(parent_bank.clone(), &Pubkey::default(), ephemeral_slot);
+        info!(
+            "EphemeralRuntime::new: ER bank created, slot={}, epoch={}",
+            bank.slot(),
+            bank.epoch(),
+        );
 
         // The bank inherits tick_height from the L1 parent, but max_tick_height
-        // is (ephemeral_slot + 1) * ticks_per_slot — astronomically large due to
-        // ER_SLOT_OFFSET.  Warp tick_height so only one slot's worth of ticks
-        // remains, matching what a normal bank would need.
+        // is (ephemeral_slot + 1) * ticks_per_slot.  When the ER slot is in the
+        // same epoch (not offset by 1 trillion), the gap is smaller, but we
+        // still warp tick_height so only one slot's worth of ticks remains.
         let ticks_per_slot = bank.ticks_per_slot();
         bank.set_tick_height(bank.max_tick_height() - ticks_per_slot);
 
-        let bank_forks = BankForks::new_rw_arc(bank);
+        let bank_forks = BankForks::new_rw_arc_ephemeral(bank);
         let initial_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
 
         // Validate and snapshot delegated accounts
@@ -148,6 +182,7 @@ impl EphemeralRuntime {
         let touched_accounts = Arc::new(RwLock::new(HashSet::new()));
         // Sonic: Starts inactive — transactions rejected until activate() is called
         let active = Arc::new(AtomicBool::new(false));
+        let session_pda: Arc<RwLock<Option<Pubkey>>> = Arc::new(RwLock::new(None));
         let tx_client = EphemeralTransactionClient::new(
             bank_forks.clone(),
             delegated_set.clone(),
@@ -228,6 +263,7 @@ impl EphemeralRuntime {
             None,
             runtime.clone(),
             Some(delegated_set.clone()),
+            Some(session_pda.clone()),
         )?;
 
         // Sonic: Start PubSub WebSocket service
@@ -271,17 +307,8 @@ impl EphemeralRuntime {
             initial_bank.slot()
         );
 
-        let slot_advancer = crate::slot_advancer::SlotAdvancer::new(
-            bank_forks.clone(),
-            block_commitment_cache.clone(),
-            initial_bank,
-            crate::slot_advancer::Config {
-                slot_duration: Duration::from_millis(400),
-                manager_account: Pubkey::default(),
-            },
-            advancer_exit.clone(),
-            Some(rpc_subscriptions.clone()),
-        );
+        // Slot advancer is NOT started here — it will be started
+        // when activate() is called (session opened).
 
         Ok(Self {
             bank_forks,
@@ -297,11 +324,12 @@ impl EphemeralRuntime {
             tpu_addr: actual_tpu_addr,
             rpc_exit,
             advancer_exit,
-            slot_advancer: Some(slot_advancer),
+            slot_advancer: None,
             initial_account_snapshots,
             delegated_accounts: delegated_set,
             touched_accounts,
             active,
+            session_pda,
             _portal_program_id: portal_program_id,
 
             _settings: settings,
@@ -325,21 +353,60 @@ impl EphemeralRuntime {
         self.tpu_addr
     }
 
-    /// Sonic: Activate the ephemeral rollup — transactions will be accepted.
-    pub fn activate(&self) {
+    /// Sonic: Activate the ephemeral rollup — starts slot advancer
+    /// and begins accepting transactions.
+    pub fn activate(&mut self) {
         info!("Activating ephemeral rollup at {}", self.rpc_addr);
         self.active.store(true, Ordering::Relaxed);
+
+        // Start slot advancer if not already running
+        if self.slot_advancer.is_none() {
+            let advancer_exit = Arc::new(AtomicBool::new(false));
+            self.advancer_exit = advancer_exit.clone();
+            let initial_bank = self.bank_forks.read().unwrap().working_bank();
+            self.slot_advancer = Some(crate::slot_advancer::SlotAdvancer::new(
+                self.bank_forks.clone(),
+                self.block_commitment_cache.clone(),
+                initial_bank,
+                crate::slot_advancer::Config {
+                    slot_duration: Duration::from_millis(400),
+                    manager_account: Pubkey::default(),
+                },
+                advancer_exit,
+                Some(self.rpc_subscriptions.clone()),
+            ));
+        }
     }
 
-    /// Sonic: Deactivate the ephemeral rollup — transactions will be rejected.
-    pub fn deactivate(&self) {
+    /// Sonic: Deactivate the ephemeral rollup — stops slot advancer
+    /// and rejects transactions.
+    pub fn deactivate(&mut self) {
         info!("Deactivating ephemeral rollup at {}", self.rpc_addr);
         self.active.store(false, Ordering::Relaxed);
+
+        // Stop slot advancer
+        self.advancer_exit.store(true, Ordering::Relaxed);
+        if let Some(advancer) = self.slot_advancer.take() {
+            advancer.join();
+        }
+
+        // Clear session PDA
+        *self.session_pda.write().unwrap() = None;
     }
 
     /// Sonic: Check if the ephemeral rollup is accepting transactions.
     pub fn is_active(&self) -> bool {
         self.active.load(Ordering::Relaxed)
+    }
+
+    /// Sonic: Set the current session PDA.
+    pub fn set_session_pda(&self, pda: Pubkey) {
+        *self.session_pda.write().unwrap() = Some(pda);
+    }
+
+    /// Sonic: Get a clone of the session PDA Arc for sharing with RPC.
+    pub fn session_pda(&self) -> Arc<RwLock<Option<Pubkey>>> {
+        self.session_pda.clone()
     }
 
     pub fn bank(&self) -> Arc<Bank> {
@@ -380,14 +447,25 @@ impl EphemeralRuntime {
         }
 
         // 2. Create new ephemeral bank from current L1 root
-        let ephemeral_slot = Self::ER_SLOT_OFFSET + parent_bank.slot() + 1;
+        let ephemeral_slot = Self::er_slot_for(&parent_bank);
+        info!(
+            "reset_to_new_parent: parent_slot={}, ephemeral_slot={}, parent_epoch={}",
+            parent_bank.slot(),
+            ephemeral_slot,
+            parent_bank.epoch(),
+        );
         let bank = Bank::new_from_parent(parent_bank, &Pubkey::default(), ephemeral_slot);
+        info!(
+            "reset_to_new_parent: ER bank created, slot={}, epoch={}",
+            bank.slot(),
+            bank.epoch(),
+        );
         let ticks_per_slot = bank.ticks_per_slot();
         bank.set_tick_height(bank.max_tick_height() - ticks_per_slot);
 
         // 3. Swap BankForks in-place — same Arc, new contents.
         //    All holders (RPC service, tx_client) see the new bank.
-        let new_bf_arc = BankForks::new_rw_arc(bank);
+        let new_bf_arc = BankForks::new_rw_arc_ephemeral(bank);
         let new_bf = Arc::try_unwrap(new_bf_arc)
             .unwrap_or_else(|_| panic!("just created, refcount must be 1"))
             .into_inner()

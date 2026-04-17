@@ -556,6 +556,7 @@ impl JsonRpcService {
             config.prioritization_fee_cache,
             runtime,
             None, // delegated_accounts: not an ephemeral rollup node
+            None, // session_pda: not an ephemeral rollup node
         )?;
         Ok(json_rpc_service)
     }
@@ -593,6 +594,8 @@ impl JsonRpcService {
         runtime: Arc<TokioRuntime>,
         // Sonic: Optional delegated accounts set for ephemeral rollup RPC.
         delegated_accounts: Option<Arc<RwLock<HashSet<Pubkey>>>>,
+        // Sonic: Optional session PDA for ephemeral rollup RPC.
+        session_pda: Option<Arc<RwLock<Option<Pubkey>>>>,
     ) -> Result<Self, String> {
         Self::new(
             rpc_addr,
@@ -616,6 +619,7 @@ impl JsonRpcService {
             prioritization_fee_cache,
             runtime,
             delegated_accounts,
+            session_pda,
         )
     }
 
@@ -650,6 +654,8 @@ impl JsonRpcService {
         runtime: Arc<TokioRuntime>,
         // Sonic: Optional delegated accounts set for ephemeral rollup RPC.
         delegated_accounts: Option<Arc<RwLock<HashSet<Pubkey>>>>,
+        // Sonic: Optional session PDA for ephemeral rollup RPC.
+        session_pda: Option<Arc<RwLock<Option<Pubkey>>>>,
     ) -> Result<Self, String> {
         info!("rpc bound to {rpc_addr:?}");
         info!("rpc configuration: {config:?}");
@@ -747,6 +753,9 @@ impl JsonRpcService {
         let has_delegated_accounts = delegated_accounts.is_some();
         if let Some(da) = delegated_accounts {
             request_processor.set_delegated_accounts(da);
+        }
+        if let Some(sp) = session_pda {
+            request_processor.set_session_pda(sp);
         }
 
         let _send_transaction_service = Arc::new(SendTransactionService::new(
@@ -980,6 +989,7 @@ mod tests {
             Some(Arc::new(PrioritizationFeeCache::default())),
             runtime,
             // Sonic:
+            None,
             None,
         )
         .expect("assume successful JsonRpcService start");
