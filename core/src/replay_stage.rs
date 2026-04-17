@@ -2433,7 +2433,10 @@ impl ReplayStage {
                 next_leader,
                 rpc_subscriptions,
                 slot_status_notifier,
-                NewBankOptions { vote_only_bank },
+                NewBankOptions {
+                    vote_only_bank,
+                    ..NewBankOptions::default()
+                },
             );
             // make sure parent is frozen for finalized hashes via the above
             // new()-ing of its child bank
@@ -4606,6 +4609,7 @@ impl ReplayStage {
                 // Migration period banks are VoM
                 let options = NewBankOptions {
                     vote_only_bank: migration_status.should_bank_be_vote_only(child_slot),
+                    ..NewBankOptions::default()
                 };
                 if options.vote_only_bank {
                     info!("Replaying block in slot {child_slot} in VoM");
