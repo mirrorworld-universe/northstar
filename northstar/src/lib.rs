@@ -846,14 +846,29 @@ mod portal_e2e_tests {
         bank.transfer(100_000_000_000, &mint_keypair, &owner_pubkey)
             .unwrap();
 
+        let owner_program = Pubkey::new_unique();
         let delegated_account = Pubkey::new_unique();
-        let delegated_account_data = vec![0xAB; 100];
-        let mut delegated_account_owner =
-            AccountSharedData::new(1_000_000, delegated_account_data.len(), &program_id);
-        delegated_account_owner
+        let delegated_account_data = (0..100).map(|i| (i as u8) ^ 0xAB).collect::<Vec<_>>();
+        let mut l1_account_before_delegation =
+            AccountSharedData::new(1_000_000, delegated_account_data.len(), &owner_program);
+        l1_account_before_delegation
             .data_as_mut_slice()
             .copy_from_slice(&delegated_account_data);
-        bank.store_account(&delegated_account, &delegated_account_owner);
+
+        // Simulate L1 owner handoff to portal before delegate instruction.
+        // Data written before delegation must survive both owner transfer and delegation.
+        let mut portal_owned_account = l1_account_before_delegation.clone();
+        portal_owned_account.set_owner(program_id);
+        bank.store_account(&delegated_account, &portal_owned_account);
+
+        let l1_snapshot_before_delegate = bank
+            .get_account(&delegated_account)
+            .expect("delegated account should exist on L1 before delegate tx");
+        assert_eq!(
+            l1_snapshot_before_delegate.data(),
+            delegated_account_data.as_slice(),
+            "L1 account data should match bytes written before delegation"
+        );
 
         let grid_id = 1u64;
         let ttl_slots = 1000u64;
@@ -885,7 +900,7 @@ mod portal_e2e_tests {
             program_id,
             owner_pubkey,
             delegated_account,
-            Pubkey::new_unique(),
+            owner_program,
             delegation_record_pda,
             grid_id,
         );
@@ -931,11 +946,17 @@ mod portal_e2e_tests {
             .expect("Should have AccountDelegated event");
 
         let L1Event::AccountDelegated {
-            delegated_account, ..
+            delegated_account,
+            owner_program: detected_owner_program,
+            ..
         } = delegation_event
         else {
             panic!("Expected AccountDelegated");
         };
+        assert_eq!(
+            *detected_owner_program, owner_program,
+            "delegation event should preserve owner program"
+        );
 
         let parent_bank = Arc::clone(&bank_ref);
 
@@ -975,14 +996,10 @@ mod portal_e2e_tests {
 
         let account = account_opt.unwrap();
         let account_data = account.data();
-        eprintln!(
-            "DEBUG: Account data length: {}, first few bytes: {:?}",
-            account_data.len(),
-            &account_data[..10.min(account_data.len())]
-        );
-        assert!(
-            !account_data.is_empty(),
-            "Delegated account should have data"
+        assert_eq!(
+            account_data,
+            delegated_account_data.as_slice(),
+            "ER account data should match bytes written before delegation"
         );
 
         std::thread::sleep(Duration::from_secs(2));
@@ -990,21 +1007,23 @@ mod portal_e2e_tests {
         let rpc_account = rpc_client
             .get_account_data(delegated_account)
             .expect("Delegated account should be readable via RPC");
-        eprintln!(
-            "DEBUG: RPC account data length: {}, first few bytes: {:?}",
-            rpc_account.len(),
-            &rpc_account[..10.min(rpc_account.len())]
+        assert_eq!(
+            rpc_account, delegated_account_data,
+            "ER RPC should expose same delegated bytes"
         );
 
-        let l1_account = bank_ref.get_account(delegated_account);
-        assert!(
-            l1_account.is_some(),
-            "Delegated account should still exist on L1"
-        );
+        let l1_account = bank_ref
+            .get_account(delegated_account)
+            .expect("Delegated account should still exist on L1");
         assert_eq!(
-            l1_account.unwrap().owner(),
+            l1_account.owner(),
             &program_id,
             "L1 account owner should still be portal program"
+        );
+        assert_eq!(
+            l1_account.data(),
+            delegated_account_data.as_slice(),
+            "L1 account data should survive portal delegate instruction"
         );
 
         runtime.shutdown();
