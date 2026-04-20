@@ -1,7 +1,8 @@
 use {
     crate::{
         address_lookup_table::*, clap_app::*, cluster_query::*, feature::*, inflation::*, nonce::*,
-        program::*, program_v4::*, spend_utils::*, stake::*, validator_info::*, vote::*, wallet::*,
+        portal::*, program::*, program_v4::*, spend_utils::*, stake::*, validator_info::*, vote::*,
+        wallet::*,
     },
     clap::{ArgMatches, Shell, crate_description, crate_name},
     num_traits::FromPrimitive,
@@ -175,6 +176,7 @@ pub enum CliCommand {
     },
     // Program Deployment
     Deploy,
+    Portal(PortalCliCommand),
     Program(ProgramCliCommand),
     ProgramV4(ProgramV4CliCommand),
     // Stake Commands
@@ -694,6 +696,9 @@ pub fn parse_command(
             clap::ErrorKind::UnrecognizedSubcommand,
         )
         .exit(),
+        ("portal", Some(matches)) => {
+            parse_portal_subcommand(matches, default_signer, wallet_manager)
+        }
         ("program", Some(matches)) => {
             parse_program_subcommand(matches, default_signer, wallet_manager)
         }
@@ -1219,6 +1224,11 @@ pub async fn process_command(config: &CliConfig<'_>) -> ProcessResult {
             // This command is not supported any longer
             // Error message is printed on the previous stage
             std::process::exit(1);
+        }
+
+        // Portal interaction
+        CliCommand::Portal(portal_subcommand) => {
+            process_portal_subcommand(&rpc_client, config, portal_subcommand).await
         }
 
         // Deploy a custom program to the chain
