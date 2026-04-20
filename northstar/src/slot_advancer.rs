@@ -2,7 +2,7 @@ use {
     log::{debug, info},
     solana_hash::Hash,
     solana_pubkey::Pubkey,
-    solana_rpc::rpc_subscriptions::RpcSubscriptions,
+    solana_rpc::{er_history::ErHistoryStore, rpc_subscriptions::RpcSubscriptions},
     solana_runtime::{
         bank::Bank,
         bank_forks::BankForks,
@@ -50,6 +50,26 @@ impl SlotAdvancer {
         exit: Arc<AtomicBool>,
         rpc_subscriptions: Option<Arc<RpcSubscriptions>>,
     ) -> Self {
+        Self::new_with_history(
+            bank_forks,
+            block_commitment_cache,
+            initial_bank,
+            config,
+            exit,
+            rpc_subscriptions,
+            None,
+        )
+    }
+
+    pub fn new_with_history(
+        bank_forks: Arc<RwLock<BankForks>>,
+        block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
+        initial_bank: Arc<Bank>,
+        config: Config,
+        exit: Arc<AtomicBool>,
+        rpc_subscriptions: Option<Arc<RpcSubscriptions>>,
+        er_history_store: Option<Arc<ErHistoryStore>>,
+    ) -> Self {
         let exit_clone = Arc::clone(&exit);
         let thread = thread::spawn(move || {
             Self::run(
@@ -59,6 +79,7 @@ impl SlotAdvancer {
                 config,
                 exit_clone,
                 rpc_subscriptions,
+                er_history_store,
             );
         });
         Self {
@@ -74,6 +95,7 @@ impl SlotAdvancer {
         config: Config,
         exit: Arc<AtomicBool>,
         rpc_subscriptions: Option<Arc<RpcSubscriptions>>,
+        er_history_store: Option<Arc<ErHistoryStore>>,
     ) {
         let mut current_slot = current_bank.slot();
 
@@ -108,6 +130,9 @@ impl SlotAdvancer {
             }
 
             current_bank.freeze();
+            if let Some(er_history_store) = &er_history_store {
+                er_history_store.finalize_slot(&current_bank);
+            }
 
             debug!(
                 "SlotAdvancer: after freeze, slot {}, blockhash {}",

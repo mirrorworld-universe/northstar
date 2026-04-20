@@ -10,6 +10,7 @@ use {
     solana_ledger::{blockstore::Blockstore, leader_schedule_cache::LeaderScheduleCache},
     solana_pubkey::Pubkey,
     solana_rpc::{
+        er_history::ErHistoryStore,
         max_slots::MaxSlots,
         optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
         rpc::JsonRpcConfig,
@@ -72,6 +73,8 @@ pub struct EphemeralRuntime {
     active: Arc<AtomicBool>,
     /// Sonic: Current session PDA, shared with the RPC handler.
     session_pda: Arc<RwLock<Option<Pubkey>>>,
+    /// Sonic: In-memory ER transaction history for Phase 1 history APIs.
+    er_history_store: Arc<ErHistoryStore>,
     _portal_program_id: Pubkey,
 
     _tx_client: EphemeralTransactionClient,
@@ -189,11 +192,13 @@ impl EphemeralRuntime {
         // Sonic: Starts inactive — transactions rejected until activate() is called
         let active = Arc::new(AtomicBool::new(false));
         let session_pda: Arc<RwLock<Option<Pubkey>>> = Arc::new(RwLock::new(None));
-        let tx_client = EphemeralTransactionClient::new(
+        let er_history_store = Arc::new(ErHistoryStore::default());
+        let tx_client = EphemeralTransactionClient::new_with_history(
             bank_forks.clone(),
             delegated_set.clone(),
             touched_accounts.clone(),
             active.clone(),
+            er_history_store.clone(),
         );
 
         let ledger_dir = TempDir::new().map_err(|e| e.to_string())?;
@@ -270,6 +275,7 @@ impl EphemeralRuntime {
             runtime.clone(),
             Some(delegated_set.clone()),
             Some(session_pda.clone()),
+            Some(er_history_store.clone()),
         )?;
 
         // Sonic: Start PubSub WebSocket service
@@ -336,6 +342,7 @@ impl EphemeralRuntime {
             touched_accounts,
             active,
             session_pda,
+            er_history_store,
             _portal_program_id: portal_program_id,
 
             _settings: settings,
@@ -370,7 +377,7 @@ impl EphemeralRuntime {
             let advancer_exit = Arc::new(AtomicBool::new(false));
             self.advancer_exit = advancer_exit.clone();
             let initial_bank = self.bank_forks.read().unwrap().working_bank();
-            self.slot_advancer = Some(crate::slot_advancer::SlotAdvancer::new(
+            self.slot_advancer = Some(crate::slot_advancer::SlotAdvancer::new_with_history(
                 self.bank_forks.clone(),
                 self.block_commitment_cache.clone(),
                 initial_bank,
@@ -380,6 +387,7 @@ impl EphemeralRuntime {
                 },
                 advancer_exit,
                 Some(self.rpc_subscriptions.clone()),
+                Some(self.er_history_store.clone()),
             ));
         }
     }
@@ -506,7 +514,7 @@ impl EphemeralRuntime {
         // 7. Start new slot advancer
         let advancer_exit = Arc::new(AtomicBool::new(false));
         self.advancer_exit = advancer_exit.clone();
-        self.slot_advancer = Some(crate::slot_advancer::SlotAdvancer::new(
+        self.slot_advancer = Some(crate::slot_advancer::SlotAdvancer::new_with_history(
             self.bank_forks.clone(),
             self.block_commitment_cache.clone(),
             initial_bank,
@@ -516,6 +524,7 @@ impl EphemeralRuntime {
             },
             advancer_exit,
             Some(self.rpc_subscriptions.clone()),
+            Some(self.er_history_store.clone()),
         ));
 
         info!("EphemeralRuntime reset to new L1 parent, ER slot {}", slot);
@@ -531,12 +540,29 @@ impl EphemeralRuntime {
         self.initial_account_snapshots.get(pubkey)
     }
 
+    fn publish_bank_for_rpc(&self, bank: Arc<Bank>) {
+        let slot = bank.slot();
+
+        *self.block_commitment_cache.write().unwrap() = BlockCommitmentCache::new(
+            std::collections::HashMap::new(),
+            0,
+            CommitmentSlots {
+                slot,
+                root: slot,
+                highest_confirmed_slot: slot,
+                highest_super_majority_root: slot,
+            },
+        );
+        *self.optimistically_confirmed_bank.write().unwrap() = OptimisticallyConfirmedBank { bank };
+    }
+
     /// Handle a new account delegation from L1.
     /// Copies the account data from L1 into the ER bank and adds it to the
     /// delegated accounts set so transactions can write to it.
     pub fn handle_delegation(&self, delegated_account: &Pubkey, account_data: AccountSharedData) {
         let bank = self.bank();
         bank.store_account(delegated_account, &account_data);
+        self.publish_bank_for_rpc(bank.clone());
 
         // Add to the delegated accounts set so the tx client allows writes
         self.delegated_accounts
@@ -571,6 +597,7 @@ impl EphemeralRuntime {
             account.set_owner(solana_sdk_ids::system_program::id());
         }
         bank.store_account(depositor, &account);
+        self.publish_bank_for_rpc(bank.clone());
 
         // Mark as touched so the balance isn't zeroed later
         self.touched_accounts.write().unwrap().insert(*depositor);
@@ -597,7 +624,7 @@ impl Drop for EphemeralRuntime {
 mod tests {
     use {
         super::*,
-        solana_account::AccountSharedData,
+        solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
         solana_gossip::contact_info::ContactInfo,
         solana_keypair::{Keypair, Signer},
         solana_message::Message,
@@ -608,6 +635,7 @@ mod tests {
         solana_svm::transaction_processor::ExecutionRecordingConfig,
         solana_system_interface::instruction::transfer,
         solana_transaction::Transaction,
+        solana_transaction_status::{TransactionConfirmationStatus, UiTransactionEncoding},
         std::{net::TcpListener, time::Duration},
     };
 
@@ -791,6 +819,113 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(receiver_balance, transfer_amount);
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_er_history_get_transaction_and_signature_status_after_reset() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        let sender_keypair = Keypair::new();
+        let sender_pubkey = sender_keypair.pubkey();
+        let receiver_pubkey = Pubkey::new_unique();
+        let sender_initial = 100_000_000_000u64;
+        let transfer_amount = 10_000_000_000u64;
+        fund_account(&parent_bank, &sender_pubkey, sender_initial);
+        parent_bank.freeze();
+        let parent_bank = Arc::new(parent_bank);
+
+        let cluster_info = create_test_cluster_info();
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            parent_bank.clone(),
+            cluster_info,
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.activate();
+        let rpc_client = rpc_client(&runtime);
+
+        std::thread::sleep(Duration::from_secs(2));
+
+        let blockhash = rpc_client
+            .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
+            .unwrap()
+            .0;
+        let instruction = transfer(&sender_pubkey, &receiver_pubkey, transfer_amount);
+        let tx = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&sender_pubkey),
+            &[&sender_keypair],
+            blockhash,
+        );
+
+        let config = RpcSendTransactionConfig {
+            skip_preflight: true,
+            ..Default::default()
+        };
+        let signature = rpc_client
+            .send_transaction_with_config(&tx, config)
+            .unwrap();
+
+        std::thread::sleep(Duration::from_secs(2));
+
+        let confirmed_tx = rpc_client
+            .get_transaction(&signature, UiTransactionEncoding::Json)
+            .unwrap();
+        assert_eq!(confirmed_tx.transaction_index, Some(0));
+        let confirmed_meta = confirmed_tx
+            .transaction
+            .meta
+            .as_ref()
+            .expect("transaction meta should be present");
+        assert!(confirmed_meta.err.is_none());
+        assert!(
+            matches!(
+                confirmed_meta.log_messages.as_ref(),
+                solana_transaction_status::option_serializer::OptionSerializer::Some(logs)
+                    if !logs.is_empty()
+            ),
+            "ER transaction history should preserve Solana log messages"
+        );
+
+        let new_parent = Bank::new_from_parent(parent_bank, &Pubkey::default(), 1);
+        new_parent.freeze();
+        runtime.reset_to_new_parent(Arc::new(new_parent));
+
+        let confirmed_tx_after_reset = rpc_client
+            .get_transaction(&signature, UiTransactionEncoding::Json)
+            .unwrap();
+        assert_eq!(confirmed_tx_after_reset.slot, confirmed_tx.slot);
+
+        let statuses = rpc_client
+            .get_signature_statuses_with_history(&[signature])
+            .unwrap()
+            .value;
+        let status = statuses
+            .into_iter()
+            .next()
+            .flatten()
+            .expect("history status should be available after reset");
+        assert_eq!(
+            status.confirmation_status,
+            Some(TransactionConfirmationStatus::Finalized)
+        );
+        assert!(status.err.is_none());
 
         runtime.shutdown();
     }
@@ -1172,6 +1307,86 @@ mod tests {
             successes > 50,
             "Most transactions should succeed during slot transitions, got {}",
             successes
+        );
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_handle_delegation_preserves_owner_data_executable_over_rpc_commitments() {
+        agave_logger::setup();
+
+        let parent_bank = Arc::new(create_test_bank());
+        let portal_program_id = Pubkey::new_unique();
+        let delegated_pubkey = Pubkey::new_unique();
+
+        let l1_pre_delegate = AccountSharedData::new(1_000_000, 0, &system_program::id());
+        parent_bank.store_account(&delegated_pubkey, &l1_pre_delegate);
+        parent_bank.freeze();
+
+        let cluster_info = create_test_cluster_info();
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            delegated_accounts: vec![],
+        };
+
+        let mut runtime = EphemeralRuntime::new(
+            parent_bank,
+            cluster_info,
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            portal_program_id,
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+
+        runtime.activate();
+
+        let initial_er_slot = runtime.bank().slot();
+        let start = std::time::Instant::now();
+        while runtime.bank().slot() == initial_er_slot {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "ER slot advancer did not move past initial slot"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        let mut delegated_l1_snapshot = AccountSharedData::new(1_000_000, 4, &portal_program_id);
+        delegated_l1_snapshot
+            .data_as_mut_slice()
+            .copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        delegated_l1_snapshot.set_executable(true);
+
+        runtime.handle_delegation(&delegated_pubkey, delegated_l1_snapshot.clone());
+
+        let rpc_client = rpc_client(&runtime);
+        let rpc_account = rpc_client
+            .get_account_with_commitment(&delegated_pubkey, CommitmentConfig::finalized())
+            .unwrap()
+            .value
+            .expect("delegated account should be visible over finalized RPC");
+
+        assert_eq!(
+            rpc_account.owner(),
+            delegated_l1_snapshot.owner(),
+            "ER RPC should expose delegated owner from L1 snapshot"
+        );
+        assert_eq!(
+            rpc_account.data(),
+            delegated_l1_snapshot.data(),
+            "ER RPC should expose delegated data from L1 snapshot"
+        );
+        assert_eq!(
+            rpc_account.executable(),
+            delegated_l1_snapshot.executable(),
+            "ER RPC should expose delegated executable flag from L1 snapshot"
         );
 
         runtime.shutdown();

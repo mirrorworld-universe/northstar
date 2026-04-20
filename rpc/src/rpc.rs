@@ -3,7 +3,7 @@
 use solana_runtime::installed_scheduler_pool::BankWithScheduler;
 use {
     crate::{
-        filter::filter_allows, max_slots::MaxSlots,
+        er_history::ErHistoryStore, filter::filter_allows, max_slots::MaxSlots,
         optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
         parsed_token_accounts::*, rpc_cache::LargestAccountsCache, rpc_health::*,
     },
@@ -256,6 +256,8 @@ pub struct JsonRpcRequestProcessor {
     pub(crate) delegated_accounts: Option<Arc<RwLock<HashSet<Pubkey>>>>,
     /// Sonic: Optional session PDA for ephemeral rollup RPC.
     pub(crate) session_pda: Option<Arc<RwLock<Option<Pubkey>>>>,
+    /// Sonic: Optional in-memory transaction history for ephemeral rollup RPC.
+    pub(crate) er_history_store: Option<Arc<ErHistoryStore>>,
 }
 impl Metadata for JsonRpcRequestProcessor {}
 
@@ -443,6 +445,7 @@ impl JsonRpcRequestProcessor {
                 runtime,
                 delegated_accounts: None,
                 session_pda: None,
+                er_history_store: None,
             },
             transaction_receiver,
         )
@@ -456,6 +459,11 @@ impl JsonRpcRequestProcessor {
     /// Sonic: Set the session PDA for ephemeral rollup RPC.
     pub fn set_session_pda(&mut self, pda: Arc<RwLock<Option<Pubkey>>>) {
         self.session_pda = Some(pda);
+    }
+
+    /// Sonic: Set the ephemeral rollup transaction history store.
+    pub fn set_er_history_store(&mut self, er_history_store: Arc<ErHistoryStore>) {
+        self.er_history_store = Some(er_history_store);
     }
 
     #[cfg(test)]
@@ -538,6 +546,7 @@ impl JsonRpcRequestProcessor {
             runtime,
             delegated_accounts: None,
             session_pda: None,
+            er_history_store: None,
         }
     }
 
@@ -1662,8 +1671,11 @@ impl JsonRpcRequestProcessor {
         let search_transaction_history = config
             .map(|x| x.search_transaction_history)
             .unwrap_or(false);
-        if search_transaction_history {
-            self.check_if_transaction_history_enabled()?;
+        if search_transaction_history
+            && !self.config.enable_rpc_transaction_history
+            && self.er_history_store.is_none()
+        {
+            return Err(RpcCustomError::TransactionHistoryNotAvailable.into());
         }
 
         let bank = self.bank(Some(CommitmentConfig::processed()));
@@ -1696,6 +1708,8 @@ impl JsonRpcRequestProcessor {
                     })
                 {
                     Some(status)
+                } else if let Some(er_history_store) = &self.er_history_store {
+                    er_history_store.get_signature_status(&signature)
                 } else if let Some(bigtable_ledger_storage) = &self.bigtable_ledger_storage {
                     bigtable_ledger_storage
                         .get_signature_status(&signature)
@@ -1755,8 +1769,6 @@ impl JsonRpcRequestProcessor {
         signature: Signature,
         config: Option<RpcEncodingConfigWrapper<RpcTransactionConfig>>,
     ) -> Result<Option<EncodedConfirmedTransactionWithStatusMeta>> {
-        self.check_if_transaction_history_enabled()?;
-
         let config = config
             .map(|config| config.convert_to_current())
             .unwrap_or_default();
@@ -1764,6 +1776,20 @@ impl JsonRpcRequestProcessor {
         let max_supported_transaction_version = config.max_supported_transaction_version;
         let commitment = config.commitment.unwrap_or_default();
         check_is_at_least_confirmed(commitment)?;
+
+        let encode_transaction =
+                |confirmed_tx_with_meta: ConfirmedTransactionWithStatusMeta| -> Result<EncodedConfirmedTransactionWithStatusMeta> {
+                    Ok(confirmed_tx_with_meta.encode(encoding, max_supported_transaction_version).map_err(RpcCustomError::from)?)
+                };
+
+        if let Some(er_history_store) = &self.er_history_store {
+            return er_history_store
+                .get_transaction(&signature, commitment)
+                .map(encode_transaction)
+                .transpose();
+        }
+
+        self.check_if_transaction_history_enabled()?;
 
         let confirmed_bank = self.bank(Some(CommitmentConfig::confirmed()));
         let confirmed_transaction = self
@@ -1782,11 +1808,6 @@ impl JsonRpcRequestProcessor {
             })
             .await
             .expect("Failed to spawn blocking task");
-
-        let encode_transaction =
-                |confirmed_tx_with_meta: ConfirmedTransactionWithStatusMeta| -> Result<EncodedConfirmedTransactionWithStatusMeta> {
-                    Ok(confirmed_tx_with_meta.encode(encoding, max_supported_transaction_version).map_err(RpcCustomError::from)?)
-                };
 
         match confirmed_transaction.unwrap_or(None) {
             Some(mut confirmed_transaction) => {

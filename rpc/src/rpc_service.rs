@@ -3,6 +3,7 @@
 use {
     crate::{
         cluster_tpu_info::ClusterTpuInfo,
+        er_history::ErHistoryStore,
         max_slots::MaxSlots,
         northstar::*,
         optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
@@ -557,6 +558,7 @@ impl JsonRpcService {
             runtime,
             None, // delegated_accounts: not an ephemeral rollup node
             None, // session_pda: not an ephemeral rollup node
+            None, // er_history_store: not an ephemeral rollup node
         )?;
         Ok(json_rpc_service)
     }
@@ -596,6 +598,8 @@ impl JsonRpcService {
         delegated_accounts: Option<Arc<RwLock<HashSet<Pubkey>>>>,
         // Sonic: Optional session PDA for ephemeral rollup RPC.
         session_pda: Option<Arc<RwLock<Option<Pubkey>>>>,
+        // Sonic: Optional in-memory transaction history for ephemeral rollup RPC.
+        er_history_store: Option<Arc<ErHistoryStore>>,
     ) -> Result<Self, String> {
         Self::new(
             rpc_addr,
@@ -620,6 +624,7 @@ impl JsonRpcService {
             runtime,
             delegated_accounts,
             session_pda,
+            er_history_store,
         )
     }
 
@@ -656,6 +661,8 @@ impl JsonRpcService {
         delegated_accounts: Option<Arc<RwLock<HashSet<Pubkey>>>>,
         // Sonic: Optional session PDA for ephemeral rollup RPC.
         session_pda: Option<Arc<RwLock<Option<Pubkey>>>>,
+        // Sonic: Optional in-memory transaction history for ephemeral rollup RPC.
+        er_history_store: Option<Arc<ErHistoryStore>>,
     ) -> Result<Self, String> {
         info!("rpc bound to {rpc_addr:?}");
         info!("rpc configuration: {config:?}");
@@ -756,6 +763,9 @@ impl JsonRpcService {
         }
         if let Some(sp) = session_pda {
             request_processor.set_session_pda(sp);
+        }
+        if let Some(er_history_store) = er_history_store {
+            request_processor.set_er_history_store(er_history_store);
         }
 
         let _send_transaction_service = Arc::new(SendTransactionService::new(
@@ -989,6 +999,7 @@ mod tests {
             Some(Arc::new(PrioritizationFeeCache::default())),
             runtime,
             // Sonic:
+            None,
             None,
             None,
         )
