@@ -10,6 +10,7 @@ use {
     solana_ledger::{blockstore::Blockstore, leader_schedule_cache::LeaderScheduleCache},
     solana_pubkey::Pubkey,
     solana_rpc::{
+        er_history::ErHistoryStore,
         max_slots::MaxSlots,
         optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
         rpc::JsonRpcConfig,
@@ -72,6 +73,8 @@ pub struct EphemeralRuntime {
     active: Arc<AtomicBool>,
     /// Sonic: Current session PDA, shared with the RPC handler.
     session_pda: Arc<RwLock<Option<Pubkey>>>,
+    /// Sonic: In-memory ER transaction history for Phase 1 history APIs.
+    er_history_store: Arc<ErHistoryStore>,
     _portal_program_id: Pubkey,
 
     _tx_client: EphemeralTransactionClient,
@@ -189,11 +192,13 @@ impl EphemeralRuntime {
         // Sonic: Starts inactive — transactions rejected until activate() is called
         let active = Arc::new(AtomicBool::new(false));
         let session_pda: Arc<RwLock<Option<Pubkey>>> = Arc::new(RwLock::new(None));
-        let tx_client = EphemeralTransactionClient::new(
+        let er_history_store = Arc::new(ErHistoryStore::default());
+        let tx_client = EphemeralTransactionClient::new_with_history(
             bank_forks.clone(),
             delegated_set.clone(),
             touched_accounts.clone(),
             active.clone(),
+            er_history_store.clone(),
         );
 
         let ledger_dir = TempDir::new().map_err(|e| e.to_string())?;
@@ -270,6 +275,7 @@ impl EphemeralRuntime {
             runtime.clone(),
             Some(delegated_set.clone()),
             Some(session_pda.clone()),
+            Some(er_history_store.clone()),
         )?;
 
         // Sonic: Start PubSub WebSocket service
@@ -336,6 +342,7 @@ impl EphemeralRuntime {
             touched_accounts,
             active,
             session_pda,
+            er_history_store,
             _portal_program_id: portal_program_id,
 
             _settings: settings,
@@ -370,7 +377,7 @@ impl EphemeralRuntime {
             let advancer_exit = Arc::new(AtomicBool::new(false));
             self.advancer_exit = advancer_exit.clone();
             let initial_bank = self.bank_forks.read().unwrap().working_bank();
-            self.slot_advancer = Some(crate::slot_advancer::SlotAdvancer::new(
+            self.slot_advancer = Some(crate::slot_advancer::SlotAdvancer::new_with_history(
                 self.bank_forks.clone(),
                 self.block_commitment_cache.clone(),
                 initial_bank,
@@ -380,6 +387,7 @@ impl EphemeralRuntime {
                 },
                 advancer_exit,
                 Some(self.rpc_subscriptions.clone()),
+                Some(self.er_history_store.clone()),
             ));
         }
     }
@@ -506,7 +514,7 @@ impl EphemeralRuntime {
         // 7. Start new slot advancer
         let advancer_exit = Arc::new(AtomicBool::new(false));
         self.advancer_exit = advancer_exit.clone();
-        self.slot_advancer = Some(crate::slot_advancer::SlotAdvancer::new(
+        self.slot_advancer = Some(crate::slot_advancer::SlotAdvancer::new_with_history(
             self.bank_forks.clone(),
             self.block_commitment_cache.clone(),
             initial_bank,
@@ -516,6 +524,7 @@ impl EphemeralRuntime {
             },
             advancer_exit,
             Some(self.rpc_subscriptions.clone()),
+            Some(self.er_history_store.clone()),
         ));
 
         info!("EphemeralRuntime reset to new L1 parent, ER slot {}", slot);
@@ -626,6 +635,7 @@ mod tests {
         solana_svm::transaction_processor::ExecutionRecordingConfig,
         solana_system_interface::instruction::transfer,
         solana_transaction::Transaction,
+        solana_transaction_status::{TransactionConfirmationStatus, UiTransactionEncoding},
         std::{net::TcpListener, time::Duration},
     };
 
@@ -809,6 +819,108 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(receiver_balance, transfer_amount);
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_er_history_get_transaction_and_signature_status_after_reset() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        let sender_keypair = Keypair::new();
+        let sender_pubkey = sender_keypair.pubkey();
+        let receiver_pubkey = Pubkey::new_unique();
+        let sender_initial = 100_000_000_000u64;
+        let transfer_amount = 10_000_000_000u64;
+        fund_account(&parent_bank, &sender_pubkey, sender_initial);
+        parent_bank.freeze();
+        let parent_bank = Arc::new(parent_bank);
+
+        let cluster_info = create_test_cluster_info();
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            parent_bank.clone(),
+            cluster_info,
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.activate();
+        let rpc_client = rpc_client(&runtime);
+
+        std::thread::sleep(Duration::from_secs(2));
+
+        let blockhash = rpc_client
+            .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
+            .unwrap()
+            .0;
+        let instruction = transfer(&sender_pubkey, &receiver_pubkey, transfer_amount);
+        let tx = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&sender_pubkey),
+            &[&sender_keypair],
+            blockhash,
+        );
+
+        let config = RpcSendTransactionConfig {
+            skip_preflight: true,
+            ..Default::default()
+        };
+        let signature = rpc_client
+            .send_transaction_with_config(&tx, config)
+            .unwrap();
+
+        std::thread::sleep(Duration::from_secs(2));
+
+        let confirmed_tx = rpc_client
+            .get_transaction(&signature, UiTransactionEncoding::Json)
+            .unwrap();
+        assert_eq!(confirmed_tx.transaction_index, Some(0));
+        assert!(
+            confirmed_tx
+                .transaction
+                .meta
+                .as_ref()
+                .expect("transaction meta should be present")
+                .err
+                .is_none()
+        );
+
+        let new_parent = Bank::new_from_parent(parent_bank, &Pubkey::default(), 1);
+        new_parent.freeze();
+        runtime.reset_to_new_parent(Arc::new(new_parent));
+
+        let confirmed_tx_after_reset = rpc_client
+            .get_transaction(&signature, UiTransactionEncoding::Json)
+            .unwrap();
+        assert_eq!(confirmed_tx_after_reset.slot, confirmed_tx.slot);
+
+        let statuses = rpc_client
+            .get_signature_statuses_with_history(&[signature])
+            .unwrap()
+            .value;
+        let status = statuses
+            .into_iter()
+            .next()
+            .flatten()
+            .expect("history status should be available after reset");
+        assert_eq!(
+            status.confirmation_status,
+            Some(TransactionConfirmationStatus::Finalized)
+        );
+        assert!(status.err.is_none());
 
         runtime.shutdown();
     }

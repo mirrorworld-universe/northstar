@@ -2,17 +2,23 @@ use {
     log::{debug, warn},
     solana_account::{ReadableAccount, WritableAccount},
     solana_keypair::Keypair,
+    solana_ledger::transaction_balances::compile_collected_balances,
     solana_pubkey::Pubkey,
+    solana_rpc::er_history::ErHistoryStore,
     solana_runtime::{bank::Bank, bank_forks::BankForks},
     solana_sdk_ids::{bpf_loader, bpf_loader_upgradeable, system_program, sysvar},
     solana_send_transaction_service::{
         send_transaction_service_stats::SendTransactionServiceStats,
         transaction_client::TransactionClient,
     },
-    solana_svm::transaction_processor::ExecutionRecordingConfig,
+    solana_svm::{
+        transaction_balances::BalanceCollector, transaction_commit_result::TransactionCommitResult,
+        transaction_processor::ExecutionRecordingConfig,
+    },
     solana_svm_timings::ExecuteTimings,
     solana_tls_utils::NotifyKeyUpdate,
     solana_transaction::versioned::VersionedTransaction,
+    solana_transaction_status::{TransactionStatusMeta, VersionedTransactionWithStatusMeta},
     std::{
         collections::HashSet,
         error::Error,
@@ -34,6 +40,8 @@ pub struct EphemeralTransactionClient {
     /// When false, all transactions are rejected.
     /// Shared with EphemeralRuntime — set to true when a session is active.
     active: Arc<AtomicBool>,
+    /// In-memory ER transaction history shared with RPC handlers.
+    er_history_store: Arc<ErHistoryStore>,
 }
 
 impl Clone for EphemeralTransactionClient {
@@ -43,6 +51,7 @@ impl Clone for EphemeralTransactionClient {
             delegated_accounts: Arc::clone(&self.delegated_accounts),
             touched_accounts: Arc::clone(&self.touched_accounts),
             active: Arc::clone(&self.active),
+            er_history_store: Arc::clone(&self.er_history_store),
         }
     }
 }
@@ -54,11 +63,28 @@ impl EphemeralTransactionClient {
         touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
         active: Arc<AtomicBool>,
     ) -> Self {
+        Self::new_with_history(
+            bank_forks,
+            delegated_accounts,
+            touched_accounts,
+            active,
+            Arc::new(ErHistoryStore::default()),
+        )
+    }
+
+    pub fn new_with_history(
+        bank_forks: Arc<RwLock<BankForks>>,
+        delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+        touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+        active: Arc<AtomicBool>,
+        er_history_store: Arc<ErHistoryStore>,
+    ) -> Self {
         Self {
             bank_forks,
             delegated_accounts,
             touched_accounts,
             active,
+            er_history_store,
         }
     }
 
@@ -165,7 +191,7 @@ impl TransactionClient for EphemeralTransactionClient {
                     &self.delegated_accounts,
                 );
 
-                if let Err(e) = Self::execute_transaction(&bank, tx.clone()) {
+                if let Err(e) = self.execute_transaction(&bank, tx.clone()) {
                     debug!("Tx execution failed: {e}");
                 }
 
@@ -178,23 +204,90 @@ impl TransactionClient for EphemeralTransactionClient {
 impl EphemeralTransactionClient {
     // TODO: Convert it to accept vector of transaction so we batch execution
     fn execute_transaction(
+        &self,
         bank: &Bank,
         tx: VersionedTransaction,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let batch = bank.prepare_entry_batch(vec![tx])?;
-        let results = bank.load_execute_and_commit_transactions(
+        let batch = bank.prepare_entry_batch(vec![tx.clone()])?;
+        let (commit_results, balance_collector) = bank.load_execute_and_commit_transactions(
             &batch,
             usize::MAX, // TODO: Use appropriate age limit for ephemeral rollup
-            ExecutionRecordingConfig::default(),
+            Self::history_recording_config(),
             &mut ExecuteTimings::default(),
             None,
         );
-        for (tx_idx, result) in results.0.iter().enumerate() {
+
+        self.record_transaction_history(bank, tx, &commit_results, balance_collector);
+
+        for (tx_idx, result) in commit_results.iter().enumerate() {
             if let Err(e) = result {
                 debug!("Tx {tx_idx} failed: {e}");
             }
         }
         Ok(())
+    }
+
+    fn history_recording_config() -> ExecutionRecordingConfig {
+        ExecutionRecordingConfig {
+            enable_transaction_balance_recording: true,
+            ..ExecutionRecordingConfig::default()
+        }
+    }
+
+    fn record_transaction_history(
+        &self,
+        bank: &Bank,
+        tx: VersionedTransaction,
+        commit_results: &[TransactionCommitResult],
+        balance_collector: Option<BalanceCollector>,
+    ) {
+        let Some(Ok(committed_tx)) = commit_results.first() else {
+            return;
+        };
+
+        let (balances, token_balances) =
+            compile_collected_balances(balance_collector.unwrap_or_default());
+        let pre_balances = balances.pre_balances.into_iter().next().unwrap_or_default();
+        let post_balances = balances
+            .post_balances
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let pre_token_balances = token_balances
+            .pre_token_balances
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let post_token_balances = token_balances
+            .post_token_balances
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+
+        let meta = TransactionStatusMeta {
+            status: committed_tx.status.clone(),
+            fee: committed_tx.fee_details.total_fee(),
+            pre_balances,
+            post_balances,
+            inner_instructions: None,
+            log_messages: None,
+            pre_token_balances: Some(pre_token_balances),
+            post_token_balances: Some(post_token_balances),
+            rewards: Some(vec![]),
+            loaded_addresses: Default::default(),
+            return_data: None,
+            compute_units_consumed: Some(committed_tx.executed_units),
+            cost_units: None,
+        };
+
+        let _ = self.er_history_store.record_transaction(
+            bank.slot(),
+            VersionedTransactionWithStatusMeta {
+                transaction: tx,
+                meta,
+            },
+            Some(bank.clock().unix_timestamp),
+        );
     }
 
     /// Check if a key is an infrastructure account (system program, sysvars, etc.)

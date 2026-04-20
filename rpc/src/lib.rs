@@ -1,6 +1,7 @@
 #![cfg(feature = "agave-unstable-api")]
 #![allow(clippy::arithmetic_side_effects)]
 mod cluster_tpu_info;
+pub mod er_history;
 pub mod filter;
 pub mod max_slots;
 pub mod northstar;
