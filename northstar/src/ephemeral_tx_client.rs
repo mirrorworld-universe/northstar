@@ -18,7 +18,9 @@ use {
     solana_svm_timings::ExecuteTimings,
     solana_tls_utils::NotifyKeyUpdate,
     solana_transaction::versioned::VersionedTransaction,
-    solana_transaction_status::{TransactionStatusMeta, VersionedTransactionWithStatusMeta},
+    solana_transaction_status::{
+        TransactionStatusMeta, VersionedTransactionWithStatusMeta, map_inner_instructions,
+    },
     std::{
         collections::HashSet,
         error::Error,
@@ -229,8 +231,10 @@ impl EphemeralTransactionClient {
 
     fn history_recording_config() -> ExecutionRecordingConfig {
         ExecutionRecordingConfig {
+            enable_cpi_recording: true,
+            enable_log_recording: true,
+            enable_return_data_recording: true,
             enable_transaction_balance_recording: true,
-            ..ExecutionRecordingConfig::default()
         }
     }
 
@@ -269,13 +273,16 @@ impl EphemeralTransactionClient {
             fee: committed_tx.fee_details.total_fee(),
             pre_balances,
             post_balances,
-            inner_instructions: None,
-            log_messages: None,
+            inner_instructions: committed_tx
+                .inner_instructions
+                .clone()
+                .map(|inner| map_inner_instructions(inner).collect()),
+            log_messages: committed_tx.log_messages.clone(),
             pre_token_balances: Some(pre_token_balances),
             post_token_balances: Some(post_token_balances),
             rewards: Some(vec![]),
             loaded_addresses: Default::default(),
-            return_data: None,
+            return_data: committed_tx.return_data.clone(),
             compute_units_consumed: Some(committed_tx.executed_units),
             cost_units: None,
         };
@@ -393,10 +400,13 @@ mod tests {
     use {
         super::*,
         solana_account::AccountSharedData,
+        solana_fee_structure::FeeDetails,
         solana_keypair::{Keypair, Signer},
         solana_message::Message,
         solana_sdk_ids::system_program,
-        solana_transaction::versioned::VersionedTransaction,
+        solana_svm::transaction_execution_result::TransactionLoadedAccountsStats,
+        solana_transaction::{Transaction, versioned::VersionedTransaction},
+        solana_transaction_context::transaction::TransactionReturnData,
     };
 
     fn create_test_bank() -> solana_runtime::bank::Bank {
@@ -633,6 +643,22 @@ mod tests {
         )
     }
 
+    fn create_client_with_history(
+        bank_forks: Arc<RwLock<BankForks>>,
+        delegated: Vec<Pubkey>,
+        er_history_store: Arc<ErHistoryStore>,
+    ) -> EphemeralTransactionClient {
+        let delegated_set = Arc::new(RwLock::new(delegated.into_iter().collect()));
+        let touched_set = Arc::new(RwLock::new(HashSet::new()));
+        EphemeralTransactionClient::new_with_history(
+            bank_forks,
+            delegated_set,
+            touched_set,
+            Arc::new(AtomicBool::new(true)),
+            er_history_store,
+        )
+    }
+
     /// Helper to create a simple transfer transaction
     fn create_transfer_tx(
         fee_payer: &Keypair,
@@ -648,6 +674,94 @@ mod tests {
             &blockhash,
         ));
         VersionedTransaction::try_new(message, &[fee_payer]).unwrap()
+    }
+
+    #[test]
+    fn test_record_transaction_history_preserves_logs_cpi_and_return_data() {
+        let fee_payer = Keypair::new();
+        let recipient = Pubkey::new_unique();
+        let (bank, bank_forks) = create_test_bank_forks_with_accounts(&[
+            (fee_payer.pubkey(), 10_000_000),
+            (recipient, 1_000_000),
+        ]);
+        let er_history_store = Arc::new(ErHistoryStore::default());
+        let client = create_client_with_history(bank_forks, vec![], er_history_store.clone());
+
+        let blockhash = bank.last_blockhash();
+        let tx = Transaction::new_signed_with_payer(
+            &[solana_system_interface::instruction::transfer(
+                &fee_payer.pubkey(),
+                &recipient,
+                1,
+            )],
+            Some(&fee_payer.pubkey()),
+            &[&fee_payer],
+            blockhash,
+        );
+        let tx = VersionedTransaction::from(tx);
+        let signature = tx.signatures[0];
+
+        let expected_logs = vec![
+            "Program 11111111111111111111111111111111 invoke [1]".to_string(),
+            "Program 11111111111111111111111111111111 success".to_string(),
+        ];
+        let expected_inner = vec![vec![]];
+        let expected_return_data = TransactionReturnData {
+            program_id: Pubkey::new_unique(),
+            data: vec![0xAA, 0xBB, 0xCC],
+        };
+
+        client.record_transaction_history(
+            &bank,
+            tx,
+            &[Ok(
+                solana_svm::transaction_commit_result::CommittedTransaction {
+                    status: Ok(()),
+                    log_messages: Some(expected_logs.clone()),
+                    inner_instructions: Some(expected_inner.clone()),
+                    return_data: Some(expected_return_data.clone()),
+                    executed_units: 321,
+                    fee_details: FeeDetails::new(5_000, 0),
+                    loaded_account_stats: TransactionLoadedAccountsStats::default(),
+                    fee_payer_post_balance: 9_995_000,
+                },
+            )],
+            None,
+        );
+
+        let recorded = er_history_store
+            .get_transaction(
+                &signature,
+                solana_rpc_client_types::config::CommitmentConfig::confirmed(),
+            )
+            .expect("ER history should contain transaction");
+        let meta = recorded
+            .tx_with_meta
+            .get_status_meta()
+            .expect("transaction status meta should exist");
+
+        let expected_inner = expected_inner
+            .into_iter()
+            .enumerate()
+            .map(
+                |(index, instructions)| solana_transaction_status::InnerInstructions {
+                    index: index as u8,
+                    instructions: instructions
+                        .into_iter()
+                        .map(|info| solana_transaction_status::InnerInstruction {
+                            stack_height: Some(u32::from(info.stack_height)),
+                            instruction: info.instruction,
+                        })
+                        .collect(),
+                },
+            )
+            .filter(|inner| !inner.instructions.is_empty())
+            .collect::<Vec<_>>();
+
+        assert_eq!(meta.log_messages.as_ref(), Some(&expected_logs));
+        assert_eq!(meta.inner_instructions.as_ref(), Some(&expected_inner));
+        assert_eq!(meta.return_data.as_ref(), Some(&expected_return_data));
+        assert_eq!(meta.compute_units_consumed, Some(321));
     }
 
     #[test]

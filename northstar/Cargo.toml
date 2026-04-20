@@ -58,3 +58,5 @@ serde_json = { workspace = true }
 solana-ledger = { workspace = true, features = ["agave-unstable-api"] }
 solana-runtime = { workspace = true, features = ["agave-unstable-api", "dev-context-only-utils"] }
 solana-instruction = { workspace = true }
+solana-fee-structure.workspace = true
+solana-transaction-context.workspace = true

@@ -888,14 +888,19 @@ mod tests {
             .get_transaction(&signature, UiTransactionEncoding::Json)
             .unwrap();
         assert_eq!(confirmed_tx.transaction_index, Some(0));
+        let confirmed_meta = confirmed_tx
+            .transaction
+            .meta
+            .as_ref()
+            .expect("transaction meta should be present");
+        assert!(confirmed_meta.err.is_none());
         assert!(
-            confirmed_tx
-                .transaction
-                .meta
-                .as_ref()
-                .expect("transaction meta should be present")
-                .err
-                .is_none()
+            matches!(
+                confirmed_meta.log_messages.as_ref(),
+                solana_transaction_status::option_serializer::OptionSerializer::Some(logs)
+                    if !logs.is_empty()
+            ),
+            "ER transaction history should preserve Solana log messages"
         );
 
         let new_parent = Bank::new_from_parent(parent_bank, &Pubkey::default(), 1);
