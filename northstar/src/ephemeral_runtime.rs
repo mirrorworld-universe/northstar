@@ -590,9 +590,19 @@ impl EphemeralRuntime {
         // TODO: make sure we do it between blocks or postpone a bit block creation
         let bank = self.bank();
         let mut account = bank.get_account(depositor).unwrap_or_default();
-        let new_balance = account.lamports().saturating_add(lamports);
+        let was_delegated = self.delegated_accounts.read().unwrap().contains(depositor);
+        let was_touched = self.touched_accounts.read().unwrap().contains(depositor);
+
+        // Untouched, non-delegated accounts inherit L1 lamports into the ER bank.
+        // Deposits must materialize only the deposited amount, not L1 balance + deposit.
+        let base_balance = if was_delegated || was_touched {
+            account.lamports()
+        } else {
+            0
+        };
+        let new_balance = base_balance.saturating_add(lamports);
         account.set_lamports(new_balance);
-        // Ensure the account is owned by system program
+        // Ensure the account is owned by system program when materializing a new balance.
         if account.owner() == &Pubkey::default() {
             account.set_owner(solana_sdk_ids::system_program::id());
         }
@@ -603,8 +613,8 @@ impl EphemeralRuntime {
         self.touched_accounts.write().unwrap().insert(*depositor);
 
         info!(
-            "Credited {} lamports to {} on ER (new balance: {})",
-            lamports, depositor, new_balance
+            "Credited {} lamports to {} on ER (base: {}, new balance: {})",
+            lamports, depositor, base_balance, new_balance
         );
     }
 }

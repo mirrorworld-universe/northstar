@@ -167,13 +167,14 @@ mod tests {
         solana_pubkey::Pubkey,
         solana_rent::Rent,
         solana_rpc::optimistically_confirmed_bank_tracker::BankNotification,
-        solana_rpc_client_api::request::RpcRequest,
+        solana_rpc_client_api::{config::RpcSendTransactionConfig, request::RpcRequest},
         solana_runtime::{
             bank::Bank,
             bank_forks::BankForks,
             genesis_utils::{GenesisConfigInfo, create_genesis_config},
         },
         solana_sdk_ids::system_program,
+        solana_system_interface::instruction::transfer,
         solana_transaction::Transaction,
         std::{net::TcpListener, sync::RwLock, time::Duration},
     };
@@ -247,6 +248,10 @@ mod tests {
         Pubkey::find_program_address(&[b"fee_vault", owner.as_ref()], program_id)
     }
 
+    fn find_delegation_record_pda(program_id: &Pubkey, delegated_account: &Pubkey) -> (Pubkey, u8) {
+        Pubkey::find_program_address(&[b"delegation", delegated_account.as_ref()], program_id)
+    }
+
     fn build_open_session_ix(
         program_id: Pubkey,
         owner: Pubkey,
@@ -268,6 +273,56 @@ mod tests {
                 AccountMeta::new(owner, true),
                 AccountMeta::new(session_pda, false),
                 AccountMeta::new(fee_vault_pda, false),
+                AccountMeta::new_readonly(system_program::id(), false),
+            ],
+            data,
+        }
+    }
+
+    fn build_delegate_ix(
+        program_id: Pubkey,
+        payer: Pubkey,
+        delegated_account: Pubkey,
+        owner_program: Pubkey,
+        delegation_record_pda: Pubkey,
+        grid_id: u64,
+    ) -> Instruction {
+        let ix = PortalInstruction::Delegate { grid_id };
+        let data = borsh::to_vec(&ix).unwrap();
+        Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new(payer, true),
+                AccountMeta::new(delegated_account, false),
+                AccountMeta::new_readonly(owner_program, false),
+                AccountMeta::new(delegation_record_pda, false),
+                AccountMeta::new_readonly(system_program::id(), false),
+            ],
+            data,
+        }
+    }
+
+    fn build_deposit_fee_ix(
+        program_id: Pubkey,
+        depositor: Pubkey,
+        session_pda: Pubkey,
+        recipient: Pubkey,
+        lamports: u64,
+    ) -> Instruction {
+        let (deposit_receipt_pda, _) = Pubkey::find_program_address(
+            &[b"deposit_receipt", session_pda.as_ref(), recipient.as_ref()],
+            &program_id,
+        );
+
+        let ix = PortalInstruction::DepositFee { lamports };
+        let data = borsh::to_vec(&ix).unwrap();
+        Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new(depositor, true),
+                AccountMeta::new_readonly(session_pda, false),
+                AccountMeta::new(deposit_receipt_pda, false),
+                AccountMeta::new_readonly(recipient, false),
                 AccountMeta::new_readonly(system_program::id(), false),
             ],
             data,
@@ -603,6 +658,231 @@ mod tests {
         assert_eq!(
             slot_before_stop, slot_after_stop,
             "ER slot should stop advancing after session close"
+        );
+
+        exit.store(true, Ordering::Relaxed);
+        service.join().expect("service should join");
+    }
+
+    #[test]
+    fn test_service_self_deposit_only_credits_er_deposit_amount_and_can_spend_it() {
+        agave_logger::setup();
+
+        let (root_bank, bank_forks, program_id, mint_keypair) = setup_bank_with_portal();
+        let owner = Keypair::new();
+        root_bank
+            .transfer(30_000_000_000, &mint_keypair, &owner.pubkey())
+            .unwrap();
+
+        let delegated_owner_program = Pubkey::new_unique();
+        let delegated_account = Pubkey::new_unique();
+        let delegated_portal_account = AccountSharedData::new(1_000_000, 0, &program_id);
+        root_bank.store_account(&delegated_account, &delegated_portal_account);
+
+        let grid_id = 7u64;
+        let deposit_amount = 1_000_000_000u64;
+        let transfer_amount = 500_000_000u64;
+        let third_party = Pubkey::new_unique();
+        let (session_pda, _) = find_session_pda(&program_id, &owner.pubkey(), grid_id);
+        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id, &owner.pubkey());
+        let (delegation_record_pda, _) =
+            find_delegation_record_pda(&program_id, &delegated_account);
+
+        let open_ix = build_open_session_ix(
+            program_id,
+            owner.pubkey(),
+            session_pda,
+            fee_vault_pda,
+            grid_id,
+            1000,
+            5_000_000_000,
+        );
+        let blockhash = root_bank.last_blockhash();
+        let open_tx = Transaction::new_signed_with_payer(
+            &[open_ix],
+            Some(&owner.pubkey()),
+            &[&owner],
+            blockhash,
+        );
+        root_bank.process_transaction(&open_tx).unwrap();
+        root_bank.freeze();
+
+        let bank_for_open = bank_forks.read().unwrap().root_bank();
+
+        let cluster_info = create_test_cluster_info();
+        let (sender, receiver) = unbounded();
+        let exit = Arc::new(AtomicBool::new(false));
+        let config = NorthStarServiceConfig {
+            listen_addr: find_free_addr(),
+            ws_addr: find_free_addr(),
+            tpu_addr: find_free_addr(),
+            slot_duration: Duration::from_millis(400),
+        };
+
+        let service = NorthStarService::new(
+            bank_forks,
+            receiver,
+            northstar::ManagerConfig {
+                portal_program_id: program_id,
+                manager_account: Arc::new(Keypair::new()),
+            },
+            cluster_info,
+            config.clone(),
+            exit.clone(),
+        );
+
+        let rpc = RpcClient::new(format!("http://{}", config.listen_addr));
+        std::thread::sleep(Duration::from_secs(2));
+
+        sender
+            .send((BankNotification::Frozen(bank_for_open.clone()), None))
+            .unwrap();
+
+        let mut session_from_rpc = None;
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_millis(300));
+            session_from_rpc = rpc
+                .send(
+                    RpcRequest::Custom {
+                        method: "getSessionPda",
+                    },
+                    serde_json::Value::Null,
+                )
+                .unwrap();
+            if session_from_rpc.is_some() {
+                break;
+            }
+        }
+        assert_eq!(session_from_rpc, Some(session_pda.to_string()));
+
+        let delegate_bank = Bank::new_from_parent(
+            bank_for_open.clone(),
+            &Pubkey::default(),
+            bank_for_open.slot() + 1,
+        );
+        let delegate_ix = build_delegate_ix(
+            program_id,
+            owner.pubkey(),
+            delegated_account,
+            delegated_owner_program,
+            delegation_record_pda,
+            grid_id,
+        );
+        let blockhash = delegate_bank.last_blockhash();
+        let delegate_tx = Transaction::new_signed_with_payer(
+            &[delegate_ix],
+            Some(&owner.pubkey()),
+            &[&owner],
+            blockhash,
+        );
+        delegate_bank.process_transaction(&delegate_tx).unwrap();
+        delegate_bank.freeze();
+        let delegate_bank = Arc::new(delegate_bank);
+
+        sender
+            .send((BankNotification::Frozen(delegate_bank.clone()), None))
+            .unwrap();
+
+        let mut delegated_accounts: Vec<String> = vec![];
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_millis(300));
+            delegated_accounts = rpc
+                .send(
+                    RpcRequest::Custom {
+                        method: "getDelegatedAccounts",
+                    },
+                    serde_json::Value::Null,
+                )
+                .unwrap();
+            if delegated_accounts
+                .iter()
+                .any(|a| a == &delegated_account.to_string())
+            {
+                break;
+            }
+        }
+        assert!(
+            delegated_accounts
+                .iter()
+                .any(|a| a == &delegated_account.to_string()),
+            "delegated account should be visible on ER"
+        );
+
+        let deposit_bank = Bank::new_from_parent(
+            delegate_bank.clone(),
+            &Pubkey::default(),
+            delegate_bank.slot() + 1,
+        );
+        let deposit_ix = build_deposit_fee_ix(
+            program_id,
+            owner.pubkey(),
+            session_pda,
+            owner.pubkey(),
+            deposit_amount,
+        );
+        let blockhash = deposit_bank.last_blockhash();
+        let deposit_tx = Transaction::new_signed_with_payer(
+            &[deposit_ix],
+            Some(&owner.pubkey()),
+            &[&owner],
+            blockhash,
+        );
+        deposit_bank.process_transaction(&deposit_tx).unwrap();
+        deposit_bank.freeze();
+
+        sender
+            .send((BankNotification::Frozen(Arc::new(deposit_bank)), None))
+            .unwrap();
+
+        let mut owner_er_balance = 0;
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_millis(300));
+            owner_er_balance = rpc
+                .get_balance_with_commitment(&owner.pubkey(), CommitmentConfig::processed())
+                .unwrap()
+                .value;
+            if owner_er_balance == deposit_amount {
+                break;
+            }
+        }
+        assert_eq!(
+            owner_er_balance, deposit_amount,
+            "ER should credit only deposit amount, not inherited L1 balance plus deposit"
+        );
+
+        let blockhash = rpc
+            .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
+            .unwrap()
+            .0;
+        let transfer_tx = Transaction::new_signed_with_payer(
+            &[transfer(&owner.pubkey(), &third_party, transfer_amount)],
+            Some(&owner.pubkey()),
+            &[&owner],
+            blockhash,
+        );
+        rpc.send_transaction_with_config(
+            &transfer_tx,
+            RpcSendTransactionConfig {
+                skip_preflight: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let mut third_party_balance = 0;
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_millis(300));
+            third_party_balance = rpc
+                .get_balance_with_commitment(&third_party, CommitmentConfig::processed())
+                .unwrap()
+                .value;
+            if third_party_balance == transfer_amount {
+                break;
+            }
+        }
+        assert_eq!(
+            third_party_balance, transfer_amount,
+            "owner should be able to spend deposited ER funds"
         );
 
         exit.store(true, Ordering::Relaxed);
