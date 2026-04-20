@@ -28,7 +28,7 @@ use {
         collections::{HashMap, HashSet},
         net::SocketAddr,
         sync::{
-            Arc, RwLock,
+            Arc, Mutex, RwLock,
             atomic::{AtomicBool, AtomicU64, Ordering},
         },
         time::Duration,
@@ -39,6 +39,8 @@ use {
 
 pub struct EphemeralRuntime {
     bank_forks: Arc<RwLock<BankForks>>,
+    /// Serializes ER bank mutations with slot advancement and tx execution.
+    bank_operation_lock: Arc<Mutex<()>>,
     block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
     optimistically_confirmed_bank: Arc<RwLock<OptimisticallyConfirmedBank>>,
     rpc_service: JsonRpcService,
@@ -189,12 +191,14 @@ impl EphemeralRuntime {
 
         let delegated_set = Arc::new(RwLock::new(delegated_accounts.clone()));
         let touched_accounts = Arc::new(RwLock::new(HashSet::new()));
+        let bank_operation_lock = Arc::new(Mutex::new(()));
         // Sonic: Starts inactive — transactions rejected until activate() is called
         let active = Arc::new(AtomicBool::new(false));
         let session_pda: Arc<RwLock<Option<Pubkey>>> = Arc::new(RwLock::new(None));
         let er_history_store = Arc::new(ErHistoryStore::default());
         let tx_client = EphemeralTransactionClient::new_with_history(
             bank_forks.clone(),
+            bank_operation_lock.clone(),
             delegated_set.clone(),
             touched_accounts.clone(),
             active.clone(),
@@ -324,6 +328,7 @@ impl EphemeralRuntime {
 
         Ok(Self {
             bank_forks,
+            bank_operation_lock,
             block_commitment_cache,
             optimistically_confirmed_bank,
             rpc_service,
@@ -379,6 +384,7 @@ impl EphemeralRuntime {
             let initial_bank = self.bank_forks.read().unwrap().working_bank();
             self.slot_advancer = Some(crate::slot_advancer::SlotAdvancer::new_with_history(
                 self.bank_forks.clone(),
+                self.bank_operation_lock.clone(),
                 self.block_commitment_cache.clone(),
                 initial_bank,
                 crate::slot_advancer::Config {
@@ -460,62 +466,71 @@ impl EphemeralRuntime {
             advancer.join();
         }
 
-        // 2. Create new ephemeral bank from current L1 root
-        let ephemeral_slot = Self::er_slot_for(&parent_bank);
-        info!(
-            "reset_to_new_parent: parent_slot={}, ephemeral_slot={}, parent_epoch={}",
-            parent_bank.slot(),
-            ephemeral_slot,
-            parent_bank.epoch(),
-        );
-        let bank = Bank::new_from_parent_ephemeral(parent_bank, &Pubkey::default(), ephemeral_slot);
-        info!(
-            "reset_to_new_parent: ER bank created, slot={}, epoch={}",
-            bank.slot(),
-            bank.epoch(),
-        );
-        let ticks_per_slot = bank.ticks_per_slot();
-        bank.set_tick_height(bank.max_tick_height() - ticks_per_slot);
+        let initial_bank = {
+            let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
 
-        // 3. Swap BankForks in-place — same Arc, new contents.
-        //    All holders (RPC service, tx_client) see the new bank.
-        let new_bf_arc = BankForks::new_rw_arc_ephemeral(bank);
-        let new_bf = Arc::try_unwrap(new_bf_arc)
-            .unwrap_or_else(|_| panic!("just created, refcount must be 1"))
-            .into_inner()
-            .expect("lock not poisoned");
-        *self.bank_forks.write().unwrap() = new_bf;
+            // 2. Create new ephemeral bank from current L1 root
+            let ephemeral_slot = Self::er_slot_for(&parent_bank);
+            info!(
+                "reset_to_new_parent: parent_slot={}, ephemeral_slot={}, parent_epoch={}",
+                parent_bank.slot(),
+                ephemeral_slot,
+                parent_bank.epoch(),
+            );
+            let bank =
+                Bank::new_from_parent_ephemeral(parent_bank, &Pubkey::default(), ephemeral_slot);
+            info!(
+                "reset_to_new_parent: ER bank created, slot={}, epoch={}",
+                bank.slot(),
+                bank.epoch(),
+            );
+            let ticks_per_slot = bank.ticks_per_slot();
+            bank.set_tick_height(bank.max_tick_height() - ticks_per_slot);
 
-        let initial_bank = self.bank_forks.read().unwrap().root_bank();
-        let slot = initial_bank.slot();
+            // 3. Swap BankForks in-place — same Arc, new contents.
+            //    All holders (RPC service, tx_client) see the new bank.
+            let new_bf_arc = BankForks::new_rw_arc_ephemeral(bank);
+            let new_bf = Arc::try_unwrap(new_bf_arc)
+                .unwrap_or_else(|_| panic!("just created, refcount must be 1"))
+                .into_inner()
+                .expect("lock not poisoned");
+            *self.bank_forks.write().unwrap() = new_bf;
 
-        // 4. Update commitment cache
-        *self.block_commitment_cache.write().unwrap() = BlockCommitmentCache::new(
-            std::collections::HashMap::new(),
-            0,
-            CommitmentSlots {
-                slot,
-                root: slot,
-                highest_confirmed_slot: slot,
-                highest_super_majority_root: slot,
-            },
-        );
+            let initial_bank = self.bank_forks.read().unwrap().root_bank();
+            let slot = initial_bank.slot();
 
-        // 5. Update optimistically confirmed bank
-        *self.optimistically_confirmed_bank.write().unwrap() = OptimisticallyConfirmedBank {
-            bank: initial_bank.clone(),
+            // 4. Update commitment cache
+            *self.block_commitment_cache.write().unwrap() = BlockCommitmentCache::new(
+                std::collections::HashMap::new(),
+                0,
+                CommitmentSlots {
+                    slot,
+                    root: slot,
+                    highest_confirmed_slot: slot,
+                    highest_super_majority_root: slot,
+                },
+            );
+
+            // 5. Update optimistically confirmed bank
+            *self.optimistically_confirmed_bank.write().unwrap() = OptimisticallyConfirmedBank {
+                bank: initial_bank.clone(),
+            };
+
+            // 6. Clear session state
+            self.initial_account_snapshots.clear();
+            self.delegated_accounts.write().unwrap().clear();
+            self.touched_accounts.write().unwrap().clear();
+
+            initial_bank
         };
-
-        // 6. Clear session state
-        self.initial_account_snapshots.clear();
-        self.delegated_accounts.write().unwrap().clear();
-        self.touched_accounts.write().unwrap().clear();
 
         // 7. Start new slot advancer
         let advancer_exit = Arc::new(AtomicBool::new(false));
         self.advancer_exit = advancer_exit.clone();
+        let slot = initial_bank.slot();
         self.slot_advancer = Some(crate::slot_advancer::SlotAdvancer::new_with_history(
             self.bank_forks.clone(),
+            self.bank_operation_lock.clone(),
             self.block_commitment_cache.clone(),
             initial_bank,
             crate::slot_advancer::Config {
@@ -560,9 +575,9 @@ impl EphemeralRuntime {
     /// Copies the account data from L1 into the ER bank and adds it to the
     /// delegated accounts set so transactions can write to it.
     pub fn handle_delegation(&self, delegated_account: &Pubkey, account_data: AccountSharedData) {
+        let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
         let bank = self.bank();
         bank.store_account(delegated_account, &account_data);
-        self.publish_bank_for_rpc(bank.clone());
 
         // Add to the delegated accounts set so the tx client allows writes
         self.delegated_accounts
@@ -576,6 +591,8 @@ impl EphemeralRuntime {
             .unwrap()
             .insert(*delegated_account);
 
+        self.publish_bank_for_rpc(bank.clone());
+
         info!(
             "Delegated account {} added to ER (owner: {}, lamports: {})",
             delegated_account,
@@ -587,7 +604,7 @@ impl EphemeralRuntime {
     /// Credit a deposit on the ephemeral bank. Called by NorthStarService
     /// when a FeeDeposited event is detected on L1.
     pub fn credit_deposit(&self, depositor: &Pubkey, lamports: u64) {
-        // TODO: make sure we do it between blocks or postpone a bit block creation
+        let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
         let bank = self.bank();
         let mut account = bank.get_account(depositor).unwrap_or_default();
         let was_delegated = self.delegated_accounts.read().unwrap().contains(depositor);
@@ -607,10 +624,11 @@ impl EphemeralRuntime {
             account.set_owner(solana_sdk_ids::system_program::id());
         }
         bank.store_account(depositor, &account);
-        self.publish_bank_for_rpc(bank.clone());
 
         // Mark as touched so the balance isn't zeroed later
         self.touched_accounts.write().unwrap().insert(*depositor);
+
+        self.publish_bank_for_rpc(bank.clone());
 
         info!(
             "Credited {} lamports to {} on ER (base: {}, new balance: {})",

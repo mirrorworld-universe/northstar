@@ -25,7 +25,7 @@ use {
         collections::HashSet,
         error::Error,
         sync::{
-            Arc, RwLock,
+            Arc, Mutex, RwLock,
             atomic::{AtomicBool, Ordering},
         },
     },
@@ -33,6 +33,8 @@ use {
 
 pub struct EphemeralTransactionClient {
     bank_forks: Arc<RwLock<BankForks>>,
+    /// Serializes ER bank mutations with SlotAdvancer and deposit/delegation writes.
+    bank_operation_lock: Arc<Mutex<()>>,
     /// Set of delegated account pubkeys for filtering.
     /// Wrapped in RwLock because new delegations can arrive from L1 at runtime.
     delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
@@ -50,6 +52,7 @@ impl Clone for EphemeralTransactionClient {
     fn clone(&self) -> Self {
         Self {
             bank_forks: Arc::clone(&self.bank_forks),
+            bank_operation_lock: Arc::clone(&self.bank_operation_lock),
             delegated_accounts: Arc::clone(&self.delegated_accounts),
             touched_accounts: Arc::clone(&self.touched_accounts),
             active: Arc::clone(&self.active),
@@ -61,12 +64,14 @@ impl Clone for EphemeralTransactionClient {
 impl EphemeralTransactionClient {
     pub fn new(
         bank_forks: Arc<RwLock<BankForks>>,
+        bank_operation_lock: Arc<Mutex<()>>,
         delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
         touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
         active: Arc<AtomicBool>,
     ) -> Self {
         Self::new_with_history(
             bank_forks,
+            bank_operation_lock,
             delegated_accounts,
             touched_accounts,
             active,
@@ -76,6 +81,7 @@ impl EphemeralTransactionClient {
 
     pub fn new_with_history(
         bank_forks: Arc<RwLock<BankForks>>,
+        bank_operation_lock: Arc<Mutex<()>>,
         delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
         touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
         active: Arc<AtomicBool>,
@@ -83,6 +89,7 @@ impl EphemeralTransactionClient {
     ) -> Self {
         Self {
             bank_forks,
+            bank_operation_lock,
             delegated_accounts,
             touched_accounts,
             active,
@@ -161,9 +168,6 @@ impl TransactionClient for EphemeralTransactionClient {
             );
             return;
         }
-        // BUG: This should work around slot advancer, because it might change
-        // bank between transactions
-        let bank = self.bank();
         wire_transactions
             .into_iter()
             .filter_map(|wire_tx| match bincode::deserialize(&wire_tx) {
@@ -174,6 +178,9 @@ impl TransactionClient for EphemeralTransactionClient {
                 }
             })
             .for_each(|tx| {
+                let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
+                let bank = self.bank();
+
                 // Delegation filter: reject transactions that write to non-delegated accounts
                 if !self.is_transaction_allowed(&tx) {
                     warn!(
@@ -637,6 +644,7 @@ mod tests {
         let touched_set = Arc::new(RwLock::new(HashSet::new()));
         EphemeralTransactionClient::new(
             bank_forks,
+            Arc::new(Mutex::new(())),
             delegated_set,
             touched_set,
             Arc::new(AtomicBool::new(true)),
@@ -652,6 +660,7 @@ mod tests {
         let touched_set = Arc::new(RwLock::new(HashSet::new()));
         EphemeralTransactionClient::new_with_history(
             bank_forks,
+            Arc::new(Mutex::new(())),
             delegated_set,
             touched_set,
             Arc::new(AtomicBool::new(true)),

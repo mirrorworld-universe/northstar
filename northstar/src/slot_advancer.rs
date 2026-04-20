@@ -11,7 +11,7 @@ use {
     },
     std::{
         sync::{
-            Arc, RwLock,
+            Arc, Mutex, RwLock,
             atomic::{AtomicBool, Ordering},
         },
         thread::{self, JoinHandle},
@@ -44,6 +44,7 @@ pub struct SlotAdvancer {
 impl SlotAdvancer {
     pub fn new(
         bank_forks: Arc<RwLock<BankForks>>,
+        bank_operation_lock: Arc<Mutex<()>>,
         block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
         initial_bank: Arc<Bank>,
         config: Config,
@@ -52,6 +53,7 @@ impl SlotAdvancer {
     ) -> Self {
         Self::new_with_history(
             bank_forks,
+            bank_operation_lock,
             block_commitment_cache,
             initial_bank,
             config,
@@ -63,6 +65,7 @@ impl SlotAdvancer {
 
     pub fn new_with_history(
         bank_forks: Arc<RwLock<BankForks>>,
+        bank_operation_lock: Arc<Mutex<()>>,
         block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
         initial_bank: Arc<Bank>,
         config: Config,
@@ -74,6 +77,7 @@ impl SlotAdvancer {
         let thread = thread::spawn(move || {
             Self::run(
                 bank_forks,
+                bank_operation_lock,
                 block_commitment_cache,
                 initial_bank,
                 config,
@@ -90,6 +94,7 @@ impl SlotAdvancer {
 
     fn run(
         bank_forks: Arc<RwLock<BankForks>>,
+        bank_operation_lock: Arc<Mutex<()>>,
         block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
         mut current_bank: Arc<Bank>,
         config: Config,
@@ -129,40 +134,46 @@ impl SlotAdvancer {
                 current_bank.register_tick(&hash, &scheduler);
             }
 
-            current_bank.freeze();
-            if let Some(er_history_store) = &er_history_store {
-                er_history_store.finalize_slot(&current_bank);
-            }
+            let (current_bank_slot, next_bank_arc) = {
+                let _bank_operation_guard = bank_operation_lock.lock().unwrap();
 
-            debug!(
-                "SlotAdvancer: after freeze, slot {}, blockhash {}",
-                current_bank.slot(),
-                current_bank.last_blockhash()
-            );
+                current_bank.freeze();
+                if let Some(er_history_store) = &er_history_store {
+                    er_history_store.finalize_slot(&current_bank);
+                }
 
-            current_slot += 1;
-            let current_bank_slot = current_bank.slot();
-            let next_bank = Bank::new_from_parent_ephemeral(
-                current_bank,
-                &config.manager_account,
-                current_slot,
-            );
+                debug!(
+                    "SlotAdvancer: after freeze, slot {}, blockhash {}",
+                    current_bank.slot(),
+                    current_bank.last_blockhash()
+                );
 
-            let next_bank_arc = {
-                let mut bank_forks_write = bank_forks.write().unwrap();
-                let inserted = bank_forks_write.insert(next_bank);
+                current_slot += 1;
+                let current_bank_slot = current_bank.slot();
+                let next_bank = Bank::new_from_parent_ephemeral(
+                    current_bank,
+                    &config.manager_account,
+                    current_slot,
+                );
 
-                // NOTE: We intentionally do NOT call set_root() here.
-                // The ER shares an AccountsDb with the L1 validator.
-                // Bank::squash() (called by set_root) walks the entire parent
-                // chain and calls add_root() for each slot — including the L1
-                // parent.  Because the L1 concurrently advances its own roots
-                // on the same AccountsDb, this causes a "Roots must be added
-                // in order" panic.  The ER is short-lived so rooting is not
-                // required for correctness; the commitment cache update below
-                // is sufficient for RPC queries.
+                let next_bank_arc = {
+                    let mut bank_forks_write = bank_forks.write().unwrap();
+                    let inserted = bank_forks_write.insert(next_bank);
 
-                inserted.clone_without_scheduler()
+                    // NOTE: We intentionally do NOT call set_root() here.
+                    // The ER shares an AccountsDb with the L1 validator.
+                    // Bank::squash() (called by set_root) walks the entire parent
+                    // chain and calls add_root() for each slot — including the L1
+                    // parent.  Because the L1 concurrently advances its own roots
+                    // on the same AccountsDb, this causes a "Roots must be added
+                    // in order" panic.  The ER is short-lived so rooting is not
+                    // required for correctness; the commitment cache update below
+                    // is sufficient for RPC queries.
+
+                    inserted.clone_without_scheduler()
+                };
+
+                (current_bank_slot, next_bank_arc)
             };
 
             {
@@ -243,6 +254,7 @@ mod tests {
 
         let advancer = SlotAdvancer::new(
             bank_forks.clone(),
+            Arc::new(Mutex::new(())),
             block_commitment_cache,
             initial_bank,
             config,
@@ -279,6 +291,7 @@ mod tests {
 
         let advancer = SlotAdvancer::new(
             bank_forks.clone(),
+            Arc::new(Mutex::new(())),
             block_commitment_cache,
             initial_bank,
             config,
@@ -312,6 +325,7 @@ mod tests {
 
         let advancer = SlotAdvancer::new(
             bank_forks.clone(),
+            Arc::new(Mutex::new(())),
             block_commitment_cache,
             initial_bank,
             config,
@@ -358,6 +372,7 @@ mod tests {
 
         let advancer = SlotAdvancer::new(
             bank_forks.clone(),
+            Arc::new(Mutex::new(())),
             block_commitment_cache,
             initial_bank,
             config,
@@ -375,6 +390,52 @@ mod tests {
             "Should have advanced from non-zero initial slot {} by multiple slots, but only got {}",
             ephemeral_slot,
             latest_slot
+        );
+    }
+
+    #[test]
+    fn test_slot_advancer_waits_for_bank_operation_lock() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        let bank_forks = BankForks::new_rw_arc(parent_bank);
+        let initial_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
+        let initial_slot = initial_bank.slot();
+
+        let exit = Arc::new(AtomicBool::new(false));
+        let block_commitment_cache = create_block_commitment_cache(initial_slot);
+        let bank_operation_lock = Arc::new(Mutex::new(()));
+        let bank_operation_guard = bank_operation_lock.lock().unwrap();
+
+        let advancer = SlotAdvancer::new(
+            bank_forks.clone(),
+            bank_operation_lock.clone(),
+            block_commitment_cache,
+            initial_bank,
+            Config {
+                slot_duration: Duration::from_millis(5),
+                manager_account: Pubkey::default(),
+            },
+            exit.clone(),
+            None,
+        );
+
+        thread::sleep(Duration::from_millis(50));
+        let slot_while_locked = bank_forks.read().unwrap().working_bank().slot();
+        assert_eq!(
+            slot_while_locked, initial_slot,
+            "slot advancer must not freeze/advance while bank op lock held"
+        );
+
+        drop(bank_operation_guard);
+        thread::sleep(Duration::from_millis(50));
+        exit.store(true, Ordering::Relaxed);
+        advancer.join();
+
+        let slot_after_release = bank_forks.read().unwrap().working_bank().slot();
+        assert!(
+            slot_after_release > initial_slot,
+            "slot advancer should advance once bank op lock released"
         );
     }
 }
