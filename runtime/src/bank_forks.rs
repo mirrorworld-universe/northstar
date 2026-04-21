@@ -167,16 +167,12 @@ impl BankForks {
 
     /// Create BankForks for an ephemeral rollup.
     ///
-    /// Unlike [`new_rw_arc`], this only sets the fork-graph reference in
-    /// the `ProgramCache` when one isn't already present. In production
-    /// the ER bank inherits its parent's `ProgramCache` which already
-    /// points to the L1 `BankForks`; overwriting it would cause L1
-    /// banking threads to panic when `Weak::upgrade()` fails.
-    /// In unit tests the bank is standalone so no fork-graph exists yet
-    /// and we must install one.
+    /// The ER bank uses an isolated `ProgramCache` (see
+    /// `TransactionBatchProcessor::new_from_isolated_cache`), so its cache
+    /// always needs a fresh fork-graph reference pointing back at this
+    /// `BankForks`. Setting it unconditionally is safe because the cache is
+    /// not shared with the L1 validator.
     pub fn new_rw_arc_ephemeral(root_bank: Bank) -> Arc<RwLock<Self>> {
-        let has_fork_graph = root_bank.has_fork_graph_in_program_cache();
-
         let root_bank = Arc::new(root_bank);
         let root_slot = root_bank.slot();
 
@@ -205,11 +201,7 @@ impl BankForks {
             migration_status,
         }));
 
-        if !has_fork_graph {
-            // Standalone bank (unit tests) — install ourselves as fork graph.
-            root_bank.set_fork_graph_in_program_cache(Arc::downgrade(&bank_forks));
-        }
-        // Otherwise: production ER — keep L1's fork graph intact.
+        root_bank.set_fork_graph_in_program_cache(Arc::downgrade(&bank_forks));
 
         bank_forks
     }
