@@ -177,7 +177,7 @@ impl TransactionClient for EphemeralTransactionClient {
                     None
                 }
             })
-            .for_each(|tx| {
+            .for_each(|tx: VersionedTransaction| {
                 let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
                 let bank = self.bank();
 
@@ -295,12 +295,11 @@ impl EphemeralTransactionClient {
         };
 
         let _ = self.er_history_store.record_transaction(
-            bank.slot(),
+            bank,
             VersionedTransactionWithStatusMeta {
                 transaction: tx,
                 meta,
             },
-            Some(bank.clock().unix_timestamp),
         );
     }
 
@@ -399,6 +398,17 @@ impl EphemeralTransactionClient {
 impl NotifyKeyUpdate for EphemeralTransactionClient {
     fn update_key(&self, _key: &Keypair) -> Result<(), Box<dyn Error>> {
         Ok(())
+    }
+}
+
+impl solana_rpc::rpc::ErTxExecutor for EphemeralTransactionClient {
+    fn execute_wire(&self, wire_transaction: Vec<u8>) {
+        let stats = SendTransactionServiceStats::default();
+        <Self as TransactionClient>::send_transactions_in_batch(
+            self,
+            vec![wire_transaction],
+            &stats,
+        );
     }
 }
 

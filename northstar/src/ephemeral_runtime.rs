@@ -13,7 +13,7 @@ use {
         er_history::ErHistoryStore,
         max_slots::MaxSlots,
         optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
-        rpc::JsonRpcConfig,
+        rpc::{ErNodeInfo, JsonRpcConfig},
         rpc_pubsub_service::{PubSubConfig, PubSubService},
         rpc_service::JsonRpcService,
         rpc_subscriptions::RpcSubscriptions,
@@ -24,9 +24,10 @@ use {
         commitment::{BlockCommitmentCache, CommitmentSlots},
     },
     solana_send_transaction_service::send_transaction_service,
+    solana_signer::Signer,
     std::{
         collections::{HashMap, HashSet},
-        net::SocketAddr,
+        net::{IpAddr, Ipv4Addr, SocketAddr},
         sync::{
             Arc, Mutex, RwLock,
             atomic::{AtomicBool, AtomicU64, Ordering},
@@ -117,6 +118,65 @@ impl EphemeralRuntime {
         parent.slot().saturating_add(ER_SLOT_OFFSET)
     }
 
+    fn advertise_addr(addr: SocketAddr) -> SocketAddr {
+        if addr.ip().is_unspecified() {
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), addr.port())
+        } else {
+            addr
+        }
+    }
+
+    fn prepare_initial_working_bank(bank: &Bank) {
+        let ticks_per_slot = bank.ticks_per_slot();
+        bank.set_tick_height(bank.max_tick_height() - ticks_per_slot);
+    }
+
+    fn freeze_and_rotate_bank_for_rpc(
+        bank_forks: &Arc<RwLock<BankForks>>,
+        block_commitment_cache: &Arc<RwLock<BlockCommitmentCache>>,
+        optimistically_confirmed_bank: &Arc<RwLock<OptimisticallyConfirmedBank>>,
+        rpc_subscriptions: Option<&Arc<RpcSubscriptions>>,
+        er_history_store: &Arc<ErHistoryStore>,
+    ) -> Arc<Bank> {
+        let (frozen_slot, frozen_bank, next_bank_slot, next_bank_arc) = {
+            let current_bank = bank_forks.read().unwrap().working_bank();
+            current_bank.freeze();
+            er_history_store.finalize_slot(&current_bank);
+
+            let frozen_slot = current_bank.slot();
+            let frozen_bank = current_bank.clone();
+            let next_bank_slot = frozen_slot.saturating_add(1);
+            let next_bank =
+                Bank::new_from_parent_ephemeral(current_bank, &Pubkey::default(), next_bank_slot);
+            let next_bank_arc = {
+                let mut bank_forks_write = bank_forks.write().unwrap();
+                let inserted = bank_forks_write.insert(next_bank);
+                inserted.clone_without_scheduler()
+            };
+
+            (frozen_slot, frozen_bank, next_bank_slot, next_bank_arc)
+        };
+
+        *block_commitment_cache.write().unwrap() = BlockCommitmentCache::new(
+            std::collections::HashMap::new(),
+            0,
+            CommitmentSlots {
+                slot: frozen_slot,
+                root: frozen_slot,
+                highest_confirmed_slot: frozen_slot,
+                highest_super_majority_root: frozen_slot,
+            },
+        );
+        *optimistically_confirmed_bank.write().unwrap() =
+            OptimisticallyConfirmedBank { bank: frozen_bank };
+
+        if let Some(subs) = rpc_subscriptions {
+            subs.notify_slot(next_bank_slot, frozen_slot, next_bank_slot);
+        }
+
+        next_bank_arc
+    }
+
     pub fn new(
         parent_bank: Arc<Bank>,
         cluster_info: Arc<ClusterInfo>,
@@ -138,7 +198,7 @@ impl EphemeralRuntime {
             parent_bank.epoch(),
             parent_bank.get_slots_in_epoch(parent_bank.epoch()),
         );
-        let bank = Bank::new_from_parent_ephemeral(
+        let bank = Bank::new_from_parent_ephemeral_isolated(
             parent_bank.clone(),
             &Pubkey::default(),
             ephemeral_slot,
@@ -153,8 +213,7 @@ impl EphemeralRuntime {
         // is (ephemeral_slot + 1) * ticks_per_slot.  When the ER slot is in the
         // same epoch (not offset by 1 trillion), the gap is smaller, but we
         // still warp tick_height so only one slot's worth of ticks remains.
-        let ticks_per_slot = bank.ticks_per_slot();
-        bank.set_tick_height(bank.max_tick_height() - ticks_per_slot);
+        Self::prepare_initial_working_bank(&bank);
 
         let bank_forks = BankForks::new_rw_arc_ephemeral(bank);
         let initial_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
@@ -224,6 +283,14 @@ impl EphemeralRuntime {
             bank: Arc::clone(&initial_bank),
         }));
 
+        let initial_bank = Self::freeze_and_rotate_bank_for_rpc(
+            &bank_forks,
+            &block_commitment_cache,
+            &optimistically_confirmed_bank,
+            None,
+            &er_history_store,
+        );
+
         let leader_schedule_cache = Arc::new(LeaderScheduleCache::default());
 
         let max_slots = Arc::new(MaxSlots::default());
@@ -242,8 +309,8 @@ impl EphemeralRuntime {
 
         let runtime = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
-                .max_blocking_threads(1)
+                .worker_threads(16)
+                .max_blocking_threads(16)
                 .enable_all()
                 .build()
                 .map_err(|e| e.to_string())?,
@@ -253,8 +320,14 @@ impl EphemeralRuntime {
             full_api: true,
             enable_rpc_transaction_history: false,
             disable_health_check: true,
+            rpc_threads: 16,
+            rpc_blocking_threads: 16,
             ..JsonRpcConfig::default()
         };
+
+        let advertised_rpc_addr = Self::advertise_addr(rpc_addr);
+        let advertised_ws_addr = Self::advertise_addr(ws_addr);
+        let advertised_tpu_addr = Self::advertise_addr(tpu_addr);
 
         let rpc_service = JsonRpcService::new_with_client(
             rpc_addr,
@@ -280,6 +353,13 @@ impl EphemeralRuntime {
             Some(delegated_set.clone()),
             Some(session_pda.clone()),
             Some(er_history_store.clone()),
+            Some(ErNodeInfo {
+                identity: manager_keypair.pubkey(),
+                rpc: advertised_rpc_addr,
+                pubsub: advertised_ws_addr,
+                tpu_quic: advertised_tpu_addr,
+            }),
+            Some(Arc::new(tx_client.clone()) as Arc<dyn solana_rpc::rpc::ErTxExecutor>),
         )?;
 
         // Sonic: Start PubSub WebSocket service
@@ -319,7 +399,7 @@ impl EphemeralRuntime {
         info!("EphemeralRuntime TPU listening at {actual_tpu_addr}");
 
         info!(
-            "EphemeralRuntime listening at {rpc_addr} with slot {}",
+            "EphemeralRuntime listening at {rpc_addr} with working slot {}",
             initial_bank.slot()
         );
 
@@ -386,6 +466,7 @@ impl EphemeralRuntime {
                 self.bank_forks.clone(),
                 self.bank_operation_lock.clone(),
                 self.block_commitment_cache.clone(),
+                self.optimistically_confirmed_bank.clone(),
                 initial_bank,
                 crate::slot_advancer::Config {
                     slot_duration: Duration::from_millis(400),
@@ -477,15 +558,17 @@ impl EphemeralRuntime {
                 ephemeral_slot,
                 parent_bank.epoch(),
             );
-            let bank =
-                Bank::new_from_parent_ephemeral(parent_bank, &Pubkey::default(), ephemeral_slot);
+            let bank = Bank::new_from_parent_ephemeral_isolated(
+                parent_bank,
+                &Pubkey::default(),
+                ephemeral_slot,
+            );
             info!(
                 "reset_to_new_parent: ER bank created, slot={}, epoch={}",
                 bank.slot(),
                 bank.epoch(),
             );
-            let ticks_per_slot = bank.ticks_per_slot();
-            bank.set_tick_height(bank.max_tick_height() - ticks_per_slot);
+            Self::prepare_initial_working_bank(&bank);
 
             // 3. Swap BankForks in-place — same Arc, new contents.
             //    All holders (RPC service, tx_client) see the new bank.
@@ -496,27 +579,16 @@ impl EphemeralRuntime {
                 .expect("lock not poisoned");
             *self.bank_forks.write().unwrap() = new_bf;
 
-            let initial_bank = self.bank_forks.read().unwrap().root_bank();
-            let slot = initial_bank.slot();
-
-            // 4. Update commitment cache
-            *self.block_commitment_cache.write().unwrap() = BlockCommitmentCache::new(
-                std::collections::HashMap::new(),
-                0,
-                CommitmentSlots {
-                    slot,
-                    root: slot,
-                    highest_confirmed_slot: slot,
-                    highest_super_majority_root: slot,
-                },
+            // 4. Publish frozen ER bank for RPC/preflight, keep fresh child as working bank.
+            let initial_bank = Self::freeze_and_rotate_bank_for_rpc(
+                &self.bank_forks,
+                &self.block_commitment_cache,
+                &self.optimistically_confirmed_bank,
+                Some(&self.rpc_subscriptions),
+                &self.er_history_store,
             );
 
-            // 5. Update optimistically confirmed bank
-            *self.optimistically_confirmed_bank.write().unwrap() = OptimisticallyConfirmedBank {
-                bank: initial_bank.clone(),
-            };
-
-            // 6. Clear session state
+            // 5. Clear session state
             self.initial_account_snapshots.clear();
             self.delegated_accounts.write().unwrap().clear();
             self.touched_accounts.write().unwrap().clear();
@@ -532,6 +604,7 @@ impl EphemeralRuntime {
             self.bank_forks.clone(),
             self.bank_operation_lock.clone(),
             self.block_commitment_cache.clone(),
+            self.optimistically_confirmed_bank.clone(),
             initial_bank,
             crate::slot_advancer::Config {
                 slot_duration: Duration::from_millis(400),
@@ -555,20 +628,14 @@ impl EphemeralRuntime {
         self.initial_account_snapshots.get(pubkey)
     }
 
-    fn publish_bank_for_rpc(&self, bank: Arc<Bank>) {
-        let slot = bank.slot();
-
-        *self.block_commitment_cache.write().unwrap() = BlockCommitmentCache::new(
-            std::collections::HashMap::new(),
-            0,
-            CommitmentSlots {
-                slot,
-                root: slot,
-                highest_confirmed_slot: slot,
-                highest_super_majority_root: slot,
-            },
+    fn publish_bank_for_rpc(&self) {
+        Self::freeze_and_rotate_bank_for_rpc(
+            &self.bank_forks,
+            &self.block_commitment_cache,
+            &self.optimistically_confirmed_bank,
+            Some(&self.rpc_subscriptions),
+            &self.er_history_store,
         );
-        *self.optimistically_confirmed_bank.write().unwrap() = OptimisticallyConfirmedBank { bank };
     }
 
     /// Handle a new account delegation from L1.
@@ -591,7 +658,7 @@ impl EphemeralRuntime {
             .unwrap()
             .insert(*delegated_account);
 
-        self.publish_bank_for_rpc(bank.clone());
+        self.publish_bank_for_rpc();
 
         info!(
             "Delegated account {} added to ER (owner: {}, lamports: {})",
@@ -628,7 +695,7 @@ impl EphemeralRuntime {
         // Mark as touched so the balance isn't zeroed later
         self.touched_accounts.write().unwrap().insert(*depositor);
 
-        self.publish_bank_for_rpc(bank.clone());
+        self.publish_bank_for_rpc();
 
         info!(
             "Credited {} lamports to {} on ER (base: {}, new balance: {})",
@@ -1013,13 +1080,10 @@ mod tests {
             blockhash,
         );
 
-        let config = RpcSendTransactionConfig {
-            skip_preflight: true,
-            ..Default::default()
-        };
-        // sendTransaction RPC succeeds (returns sig) but tx is dropped internally
+        // sendTransaction RPC must survive preflight even while runtime is inactive.
+        // The tx is still dropped internally because the runtime rejects execution.
         rpc_client
-            .send_transaction_with_config(&tx, config)
+            .send_transaction_with_config(&tx, RpcSendTransactionConfig::default())
             .unwrap();
 
         std::thread::sleep(Duration::from_secs(2));
