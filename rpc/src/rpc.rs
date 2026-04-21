@@ -231,6 +231,14 @@ impl Default for RpcBigtableConfig {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct ErNodeInfo {
+    pub identity: Pubkey,
+    pub rpc: SocketAddr,
+    pub pubsub: SocketAddr,
+    pub tpu_quic: SocketAddr,
+}
+
 #[derive(Clone)]
 pub struct JsonRpcRequestProcessor {
     bank_forks: Arc<RwLock<BankForks>>,
@@ -258,6 +266,21 @@ pub struct JsonRpcRequestProcessor {
     pub(crate) session_pda: Option<Arc<RwLock<Option<Pubkey>>>>,
     /// Sonic: Optional in-memory transaction history for ephemeral rollup RPC.
     pub(crate) er_history_store: Option<Arc<ErHistoryStore>>,
+    /// Sonic: Optional single-node contact info override for ephemeral rollup RPC.
+    pub(crate) er_node_info: Option<ErNodeInfo>,
+    /// Sonic: Optional synchronous transaction executor for ephemeral rollup RPC.
+    /// When set, `sendTransaction` bypasses `SendTransactionService` and executes
+    /// the wire transaction directly on the ER bank, with no queue, no batching,
+    /// no retry, and no preflight simulation.
+    pub(crate) er_tx_executor: Option<Arc<dyn ErTxExecutor>>,
+}
+
+/// Sonic: Synchronous executor used by ER `sendTransaction` to bypass
+/// `SendTransactionService` (queue/batch/retry are pointless on a single
+/// in-process ER node).
+pub trait ErTxExecutor: std::marker::Send + std::marker::Sync {
+    /// Execute one wire-encoded transaction synchronously.
+    fn execute_wire(&self, wire_transaction: Vec<u8>);
 }
 impl Metadata for JsonRpcRequestProcessor {}
 
@@ -446,6 +469,8 @@ impl JsonRpcRequestProcessor {
                 delegated_accounts: None,
                 session_pda: None,
                 er_history_store: None,
+                er_node_info: None,
+                er_tx_executor: None,
             },
             transaction_receiver,
         )
@@ -464,6 +489,17 @@ impl JsonRpcRequestProcessor {
     /// Sonic: Set the ephemeral rollup transaction history store.
     pub fn set_er_history_store(&mut self, er_history_store: Arc<ErHistoryStore>) {
         self.er_history_store = Some(er_history_store);
+    }
+
+    /// Sonic: Set single-node contact info for ephemeral rollup RPC.
+    pub fn set_er_node_info(&mut self, er_node_info: ErNodeInfo) {
+        self.er_node_info = Some(er_node_info);
+    }
+
+    /// Sonic: Set synchronous ER transaction executor (bypasses
+    /// `SendTransactionService` queue/preflight on `sendTransaction`).
+    pub fn set_er_tx_executor(&mut self, executor: Arc<dyn ErTxExecutor>) {
+        self.er_tx_executor = Some(executor);
     }
 
     #[cfg(test)]
@@ -547,6 +583,8 @@ impl JsonRpcRequestProcessor {
             delegated_accounts: None,
             session_pda: None,
             er_history_store: None,
+            er_node_info: None,
+            er_tx_executor: None,
         }
     }
 
@@ -990,6 +1028,11 @@ impl JsonRpcRequestProcessor {
     }
 
     fn get_slot_leader(&self, config: RpcContextConfig) -> Result<String> {
+        if let Some(er_node_info) = &self.er_node_info {
+            let _ = self.get_bank_with_config(config)?;
+            return Ok(er_node_info.identity.to_string());
+        }
+
         let bank = self.get_bank_with_config(config)?;
         Ok(bank.leader_id().to_string())
     }
@@ -1000,6 +1043,11 @@ impl JsonRpcRequestProcessor {
         start_slot: Slot,
         limit: usize,
     ) -> Result<Vec<Pubkey>> {
+        if let Some(er_node_info) = &self.er_node_info {
+            let _ = (commitment, start_slot);
+            return Ok(std::iter::repeat_n(er_node_info.identity, limit).collect());
+        }
+
         let bank = self.bank(commitment);
 
         let (mut epoch, mut slot_index) =
@@ -1312,8 +1360,6 @@ impl JsonRpcRequestProcessor {
         slot: Slot,
         config: Option<RpcEncodingConfigWrapper<RpcBlockConfig>>,
     ) -> Result<Option<UiConfirmedBlock>> {
-        self.check_if_transaction_history_enabled()?;
-
         let config = config
             .map(|config| config.convert_to_current())
             .unwrap_or_default();
@@ -1325,6 +1371,27 @@ impl JsonRpcRequestProcessor {
         };
         let commitment = config.commitment.unwrap_or_default();
         check_is_at_least_confirmed(commitment)?;
+
+        if let Some(er_history_store) = &self.er_history_store {
+            let encode_block = |confirmed_block: ConfirmedBlock| async move {
+                self.runtime
+                    .spawn_blocking(move || {
+                        confirmed_block
+                            .encode_with_options(encoding, encoding_options)
+                            .map_err(RpcCustomError::from)
+                    })
+                    .await
+                    .expect("Failed to spawn blocking task")
+                    .map_err(Error::from)
+            };
+            let encoded_block_future: OptionFuture<_> = er_history_store
+                .get_block(slot, commitment)
+                .map(encode_block)
+                .into();
+            return encoded_block_future.await.transpose();
+        }
+
+        self.check_if_transaction_history_enabled()?;
 
         // Block is old enough to be finalized
         if slot
@@ -1442,6 +1509,37 @@ impl JsonRpcRequestProcessor {
             .unwrap()
             .highest_super_majority_root();
 
+        if let Some(er_history_store) = &self.er_history_store {
+            let min_context_slot = config.min_context_slot.unwrap_or_default();
+            let highest_slot = if commitment.is_finalized() {
+                highest_super_majority_root
+            } else {
+                self.get_bank_with_config(config)?.slot()
+            };
+            if highest_slot < min_context_slot {
+                return Err(RpcCustomError::MinContextSlotNotReached {
+                    context_slot: highest_slot,
+                }
+                .into());
+            }
+
+            let end_slot = min(
+                end_slot
+                    .unwrap_or_else(|| start_slot.saturating_add(MAX_GET_CONFIRMED_BLOCKS_RANGE)),
+                highest_slot,
+            );
+            if end_slot < start_slot {
+                return Ok(vec![]);
+            }
+            if end_slot - start_slot > MAX_GET_CONFIRMED_BLOCKS_RANGE {
+                return Err(Error::invalid_params(format!(
+                    "Slot range too large; max {MAX_GET_CONFIRMED_BLOCKS_RANGE}"
+                )));
+            }
+
+            return Ok(er_history_store.get_blocks(start_slot, end_slot, commitment));
+        }
+
         let min_context_slot = config.min_context_slot.unwrap_or_default();
         if commitment.is_finalized() && highest_super_majority_root < min_context_slot {
             return Err(RpcCustomError::MinContextSlotNotReached {
@@ -1536,6 +1634,24 @@ impl JsonRpcRequestProcessor {
             )));
         }
 
+        if let Some(er_history_store) = &self.er_history_store {
+            if commitment.is_finalized() {
+                let min_context_slot = config.min_context_slot.unwrap_or_default();
+                let highest_super_majority_root = self
+                    .block_commitment_cache
+                    .read()
+                    .unwrap()
+                    .highest_super_majority_root();
+                if highest_super_majority_root < min_context_slot {
+                    return Err(RpcCustomError::MinContextSlotNotReached {
+                        context_slot: highest_super_majority_root,
+                    }
+                    .into());
+                }
+            }
+            return Ok(er_history_store.get_blocks_with_limit(start_slot, limit, commitment));
+        }
+
         let lowest_blockstore_slot = self
             .blockstore
             .get_first_available_block()
@@ -1600,6 +1716,9 @@ impl JsonRpcRequestProcessor {
     }
 
     pub async fn get_block_time(&self, slot: Slot) -> Result<Option<UnixTimestamp>> {
+        if let Some(er_history_store) = &self.er_history_store {
+            return Ok(er_history_store.get_block_time(slot, CommitmentConfig::confirmed()));
+        }
         if slot == 0 {
             return Ok(Some(self.genesis_creation_time()));
         }
@@ -1858,10 +1977,19 @@ impl JsonRpcRequestProcessor {
         mut limit: usize,
         config: RpcContextConfig,
     ) -> Result<Vec<RpcConfirmedTransactionStatusWithSignature>> {
-        self.check_if_transaction_history_enabled()?;
-
         let commitment = config.commitment.unwrap_or_default();
         check_is_at_least_confirmed(commitment)?;
+
+        if let Some(er_history_store) = &self.er_history_store {
+            let results = er_history_store
+                .get_signatures_for_address(&address, before, until, limit, commitment)
+                .map_err(|signature| RpcCustomError::FilterTransactionNotFound {
+                    signature: signature.to_string(),
+                })?;
+            return Ok(results.into_iter().map(Into::into).collect());
+        }
+
+        self.check_if_transaction_history_enabled()?;
 
         let highest_super_majority_root = self
             .block_commitment_cache
@@ -2001,6 +2129,17 @@ impl JsonRpcRequestProcessor {
     }
 
     pub async fn get_first_available_block(&self) -> Slot {
+        if let Some(er_history_store) = &self.er_history_store {
+            return er_history_store
+                .get_first_available_block()
+                .unwrap_or_else(|| {
+                    self.block_commitment_cache
+                        .read()
+                        .unwrap()
+                        .highest_super_majority_root()
+                });
+        }
+
         let slot = self
             .blockstore
             .get_first_available_block()
@@ -3705,6 +3844,28 @@ pub mod rpc_full {
 
         fn get_cluster_nodes(&self, meta: Self::Metadata) -> Result<Vec<RpcContactInfo>> {
             debug!("get_cluster_nodes rpc request received");
+            if let Some(er_node_info) = &meta.er_node_info {
+                return Ok(vec![RpcContactInfo {
+                    pubkey: er_node_info.identity.to_string(),
+                    gossip: None,
+                    tvu: None,
+                    // Sonic: advertise ER TPU on both legacy and QUIC fields so
+                    // CLI sender paths that still prefer `tpu` discover ER node.
+                    tpu: Some(er_node_info.tpu_quic),
+                    tpu_quic: Some(er_node_info.tpu_quic),
+                    tpu_forwards: None,
+                    tpu_forwards_quic: None,
+                    tpu_vote: None,
+                    serve_repair: None,
+                    rpc: Some(er_node_info.rpc),
+                    pubsub: Some(er_node_info.pubsub),
+                    version: None,
+                    client_id: None,
+                    feature_set: None,
+                    shred_version: None,
+                }]);
+            }
+
             let cluster_info = &meta.cluster_info;
             let socket_addr_space = cluster_info.socket_addr_space();
             let my_shred_version = cluster_info.my_shred_version();
@@ -4000,6 +4161,20 @@ pub mod rpc_full {
                     }
                     .into());
                 }
+            }
+
+            // Sonic: ER fast path — preflight (if requested) has already run
+            // above; bypass `SendTransactionService` queue/retry and execute
+            // the wire transaction synchronously on the ER bank.
+            if let Some(executor) = meta.er_tx_executor.clone() {
+                // Dispatch on blocking pool so the JSON-RPC HTTP I/O thread
+                // returns immediately. Otherwise tx execution serializes all
+                // RPC traffic and stalls the deploy under burst.
+                let signature_str = signature.to_string();
+                meta.runtime.spawn_blocking(move || {
+                    executor.execute_wire(wire_transaction);
+                });
+                return Ok(signature_str);
             }
 
             _send_transaction(
