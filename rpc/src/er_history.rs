@@ -26,6 +26,16 @@ struct ErSlotHistory {
     signatures: Vec<Signature>,
 }
 
+/// Slim performance sample for ER, mapped 1:1 onto `RpcPerfSample`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ErPerfSample {
+    pub slot: Slot,
+    pub num_transactions: u64,
+    pub num_non_vote_transactions: u64,
+    pub num_slots: u64,
+    pub sample_period_secs: u16,
+}
+
 #[derive(Default)]
 struct ErHistoryInner {
     slots: BTreeMap<Slot, ErSlotHistory>,
@@ -214,6 +224,65 @@ impl ErHistoryStore {
         self.inner.read().unwrap().slots.keys().next().copied()
     }
 
+    /// Synthesize `getRecentPerformanceSamples` data from finalized ER slots.
+    /// Buckets adjacent slots into ~`sample_period_secs`-second windows using
+    /// `slot_duration_ms`. Returns at most `limit` samples, newest first (the
+    /// same order Solana RPC returns).
+    pub fn recent_performance_samples(
+        &self,
+        limit: usize,
+        slot_duration_ms: u64,
+    ) -> Vec<ErPerfSample> {
+        if limit == 0 {
+            return vec![];
+        }
+        let sample_period_secs: u16 = 60;
+        let slot_duration_ms = slot_duration_ms.max(1);
+        let slots_per_sample = ((sample_period_secs as u64 * 1000) / slot_duration_ms).max(1);
+
+        let inner = self.inner.read().unwrap();
+        // Walk finalized slots oldest -> newest, bucketed; then reverse for
+        // newest-first output.
+        let mut samples: Vec<ErPerfSample> = Vec::new();
+        let mut bucket_start: Option<Slot> = None;
+        let mut bucket_slot_count: u64 = 0;
+        let mut bucket_tx_count: u64 = 0;
+        let mut bucket_last_slot: Slot = 0;
+        for (slot, slot_history) in inner.slots.iter() {
+            if !slot_history.finalized {
+                continue;
+            }
+            let start = *bucket_start.get_or_insert(*slot);
+            if slot.saturating_sub(start) >= slots_per_sample {
+                samples.push(ErPerfSample {
+                    slot: bucket_last_slot,
+                    num_transactions: bucket_tx_count,
+                    num_non_vote_transactions: bucket_tx_count,
+                    num_slots: bucket_slot_count,
+                    sample_period_secs,
+                });
+                bucket_start = Some(*slot);
+                bucket_slot_count = 0;
+                bucket_tx_count = 0;
+            }
+            bucket_slot_count += 1;
+            bucket_tx_count += slot_history.signatures.len() as u64;
+            bucket_last_slot = *slot;
+        }
+        if bucket_slot_count > 0 {
+            samples.push(ErPerfSample {
+                slot: bucket_last_slot,
+                num_transactions: bucket_tx_count,
+                num_non_vote_transactions: bucket_tx_count,
+                num_slots: bucket_slot_count,
+                sample_period_secs,
+            });
+        }
+        samples.reverse();
+        samples.truncate(limit);
+        samples
+    }
+
     pub fn get_signatures_for_address(
         &self,
         address: &Pubkey,
@@ -385,6 +454,66 @@ mod tests {
             store.get_block_time(1, CommitmentConfig::finalized()),
             Some(bank1.clock().unix_timestamp)
         );
+    }
+
+    #[test]
+    fn test_recent_performance_samples_buckets_finalized_slots() {
+        let store = ErHistoryStore::default();
+        let payer = Keypair::new();
+        let recipient = Pubkey::new_unique();
+
+        // 6 finalized slots; with slot_duration=10s and 60s window we expect
+        // 1 sample of 6 slots. Each slot has one tx.
+        let bank0 = Arc::new(create_test_bank());
+        let mut prev = bank0.clone();
+        let tx = create_test_tx(&prev, &payer, &recipient);
+        store.record_transaction(&prev, tx);
+        store.finalize_slot(&prev);
+        for slot in 1u64..6 {
+            let bank = Arc::new(Bank::new_from_parent(prev.clone(), &Pubkey::new_unique(), slot));
+            let tx = VersionedTransactionWithStatusMeta {
+                transaction: VersionedTransaction {
+                    signatures: vec![Signature::from([slot as u8 + 1; 64])],
+                    ..create_test_tx(&bank, &payer, &recipient).transaction
+                },
+                meta: TransactionStatusMeta {
+                    status: Ok(()),
+                    fee: 5000,
+                    pre_balances: vec![],
+                    post_balances: vec![],
+                    inner_instructions: None,
+                    log_messages: None,
+                    pre_token_balances: None,
+                    post_token_balances: None,
+                    rewards: Some(vec![]),
+                    loaded_addresses: Default::default(),
+                    return_data: None,
+                    compute_units_consumed: Some(0),
+                    cost_units: None,
+                },
+            };
+            store.record_transaction(&bank, tx);
+            store.finalize_slot(&bank);
+            prev = bank;
+        }
+
+        // 10s/slot -> 60s window -> 6 slots per bucket -> 1 sample.
+        let samples = store.recent_performance_samples(10, 10_000);
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].num_slots, 6);
+        assert_eq!(samples[0].num_transactions, 6);
+        assert_eq!(samples[0].sample_period_secs, 60);
+
+        // 30s/slot -> 60s window -> 2 slots per bucket -> 3 samples (newest
+        // first).
+        let samples = store.recent_performance_samples(10, 30_000);
+        assert_eq!(samples.len(), 3);
+        assert!(samples[0].slot > samples[1].slot);
+        assert_eq!(samples.iter().map(|s| s.num_slots).sum::<u64>(), 6);
+
+        // limit
+        let samples = store.recent_performance_samples(2, 30_000);
+        assert_eq!(samples.len(), 2);
     }
 
     #[test]

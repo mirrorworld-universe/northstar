@@ -358,6 +358,8 @@ impl EphemeralRuntime {
                 rpc: advertised_rpc_addr,
                 pubsub: advertised_ws_addr,
                 tpu_quic: advertised_tpu_addr,
+                er_root_slot: ephemeral_slot,
+                slot_duration_ms: 400,
             }),
             Some(Arc::new(tx_client.clone()) as Arc<dyn solana_rpc::rpc::ErTxExecutor>),
         )?;

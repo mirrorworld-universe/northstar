@@ -237,6 +237,14 @@ pub struct ErNodeInfo {
     pub rpc: SocketAddr,
     pub pubsub: SocketAddr,
     pub tpu_quic: SocketAddr,
+    /// Slot at which the ER root bank was created. ER slots are placed
+    /// `parent.slot + 2^40` ahead of L1 so explorer-facing RPCs would
+    /// otherwise show nonsensical absolute slots / epoch progress. We
+    /// subtract this when synthesizing `getEpochInfo` for the ER.
+    pub er_root_slot: Slot,
+    /// SlotAdvancer tick period in milliseconds. Used to bucket finalized
+    /// slots into ~60s windows for `getRecentPerformanceSamples`.
+    pub slot_duration_ms: u64,
 }
 
 #[derive(Clone)]
@@ -3002,6 +3010,22 @@ pub mod rpc_minimal {
         ) -> Result<EpochInfo> {
             debug!("get_epoch_info rpc request received");
             let bank = meta.get_bank_with_config(config.unwrap_or_default())?;
+            if let Some(er_node_info) = &meta.er_node_info {
+                // The ER bank lives 2^40 slots above its L1 parent. Reporting
+                // that absolute slot to the explorer breaks epoch-progress UI
+                // entirely. Normalize so the ER root looks like epoch 0 /
+                // slot 0 of one very long virtual epoch.
+                const ER_VIRTUAL_SLOTS_IN_EPOCH: u64 = 1u64 << 32;
+                let normalized_slot = bank.slot().saturating_sub(er_node_info.er_root_slot);
+                return Ok(EpochInfo {
+                    epoch: 0,
+                    slot_index: normalized_slot,
+                    slots_in_epoch: ER_VIRTUAL_SLOTS_IN_EPOCH,
+                    absolute_slot: normalized_slot,
+                    block_height: bank.block_height(),
+                    transaction_count: Some(bank.transaction_count()),
+                });
+            }
             Ok(bank.get_epoch_info())
         }
 
@@ -3103,6 +3127,14 @@ pub mod rpc_minimal {
             config: Option<RpcGetVoteAccountsConfig>,
         ) -> Result<RpcVoteAccountStatus> {
             debug!("get_vote_accounts rpc request received");
+            if meta.er_node_info.is_some() {
+                // ER has no consensus and therefore no vote accounts.
+                // Return an empty status so explorer-style clients keep going.
+                return Ok(RpcVoteAccountStatus {
+                    current: vec![],
+                    delinquent: vec![],
+                });
+            }
             meta.get_vote_accounts(config)
         }
 
@@ -3830,6 +3862,24 @@ pub mod rpc_full {
                 )));
             }
 
+            // ER has no Blockstore-backed perf samples; synthesize from the
+            // in-memory ER history store using the SlotAdvancer tick period.
+            if let (Some(er_history_store), Some(er_node_info)) =
+                (&meta.er_history_store, &meta.er_node_info)
+            {
+                return Ok(er_history_store
+                    .recent_performance_samples(limit, er_node_info.slot_duration_ms)
+                    .into_iter()
+                    .map(|sample| RpcPerfSample {
+                        slot: sample.slot,
+                        num_transactions: sample.num_transactions,
+                        num_non_vote_transactions: Some(sample.num_non_vote_transactions),
+                        num_slots: sample.num_slots,
+                        sample_period_secs: sample.sample_period_secs,
+                    })
+                    .collect());
+            }
+
             Ok(meta
                 .blockstore
                 .get_recent_perf_samples(limit)
@@ -4477,6 +4527,12 @@ pub mod rpc_full {
                     }
                     Err(err) => return Box::pin(future::err(err)),
                 }
+            }
+
+            // ER has no inflation rewards (no staking, no vote accounts).
+            if meta.er_node_info.is_some() {
+                let response = vec![None; addresses.len()];
+                return Box::pin(future::ok(response));
             }
 
             Box::pin(async move { meta.get_inflation_reward(addresses, config).await })
