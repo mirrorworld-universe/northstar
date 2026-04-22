@@ -3,6 +3,7 @@ use {
         EphemeralRollupSettings, ephemeral_tpu::EphemeralTpu,
         ephemeral_tx_client::EphemeralTransactionClient, slot_advancer::SlotAdvancer,
     },
+    crossbeam_channel::{Sender, unbounded},
     log::{info, warn},
     solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
     solana_gossip::cluster_info::ClusterInfo,
@@ -32,6 +33,7 @@ use {
             Arc, Mutex, RwLock,
             atomic::{AtomicBool, AtomicU64, Ordering},
         },
+        thread::{Builder, JoinHandle},
         time::Duration,
     },
     tempfile::TempDir,
@@ -74,6 +76,14 @@ pub struct EphemeralRuntime {
     /// links. Without this, dropping the ER root would drop the unrooted L1
     /// parent bank and purge its slot from the shared AccountsDb.
     l1_anchor_bank: Arc<Bank>,
+    /// Sonic: Old ER fork trees are dropped on a dedicated reaper thread so a
+    /// session reset does not synchronously destroy thousands of banks on the
+    /// `solNorthStar` service thread.
+    retired_bank_forks_sender: Option<Sender<BankForks>>,
+    retired_bank_forks_reaper: Option<JoinHandle<()>>,
+    retired_bank_forks_pending: Arc<AtomicU64>,
+    #[cfg(test)]
+    retired_bank_forks_reaper_pause: Arc<AtomicBool>,
 
     /// Sonic: When false, the tx_client rejects all transactions.
     /// Set to true when an ephemeral session is active.
@@ -128,6 +138,51 @@ impl EphemeralRuntime {
         } else {
             addr
         }
+    }
+
+    fn spawn_bank_forks_reaper(
+        pending: Arc<AtomicU64>,
+        #[cfg(test)] pause: Arc<AtomicBool>,
+    ) -> (Sender<BankForks>, JoinHandle<()>) {
+        let (sender, receiver) = unbounded();
+        let thread_hdl = Builder::new()
+            .name("solNorthStarReaper".to_string())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                while let Ok(old_bank_forks) = receiver.recv() {
+                    #[cfg(test)]
+                    while pause.load(Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+
+                    drop(old_bank_forks);
+                    pending.fetch_sub(1, Ordering::Relaxed);
+                }
+            })
+            .unwrap();
+        (sender, thread_hdl)
+    }
+
+    fn retire_bank_forks(&self, old_bank_forks: BankForks) {
+        if let Some(sender) = &self.retired_bank_forks_sender {
+            self.retired_bank_forks_pending
+                .fetch_add(1, Ordering::Relaxed);
+            if sender.send(old_bank_forks).is_err() {
+                self.retired_bank_forks_pending
+                    .fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn set_bank_forks_reaper_paused(&self, paused: bool) {
+        self.retired_bank_forks_reaper_pause
+            .store(paused, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn retired_bank_forks_pending(&self) -> u64 {
+        self.retired_bank_forks_pending.load(Ordering::Relaxed)
     }
 
     fn prepare_initial_working_bank(bank: &Bank) {
@@ -421,6 +476,14 @@ impl EphemeralRuntime {
 
         // Slot advancer is NOT started here — it will be started
         // when activate() is called (session opened).
+        let retired_bank_forks_pending = Arc::new(AtomicU64::new(0));
+        #[cfg(test)]
+        let retired_bank_forks_reaper_pause = Arc::new(AtomicBool::new(false));
+        let (retired_bank_forks_sender, retired_bank_forks_reaper) = Self::spawn_bank_forks_reaper(
+            retired_bank_forks_pending.clone(),
+            #[cfg(test)]
+            retired_bank_forks_reaper_pause.clone(),
+        );
 
         Ok(Self {
             bank_forks,
@@ -442,6 +505,11 @@ impl EphemeralRuntime {
             delegated_accounts: delegated_set,
             touched_accounts,
             l1_anchor_bank: parent_bank,
+            retired_bank_forks_sender: Some(retired_bank_forks_sender),
+            retired_bank_forks_reaper: Some(retired_bank_forks_reaper),
+            retired_bank_forks_pending,
+            #[cfg(test)]
+            retired_bank_forks_reaper_pause,
             active,
             session_pda,
             er_history_store,
@@ -550,6 +618,10 @@ impl EphemeralRuntime {
         // Then stop RPC service
         self.rpc_exit.store(true, Ordering::Relaxed);
         self.rpc_service.exit();
+        drop(self.retired_bank_forks_sender.take());
+        if let Some(reaper) = self.retired_bank_forks_reaper.take() {
+            let _ = reaper.join();
+        }
         info!("EphemeralRuntime shutdown complete");
     }
 
@@ -594,7 +666,8 @@ impl EphemeralRuntime {
                 .unwrap_or_else(|_| panic!("just created, refcount must be 1"))
                 .into_inner()
                 .expect("lock not poisoned");
-            *self.bank_forks.write().unwrap() = new_bf;
+            let old_bf = std::mem::replace(&mut *self.bank_forks.write().unwrap(), new_bf);
+            self.retire_bank_forks(old_bf);
 
             // 4. Publish frozen ER bank for RPC/preflight, keep fresh child as working bank.
             let initial_bank = Self::freeze_and_rotate_bank_for_rpc(
@@ -1118,6 +1191,67 @@ mod tests {
             receiver_balance, 0,
             "Transaction should be rejected when runtime is inactive"
         );
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_reset_to_new_parent_retires_old_bank_forks_async() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        parent_bank.freeze();
+        let parent_bank = Arc::new(parent_bank);
+
+        let cluster_info = create_test_cluster_info();
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            parent_bank.clone(),
+            cluster_info,
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.activate();
+
+        std::thread::sleep(Duration::from_millis(200));
+        runtime.deactivate();
+        runtime.set_bank_forks_reaper_paused(true);
+
+        let new_parent = Arc::new(Bank::new_from_parent(parent_bank, &Pubkey::default(), 1));
+        let expected_er_slot = EphemeralRuntime::er_slot_for(new_parent.as_ref()).saturating_add(1);
+        runtime.reset_to_new_parent(new_parent);
+
+        assert_eq!(
+            runtime.bank().slot(),
+            expected_er_slot,
+            "reset should publish fresh ER bank immediately"
+        );
+        assert_eq!(
+            runtime.retired_bank_forks_pending(),
+            1,
+            "old ER forks should be queued for async reaping"
+        );
+
+        runtime.set_bank_forks_reaper_paused(false);
+        for _ in 0..50 {
+            if runtime.retired_bank_forks_pending() == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(runtime.retired_bank_forks_pending(), 0);
 
         runtime.shutdown();
     }
