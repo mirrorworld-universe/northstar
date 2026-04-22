@@ -7,6 +7,7 @@ use {
     log::{info, warn},
     solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
     solana_gossip::cluster_info::ClusterInfo,
+    solana_clock::{BankId, Slot},
     solana_keypair::Keypair,
     solana_ledger::{blockstore::Blockstore, leader_schedule_cache::LeaderScheduleCache},
     solana_pubkey::Pubkey,
@@ -51,6 +52,11 @@ impl DropCallback for NoopDropCallback {
     }
 }
 
+struct RetiredBankForks {
+    bank_forks: BankForks,
+    purge_slots: Vec<(Slot, BankId)>,
+}
+
 pub struct EphemeralRuntime {
     bank_forks: Arc<RwLock<BankForks>>,
     /// Serializes ER bank mutations with slot advancement and tx execution.
@@ -90,7 +96,7 @@ pub struct EphemeralRuntime {
     /// Sonic: Old ER fork trees are dropped on a dedicated reaper thread so a
     /// session reset does not synchronously destroy thousands of banks on the
     /// `solNorthStar` service thread.
-    retired_bank_forks_sender: Option<Sender<BankForks>>,
+    retired_bank_forks_sender: Option<Sender<RetiredBankForks>>,
     retired_bank_forks_reaper: Option<JoinHandle<()>>,
     retired_bank_forks_pending: Arc<AtomicU64>,
     #[cfg(test)]
@@ -154,19 +160,28 @@ impl EphemeralRuntime {
     fn spawn_bank_forks_reaper(
         pending: Arc<AtomicU64>,
         #[cfg(test)] pause: Arc<AtomicBool>,
-    ) -> (Sender<BankForks>, JoinHandle<()>) {
-        let (sender, receiver) = unbounded();
+    ) -> (Sender<RetiredBankForks>, JoinHandle<()>) {
+        let (sender, receiver) = unbounded::<RetiredBankForks>();
         let thread_hdl = Builder::new()
             .name("solNorthStarReaper".to_string())
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
-                while let Ok(old_bank_forks) = receiver.recv() {
+                while let Ok(retired_bank_forks) = receiver.recv() {
                     #[cfg(test)]
                     while pause.load(Ordering::Relaxed) {
                         std::thread::sleep(Duration::from_millis(10));
                     }
 
-                    drop(old_bank_forks);
+                    if !retired_bank_forks.purge_slots.is_empty() {
+                        retired_bank_forks
+                            .bank_forks
+                            .root_bank()
+                            .rc
+                            .accounts
+                            .accounts_db
+                            .remove_unrooted_slots(&retired_bank_forks.purge_slots);
+                    }
+                    drop(retired_bank_forks.bank_forks);
                     pending.fetch_sub(1, Ordering::Relaxed);
                 }
             })
@@ -174,11 +189,46 @@ impl EphemeralRuntime {
         (sender, thread_hdl)
     }
 
+    fn collect_bank_forks_purge_slots(bank_forks: &BankForks) -> Vec<(Slot, BankId)> {
+        bank_forks
+            .banks()
+            .iter()
+            .map(|(&slot, bank)| (slot, bank.bank_id()))
+            .collect()
+    }
+
+    fn purge_bank_forks_slots(bank_forks: &BankForks) {
+        let purge_slots = Self::collect_bank_forks_purge_slots(bank_forks);
+        if !purge_slots.is_empty() {
+            bank_forks
+                .root_bank()
+                .rc
+                .accounts
+                .accounts_db
+                .remove_unrooted_slots(&purge_slots);
+        }
+    }
+
     fn retire_bank_forks(&self, old_bank_forks: BankForks) {
         if let Some(sender) = &self.retired_bank_forks_sender {
             self.retired_bank_forks_pending
                 .fetch_add(1, Ordering::Relaxed);
-            if sender.send(old_bank_forks).is_err() {
+            let retired_bank_forks = RetiredBankForks {
+                purge_slots: Self::collect_bank_forks_purge_slots(&old_bank_forks),
+                bank_forks: old_bank_forks,
+            };
+            if let Err(err) = sender.send(retired_bank_forks) {
+                let retired_bank_forks = err.0;
+                if !retired_bank_forks.purge_slots.is_empty() {
+                    retired_bank_forks
+                        .bank_forks
+                        .root_bank()
+                        .rc
+                        .accounts
+                        .accounts_db
+                        .remove_unrooted_slots(&retired_bank_forks.purge_slots);
+                }
+                drop(retired_bank_forks.bank_forks);
                 self.retired_bank_forks_pending
                     .fetch_sub(1, Ordering::Relaxed);
             }
@@ -630,6 +680,7 @@ impl EphemeralRuntime {
         // Then stop RPC service
         self.rpc_exit.store(true, Ordering::Relaxed);
         self.rpc_service.exit();
+        Self::purge_bank_forks_slots(&self.bank_forks.read().unwrap());
         drop(self.retired_bank_forks_sender.take());
         if let Some(reaper) = self.retired_bank_forks_reaper.take() {
             let _ = reaper.join();
@@ -652,7 +703,8 @@ impl EphemeralRuntime {
             let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
 
             // 2. Create new ephemeral bank from current L1 root
-            let ephemeral_slot = Self::er_slot_for(&parent_bank);
+            let current_er_tip = self.bank_forks.read().unwrap().working_bank().slot();
+            let ephemeral_slot = Self::er_slot_for(&parent_bank).max(current_er_tip.saturating_add(1));
             info!(
                 "reset_to_new_parent: parent_slot={}, ephemeral_slot={}, parent_epoch={}",
                 parent_bank.slot(),
@@ -1255,8 +1307,11 @@ mod tests {
         runtime.deactivate();
         runtime.set_bank_forks_reaper_paused(true);
 
+        let old_er_tip = runtime.bank().slot();
         let new_parent = Arc::new(Bank::new_from_parent(parent_bank, &Pubkey::default(), 1));
-        let expected_er_slot = EphemeralRuntime::er_slot_for(new_parent.as_ref()).saturating_add(1);
+        let expected_er_root_slot =
+            EphemeralRuntime::er_slot_for(new_parent.as_ref()).max(old_er_tip.saturating_add(1));
+        let expected_er_slot = expected_er_root_slot.saturating_add(1);
         runtime.reset_to_new_parent(new_parent);
 
         assert_eq!(
@@ -1278,6 +1333,81 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(runtime.retired_bank_forks_pending(), 0);
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_reset_to_new_parent_purges_old_er_slots() {
+        agave_logger::setup();
+
+        let parent_bank = Arc::new(create_test_bank());
+        let cluster_info = create_test_cluster_info();
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            parent_bank.clone(),
+            cluster_info,
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.activate();
+
+        let depositor = Pubkey::new_unique();
+        for _ in 0..4 {
+            runtime.credit_deposit(&depositor, 1);
+        }
+        runtime.deactivate();
+
+        let old_er_slots: Vec<_> = runtime
+            .bank()
+            .parents_inclusive()
+            .into_iter()
+            .map(|bank| bank.slot())
+            .filter(|slot| *slot >= (1u64 << 40))
+            .collect();
+        assert!(!old_er_slots.is_empty());
+        assert!(old_er_slots.iter().any(|slot| {
+            !parent_bank
+                .rc
+                .accounts
+                .accounts_db
+                .get_pubkeys_for_slot(*slot)
+                .is_empty()
+        }));
+
+        let new_parent = Arc::new(Bank::new_from_parent(parent_bank.clone(), &Pubkey::default(), 1));
+        runtime.reset_to_new_parent(new_parent);
+        for _ in 0..50 {
+            if runtime.retired_bank_forks_pending() == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(runtime.retired_bank_forks_pending(), 0);
+
+        for slot in old_er_slots {
+            assert!(
+                parent_bank
+                    .rc
+                    .accounts
+                    .accounts_db
+                    .get_pubkeys_for_slot(slot)
+                    .is_empty(),
+                "old ER slot {slot} should be purged during async retirement"
+            );
+        }
 
         runtime.shutdown();
     }
