@@ -70,6 +70,10 @@ pub struct EphemeralRuntime {
     delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
     /// Shared with EphemeralTransactionClient - tracks accounts that have been written to on this ER.
     touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+    /// Sonic: Hold current L1 anchor bank alive even if ER banks sever parent
+    /// links. Without this, dropping the ER root would drop the unrooted L1
+    /// parent bank and purge its slot from the shared AccountsDb.
+    l1_anchor_bank: Arc<Bank>,
 
     /// Sonic: When false, the tx_client rejects all transactions.
     /// Set to true when an ephemeral session is active.
@@ -153,6 +157,16 @@ impl EphemeralRuntime {
                 let inserted = bank_forks_write.insert(next_bank);
                 inserted.clone_without_scheduler()
             };
+
+            // Sonic: ER account lookup uses `ancestors`, not recursive parent
+            // traversal. Once child exists, older ER banks no longer need to
+            // keep their own parent links alive. Clear only ER->ER links; do
+            // not mutate the L1 anchor bank.
+            if let Some(parent) = frozen_bank.parent() {
+                if parent.slot() >= (1u64 << 40) {
+                    parent.clear_parent();
+                }
+            }
 
             (frozen_slot, frozen_bank, next_bank_slot, next_bank_arc)
         };
@@ -427,6 +441,7 @@ impl EphemeralRuntime {
             initial_account_snapshots,
             delegated_accounts: delegated_set,
             touched_accounts,
+            l1_anchor_bank: parent_bank,
             active,
             session_pda,
             er_history_store,
@@ -561,7 +576,7 @@ impl EphemeralRuntime {
                 parent_bank.epoch(),
             );
             let bank = Bank::new_from_parent_ephemeral_isolated(
-                parent_bank,
+                parent_bank.clone(),
                 &Pubkey::default(),
                 ephemeral_slot,
             );
@@ -590,7 +605,11 @@ impl EphemeralRuntime {
                 &self.er_history_store,
             );
 
-            // 5. Clear session state
+            // 5. Keep new L1 anchor alive even if ER root later severs its
+            // parent link to keep ER chains shallow.
+            self.l1_anchor_bank = parent_bank;
+
+            // 6. Clear session state
             self.initial_account_snapshots.clear();
             self.delegated_accounts.write().unwrap().clear();
             self.touched_accounts.write().unwrap().clear();
@@ -1160,6 +1179,28 @@ mod tests {
 
         // Session state should be cleared
         assert!(runtime.delegated_accounts().is_empty());
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_publish_bank_for_rpc_keeps_parent_chain_shallow() {
+        agave_logger::setup();
+
+        let (_, mut runtime) = create_runtime();
+        runtime.activate();
+
+        let depositor = Pubkey::new_unique();
+        for _ in 0..64 {
+            runtime.credit_deposit(&depositor, 1);
+        }
+
+        let working_bank = runtime.bank();
+        assert!(
+            working_bank.parents().len() <= 2,
+            "ER working bank parent chain grew too deep: {}",
+            working_bank.parents().len()
+        );
 
         runtime.shutdown();
     }

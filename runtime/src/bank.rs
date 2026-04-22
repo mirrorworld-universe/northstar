@@ -1493,12 +1493,22 @@ impl Bank {
         };
 
         let (_, ancestors_time_us) = measure_us!({
-            let mut ancestors = Vec::with_capacity(1 + new.parents().len());
-            ancestors.push(new.slot());
-            new.parents().iter().for_each(|p| {
-                ancestors.push(p.slot());
-            });
-            new.ancestors = Ancestors::from(ancestors);
+            if ephemeral {
+                // Sonic: ER banks may sever older in-memory parent links to keep
+                // long-lived sessions from building an unbounded recursive drop
+                // chain. Build ancestry from the parent's cached slot set instead
+                // of recursively traversing parent Arcs.
+                let mut ancestors_map = HashMap::<Slot, usize>::from(&parent.ancestors);
+                ancestors_map.insert(new.slot(), 0);
+                new.ancestors = Ancestors::from(&ancestors_map);
+            } else {
+                let mut ancestors = Vec::with_capacity(1 + new.parents().len());
+                ancestors.push(new.slot());
+                new.parents().iter().for_each(|p| {
+                    ancestors.push(p.slot());
+                });
+                new.ancestors = Ancestors::from(ancestors);
+            }
         });
 
         // Following code may touch AccountsDb, requiring proper ancestors
@@ -2894,6 +2904,14 @@ impl Bank {
     /// Return the more recent checkpoint of this bank instance.
     pub fn parent(&self) -> Option<Arc<Bank>> {
         self.rc.parent.read().unwrap().clone()
+    }
+
+    /// Sonic: For Northstar ephemeral forks, descendants copy full slot ancestry
+    /// into `ancestors`, so older in-memory parent `Arc`s are no longer needed.
+    /// Severing this link keeps ER chains shallow and avoids recursive drop stack
+    /// overflow on long-lived sessions.
+    pub fn clear_parent(&self) {
+        *self.rc.parent.write().unwrap() = None;
     }
 
     pub fn parent_slot(&self) -> Slot {

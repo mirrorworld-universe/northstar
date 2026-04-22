@@ -1,5 +1,6 @@
 use {
     log::{debug, info},
+    solana_clock::Slot,
     solana_hash::Hash,
     solana_pubkey::Pubkey,
     solana_rpc::{
@@ -44,6 +45,8 @@ pub struct SlotAdvancer {
     thread: JoinHandle<()>,
     _exit: Arc<AtomicBool>,
 }
+
+const ER_SLOT_OFFSET: Slot = 1u64 << 40;
 
 impl SlotAdvancer {
     pub fn new(
@@ -181,6 +184,16 @@ impl SlotAdvancer {
 
                     inserted.clone_without_scheduler()
                 };
+
+                // Sonic: ER account lookup uses `ancestors`, not recursive parent
+                // traversal. Once child exists, older ER banks no longer need to
+                // keep their own parent links alive. Clear only ER->ER links; do
+                // not mutate the L1 anchor bank.
+                if let Some(parent) = frozen_bank.parent() {
+                    if parent.slot() >= ER_SLOT_OFFSET {
+                        parent.clear_parent();
+                    }
+                }
 
                 (
                     current_bank_slot,
@@ -425,6 +438,55 @@ mod tests {
             "Should have advanced from non-zero initial slot {} by multiple slots, but only got {}",
             ephemeral_slot,
             latest_slot
+        );
+    }
+
+    #[test]
+    fn test_ephemeral_slot_advancer_keeps_parent_chain_shallow() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        parent_bank.freeze();
+        let parent_bank = Arc::new(parent_bank);
+
+        let initial_slot = 1u64 << 40;
+        let initial_bank =
+            Bank::new_from_parent_ephemeral_isolated(parent_bank, &Pubkey::default(), initial_slot);
+        let ticks_per_slot = initial_bank.ticks_per_slot();
+        initial_bank.set_tick_height(initial_bank.max_tick_height() - ticks_per_slot);
+
+        let bank_forks = BankForks::new_rw_arc_ephemeral(initial_bank);
+        let initial_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
+
+        let exit = Arc::new(AtomicBool::new(false));
+        let block_commitment_cache = create_block_commitment_cache(initial_bank.slot());
+        let optimistically_confirmed_bank =
+            create_optimistically_confirmed_bank(initial_bank.clone());
+
+        let advancer = SlotAdvancer::new(
+            bank_forks.clone(),
+            Arc::new(Mutex::new(())),
+            block_commitment_cache,
+            optimistically_confirmed_bank,
+            initial_bank,
+            Config {
+                slot_duration: Duration::from_millis(5),
+                manager_account: Pubkey::default(),
+            },
+            exit.clone(),
+            None,
+        );
+
+        thread::sleep(Duration::from_millis(200));
+        exit.store(true, Ordering::Relaxed);
+        advancer.join();
+
+        let working_bank = bank_forks.read().unwrap().working_bank();
+        assert!(working_bank.slot() > initial_slot + 5);
+        assert!(
+            working_bank.parents().len() <= 2,
+            "ER working bank parent chain grew too deep: {}",
+            working_bank.parents().len()
         );
     }
 
