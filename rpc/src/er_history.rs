@@ -15,6 +15,14 @@ use {
     },
 };
 
+fn slot_visible_at_commitment(slot_history: &ErSlotHistory, commitment: CommitmentConfig) -> bool {
+    if commitment.is_confirmed() || commitment.is_finalized() {
+        slot_history.finalized
+    } else {
+        true
+    }
+}
+
 #[derive(Default, Clone)]
 struct ErSlotHistory {
     blockhash: Option<String>,
@@ -113,13 +121,9 @@ impl ErHistoryStore {
     ) -> Option<ConfirmedTransactionWithStatusMeta> {
         let inner = self.inner.read().unwrap();
         let transaction = inner.transactions.get(signature)?.clone();
-        let finalized = inner
-            .slots
-            .get(&transaction.slot)
-            .map(|slot| slot.finalized)
-            .unwrap_or(false);
+        let slot_history = inner.slots.get(&transaction.slot)?;
 
-        if commitment.is_finalized() && !finalized {
+        if !slot_visible_at_commitment(slot_history, commitment) {
             return None;
         }
 
@@ -155,7 +159,7 @@ impl ErHistoryStore {
     pub fn get_block(&self, slot: Slot, commitment: CommitmentConfig) -> Option<ConfirmedBlock> {
         let inner = self.inner.read().unwrap();
         let slot_history = inner.slots.get(&slot)?;
-        if commitment.is_finalized() && !slot_history.finalized {
+        if !slot_visible_at_commitment(slot_history, commitment) {
             return None;
         }
 
@@ -186,7 +190,7 @@ impl ErHistoryStore {
         inner
             .slots
             .range(start_slot..=end_slot)
-            .filter(|(_, slot_history)| !commitment.is_finalized() || slot_history.finalized)
+            .filter(|(_, slot_history)| slot_visible_at_commitment(slot_history, commitment))
             .map(|(slot, _)| *slot)
             .collect()
     }
@@ -201,7 +205,7 @@ impl ErHistoryStore {
         inner
             .slots
             .range(start_slot..)
-            .filter(|(_, slot_history)| !commitment.is_finalized() || slot_history.finalized)
+            .filter(|(_, slot_history)| slot_visible_at_commitment(slot_history, commitment))
             .map(|(slot, _)| *slot)
             .take(limit)
             .collect()
@@ -214,7 +218,7 @@ impl ErHistoryStore {
     ) -> Option<UnixTimestamp> {
         let inner = self.inner.read().unwrap();
         let slot_history = inner.slots.get(&slot)?;
-        if commitment.is_finalized() && !slot_history.finalized {
+        if !slot_visible_at_commitment(slot_history, commitment) {
             return None;
         }
         slot_history.block_time
@@ -296,7 +300,7 @@ impl ErHistoryStore {
             .slots
             .iter()
             .rev()
-            .filter(|(_, slot_history)| !commitment.is_finalized() || slot_history.finalized)
+            .filter(|(_, slot_history)| slot_visible_at_commitment(slot_history, commitment))
             .flat_map(|(_, slot_history)| slot_history.signatures.iter().rev())
             .filter_map(|signature| {
                 let transaction = inner.transactions.get(signature)?;
@@ -304,12 +308,8 @@ impl ErHistoryStore {
                     TransactionWithStatusMeta::Complete(transaction) => transaction,
                     TransactionWithStatusMeta::MissingMetadata(_) => return None,
                 };
-                if !versioned_transaction
-                    .transaction
-                    .message
-                    .static_account_keys()
-                    .contains(address)
-                {
+                let account_keys = versioned_transaction.account_keys();
+                if !account_keys.iter().any(|key| key == address) {
                     return None;
                 }
                 let err = versioned_transaction.meta.status.clone().err();
@@ -359,6 +359,7 @@ mod tests {
     use {
         super::*,
         solana_keypair::{Keypair, Signer},
+        solana_message::{MessageHeader, VersionedMessage, v0},
         solana_runtime::genesis_utils::create_genesis_config,
         solana_system_interface::instruction as system_instruction,
         solana_transaction::{Transaction, versioned::VersionedTransaction},
@@ -416,7 +417,7 @@ mod tests {
         assert!(
             store
                 .get_block(bank0.slot(), CommitmentConfig::confirmed())
-                .is_some()
+                .is_none()
         );
         assert!(
             store
@@ -470,7 +471,11 @@ mod tests {
         store.record_transaction(&prev, tx);
         store.finalize_slot(&prev);
         for slot in 1u64..6 {
-            let bank = Arc::new(Bank::new_from_parent(prev.clone(), &Pubkey::new_unique(), slot));
+            let bank = Arc::new(Bank::new_from_parent(
+                prev.clone(),
+                &Pubkey::new_unique(),
+                slot,
+            ));
             let tx = VersionedTransactionWithStatusMeta {
                 transaction: VersionedTransaction {
                     signatures: vec![Signature::from([slot as u8 + 1; 64])],
@@ -578,5 +583,68 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![sig0]
         );
+    }
+
+    #[test]
+    fn test_get_signatures_for_address_matches_loaded_addresses() {
+        let store = ErHistoryStore::default();
+        let payer = Keypair::new();
+        let loaded_address = Pubkey::new_unique();
+
+        let bank = create_test_bank();
+        let tx = VersionedTransaction::try_new(
+            VersionedMessage::V0(v0::Message {
+                header: MessageHeader {
+                    num_required_signatures: 1,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 0,
+                },
+                recent_blockhash: bank.last_blockhash(),
+                account_keys: vec![payer.pubkey()],
+                instructions: vec![],
+                address_table_lookups: vec![],
+            }),
+            &[&payer],
+        )
+        .unwrap();
+        let signature = tx.signatures[0];
+
+        store.record_transaction(
+            &bank,
+            VersionedTransactionWithStatusMeta {
+                transaction: tx,
+                meta: TransactionStatusMeta {
+                    status: Ok(()),
+                    fee: 5000,
+                    pre_balances: vec![],
+                    post_balances: vec![],
+                    inner_instructions: None,
+                    log_messages: None,
+                    pre_token_balances: None,
+                    post_token_balances: None,
+                    rewards: Some(vec![]),
+                    loaded_addresses: v0::LoadedAddresses {
+                        writable: vec![loaded_address],
+                        readonly: vec![],
+                    },
+                    return_data: None,
+                    compute_units_consumed: Some(0),
+                    cost_units: None,
+                },
+            },
+        );
+        store.finalize_slot(&bank);
+
+        let matches = store
+            .get_signatures_for_address(
+                &loaded_address,
+                None,
+                None,
+                10,
+                CommitmentConfig::confirmed(),
+            )
+            .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].signature, signature);
     }
 }

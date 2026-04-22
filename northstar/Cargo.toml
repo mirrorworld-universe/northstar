@@ -53,6 +53,7 @@ borsh = { workspace = true }
 
 [dev-dependencies]
 agave-snapshots.workspace = true
+solana-address-lookup-table-interface.workspace = true
 solana-rent.workspace = true
 serde_json = { workspace = true }
 solana-ledger = { workspace = true, features = ["agave-unstable-api"] }
