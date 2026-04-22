@@ -20,7 +20,7 @@ use {
         rpc_subscriptions::RpcSubscriptions,
     },
     solana_runtime::{
-        bank::Bank,
+        bank::{Bank, DropCallback},
         bank_forks::BankForks,
         commitment::{BlockCommitmentCache, CommitmentSlots},
     },
@@ -39,6 +39,17 @@ use {
     tempfile::TempDir,
     tokio::runtime::Runtime as TokioRuntime,
 };
+
+#[derive(Debug, Clone)]
+struct NoopDropCallback;
+
+impl DropCallback for NoopDropCallback {
+    fn callback(&self, _bank: &Bank) {}
+
+    fn clone_box(&self) -> Box<dyn DropCallback + Send + Sync> {
+        Box::new(self.clone())
+    }
+}
 
 pub struct EphemeralRuntime {
     bank_forks: Arc<RwLock<BankForks>>,
@@ -272,6 +283,7 @@ impl EphemeralRuntime {
             &Pubkey::default(),
             ephemeral_slot,
         );
+        bank.set_callback(Some(Box::new(NoopDropCallback)));
         info!(
             "EphemeralRuntime::new: ER bank created, slot={}, epoch={}",
             bank.slot(),
@@ -652,6 +664,7 @@ impl EphemeralRuntime {
                 &Pubkey::default(),
                 ephemeral_slot,
             );
+            bank.set_callback(Some(Box::new(NoopDropCallback)));
             info!(
                 "reset_to_new_parent: ER bank created, slot={}, epoch={}",
                 bank.slot(),
@@ -825,8 +838,21 @@ mod tests {
         solana_system_interface::instruction::transfer,
         solana_transaction::Transaction,
         solana_transaction_status::{TransactionConfirmationStatus, UiTransactionEncoding},
-        std::{net::TcpListener, time::Duration},
+        std::{net::TcpListener, sync::atomic::AtomicU64, time::Duration},
     };
+
+    #[derive(Debug, Clone)]
+    struct CountingDropCallback(Arc<AtomicU64>);
+
+    impl DropCallback for CountingDropCallback {
+        fn callback(&self, _bank: &Bank) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn clone_box(&self) -> Box<dyn DropCallback + Send + Sync> {
+            Box::new(self.clone())
+        }
+    }
 
     fn create_test_cluster_info() -> Arc<ClusterInfo> {
         let keypair = Arc::new(Keypair::new());
@@ -1315,6 +1341,50 @@ mod tests {
         assert!(runtime.delegated_accounts().is_empty());
 
         runtime.shutdown();
+    }
+
+    #[test]
+    fn test_er_banks_do_not_inherit_l1_drop_callback() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        let dropped = Arc::new(AtomicU64::new(0));
+        parent_bank.set_callback(Some(Box::new(CountingDropCallback(dropped.clone()))));
+        parent_bank.freeze();
+        let parent_bank = Arc::new(parent_bank);
+
+        let cluster_info = create_test_cluster_info();
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            parent_bank.clone(),
+            cluster_info,
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.activate();
+
+        std::thread::sleep(Duration::from_millis(150));
+        let new_parent = Arc::new(Bank::new_from_parent(parent_bank, &Pubkey::default(), 1));
+        runtime.reset_to_new_parent(new_parent);
+        runtime.shutdown();
+
+        assert_eq!(
+            dropped.load(Ordering::Relaxed),
+            0,
+            "ER banks should not forward drops into the L1 callback queue"
+        );
     }
 
     #[test]
