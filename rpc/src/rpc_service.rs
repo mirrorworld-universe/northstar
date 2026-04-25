@@ -559,6 +559,8 @@ impl JsonRpcService {
             None, // delegated_accounts: not an ephemeral rollup node
             None, // session_pda: not an ephemeral rollup node
             None, // er_history_store: not an ephemeral rollup node
+            None, // er_node_info: not an ephemeral rollup node
+            None, // er_tx_executor: not an ephemeral rollup node
         )?;
         Ok(json_rpc_service)
     }
@@ -600,6 +602,11 @@ impl JsonRpcService {
         session_pda: Option<Arc<RwLock<Option<Pubkey>>>>,
         // Sonic: Optional in-memory transaction history for ephemeral rollup RPC.
         er_history_store: Option<Arc<ErHistoryStore>>,
+        // Sonic: Optional single-node contact info for ephemeral rollup RPC.
+        er_node_info: Option<ErNodeInfo>,
+        // Sonic: Optional synchronous tx executor — bypasses queue/preflight
+        // and executes wire transactions in-process on the ER bank.
+        er_tx_executor: Option<Arc<dyn crate::rpc::ErTxExecutor>>,
     ) -> Result<Self, String> {
         Self::new(
             rpc_addr,
@@ -625,6 +632,8 @@ impl JsonRpcService {
             delegated_accounts,
             session_pda,
             er_history_store,
+            er_node_info,
+            er_tx_executor,
         )
     }
 
@@ -663,6 +672,10 @@ impl JsonRpcService {
         session_pda: Option<Arc<RwLock<Option<Pubkey>>>>,
         // Sonic: Optional in-memory transaction history for ephemeral rollup RPC.
         er_history_store: Option<Arc<ErHistoryStore>>,
+        // Sonic: Optional single-node contact info for ephemeral rollup RPC.
+        er_node_info: Option<ErNodeInfo>,
+        // Sonic: Optional synchronous tx executor for ephemeral rollup RPC.
+        er_tx_executor: Option<Arc<dyn crate::rpc::ErTxExecutor>>,
     ) -> Result<Self, String> {
         info!("rpc bound to {rpc_addr:?}");
         info!("rpc configuration: {config:?}");
@@ -766,6 +779,12 @@ impl JsonRpcService {
         }
         if let Some(er_history_store) = er_history_store {
             request_processor.set_er_history_store(er_history_store);
+        }
+        if let Some(er_node_info) = er_node_info {
+            request_processor.set_er_node_info(er_node_info);
+        }
+        if let Some(er_tx_executor) = er_tx_executor {
+            request_processor.set_er_tx_executor(er_tx_executor);
         }
 
         let _send_transaction_service = Arc::new(SendTransactionService::new(
@@ -999,6 +1018,8 @@ mod tests {
             Some(Arc::new(PrioritizationFeeCache::default())),
             runtime,
             // Sonic:
+            None,
+            None,
             None,
             None,
             None,

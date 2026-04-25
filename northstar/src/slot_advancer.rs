@@ -2,7 +2,11 @@ use {
     log::{debug, info},
     solana_hash::Hash,
     solana_pubkey::Pubkey,
-    solana_rpc::{er_history::ErHistoryStore, rpc_subscriptions::RpcSubscriptions},
+    solana_rpc::{
+        er_history::ErHistoryStore,
+        optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
+        rpc_subscriptions::RpcSubscriptions,
+    },
     solana_runtime::{
         bank::Bank,
         bank_forks::BankForks,
@@ -11,7 +15,7 @@ use {
     },
     std::{
         sync::{
-            Arc, RwLock,
+            Arc, Mutex, RwLock,
             atomic::{AtomicBool, Ordering},
         },
         thread::{self, JoinHandle},
@@ -44,7 +48,9 @@ pub struct SlotAdvancer {
 impl SlotAdvancer {
     pub fn new(
         bank_forks: Arc<RwLock<BankForks>>,
+        bank_operation_lock: Arc<Mutex<()>>,
         block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
+        optimistically_confirmed_bank: Arc<RwLock<OptimisticallyConfirmedBank>>,
         initial_bank: Arc<Bank>,
         config: Config,
         exit: Arc<AtomicBool>,
@@ -52,7 +58,9 @@ impl SlotAdvancer {
     ) -> Self {
         Self::new_with_history(
             bank_forks,
+            bank_operation_lock,
             block_commitment_cache,
+            optimistically_confirmed_bank,
             initial_bank,
             config,
             exit,
@@ -63,7 +71,9 @@ impl SlotAdvancer {
 
     pub fn new_with_history(
         bank_forks: Arc<RwLock<BankForks>>,
+        bank_operation_lock: Arc<Mutex<()>>,
         block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
+        optimistically_confirmed_bank: Arc<RwLock<OptimisticallyConfirmedBank>>,
         initial_bank: Arc<Bank>,
         config: Config,
         exit: Arc<AtomicBool>,
@@ -74,7 +84,9 @@ impl SlotAdvancer {
         let thread = thread::spawn(move || {
             Self::run(
                 bank_forks,
+                bank_operation_lock,
                 block_commitment_cache,
+                optimistically_confirmed_bank,
                 initial_bank,
                 config,
                 exit_clone,
@@ -90,87 +102,99 @@ impl SlotAdvancer {
 
     fn run(
         bank_forks: Arc<RwLock<BankForks>>,
+        bank_operation_lock: Arc<Mutex<()>>,
         block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
-        mut current_bank: Arc<Bank>,
+        optimistically_confirmed_bank: Arc<RwLock<OptimisticallyConfirmedBank>>,
+        initial_bank: Arc<Bank>,
         config: Config,
         exit: Arc<AtomicBool>,
         rpc_subscriptions: Option<Arc<RpcSubscriptions>>,
         er_history_store: Option<Arc<ErHistoryStore>>,
     ) {
-        let mut current_slot = current_bank.slot();
-
         info!(
             "SlotAdvancer: starting at slot {}, bank_forks_root {}",
-            current_slot,
+            initial_bank.slot(),
             bank_forks.read().unwrap().root()
         );
 
         while !exit.load(Ordering::Relaxed) {
             thread::sleep(config.slot_duration);
 
-            let max_tick_height = current_bank.max_tick_height();
-            let tick_height = current_bank.tick_height();
-            let ticks_remaining = max_tick_height - tick_height;
+            let (current_bank_slot, next_bank_slot, frozen_bank, next_bank_arc) = {
+                let _bank_operation_guard = bank_operation_lock.lock().unwrap();
+                let current_bank = bank_forks.read().unwrap().working_bank();
 
-            debug!(
-                "SlotAdvancer: current slot {}, tick_height {}, max_tick_height {}, \
-                 ticks_remaining {}",
-                current_bank.slot(),
-                tick_height,
-                max_tick_height,
-                ticks_remaining
-            );
+                let max_tick_height = current_bank.max_tick_height();
+                let tick_height = current_bank.tick_height();
+                let ticks_remaining = max_tick_height - tick_height;
 
-            for _ in 0..ticks_remaining {
-                // Ephemeral rollup: PoH is not verified externally, so we
-                // use random tick hashes to drive slot advancement.
-                let hash = Hash::new_unique();
-                let scheduler = RwLock::new(SchedulerStatus::Unavailable);
-                current_bank.register_tick(&hash, &scheduler);
-            }
+                debug!(
+                    "SlotAdvancer: current slot {}, tick_height {}, max_tick_height {}, \
+                     ticks_remaining {}",
+                    current_bank.slot(),
+                    tick_height,
+                    max_tick_height,
+                    ticks_remaining
+                );
 
-            current_bank.freeze();
-            if let Some(er_history_store) = &er_history_store {
-                er_history_store.finalize_slot(&current_bank);
-            }
+                for _ in 0..ticks_remaining {
+                    // Ephemeral rollup: PoH is not verified externally, so we
+                    // use random tick hashes to drive slot advancement.
+                    let hash = Hash::new_unique();
+                    let scheduler = RwLock::new(SchedulerStatus::Unavailable);
+                    current_bank.register_tick(&hash, &scheduler);
+                }
 
-            debug!(
-                "SlotAdvancer: after freeze, slot {}, blockhash {}",
-                current_bank.slot(),
-                current_bank.last_blockhash()
-            );
+                current_bank.freeze();
+                if let Some(er_history_store) = &er_history_store {
+                    er_history_store.finalize_slot(&current_bank);
+                }
 
-            current_slot += 1;
-            let current_bank_slot = current_bank.slot();
-            let next_bank = Bank::new_from_parent_ephemeral(
-                current_bank,
-                &config.manager_account,
-                current_slot,
-            );
+                debug!(
+                    "SlotAdvancer: after freeze, slot {}, blockhash {}",
+                    current_bank.slot(),
+                    current_bank.last_blockhash()
+                );
 
-            let next_bank_arc = {
-                let mut bank_forks_write = bank_forks.write().unwrap();
-                let inserted = bank_forks_write.insert(next_bank);
+                let current_bank_slot = current_bank.slot();
+                let frozen_bank = current_bank.clone();
+                let next_bank_slot = current_bank_slot.saturating_add(1);
+                let next_bank = Bank::new_from_parent_ephemeral(
+                    current_bank,
+                    &config.manager_account,
+                    next_bank_slot,
+                );
 
-                // NOTE: We intentionally do NOT call set_root() here.
-                // The ER shares an AccountsDb with the L1 validator.
-                // Bank::squash() (called by set_root) walks the entire parent
-                // chain and calls add_root() for each slot — including the L1
-                // parent.  Because the L1 concurrently advances its own roots
-                // on the same AccountsDb, this causes a "Roots must be added
-                // in order" panic.  The ER is short-lived so rooting is not
-                // required for correctness; the commitment cache update below
-                // is sufficient for RPC queries.
+                let next_bank_arc = {
+                    let mut bank_forks_write = bank_forks.write().unwrap();
+                    let inserted = bank_forks_write.insert(next_bank);
 
-                inserted.clone_without_scheduler()
+                    // NOTE: We intentionally do NOT call set_root() here.
+                    // The ER shares an AccountsDb with the L1 validator.
+                    // Bank::squash() (called by set_root) walks the entire parent
+                    // chain and calls add_root() for each slot — including the L1
+                    // parent.  Because the L1 concurrently advances its own roots
+                    // on the same AccountsDb, this causes a "Roots must be added
+                    // in order" panic.  The ER is short-lived so rooting is not
+                    // required for correctness; the commitment cache update below
+                    // is sufficient for RPC queries.
+
+                    inserted.clone_without_scheduler()
+                };
+
+                (
+                    current_bank_slot,
+                    next_bank_slot,
+                    frozen_bank,
+                    next_bank_arc,
+                )
             };
 
             {
                 let mut cache = block_commitment_cache.write().unwrap();
                 // We don't call set_root (see above), so report the current
                 // frozen slot as both the tip and the "root" for RPC purposes.
-                // This makes all commitment levels (processed, confirmed,
-                // finalized) resolve to the latest frozen bank.
+                // This makes processed/finalized resolve to latest frozen bank.
                 *cache = BlockCommitmentCache::new(
                     std::collections::HashMap::new(),
                     0,
@@ -183,18 +207,22 @@ impl SlotAdvancer {
                 );
             }
 
+            // Confirmed commitment should track latest frozen ER bank.
+            // RPC preflight simulation requires a frozen bank, so do not point
+            // this at the new working bank.
+            *optimistically_confirmed_bank.write().unwrap() =
+                OptimisticallyConfirmedBank { bank: frozen_bank };
+
             debug!(
                 "SlotAdvancer: advanced to slot {}, new blockhash {}",
-                current_slot,
+                next_bank_slot,
                 next_bank_arc.last_blockhash()
             );
 
             // Sonic: Notify RPC subscriptions about the new slot
             if let Some(ref subs) = rpc_subscriptions {
-                subs.notify_slot(current_slot, current_bank_slot, current_slot);
+                subs.notify_slot(next_bank_slot, current_bank_slot, next_bank_slot);
             }
-
-            current_bank = next_bank_arc;
         }
 
         info!("SlotAdvancer: thread exiting");
@@ -228,6 +256,12 @@ mod tests {
         )))
     }
 
+    fn create_optimistically_confirmed_bank(
+        bank: Arc<Bank>,
+    ) -> Arc<RwLock<OptimisticallyConfirmedBank>> {
+        Arc::new(RwLock::new(OptimisticallyConfirmedBank { bank }))
+    }
+
     #[test]
     fn test_slot_advances() {
         agave_logger::setup();
@@ -240,10 +274,14 @@ mod tests {
         let exit = Arc::new(AtomicBool::new(false));
         let config = Config::default();
         let block_commitment_cache = create_block_commitment_cache(initial_slot);
+        let optimistically_confirmed_bank =
+            create_optimistically_confirmed_bank(initial_bank.clone());
 
         let advancer = SlotAdvancer::new(
             bank_forks.clone(),
+            Arc::new(Mutex::new(())),
             block_commitment_cache,
+            optimistically_confirmed_bank,
             initial_bank,
             config,
             exit.clone(),
@@ -276,10 +314,14 @@ mod tests {
         let exit = Arc::new(AtomicBool::new(false));
         let config = Config::default();
         let block_commitment_cache = create_block_commitment_cache(initial_slot);
+        let optimistically_confirmed_bank =
+            create_optimistically_confirmed_bank(initial_bank.clone());
 
         let advancer = SlotAdvancer::new(
             bank_forks.clone(),
+            Arc::new(Mutex::new(())),
             block_commitment_cache,
+            optimistically_confirmed_bank,
             initial_bank,
             config,
             exit.clone(),
@@ -309,10 +351,14 @@ mod tests {
         let exit = Arc::new(AtomicBool::new(false));
         let config = Config::default();
         let block_commitment_cache = create_block_commitment_cache(initial_slot);
+        let optimistically_confirmed_bank =
+            create_optimistically_confirmed_bank(initial_bank.clone());
 
         let advancer = SlotAdvancer::new(
             bank_forks.clone(),
+            Arc::new(Mutex::new(())),
             block_commitment_cache,
+            optimistically_confirmed_bank,
             initial_bank,
             config,
             exit.clone(),
@@ -355,10 +401,14 @@ mod tests {
             manager_account: Pubkey::default(),
         };
         let block_commitment_cache = create_block_commitment_cache(initial_bank.slot());
+        let optimistically_confirmed_bank =
+            create_optimistically_confirmed_bank(initial_bank.clone());
 
         let advancer = SlotAdvancer::new(
             bank_forks.clone(),
+            Arc::new(Mutex::new(())),
             block_commitment_cache,
+            optimistically_confirmed_bank,
             initial_bank,
             config,
             exit.clone(),
@@ -375,6 +425,55 @@ mod tests {
             "Should have advanced from non-zero initial slot {} by multiple slots, but only got {}",
             ephemeral_slot,
             latest_slot
+        );
+    }
+
+    #[test]
+    fn test_slot_advancer_waits_for_bank_operation_lock() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        let bank_forks = BankForks::new_rw_arc(parent_bank);
+        let initial_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
+        let initial_slot = initial_bank.slot();
+
+        let exit = Arc::new(AtomicBool::new(false));
+        let block_commitment_cache = create_block_commitment_cache(initial_slot);
+        let optimistically_confirmed_bank =
+            create_optimistically_confirmed_bank(initial_bank.clone());
+        let bank_operation_lock = Arc::new(Mutex::new(()));
+        let bank_operation_guard = bank_operation_lock.lock().unwrap();
+
+        let advancer = SlotAdvancer::new(
+            bank_forks.clone(),
+            bank_operation_lock.clone(),
+            block_commitment_cache,
+            optimistically_confirmed_bank,
+            initial_bank,
+            Config {
+                slot_duration: Duration::from_millis(5),
+                manager_account: Pubkey::default(),
+            },
+            exit.clone(),
+            None,
+        );
+
+        thread::sleep(Duration::from_millis(50));
+        let slot_while_locked = bank_forks.read().unwrap().working_bank().slot();
+        assert_eq!(
+            slot_while_locked, initial_slot,
+            "slot advancer must not freeze/advance while bank op lock held"
+        );
+
+        drop(bank_operation_guard);
+        thread::sleep(Duration::from_millis(50));
+        exit.store(true, Ordering::Relaxed);
+        advancer.join();
+
+        let slot_after_release = bank_forks.read().unwrap().working_bank().slot();
+        assert!(
+            slot_after_release > initial_slot,
+            "slot advancer should advance once bank op lock released"
         );
     }
 }

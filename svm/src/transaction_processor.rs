@@ -303,6 +303,30 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         }
     }
 
+    // Northstar: like `new_from`, but with a freshly-constructed `ProgramCache`.
+    //
+    // Used by the ephemeral rollup so its `ProgramCache` (and the cooperative
+    // loading-task waiter inside it) is fully isolated from the L1 validator's
+    // cache. Sharing the cache caused deploy-style transactions to deadlock on
+    // the loader's cooperative-loading wait when L1 banking concurrently
+    // mutated the same `ProgramCache` slot.
+    //
+    // Environments and builtin program ids are still cloned from `self` so the
+    // ER inherits the same compiled syscalls, validator features, and builtin
+    // entrypoints as L1.
+    pub fn new_from_isolated_cache(&self, slot: Slot, epoch: Epoch) -> Self {
+        Self {
+            slot,
+            epoch,
+            sysvar_cache: RwLock::<SysvarCache>::default(),
+            epoch_boundary_preparation: self.epoch_boundary_preparation.clone(),
+            global_program_cache: Arc::new(RwLock::new(ProgramCache::new(slot))),
+            environments: self.environments.clone(),
+            builtin_program_ids: RwLock::new(self.builtin_program_ids.read().unwrap().clone()),
+            execution_cost: self.execution_cost,
+        }
+    }
+
     /// Sets the base execution cost for the transactions that this instance of transaction processor
     /// will execute.
     pub fn set_execution_cost(&mut self, cost: SVMTransactionExecutionCost) {

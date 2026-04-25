@@ -975,6 +975,13 @@ pub struct NewBankOptions {
     // (stake history, vote accounts, `EpochRewards` sysvar), which an ER fork
     // has no business touching.
     pub ephemeral: bool,
+    // Northstar: when set, the new bank gets a freshly-allocated
+    // `ProgramCache` instead of inheriting the parent's. Used **only** for
+    // the ER root bank so cooperative loading inside the cache is isolated
+    // from L1's banking stage. Subsequent ER child banks must inherit the
+    // ER root's isolated cache, otherwise the cooperative loader's fork
+    // graph stops resolving builtin/program entries deployed inside the ER.
+    pub isolate_program_cache: bool,
 }
 
 #[cfg(feature = "dev-context-only-utils")]
@@ -1268,6 +1275,31 @@ impl Bank {
             NewBankOptions {
                 vote_only_bank: false,
                 ephemeral: true,
+                // Inherit the parent's (already isolated) ER ProgramCache so
+                // child ER banks can resolve programs deployed within the ER.
+                isolate_program_cache: false,
+            },
+        )
+    }
+
+    /// Northstar: like `new_from_parent_ephemeral`, but additionally allocates
+    /// a fresh `ProgramCache` for this bank. Use **only** when constructing
+    /// the ER root bank; child ER banks must inherit the ER root's cache via
+    /// `new_from_parent_ephemeral`.
+    pub fn new_from_parent_ephemeral_isolated(
+        parent: Arc<Bank>,
+        leader_id: &Pubkey,
+        slot: Slot,
+    ) -> Self {
+        Self::_new_from_parent(
+            parent,
+            leader_id,
+            slot,
+            null_tracer(),
+            NewBankOptions {
+                vote_only_bank: false,
+                ephemeral: true,
+                isolate_program_cache: true,
             },
         )
     }
@@ -1312,6 +1344,8 @@ impl Bank {
             vote_only_bank,
             // Northstar: ephemeral-fork flag; see usage below.
             ephemeral,
+            // Northstar: only set on the ER root bank.
+            isolate_program_cache,
         } = new_bank_options;
 
         parent.freeze();
@@ -1345,7 +1379,20 @@ impl Bank {
         let (epoch_stakes, epoch_stakes_time_us) = measure_us!(parent.epoch_stakes.clone());
 
         let (transaction_processor, builtin_program_ids_time_us) = measure_us!(
-            TransactionBatchProcessor::new_from(&parent.transaction_processor, slot, epoch)
+            // Northstar: ER root banks must NOT share the L1 `ProgramCache`.
+            // The cache's cooperative-loading waiter deadlocks deploy-style
+            // transactions on the ER side when L1 banking concurrently
+            // touches the same cache. Use an isolated cache for the ER root
+            // bank only — child ER banks reuse the parent's isolated cache
+            // so the cooperative loader's fork graph still resolves
+            // correctly within the ER fork.
+            if isolate_program_cache {
+                parent
+                    .transaction_processor
+                    .new_from_isolated_cache(slot, epoch)
+            } else {
+                TransactionBatchProcessor::new_from(&parent.transaction_processor, slot, epoch)
+            }
         );
 
         let (transaction_debug_keys, transaction_debug_keys_time_us) =
@@ -1501,6 +1548,16 @@ impl Bank {
 
         let (_, cache_preparation_time_us) =
             measure_us!(new.prepare_program_cache_for_upcoming_feature_set());
+
+        // Northstar: ER banks use an isolated `ProgramCache` (see
+        // `new_from_isolated_cache` above) so the cooperative-loading waiter
+        // can't deadlock against L1. The fresh cache starts empty, so we
+        // must repopulate the active builtin programs that the SVM relies on
+        // (system, bpf_loader, bpf_loader_upgradeable, vote, etc.) before
+        // any tx is executed against this bank.
+        if isolate_program_cache {
+            new.add_active_builtin_programs();
+        }
 
         // Update sysvars before processing transactions
         let (_, update_sysvars_time_us) = measure_us!({

@@ -3,6 +3,7 @@ use {
     solana_account::{ReadableAccount, WritableAccount},
     solana_keypair::Keypair,
     solana_ledger::transaction_balances::compile_collected_balances,
+    solana_message::{AddressLoader, VersionedMessage, v0::LoadedAddresses},
     solana_pubkey::Pubkey,
     solana_rpc::er_history::ErHistoryStore,
     solana_runtime::{bank::Bank, bank_forks::BankForks},
@@ -25,7 +26,7 @@ use {
         collections::HashSet,
         error::Error,
         sync::{
-            Arc, RwLock,
+            Arc, Mutex, RwLock,
             atomic::{AtomicBool, Ordering},
         },
     },
@@ -33,6 +34,8 @@ use {
 
 pub struct EphemeralTransactionClient {
     bank_forks: Arc<RwLock<BankForks>>,
+    /// Serializes ER bank mutations with SlotAdvancer and deposit/delegation writes.
+    bank_operation_lock: Arc<Mutex<()>>,
     /// Set of delegated account pubkeys for filtering.
     /// Wrapped in RwLock because new delegations can arrive from L1 at runtime.
     delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
@@ -50,6 +53,7 @@ impl Clone for EphemeralTransactionClient {
     fn clone(&self) -> Self {
         Self {
             bank_forks: Arc::clone(&self.bank_forks),
+            bank_operation_lock: Arc::clone(&self.bank_operation_lock),
             delegated_accounts: Arc::clone(&self.delegated_accounts),
             touched_accounts: Arc::clone(&self.touched_accounts),
             active: Arc::clone(&self.active),
@@ -61,12 +65,14 @@ impl Clone for EphemeralTransactionClient {
 impl EphemeralTransactionClient {
     pub fn new(
         bank_forks: Arc<RwLock<BankForks>>,
+        bank_operation_lock: Arc<Mutex<()>>,
         delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
         touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
         active: Arc<AtomicBool>,
     ) -> Self {
         Self::new_with_history(
             bank_forks,
+            bank_operation_lock,
             delegated_accounts,
             touched_accounts,
             active,
@@ -76,6 +82,7 @@ impl EphemeralTransactionClient {
 
     pub fn new_with_history(
         bank_forks: Arc<RwLock<BankForks>>,
+        bank_operation_lock: Arc<Mutex<()>>,
         delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
         touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
         active: Arc<AtomicBool>,
@@ -83,6 +90,7 @@ impl EphemeralTransactionClient {
     ) -> Self {
         Self {
             bank_forks,
+            bank_operation_lock,
             delegated_accounts,
             touched_accounts,
             active,
@@ -161,9 +169,6 @@ impl TransactionClient for EphemeralTransactionClient {
             );
             return;
         }
-        // BUG: This should work around slot advancer, because it might change
-        // bank between transactions
-        let bank = self.bank();
         wire_transactions
             .into_iter()
             .filter_map(|wire_tx| match bincode::deserialize(&wire_tx) {
@@ -173,7 +178,10 @@ impl TransactionClient for EphemeralTransactionClient {
                     None
                 }
             })
-            .for_each(|tx| {
+            .for_each(|tx: VersionedTransaction| {
+                let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
+                let bank = self.bank();
+
                 // Delegation filter: reject transactions that write to non-delegated accounts
                 if !self.is_transaction_allowed(&tx) {
                     warn!(
@@ -238,6 +246,24 @@ impl EphemeralTransactionClient {
         }
     }
 
+    fn resolve_loaded_addresses(bank: &Bank, tx: &VersionedTransaction) -> LoadedAddresses {
+        match &tx.message {
+            VersionedMessage::Legacy(_) => LoadedAddresses::default(),
+            VersionedMessage::V0(message) => bank
+                .load_addresses(&message.address_table_lookups)
+                .unwrap_or_else(|err| {
+                    warn!(
+                        "Failed to resolve ALT addresses for ER history recording, sig={}: {err}",
+                        tx.signatures
+                            .first()
+                            .map(|signature| signature.to_string())
+                            .unwrap_or_default()
+                    );
+                    LoadedAddresses::default()
+                }),
+        }
+    }
+
     fn record_transaction_history(
         &self,
         bank: &Bank,
@@ -268,6 +294,7 @@ impl EphemeralTransactionClient {
             .next()
             .unwrap_or_default();
 
+        let loaded_addresses = Self::resolve_loaded_addresses(bank, &tx);
         let meta = TransactionStatusMeta {
             status: committed_tx.status.clone(),
             fee: committed_tx.fee_details.total_fee(),
@@ -281,19 +308,18 @@ impl EphemeralTransactionClient {
             pre_token_balances: Some(pre_token_balances),
             post_token_balances: Some(post_token_balances),
             rewards: Some(vec![]),
-            loaded_addresses: Default::default(),
+            loaded_addresses,
             return_data: committed_tx.return_data.clone(),
             compute_units_consumed: Some(committed_tx.executed_units),
             cost_units: None,
         };
 
         let _ = self.er_history_store.record_transaction(
-            bank.slot(),
+            bank,
             VersionedTransactionWithStatusMeta {
                 transaction: tx,
                 meta,
             },
-            Some(bank.clock().unix_timestamp),
         );
     }
 
@@ -395,18 +421,37 @@ impl NotifyKeyUpdate for EphemeralTransactionClient {
     }
 }
 
+impl solana_rpc::rpc::ErTxExecutor for EphemeralTransactionClient {
+    fn execute_wire(&self, wire_transaction: Vec<u8>) {
+        let stats = SendTransactionServiceStats::default();
+        <Self as TransactionClient>::send_transactions_in_batch(
+            self,
+            vec![wire_transaction],
+            &stats,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use {
         super::*,
         solana_account::AccountSharedData,
+        solana_address_lookup_table_interface::{
+            self as address_lookup_table,
+            state::{AddressLookupTable, LookupTableMeta},
+        },
         solana_fee_structure::FeeDetails,
         solana_keypair::{Keypair, Signer},
-        solana_message::Message,
+        solana_message::{
+            Message, MessageHeader,
+            v0::{self, MessageAddressTableLookup},
+        },
         solana_sdk_ids::system_program,
         solana_svm::transaction_execution_result::TransactionLoadedAccountsStats,
         solana_transaction::{Transaction, versioned::VersionedTransaction},
         solana_transaction_context::transaction::TransactionReturnData,
+        std::{borrow::Cow, sync::Arc},
     };
 
     fn create_test_bank() -> solana_runtime::bank::Bank {
@@ -637,6 +682,7 @@ mod tests {
         let touched_set = Arc::new(RwLock::new(HashSet::new()));
         EphemeralTransactionClient::new(
             bank_forks,
+            Arc::new(Mutex::new(())),
             delegated_set,
             touched_set,
             Arc::new(AtomicBool::new(true)),
@@ -652,6 +698,7 @@ mod tests {
         let touched_set = Arc::new(RwLock::new(HashSet::new()));
         EphemeralTransactionClient::new_with_history(
             bank_forks,
+            Arc::new(Mutex::new(())),
             delegated_set,
             touched_set,
             Arc::new(AtomicBool::new(true)),
@@ -729,6 +776,7 @@ mod tests {
             None,
         );
 
+        er_history_store.finalize_slot(&bank);
         let recorded = er_history_store
             .get_transaction(
                 &signature,
@@ -762,6 +810,93 @@ mod tests {
         assert_eq!(meta.inner_instructions.as_ref(), Some(&expected_inner));
         assert_eq!(meta.return_data.as_ref(), Some(&expected_return_data));
         assert_eq!(meta.compute_units_consumed, Some(321));
+    }
+
+    #[test]
+    fn test_record_transaction_history_preserves_loaded_addresses() {
+        let fee_payer = Keypair::new();
+        let loaded_address = Pubkey::new_unique();
+
+        use solana_genesis_config::GenesisConfig;
+        let genesis_config = GenesisConfig::new(&[], &[]);
+        let root_bank = Bank::new_for_tests(&genesis_config);
+        let fee_payer_account = AccountSharedData::new(10_000_000, 0, &system_program::id());
+        root_bank.store_account(&fee_payer.pubkey(), &fee_payer_account);
+
+        let address_table_key = Pubkey::new_unique();
+        let address_table_state = AddressLookupTable {
+            meta: LookupTableMeta {
+                last_extended_slot_start_index: 1,
+                ..LookupTableMeta::default()
+            },
+            addresses: Cow::Owned(vec![loaded_address]),
+        };
+        let address_table_data = Arc::new(address_table_state.serialize_for_tests().unwrap());
+        let address_table_account = AccountSharedData::create_from_existing_shared_data(
+            root_bank.get_minimum_balance_for_rent_exemption(address_table_data.len()),
+            address_table_data,
+            address_lookup_table::program::id(),
+            false,
+            0,
+        );
+        root_bank.store_account(&address_table_key, &address_table_account);
+        root_bank.freeze();
+        let bank = Bank::new_from_parent(Arc::new(root_bank), &Pubkey::new_unique(), 1);
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let bank = bank_forks.read().unwrap().root_bank();
+
+        let er_history_store = Arc::new(ErHistoryStore::default());
+        let client = create_client_with_history(bank_forks, vec![], er_history_store.clone());
+
+        let tx = VersionedTransaction::try_new(
+            VersionedMessage::V0(v0::Message {
+                header: MessageHeader {
+                    num_required_signatures: 1,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 0,
+                },
+                recent_blockhash: bank.last_blockhash(),
+                account_keys: vec![fee_payer.pubkey()],
+                instructions: vec![],
+                address_table_lookups: vec![MessageAddressTableLookup {
+                    account_key: address_table_key,
+                    writable_indexes: vec![0],
+                    readonly_indexes: vec![],
+                }],
+            }),
+            &[&fee_payer],
+        )
+        .unwrap();
+        let signature = tx.signatures[0];
+
+        client.record_transaction_history(
+            &bank,
+            tx,
+            &[Ok(
+                solana_svm::transaction_commit_result::CommittedTransaction {
+                    status: Ok(()),
+                    log_messages: None,
+                    inner_instructions: None,
+                    return_data: None,
+                    executed_units: 1,
+                    fee_details: FeeDetails::new(5_000, 0),
+                    loaded_account_stats: TransactionLoadedAccountsStats::default(),
+                    fee_payer_post_balance: 0,
+                },
+            )],
+            None,
+        );
+        er_history_store.finalize_slot(&bank);
+
+        let recorded = er_history_store
+            .get_transaction(
+                &signature,
+                solana_rpc_client_types::config::CommitmentConfig::confirmed(),
+            )
+            .expect("ER history should contain transaction");
+        let meta = recorded.tx_with_meta.get_status_meta().unwrap();
+        assert_eq!(meta.loaded_addresses.writable, vec![loaded_address]);
+        assert!(meta.loaded_addresses.readonly.is_empty());
     }
 
     #[test]

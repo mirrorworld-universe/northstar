@@ -4795,6 +4795,7 @@ dependencies = [
  "northstar-portal",
  "serde_json",
  "solana-account",
+ "solana-address-lookup-table-interface",
  "solana-clock",
  "solana-fee-structure",
  "solana-genesis-config",
