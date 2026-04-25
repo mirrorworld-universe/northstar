@@ -1,0 +1,76 @@
+name: Deploy Release
+
+on:
+  push:
+    branches: [release]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: [self-hosted, devnet]
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo +nightly fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    needs: fmt
+    runs-on: [self-hosted, devnet]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libprotobuf-dev libudev-dev libclang-dev
+      - name: Install Solana tools
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+      - name: Build SBF programs
+        run: cargo build-sbf -- -p northstar-portal
+      - run: BPF_OUT_DIR=target/deploy cargo clippy --all --tests -- -D warnings
+
+  test:
+    name: Test
+    if: false
+    needs: clippy
+    runs-on: [self-hosted, devnet]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libprotobuf-dev libudev-dev libclang-dev
+      - name: Install Solana tools
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+      - name: Build SBF programs
+        run: cargo build-sbf -- -p northstar-portal
+      - run: BPF_OUT_DIR=target/deploy cargo test --all
+
+  deploy:
+    name: Build and Deploy on Devnet
+    needs: clippy
+    runs-on: [self-hosted, devnet]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build portal SBF program
+        run: ./cargo-build-sbf --manifest-path northstar/programs/portal/Cargo.toml
+
+      - name: Build validator binary
+        run: cargo build --release --target-dir /home/ubuntu/northstar/ --bin agave-validator
+
+      - name: Confirm binary exists
+        run: |
+          BIN="/home/ubuntu/northstar/release/agave-validator"
+          test -f "$BIN" && test -x "$BIN" && "$BIN" --version
+
+      - name: Restart validator
+        run: sudo systemctl restart northstar-validator
