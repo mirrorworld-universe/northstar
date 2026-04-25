@@ -6,8 +6,8 @@ use {
     crossbeam_channel::{Sender, unbounded},
     log::{info, warn},
     solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
-    solana_gossip::cluster_info::ClusterInfo,
     solana_clock::{BankId, Slot},
+    solana_gossip::cluster_info::ClusterInfo,
     solana_keypair::Keypair,
     solana_ledger::{blockstore::Blockstore, leader_schedule_cache::LeaderScheduleCache},
     solana_pubkey::Pubkey,
@@ -704,7 +704,8 @@ impl EphemeralRuntime {
 
             // 2. Create new ephemeral bank from current L1 root
             let current_er_tip = self.bank_forks.read().unwrap().working_bank().slot();
-            let ephemeral_slot = Self::er_slot_for(&parent_bank).max(current_er_tip.saturating_add(1));
+            let ephemeral_slot =
+                Self::er_slot_for(&parent_bank).max(current_er_tip.saturating_add(1));
             info!(
                 "reset_to_new_parent: parent_slot={}, ephemeral_slot={}, parent_epoch={}",
                 parent_bank.slot(),
@@ -1387,7 +1388,11 @@ mod tests {
                 .is_empty()
         }));
 
-        let new_parent = Arc::new(Bank::new_from_parent(parent_bank.clone(), &Pubkey::default(), 1));
+        let new_parent = Arc::new(Bank::new_from_parent(
+            parent_bank.clone(),
+            &Pubkey::default(),
+            1,
+        ));
         runtime.reset_to_new_parent(new_parent);
         for _ in 0..50 {
             if runtime.retired_bank_forks_pending() == 0 {
