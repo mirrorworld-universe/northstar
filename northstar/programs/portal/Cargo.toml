@@ -14,7 +14,6 @@ bpf-entrypoint = []
 pinocchio = "0.9"
 pinocchio-system = "0.4"
 pinocchio-log = "0.5"
-pinocchio-pubkey = "0.3"
 borsh = { version = "1", default-features = false, features = ["derive"] }
 
 [dev-dependencies]
