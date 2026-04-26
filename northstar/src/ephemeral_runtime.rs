@@ -581,6 +581,15 @@ impl EphemeralRuntime {
                 .expect("lock not poisoned");
             *self.bank_forks.write().unwrap() = new_bf;
 
+            // `new_rw_arc_ephemeral()` installed a Weak fork graph pointing at
+            // the temporary Arc we just unwrapped. Rebind the isolated ER
+            // ProgramCache to the long-lived Arc shared by RPC/TPU/tx client.
+            self.bank_forks
+                .read()
+                .unwrap()
+                .root_bank()
+                .set_fork_graph_in_program_cache(Arc::downgrade(&self.bank_forks));
+
             // 4. Publish frozen ER bank for RPC/preflight, keep fresh child as working bank.
             let initial_bank = Self::freeze_and_rotate_bank_for_rpc(
                 &self.bank_forks,
@@ -1160,6 +1169,80 @@ mod tests {
 
         // Session state should be cleared
         assert!(runtime.delegated_accounts().is_empty());
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_reset_rebinds_program_cache_fork_graph() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        parent_bank.freeze();
+        let parent_bank = Arc::new(parent_bank);
+
+        let cluster_info = create_test_cluster_info();
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            parent_bank.clone(),
+            cluster_info,
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+
+        let new_parent = Bank::new_from_parent(parent_bank, &Pubkey::default(), 1);
+        let sender_keypair = Keypair::new();
+        let sender_pubkey = sender_keypair.pubkey();
+        let receiver_pubkey = Pubkey::new_unique();
+        fund_account(&new_parent, &sender_pubkey, 10_000_000_000);
+        new_parent.freeze();
+
+        // Mirrors real session activation path:
+        // NorthStarService::activate_session -> EphemeralRuntime::reset_to_new_parent.
+        runtime.reset_to_new_parent(Arc::new(new_parent));
+
+        // Stop slot advancer so the assertion below is single-threaded.
+        runtime
+            .advancer_exit
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(advancer) = runtime.slot_advancer.take() {
+            advancer.join();
+        }
+        runtime
+            .active
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let blockhash = runtime.bank().last_blockhash();
+        let tx = Transaction::new_signed_with_payer(
+            &[transfer(&sender_pubkey, &receiver_pubkey, 1_000_000)],
+            Some(&sender_pubkey),
+            &[&sender_keypair],
+            blockhash,
+        );
+        let wire_tx = bincode::serialize(
+            &solana_transaction::versioned::VersionedTransaction::from(tx),
+        )
+        .unwrap();
+
+        solana_send_transaction_service::transaction_client::TransactionClient::send_transactions_in_batch(
+            &runtime._tx_client,
+            vec![wire_tx],
+            &solana_send_transaction_service::send_transaction_service_stats::SendTransactionServiceStats::default(),
+        );
+
+        assert_eq!(runtime.bank().get_balance(&receiver_pubkey), 1_000_000);
 
         runtime.shutdown();
     }
