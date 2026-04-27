@@ -365,23 +365,29 @@ impl EphemeralRuntime {
             Some(Arc::new(tx_client.clone()) as Arc<dyn solana_rpc::rpc::ErTxExecutor>),
         )?;
 
-        // Sonic: Start PubSub WebSocket service
-        let rpc_subscriptions = Arc::new(RpcSubscriptions::new_with_config(
+        // Sonic: Start PubSub WebSocket service. ER block subscriptions are
+        // backed by ErHistoryStore, so enable blockSubscribe on this local path.
+        let pubsub_config = PubSubConfig {
+            enable_block_subscription: true,
+            ..PubSubConfig::default()
+        };
+        let rpc_subscriptions = Arc::new(RpcSubscriptions::new_with_config_and_er_history(
             rpc_exit.clone(),
             max_complete_transaction_status_slot,
             blockstore,
             bank_forks.clone(),
             block_commitment_cache.clone(),
             optimistically_confirmed_bank.clone(),
-            &PubSubConfig::default(),
+            &pubsub_config,
             None,
+            Some(er_history_store.clone()),
         ));
 
         tx_client.set_rpc_subscriptions(rpc_subscriptions.clone());
 
         let (pubsub_service, pubsub_trigger) = {
             let (trigger, pubsub_svc) =
-                PubSubService::new(PubSubConfig::default(), &rpc_subscriptions, ws_addr);
+                PubSubService::new(pubsub_config, &rpc_subscriptions, ws_addr);
             (Some(pubsub_svc), Some(trigger))
         };
 

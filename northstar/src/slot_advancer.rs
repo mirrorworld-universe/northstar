@@ -219,8 +219,14 @@ impl SlotAdvancer {
                 next_bank_arc.last_blockhash()
             );
 
-            // Sonic: Notify RPC subscriptions about the new slot and its ER root.
+            // Sonic: Notify RPC subscriptions about finalized ER slot and new slot/root.
             if let Some(ref subs) = rpc_subscriptions {
+                subs.notify_subscribers(CommitmentSlots {
+                    slot: current_bank_slot,
+                    root: current_bank_slot,
+                    highest_confirmed_slot: current_bank_slot,
+                    highest_super_majority_root: current_bank_slot,
+                });
                 subs.notify_slot(next_bank_slot, current_bank_slot, next_bank_slot);
                 subs.notify_roots(vec![next_bank_slot]);
             }
