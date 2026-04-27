@@ -360,7 +360,7 @@ impl Manager {
             delegated_accounts: vec![],
         };
 
-        let mut runtime = EphemeralRuntime::new(
+        let runtime = EphemeralRuntime::new(
             root_bank,
             cluster_info,
             settings,
@@ -375,10 +375,9 @@ impl Manager {
             NorthStarError::RuntimeCreationFailed(e)
         })?;
 
-        runtime.activate();
         info!(
             "Always-on ephemeral RPC initialized at {rpc_addr}, WS at {ws_addr}, TPU at \
-             {tpu_addr} (active)"
+             {tpu_addr} (inactive until session opens)"
         );
         self.runtime = Some(runtime);
         Ok(())

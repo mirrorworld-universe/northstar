@@ -580,6 +580,11 @@ impl EphemeralRuntime {
                 .into_inner()
                 .expect("lock not poisoned");
             *self.bank_forks.write().unwrap() = new_bf;
+            self.bank_forks
+                .read()
+                .unwrap()
+                .root_bank()
+                .set_fork_graph_in_program_cache(Arc::downgrade(&self.bank_forks));
 
             // `new_rw_arc_ephemeral()` installed a Weak fork graph pointing at
             // the temporary Arc we just unwrapped. Rebind the isolated ER
