@@ -172,6 +172,7 @@ impl EphemeralRuntime {
 
         if let Some(subs) = rpc_subscriptions {
             subs.notify_slot(next_bank_slot, frozen_slot, next_bank_slot);
+            subs.notify_roots(vec![next_bank_slot]);
         }
 
         next_bank_arc

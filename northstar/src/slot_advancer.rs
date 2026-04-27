@@ -219,9 +219,10 @@ impl SlotAdvancer {
                 next_bank_arc.last_blockhash()
             );
 
-            // Sonic: Notify RPC subscriptions about the new slot
+            // Sonic: Notify RPC subscriptions about the new slot and its ER root.
             if let Some(ref subs) = rpc_subscriptions {
                 subs.notify_slot(next_bank_slot, current_bank_slot, next_bank_slot);
+                subs.notify_roots(vec![next_bank_slot]);
             }
         }
 
@@ -235,7 +236,13 @@ impl SlotAdvancer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use {
+        super::*,
+        serde_json::Value,
+        solana_rpc::rpc_subscription_tracker::SubscriptionParams,
+        std::{sync::atomic::AtomicU64, time::Instant},
+        tokio::sync::broadcast::error::TryRecvError,
+    };
 
     fn create_test_bank() -> Bank {
         use solana_genesis_config::GenesisConfig;
@@ -260,6 +267,108 @@ mod tests {
         bank: Arc<Bank>,
     ) -> Arc<RwLock<OptimisticallyConfirmedBank>> {
         Arc::new(RwLock::new(OptimisticallyConfirmedBank { bank }))
+    }
+
+    fn receive_notification_json(
+        receiver: &mut tokio::sync::broadcast::Receiver<
+            solana_rpc::rpc_subscriptions::RpcNotification,
+        >,
+        deadline: Instant,
+    ) -> Option<Value> {
+        while Instant::now() < deadline {
+            match receiver.try_recv() {
+                Ok(notification) => {
+                    if let Some(json) = notification.json.upgrade() {
+                        return Some(serde_json::from_str(&json).unwrap());
+                    }
+                }
+                Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(5)),
+                Err(TryRecvError::Lagged(_)) => continue,
+                Err(TryRecvError::Closed) => panic!("subscription broadcast channel closed"),
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn test_slot_advancer_notifies_roots() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        let bank_forks = BankForks::new_rw_arc(parent_bank);
+        let initial_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
+        let initial_slot = initial_bank.slot();
+
+        let exit = Arc::new(AtomicBool::new(false));
+        let block_commitment_cache = create_block_commitment_cache(initial_slot);
+        let optimistically_confirmed_bank =
+            create_optimistically_confirmed_bank(initial_bank.clone());
+        let rpc_subscriptions = Arc::new(RpcSubscriptions::new_for_tests(
+            exit.clone(),
+            Arc::new(AtomicU64::default()),
+            bank_forks.clone(),
+            block_commitment_cache.clone(),
+            optimistically_confirmed_bank.clone(),
+        ));
+        let _root_token = rpc_subscriptions
+            .control()
+            .subscribe(SubscriptionParams::Root)
+            .unwrap();
+        let _slots_updates_token = rpc_subscriptions
+            .control()
+            .subscribe(SubscriptionParams::SlotsUpdates)
+            .unwrap();
+        let mut receiver = rpc_subscriptions.control().broadcast_receiver();
+
+        let advancer = SlotAdvancer::new(
+            bank_forks.clone(),
+            Arc::new(Mutex::new(())),
+            block_commitment_cache,
+            optimistically_confirmed_bank,
+            initial_bank,
+            Config {
+                slot_duration: Duration::from_millis(5),
+                manager_account: Pubkey::default(),
+            },
+            exit.clone(),
+            Some(rpc_subscriptions),
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut saw_root_notification = false;
+        let mut saw_slots_update_root = false;
+
+        while Instant::now() < deadline && !(saw_root_notification && saw_slots_update_root) {
+            let Some(notification) = receive_notification_json(&mut receiver, deadline) else {
+                break;
+            };
+            match notification["method"].as_str() {
+                Some("rootNotification") => {
+                    if notification["params"]["result"].as_u64() > Some(initial_slot) {
+                        saw_root_notification = true;
+                    }
+                }
+                Some("slotsUpdatesNotification") => {
+                    let result = &notification["params"]["result"];
+                    if result["type"] == "root" && result["slot"].as_u64() > Some(initial_slot) {
+                        saw_slots_update_root = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        exit.store(true, Ordering::Relaxed);
+        advancer.join();
+
+        assert!(
+            saw_root_notification,
+            "slot advancer must notify rootSubscribe subscribers"
+        );
+        assert!(
+            saw_slots_update_root,
+            "slot advancer must emit root updates for slotsUpdatesSubscribe subscribers"
+        );
     }
 
     #[test]
