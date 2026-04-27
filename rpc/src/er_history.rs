@@ -16,7 +16,9 @@ use {
 };
 
 fn slot_visible_at_commitment(slot_history: &ErSlotHistory, commitment: CommitmentConfig) -> bool {
-    if commitment.is_confirmed() || commitment.is_finalized() {
+    // Sonic: ER has a single local fork, so recorded slots are visible at
+    // `confirmed`; only `finalized` waits for the slot advancer mark.
+    if commitment.is_finalized() {
         slot_history.finalized
     } else {
         true
@@ -414,11 +416,10 @@ mod tests {
         let tx0 = create_test_tx(&bank0, &payer, &recipient);
         let sig0 = tx0.transaction.signatures[0];
         assert_eq!(store.record_transaction(&bank0, tx0), Some(0));
-        assert!(
-            store
-                .get_block(bank0.slot(), CommitmentConfig::confirmed())
-                .is_none()
-        );
+        let confirmed_block0 = store
+            .get_block(bank0.slot(), CommitmentConfig::confirmed())
+            .unwrap();
+        assert_eq!(confirmed_block0.transactions.len(), 1);
         assert!(
             store
                 .get_block(bank0.slot(), CommitmentConfig::finalized())

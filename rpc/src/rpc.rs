@@ -1811,6 +1811,14 @@ impl JsonRpcRequestProcessor {
         for signature in signatures {
             let status = if let Some(status) = self.get_transaction_status(signature, &bank) {
                 Some(status)
+            // Sonic: ER history is the canonical store for ER-only signatures;
+            // standard pollers do not pass `searchTransactionHistory`.
+            } else if let Some(status) = self
+                .er_history_store
+                .as_ref()
+                .and_then(|er_history_store| er_history_store.get_signature_status(&signature))
+            {
+                Some(status)
             } else if search_transaction_history {
                 if let Some(status) = self
                     .blockstore
@@ -1835,8 +1843,6 @@ impl JsonRpcRequestProcessor {
                     })
                 {
                     Some(status)
-                } else if let Some(er_history_store) = &self.er_history_store {
-                    er_history_store.get_signature_status(&signature)
                 } else if let Some(bigtable_ledger_storage) = &self.bigtable_ledger_storage {
                     bigtable_ledger_storage
                         .get_signature_status(&signature)
@@ -4873,7 +4879,7 @@ pub mod tests {
         solana_transaction_error::TransactionError,
         solana_transaction_status::{
             EncodedConfirmedBlock, EncodedTransaction, EncodedTransactionWithStatusMeta,
-            TransactionDetails,
+            TransactionDetails, TransactionStatusMeta, VersionedTransactionWithStatusMeta,
         },
         solana_vote_interface::state::VoteStateV4,
         solana_vote_program::{
@@ -7087,6 +7093,85 @@ pub mod tests {
                 r#"{"jsonrpc":"2.0","error":{"code":-32011,"message":"Transaction history is not available from this node"},"id":1}"#.to_string(),
             )
         );
+    }
+
+    #[test]
+    fn test_rpc_er_history_queries_without_search_flag_or_finalization() {
+        let rpc = RpcHandler::start();
+        let bank = rpc.working_bank();
+        let recipient = Pubkey::new_unique();
+        let tx = system_transaction::transfer(
+            &rpc.mint_keypair,
+            &recipient,
+            1,
+            bank.confirmed_last_blockhash(),
+        );
+        let signature = tx.signatures[0];
+        let er_history_store = Arc::new(ErHistoryStore::default());
+        assert_eq!(
+            er_history_store.record_transaction(
+                &bank,
+                VersionedTransactionWithStatusMeta {
+                    transaction: VersionedTransaction::from(tx),
+                    meta: TransactionStatusMeta {
+                        status: Ok(()),
+                        fee: TEST_SIGNATURE_FEE,
+                        pre_balances: vec![],
+                        post_balances: vec![],
+                        inner_instructions: None,
+                        log_messages: None,
+                        pre_token_balances: None,
+                        post_token_balances: None,
+                        rewards: Some(vec![]),
+                        loaded_addresses: Default::default(),
+                        return_data: None,
+                        compute_units_consumed: Some(0),
+                        cost_units: None,
+                    },
+                },
+            ),
+            Some(0)
+        );
+        let RpcHandler { mut meta, io, .. } = rpc;
+        meta.set_er_history_store(er_history_store);
+
+        // ER history is canonical for ER-only signatures, so the standard polling
+        // form must work even without `searchTransactionHistory: true`.
+        let req = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"getSignatureStatuses","params":[["{}"]]}}"#,
+            signature
+        );
+        let res = io.handle_request_sync(&req, meta.clone());
+        let json: Value = serde_json::from_str(&res.unwrap()).unwrap();
+        let status: Option<TransactionStatus> =
+            serde_json::from_value(json["result"]["value"][0].clone())
+                .expect("actual response deserialization");
+        let status = status.expect("ER signature status should be returned");
+        assert_eq!(status.status, Ok(()));
+        assert_eq!(
+            status.confirmation_status,
+            Some(TransactionConfirmationStatus::Confirmed)
+        );
+
+        // `confirmed` ER queries should not wait for slot finalization; ER has no forks.
+        let req = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"getTransaction","params":["{}",{{"encoding":"json","commitment":"confirmed"}}]}}"#,
+            signature
+        );
+        let res = io.handle_request_sync(&req, meta.clone());
+        let json: Value = serde_json::from_str(&res.unwrap()).unwrap();
+        assert_eq!(json["result"]["slot"], bank.slot());
+        assert!(json["result"]["meta"]["err"].is_null());
+
+        let req = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"getSignaturesForAddress","params":["{}",{{"limit":10,"commitment":"confirmed"}}]}}"#,
+            recipient
+        );
+        let res = io.handle_request_sync(&req, meta);
+        let json: Value = serde_json::from_str(&res.unwrap()).unwrap();
+        let entries = json["result"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["signature"], signature.to_string());
     }
 
     #[test]
