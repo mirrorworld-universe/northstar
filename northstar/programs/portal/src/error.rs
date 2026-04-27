@@ -19,6 +19,8 @@ pub enum PortalError {
     DelegationRecordAlreadyInitialized = 14,
     DelegationRecordDeserializeFailed = 15,
     DelegationRecordStateInvalid = 16,
+    DelegateBufferOwnerMismatch = 17,
+    DelegateBufferSizeMismatch = 18,
 }
 
 impl From<PortalError> for ProgramError {

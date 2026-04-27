@@ -12,6 +12,21 @@ use {
     pinocchio_system::instructions::CreateAccount,
 };
 
+/// Delegate an account into a NorthStar Ephemeral Rollup session.
+///
+/// Caller must pre-stage two accounts: `delegated_account` (Portal-owned, post-
+/// `system::Assign`) and `buffer` (`owner_program`-owned, data_len matching
+/// `delegated_account`, holding bytes to install into it). Portal copies
+/// `buffer → delegated_account` after creating the `DelegationRecord`. For the
+/// keypair-wallet flow both have 0-length data and the copy is a no-op.
+///
+/// Accounts:
+/// 0. `[signer, writable]` payer
+/// 1. `[signer, writable]` delegated_account
+/// 2. `[]` owner_program (stored in `DelegationRecord.owner_program`)
+/// 3. `[writable]` delegation_record PDA (`["delegation", delegated_account]` under Portal)
+/// 4. `[]` system_program
+/// 5. `[]` buffer
 pub fn process_delegate(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -19,24 +34,26 @@ pub fn process_delegate(
 ) -> ProgramResult {
     pinocchio_log::log!("Instruction: Delegate, grid_id={}", grid_id);
 
-    if accounts.len() < 5 {
-        pinocchio_log::log!("ERROR: Delegate failed: not enough account keys");
+    if accounts.len() < 6 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
     let payer = &accounts[0];
     let delegated_account = &accounts[1];
-    let owner_program = &accounts[2]; // the original program of delegated account
+    let owner_program = &accounts[2];
     let delegation_record = &accounts[3];
     let _system_program = &accounts[4];
+    let buffer = &accounts[5];
 
     if !payer.is_signer() {
-        pinocchio_log::log!("ERROR: Delegate failed: payer is not signer");
+        return Err(PortalError::Unauthorized.into());
+    }
+
+    if !delegated_account.is_signer() {
         return Err(PortalError::Unauthorized.into());
     }
 
     if delegated_account.owner() != program_id {
-        pinocchio_log::log!("ERROR: Delegate failed: delegated account owner mismatch");
         return Err(PortalError::DelegatedAccountOwnerMismatch.into());
     }
 
@@ -44,13 +61,18 @@ pub fn process_delegate(
     let (expected_delegation_key, bump) = find_delegation_record_pda(program_id, &delegated_key);
 
     if delegation_record.key() != &expected_delegation_key {
-        pinocchio_log::log!("ERROR: Delegate failed: delegation record PDA mismatch");
         return Err(PortalError::InvalidPdaSeeds.into());
     }
 
     if delegation_record.lamports() > 0 {
-        pinocchio_log::log!("ERROR: Delegate failed: delegation record already initialized");
         return Err(PortalError::DelegationRecordAlreadyInitialized.into());
+    }
+
+    if buffer.owner() != owner_program.key() {
+        return Err(PortalError::DelegateBufferOwnerMismatch.into());
+    }
+    if buffer.data_len() != delegated_account.data_len() {
+        return Err(PortalError::DelegateBufferSizeMismatch.into());
     }
 
     let rent = Rent::get()?;
@@ -85,6 +107,11 @@ pub fn process_delegate(
         &mut &mut delegation_data[..DelegationRecord::LEN],
     )
     .unwrap();
+    drop(delegation_data);
+
+    let buffer_data = buffer.try_borrow_data()?;
+    let mut delegated_data = delegated_account.try_borrow_mut_data()?;
+    delegated_data.copy_from_slice(&buffer_data);
 
     pinocchio_log::log!("Delegate success");
 
