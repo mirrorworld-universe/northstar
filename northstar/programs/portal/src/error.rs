@@ -19,13 +19,8 @@ pub enum PortalError {
     DelegationRecordAlreadyInitialized = 14,
     DelegationRecordDeserializeFailed = 15,
     DelegationRecordStateInvalid = 16,
-    /// Buffer PDA's pubkey does not match the expected derivation
-    /// `["portal_buffer", delegated_account]` under the owner_program.
-    DelegateBufferPdaMismatch = 17,
-    /// Buffer PDA is not owned by the owner_program supplied to Delegate.
-    DelegateBufferOwnerMismatch = 18,
-    /// Buffer PDA's data length does not match the delegated account's data length.
-    DelegateBufferSizeMismatch = 19,
+    DelegateBufferOwnerMismatch = 17,
+    DelegateBufferSizeMismatch = 18,
 }
 
 impl From<PortalError> for ProgramError {
