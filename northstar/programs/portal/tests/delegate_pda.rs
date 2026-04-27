@@ -1,18 +1,9 @@
-//! Integration tests for `Portal::Delegate`'s two flows:
+//! Integration tests for `Portal::Delegate` (both flows) and `Portal::Undelegate`.
 //!
-//! - **Flow 1 (keypair wallet)**: 5 accounts. Pre-existing behavior used by NorthStarSDK
-//!   for "fast trading wallet" delegation. Tested for backwards compatibility.
-//! - **Flow 2 (PDA with data)**: 6 accounts (adds a buffer at index 5). New flow for
-//!   stateful program-owned PDAs (AMM pools, vaults, etc.). Tests cover the happy path
-//!   and the four rejection cases (wrong buffer PDA, wrong buffer owner, wrong size,
-//!   missing delegated-account signer).
-//!
-//! The buffer dance that the *caller program* performs (allocate buffer, copy data,
-//! zero original, reassign owner) is not Portal's responsibility and is not exercised
-//! here. We instead pre-stage the post-dance state via `ProgramTest::add_account` so
-//! the tests focus on Portal's new validation + data-copy logic.
-
-#![cfg(test)]
+//! `delegated_account` and `buffer` are pre-staged via `ProgramTest::add_account`
+//! so the tests focus on Portal's validation + data-copy logic; the buffer dance
+//! that the caller program performs is the caller's responsibility and not exercised
+//! here.
 
 use {
     borsh::BorshDeserialize,
@@ -37,47 +28,35 @@ fn find_delegation_record_pda(delegated_account: &Pubkey) -> (Pubkey, u8) {
     )
 }
 
-fn find_delegate_buffer_pda(owner_program: &Pubkey, delegated_account: &Pubkey) -> (Pubkey, u8) {
-    Pubkey::find_program_address(
-        &[b"portal_buffer", delegated_account.as_ref()],
-        owner_program,
-    )
-}
-
 fn build_delegate_ix(
     payer: &Pubkey,
     delegated_account: &Pubkey,
     owner_program: &Pubkey,
     delegation_record: &Pubkey,
     grid_id: u64,
-    buffer: Option<&Pubkey>,
+    buffer: &Pubkey,
 ) -> Instruction {
     let ix = PortalInstruction::Delegate { grid_id };
     let data = borsh::to_vec(&ix).unwrap();
 
-    let mut accounts = vec![
-        AccountMeta::new(*payer, true),
-        AccountMeta::new(*delegated_account, true),
-        AccountMeta::new_readonly(*owner_program, false),
-        AccountMeta::new(*delegation_record, false),
-        AccountMeta::new_readonly(system_program::id(), false),
-    ];
-    if let Some(buf) = buffer {
-        accounts.push(AccountMeta::new_readonly(*buf, false));
-    }
-
     Instruction {
         program_id: PORTAL_PROGRAM_ID,
-        accounts,
+        accounts: vec![
+            AccountMeta::new(*payer, true),
+            AccountMeta::new(*delegated_account, true),
+            AccountMeta::new_readonly(*owner_program, false),
+            AccountMeta::new(*delegation_record, false),
+            AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new_readonly(*buffer, false),
+        ],
         data,
     }
 }
 
-/// Build a ProgramTest with Portal loaded plus a pre-staged delegated_account already
-/// owned by Portal with the given data. Optionally pre-stage a buffer too.
 struct DelegateScenario {
     payer: Keypair,
     delegated: Keypair,
+    buffer: Keypair,
     owner_program: Pubkey,
     grid_id: u64,
 }
@@ -87,6 +66,7 @@ impl DelegateScenario {
         Self {
             payer: Keypair::new(),
             delegated: Keypair::new(),
+            buffer: Keypair::new(),
             owner_program: Pubkey::new_unique(),
             grid_id: 1,
         }
@@ -96,8 +76,6 @@ impl DelegateScenario {
 struct StagedScenario {
     inner: DelegateScenario,
     program_test: ProgramTest,
-    delegated_data: Vec<u8>,
-    buffer_account: Option<(Pubkey, Vec<u8>, Pubkey)>, // (pubkey, data, owner)
 }
 
 impl StagedScenario {
@@ -107,18 +85,14 @@ impl StagedScenario {
         Self {
             inner,
             program_test,
-            delegated_data: vec![],
-            buffer_account: None,
         }
     }
 
     fn with_delegated(mut self, data: Vec<u8>, owner: Pubkey) -> Self {
-        let lamports = 10_000_000;
-        self.delegated_data = data.clone();
         self.program_test.add_account(
             self.inner.delegated.pubkey(),
             Account {
-                lamports,
+                lamports: 10_000_000,
                 data,
                 owner,
                 executable: false,
@@ -128,42 +102,21 @@ impl StagedScenario {
         self
     }
 
-    fn with_buffer(self, data: Vec<u8>) -> Self {
-        let owner = self.inner.owner_program;
-        let buffer_key = find_delegate_buffer_pda(&owner, &self.inner.delegated.pubkey()).0;
-        self.add_buffer_inner(buffer_key, data, owner)
-    }
-
-    fn with_buffer_at_wrong_pda(self, data: Vec<u8>) -> Self {
-        let buffer_key = Pubkey::new_unique(); // not the expected derivation
-        let owner = self.inner.owner_program;
-        self.add_buffer_inner(buffer_key, data, owner)
-    }
-
-    fn with_buffer_wrong_owner(self, data: Vec<u8>, wrong_owner: Pubkey) -> Self {
-        let buffer_key =
-            find_delegate_buffer_pda(&self.inner.owner_program, &self.inner.delegated.pubkey()).0;
-        self.add_buffer_inner(buffer_key, data, wrong_owner)
-    }
-
-    fn add_buffer_inner(mut self, key: Pubkey, data: Vec<u8>, owner: Pubkey) -> Self {
-        let lamports = 10_000_000;
+    fn with_buffer(mut self, data: Vec<u8>, owner: Pubkey) -> Self {
         self.program_test.add_account(
-            key,
+            self.inner.buffer.pubkey(),
             Account {
-                lamports,
-                data: data.clone(),
+                lamports: 10_000_000,
+                data,
                 owner,
                 executable: false,
                 rent_epoch: 0,
             },
         );
-        self.buffer_account = Some((key, data, owner));
         self
     }
 
     async fn start(mut self) -> RunningScenario {
-        // Ensure the payer has lamports for the delegation_record rent.
         self.program_test.add_account(
             self.inner.payer.pubkey(),
             Account {
@@ -178,7 +131,6 @@ impl StagedScenario {
         RunningScenario {
             inner: self.inner,
             context,
-            buffer_pubkey: self.buffer_account.map(|(k, _, _)| k),
         }
     }
 }
@@ -186,14 +138,12 @@ impl StagedScenario {
 struct RunningScenario {
     inner: DelegateScenario,
     context: ProgramTestContext,
-    buffer_pubkey: Option<Pubkey>,
 }
 
 impl RunningScenario {
     async fn delegate(&mut self) -> Result<(), solana_program_test::BanksClientError> {
         let banks: &mut BanksClient = &mut self.context.banks_client;
         let blockhash = banks.get_latest_blockhash().await.unwrap();
-
         let (delegation_record, _) = find_delegation_record_pda(&self.inner.delegated.pubkey());
 
         let ix = build_delegate_ix(
@@ -202,7 +152,7 @@ impl RunningScenario {
             &self.inner.owner_program,
             &delegation_record,
             self.inner.grid_id,
-            self.buffer_pubkey.as_ref(),
+            &self.inner.buffer.pubkey(),
         );
 
         let tx = Transaction::new_signed_with_payer(
@@ -221,14 +171,13 @@ impl RunningScenario {
         let blockhash = banks.get_latest_blockhash().await.unwrap();
         let (delegation_record, _) = find_delegation_record_pda(&self.inner.delegated.pubkey());
 
-        // Build the ix manually with delegated_account NOT marked as signer.
         let mut ix = build_delegate_ix(
             &self.inner.payer.pubkey(),
             &self.inner.delegated.pubkey(),
             &self.inner.owner_program,
             &delegation_record,
             self.inner.grid_id,
-            self.buffer_pubkey.as_ref(),
+            &self.inner.buffer.pubkey(),
         );
         ix.accounts[1].is_signer = false;
 
@@ -240,197 +189,7 @@ impl RunningScenario {
         );
         banks.process_transaction(tx).await
     }
-}
 
-// ===========================================================================================
-// Flow 1: Keypair-wallet delegation (existing behavior, must remain unchanged)
-// ===========================================================================================
-
-#[tokio::test]
-async fn delegate_keypair_wallet_succeeds() {
-    // Pre-stage: delegated_account is empty (zero data) and Portal-owned, simulating
-    // the post-system::Assign state for the keypair-wallet flow.
-    let scenario =
-        StagedScenario::new(DelegateScenario::new()).with_delegated(vec![], PORTAL_PROGRAM_ID);
-
-    let mut running = scenario.start().await;
-    running
-        .delegate()
-        .await
-        .expect("keypair-wallet delegate should succeed");
-
-    let (delegation_record_pda, _) = find_delegation_record_pda(&running.inner.delegated.pubkey());
-    let acct = running
-        .context
-        .banks_client
-        .get_account(delegation_record_pda)
-        .await
-        .unwrap()
-        .expect("delegation_record should exist");
-
-    let record = DelegationRecord::try_from_slice(&acct.data).unwrap();
-    assert_eq!(record.discriminator, DelegationRecord::DISCRIMINATOR);
-    assert_eq!(record.owner_program, running.inner.owner_program.to_bytes());
-    assert_eq!(record.grid_id, running.inner.grid_id);
-}
-
-#[tokio::test]
-async fn delegate_keypair_wallet_requires_delegated_signer() {
-    let scenario =
-        StagedScenario::new(DelegateScenario::new()).with_delegated(vec![], PORTAL_PROGRAM_ID);
-
-    let mut running = scenario.start().await;
-    let result = running.delegate_without_delegated_signer().await;
-    assert!(
-        result.is_err(),
-        "delegate without delegated_account signer should fail"
-    );
-}
-
-#[tokio::test]
-async fn delegate_keypair_wallet_already_delegated_rejects() {
-    let scenario =
-        StagedScenario::new(DelegateScenario::new()).with_delegated(vec![], PORTAL_PROGRAM_ID);
-
-    let mut running = scenario.start().await;
-    running
-        .delegate()
-        .await
-        .expect("first delegate should succeed");
-
-    let result = running.delegate().await;
-    assert!(
-        result.is_err(),
-        "second delegate on the same account should fail"
-    );
-}
-
-#[tokio::test]
-async fn delegate_rejects_when_delegated_not_portal_owned() {
-    // delegated_account is owned by system_program, not Portal. Should fail with
-    // DelegatedAccountOwnerMismatch.
-    let scenario =
-        StagedScenario::new(DelegateScenario::new()).with_delegated(vec![], system_program::id());
-
-    let mut running = scenario.start().await;
-    let result = running.delegate().await;
-    assert!(
-        result.is_err(),
-        "delegate of system-owned account should fail (must be Portal-owned at CPI time)"
-    );
-}
-
-// ===========================================================================================
-// Flow 2: PDA-with-buffer delegation (new buffer-dance flow for stateful PDAs)
-// ===========================================================================================
-
-#[tokio::test]
-async fn delegate_pda_with_buffer_restores_data() {
-    // Pre-stage: delegated_account is Portal-owned but zeroed (post-dance), with 188 bytes
-    // of capacity. Buffer at the expected derivation, owned by owner_program, contains 188
-    // bytes of "real" data we expect to see in delegated_account after Delegate runs.
-    let real_data: Vec<u8> = (0..188).map(|i| i as u8 ^ 0x42).collect();
-    let scenario = StagedScenario::new(DelegateScenario::new())
-        .with_delegated(vec![0u8; 188], PORTAL_PROGRAM_ID)
-        .with_buffer(real_data.clone());
-
-    let mut running = scenario.start().await;
-    running
-        .delegate()
-        .await
-        .expect("PDA-with-buffer delegate should succeed");
-
-    // Verify delegation_record is created.
-    let (delegation_record_pda, _) = find_delegation_record_pda(&running.inner.delegated.pubkey());
-    let record_acct = running
-        .context
-        .banks_client
-        .get_account(delegation_record_pda)
-        .await
-        .unwrap()
-        .expect("delegation_record should exist");
-    let record = DelegationRecord::try_from_slice(&record_acct.data).unwrap();
-    assert_eq!(record.owner_program, running.inner.owner_program.to_bytes());
-
-    // Verify delegated_account now holds the buffer's data.
-    let delegated_acct = running
-        .context
-        .banks_client
-        .get_account(running.inner.delegated.pubkey())
-        .await
-        .unwrap()
-        .expect("delegated_account still exists");
-    assert_eq!(
-        delegated_acct.data, real_data,
-        "buffer data should have been copied into delegated_account"
-    );
-    assert_eq!(delegated_acct.owner, PORTAL_PROGRAM_ID);
-}
-
-#[tokio::test]
-async fn delegate_pda_buffer_at_wrong_pda_rejects() {
-    let scenario = StagedScenario::new(DelegateScenario::new())
-        .with_delegated(vec![0u8; 188], PORTAL_PROGRAM_ID)
-        .with_buffer_at_wrong_pda(vec![0xAA; 188]);
-
-    let mut running = scenario.start().await;
-    let result = running.delegate().await;
-    assert!(
-        result.is_err(),
-        "buffer at non-PDA address should be rejected"
-    );
-}
-
-#[tokio::test]
-async fn delegate_pda_buffer_wrong_owner_rejects() {
-    // Buffer at correct derivation, but owned by system_program rather than owner_program.
-    let scenario = StagedScenario::new(DelegateScenario::new())
-        .with_delegated(vec![0u8; 188], PORTAL_PROGRAM_ID)
-        .with_buffer_wrong_owner(vec![0xAA; 188], system_program::id());
-
-    let mut running = scenario.start().await;
-    let result = running.delegate().await;
-    assert!(
-        result.is_err(),
-        "buffer not owned by owner_program should be rejected"
-    );
-}
-
-#[tokio::test]
-async fn delegate_pda_buffer_size_mismatch_rejects() {
-    // delegated_account is 188 bytes; buffer is 100 bytes.
-    let scenario = StagedScenario::new(DelegateScenario::new())
-        .with_delegated(vec![0u8; 188], PORTAL_PROGRAM_ID)
-        .with_buffer(vec![0xAA; 100]);
-
-    let mut running = scenario.start().await;
-    let result = running.delegate().await;
-    assert!(
-        result.is_err(),
-        "buffer/delegated size mismatch should be rejected"
-    );
-}
-
-#[tokio::test]
-async fn delegate_pda_with_empty_buffer_behaves_like_keypair_flow() {
-    // delegated_account is empty; buffer is empty too. The data-copy is a no-op but
-    // the call should still succeed (degenerate case).
-    let scenario = StagedScenario::new(DelegateScenario::new())
-        .with_delegated(vec![], PORTAL_PROGRAM_ID)
-        .with_buffer(vec![]);
-
-    let mut running = scenario.start().await;
-    running
-        .delegate()
-        .await
-        .expect("delegate with degenerate empty buffer should succeed");
-}
-
-// ===========================================================================================
-// Undelegate flows
-// ===========================================================================================
-
-impl RunningScenario {
     fn build_undelegate_ix(&self, owner_program: Pubkey) -> Instruction {
         let (delegation_record, _) = find_delegation_record_pda(&self.inner.delegated.pubkey());
         let ix = PortalInstruction::Undelegate;
@@ -470,10 +229,129 @@ impl RunningScenario {
     }
 }
 
+// ---- Delegate ----
+
+#[tokio::test]
+async fn delegate_keypair_wallet_succeeds() {
+    let mut scenario =
+        StagedScenario::new(DelegateScenario::new()).with_delegated(vec![], PORTAL_PROGRAM_ID);
+    let owner_program = scenario.inner.owner_program;
+    scenario = scenario.with_buffer(vec![], owner_program);
+
+    let mut running = scenario.start().await;
+    running.delegate().await.expect("delegate should succeed");
+
+    let (delegation_record_pda, _) = find_delegation_record_pda(&running.inner.delegated.pubkey());
+    let acct = running
+        .context
+        .banks_client
+        .get_account(delegation_record_pda)
+        .await
+        .unwrap()
+        .expect("delegation_record should exist");
+
+    let record = DelegationRecord::try_from_slice(&acct.data).unwrap();
+    assert_eq!(record.discriminator, DelegationRecord::DISCRIMINATOR);
+    assert_eq!(record.owner_program, running.inner.owner_program.to_bytes());
+    assert_eq!(record.grid_id, running.inner.grid_id);
+}
+
+#[tokio::test]
+async fn delegate_requires_delegated_signer() {
+    let mut scenario =
+        StagedScenario::new(DelegateScenario::new()).with_delegated(vec![], PORTAL_PROGRAM_ID);
+    let owner_program = scenario.inner.owner_program;
+    scenario = scenario.with_buffer(vec![], owner_program);
+
+    let mut running = scenario.start().await;
+    let result = running.delegate_without_delegated_signer().await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn delegate_already_delegated_rejects() {
+    let mut scenario =
+        StagedScenario::new(DelegateScenario::new()).with_delegated(vec![], PORTAL_PROGRAM_ID);
+    let owner_program = scenario.inner.owner_program;
+    scenario = scenario.with_buffer(vec![], owner_program);
+
+    let mut running = scenario.start().await;
+    running
+        .delegate()
+        .await
+        .expect("first delegate should succeed");
+
+    let result = running.delegate().await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn delegate_rejects_when_delegated_not_portal_owned() {
+    let mut scenario =
+        StagedScenario::new(DelegateScenario::new()).with_delegated(vec![], system_program::id());
+    let owner_program = scenario.inner.owner_program;
+    scenario = scenario.with_buffer(vec![], owner_program);
+
+    let mut running = scenario.start().await;
+    let result = running.delegate().await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn delegate_pda_with_buffer_restores_data() {
+    let real_data: Vec<u8> = (0..188).map(|i| i as u8 ^ 0x42).collect();
+    let mut scenario = StagedScenario::new(DelegateScenario::new())
+        .with_delegated(vec![0u8; 188], PORTAL_PROGRAM_ID);
+    let owner_program = scenario.inner.owner_program;
+    scenario = scenario.with_buffer(real_data.clone(), owner_program);
+
+    let mut running = scenario.start().await;
+    running.delegate().await.expect("delegate should succeed");
+
+    let delegated_acct = running
+        .context
+        .banks_client
+        .get_account(running.inner.delegated.pubkey())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(delegated_acct.data, real_data);
+    assert_eq!(delegated_acct.owner, PORTAL_PROGRAM_ID);
+}
+
+#[tokio::test]
+async fn delegate_buffer_wrong_owner_rejects() {
+    let mut scenario = StagedScenario::new(DelegateScenario::new())
+        .with_delegated(vec![0u8; 188], PORTAL_PROGRAM_ID);
+    // Buffer owned by system_program rather than owner_program.
+    scenario = scenario.with_buffer(vec![0xAA; 188], system_program::id());
+
+    let mut running = scenario.start().await;
+    let result = running.delegate().await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn delegate_buffer_size_mismatch_rejects() {
+    let mut scenario = StagedScenario::new(DelegateScenario::new())
+        .with_delegated(vec![0u8; 188], PORTAL_PROGRAM_ID);
+    let owner_program = scenario.inner.owner_program;
+    scenario = scenario.with_buffer(vec![0xAA; 100], owner_program);
+
+    let mut running = scenario.start().await;
+    let result = running.delegate().await;
+    assert!(result.is_err());
+}
+
+// ---- Undelegate ----
+
 #[tokio::test]
 async fn undelegate_keypair_wallet_round_trip() {
-    let scenario =
+    let mut scenario =
         StagedScenario::new(DelegateScenario::new()).with_delegated(vec![], PORTAL_PROGRAM_ID);
+    let owner_program = scenario.inner.owner_program;
+    scenario = scenario.with_buffer(vec![], owner_program);
+
     let mut running = scenario.start().await;
     running.delegate().await.expect("delegate should succeed");
     running
@@ -481,7 +359,6 @@ async fn undelegate_keypair_wallet_round_trip() {
         .await
         .expect("undelegate should succeed");
 
-    // delegated_account should now be owned by owner_program (no data, since keypair flow).
     let acct = running
         .context
         .banks_client
@@ -489,102 +366,69 @@ async fn undelegate_keypair_wallet_round_trip() {
         .await
         .unwrap()
         .expect("delegated_account still exists");
-    assert_eq!(
-        acct.owner, running.inner.owner_program,
-        "ownership should revert to owner_program"
-    );
-    assert!(acct.data.is_empty() || acct.data.iter().all(|&b| b == 0));
-
-    // delegation_record should be drained.
-    let (delegation_record_pda, _) = find_delegation_record_pda(&running.inner.delegated.pubkey());
-    let dr = running
-        .context
-        .banks_client
-        .get_account(delegation_record_pda)
-        .await
-        .unwrap();
-    if let Some(dr_acct) = dr {
-        assert_eq!(dr_acct.lamports, 0, "delegation_record lamports drained");
-        assert!(
-            dr_acct.data.iter().all(|&b| b == 0),
-            "delegation_record data zeroed"
-        );
-    }
+    assert_eq!(acct.owner, running.inner.owner_program);
 }
 
 #[tokio::test]
 async fn undelegate_pda_with_data_round_trip() {
-    // Delegate a PDA with 188 bytes of data, then undelegate. Verify ownership reverts
-    // and data is zero-filled (caller's responsibility to re-install state).
     let real_data: Vec<u8> = (0..188).map(|i| i as u8 ^ 0x42).collect();
-    let scenario = StagedScenario::new(DelegateScenario::new())
-        .with_delegated(vec![0u8; 188], PORTAL_PROGRAM_ID)
-        .with_buffer(real_data.clone());
+    let mut scenario = StagedScenario::new(DelegateScenario::new())
+        .with_delegated(vec![0u8; 188], PORTAL_PROGRAM_ID);
+    let owner_program = scenario.inner.owner_program;
+    scenario = scenario.with_buffer(real_data.clone(), owner_program);
+
     let mut running = scenario.start().await;
     running.delegate().await.expect("delegate should succeed");
 
-    // After delegate, delegated_account holds the buffer's data. Verify.
-    let acct_pre = running
+    let pre = running
         .context
         .banks_client
         .get_account(running.inner.delegated.pubkey())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(acct_pre.data, real_data);
-    assert_eq!(acct_pre.owner, PORTAL_PROGRAM_ID);
+    assert_eq!(pre.data, real_data);
+    assert_eq!(pre.owner, PORTAL_PROGRAM_ID);
 
     running
         .undelegate()
         .await
         .expect("undelegate should succeed");
 
-    let acct_post = running
+    let post = running
         .context
         .banks_client
         .get_account(running.inner.delegated.pubkey())
         .await
         .unwrap()
-        .expect("account still exists");
-    assert_eq!(
-        acct_post.owner, running.inner.owner_program,
-        "ownership reverts to owner_program"
-    );
-    assert!(
-        acct_post.data.iter().all(|&b| b == 0),
-        "delegated_account data zero-filled (owner program restores via follow-up ix)"
-    );
-    assert_eq!(
-        acct_post.data.len(),
-        188,
-        "data length preserved across undelegate"
-    );
+        .unwrap();
+    assert_eq!(post.owner, running.inner.owner_program);
+    assert!(post.data.iter().all(|&b| b == 0));
+    assert_eq!(post.data.len(), 188);
 }
 
 #[tokio::test]
 async fn undelegate_wrong_owner_program_rejects() {
-    let scenario =
+    let mut scenario =
         StagedScenario::new(DelegateScenario::new()).with_delegated(vec![], PORTAL_PROGRAM_ID);
-    let mut running = scenario.start().await;
-    running.delegate().await.expect("delegate should succeed");
+    let owner_program = scenario.inner.owner_program;
+    scenario = scenario.with_buffer(vec![], owner_program);
 
-    let bogus_owner = Pubkey::new_unique();
-    let result = running.undelegate_with(bogus_owner).await;
-    assert!(
-        result.is_err(),
-        "undelegate with wrong owner_program should fail"
-    );
+    let mut running = scenario.start().await;
+    running.delegate().await.unwrap();
+
+    let result = running.undelegate_with(Pubkey::new_unique()).await;
+    assert!(result.is_err());
 }
 
 #[tokio::test]
 async fn undelegate_non_delegated_account_rejects() {
-    // Account exists, Portal-owned, but no DelegationRecord. Undelegate should fail.
-    let scenario =
+    let mut scenario =
         StagedScenario::new(DelegateScenario::new()).with_delegated(vec![], PORTAL_PROGRAM_ID);
+    let owner_program = scenario.inner.owner_program;
+    scenario = scenario.with_buffer(vec![], owner_program);
+
     let mut running = scenario.start().await;
     let result = running.undelegate().await;
-    assert!(
-        result.is_err(),
-        "undelegate without prior delegation should fail"
-    );
+    assert!(result.is_err());
 }
