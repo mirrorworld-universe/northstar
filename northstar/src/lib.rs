@@ -633,7 +633,9 @@ mod portal_e2e_tests {
             program_id,
             accounts: vec![
                 AccountMeta::new(payer, true),
-                AccountMeta::new(delegated_account, false),
+                // Portal requires `delegated_account` to sign — proves the original controller
+                // (keypair holder, or owner program via invoke_signed for PDAs) consented.
+                AccountMeta::new(delegated_account, true),
                 AccountMeta::new_readonly(owner_program, false),
                 AccountMeta::new(delegation_record_pda, false),
                 AccountMeta::new_readonly(system_program::id(), false),
@@ -747,7 +749,10 @@ mod portal_e2e_tests {
             .unwrap();
 
         let owner_program = Pubkey::new_unique();
-        let delegated_account = Pubkey::new_unique();
+        // Portal::Delegate requires the delegated account to sign — use a Keypair
+        // (matches the keypair-wallet flow that NorthStarSDK exercises in production).
+        let delegated_keypair = Keypair::new();
+        let delegated_account = delegated_keypair.pubkey();
         let portal_owned_account = AccountSharedData::new(1_000_000, 100, &program_id);
         bank.store_account(&delegated_account, &portal_owned_account);
 
@@ -787,7 +792,7 @@ mod portal_e2e_tests {
         let tx = Transaction::new_signed_with_payer(
             &[delegate_ix],
             Some(&owner_pubkey),
-            &[&owner_keypair],
+            &[&owner_keypair, &delegated_keypair],
             blockhash,
         );
         let result = bank.process_transaction(&tx);
@@ -847,7 +852,9 @@ mod portal_e2e_tests {
             .unwrap();
 
         let owner_program = Pubkey::new_unique();
-        let delegated_account = Pubkey::new_unique();
+        // Portal::Delegate requires the delegated account to sign.
+        let delegated_keypair = Keypair::new();
+        let delegated_account = delegated_keypair.pubkey();
         let delegated_account_data = (0..100).map(|i| (i as u8) ^ 0xAB).collect::<Vec<_>>();
         let mut l1_account_before_delegation =
             AccountSharedData::new(1_000_000, delegated_account_data.len(), &owner_program);
@@ -908,7 +915,7 @@ mod portal_e2e_tests {
         let tx = Transaction::new_signed_with_payer(
             &[delegate_ix],
             Some(&owner_pubkey),
-            &[&owner_keypair],
+            &[&owner_keypair, &delegated_keypair],
             blockhash,
         );
         bank.process_transaction(&tx).unwrap();
