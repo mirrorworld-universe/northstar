@@ -258,6 +258,8 @@ impl EphemeralTransactionClient {
             highest_confirmed_slot: slot,
             highest_super_majority_root: slot,
         });
+        // Sonic: confirmed subscriptions are tracked on the gossip watcher path.
+        rpc_subscriptions.notify_gossip_subscribers(slot);
     }
 
     fn history_recording_config() -> ExecutionRecordingConfig {
