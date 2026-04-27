@@ -16,6 +16,7 @@ use {
     },
     solana_cli_output::{CliSignature, ReturnSignersConfig, return_signers_with_config},
     solana_instruction::{AccountMeta, Instruction},
+    solana_keypair::Keypair,
     solana_message::Message,
     solana_pubkey::Pubkey,
     solana_remote_wallet::remote_wallet::RemoteWalletManager,
@@ -23,9 +24,14 @@ use {
     solana_rpc_client_nonce_utils::nonblocking::blockhash_query::BlockhashQuery,
     solana_sdk_ids::system_program,
     solana_signer::Signer,
+    solana_system_interface::instruction as system_instruction,
     solana_transaction::Transaction,
     std::{rc::Rc, str::FromStr},
 };
+
+/// Rent-exempt minimum lamports for a 0-byte account. Hardcoded so the keypair-wallet
+/// delegate flow works in `sign_only` mode (no RPC available to compute it).
+const BUFFER_RENT_FOR_ZERO_BYTES: u64 = 890_880;
 
 const LOCALNET_DEFAULT_PORTAL_PROGRAM_ID: &str = "5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf";
 const DEVNET_DEFAULT_PORTAL_PROGRAM_ID: &str = "74iiMCqFw1afWyp3tdh9pUqfRfCRq7gfdC2YZoNGpovt";
@@ -79,7 +85,7 @@ pub enum PortalCliCommand {
     Delegate {
         portal_program_id: Option<Pubkey>,
         authority: SignerIndex,
-        delegated_account: Pubkey,
+        delegated_account: SignerIndex,
         owner_program: Pubkey,
         grid_id: u64,
         sign_only: bool,
@@ -412,8 +418,11 @@ fn parse_delegate(
     wallet_manager: &mut Option<Rc<RemoteWalletManager>>,
 ) -> Result<CliCommandInfo, CliError> {
     let portal_program_id = pubkey_of(matches, "portal_program_id");
-    let delegated_account =
-        pubkey_of_signer(matches, "delegated_account", wallet_manager)?.unwrap();
+    // Portal::Delegate requires delegated_account as a co-signer. Caller must pass a
+    // keypair file (or hardware wallet path), not a bare pubkey.
+    let (delegated_account_signer, delegated_account_pubkey) =
+        signer_of(matches, "delegated_account", wallet_manager)?;
+    let delegated_account_pubkey = delegated_account_pubkey.unwrap();
     let owner_program = pubkey_of_signer(matches, "owner_program", wallet_manager)?.unwrap();
     let authority = default_signer.signer_from_path(matches, wallet_manager)?;
     let authority_pubkey = authority.pubkey();
@@ -426,7 +435,7 @@ fn parse_delegate(
     let (fee_payer, fee_payer_pubkey) = signer_of(matches, FEE_PAYER_ARG.name, wallet_manager)?;
     let compute_unit_price = value_of(matches, COMPUTE_UNIT_PRICE_ARG.name);
 
-    let mut bulk_signers = vec![Some(authority), fee_payer];
+    let mut bulk_signers = vec![Some(authority), delegated_account_signer, fee_payer];
     if nonce_account.is_some() {
         bulk_signers.push(nonce_authority);
     }
@@ -437,7 +446,7 @@ fn parse_delegate(
         command: CliCommand::Portal(PortalCliCommand::Delegate {
             portal_program_id,
             authority: signer_info.index_of(Some(authority_pubkey)).unwrap(),
-            delegated_account,
+            delegated_account: signer_info.index_of(Some(delegated_account_pubkey)).unwrap(),
             owner_program,
             grid_id: value_of(matches, "grid_id").unwrap(),
             sign_only,
@@ -576,10 +585,11 @@ fn encode_undelegate() -> Vec<u8> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn process_portal_instruction(
+async fn process_portal_instructions(
     rpc_client: &RpcClient,
     config: &CliConfig<'_>,
-    instruction: Instruction,
+    instructions: Vec<Instruction>,
+    extra_signers: &[&dyn Signer],
     sign_only: bool,
     dump_transaction_message: bool,
     blockhash_query: &BlockhashQuery,
@@ -595,7 +605,7 @@ async fn process_portal_instruction(
     let nonce_authority = config.signers[nonce_authority];
     let fee_payer = config.signers[fee_payer];
 
-    let instructions = vec![instruction].with_compute_unit_config(&ComputeUnitConfig {
+    let instructions = instructions.with_compute_unit_config(&ComputeUnitConfig {
         compute_unit_price,
         compute_unit_limit: ComputeUnitLimit::Default,
     });
@@ -613,8 +623,11 @@ async fn process_portal_instruction(
 
     let mut tx = Transaction::new_unsigned(message);
 
+    let mut all_signers: Vec<&dyn Signer> = config.signers.to_vec();
+    all_signers.extend_from_slice(extra_signers);
+
     if sign_only {
-        tx.try_partial_sign(&config.signers, recent_blockhash)?;
+        tx.try_partial_sign(&all_signers, recent_blockhash)?;
         return return_signers_with_config(
             &tx,
             &config.output_format,
@@ -635,7 +648,7 @@ async fn process_portal_instruction(
         check_nonce_account(&nonce_account, &nonce_authority.pubkey(), &recent_blockhash)?;
     }
 
-    tx.try_sign(&config.signers, recent_blockhash)?;
+    tx.try_sign(&all_signers, recent_blockhash)?;
     let signature = rpc_client
         .send_and_confirm_transaction_with_spinner_and_config(
             &tx,
@@ -647,6 +660,35 @@ async fn process_portal_instruction(
     Ok(config.output_format.formatted_string(&CliSignature {
         signature: signature.to_string(),
     }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_portal_instruction(
+    rpc_client: &RpcClient,
+    config: &CliConfig<'_>,
+    instruction: Instruction,
+    sign_only: bool,
+    dump_transaction_message: bool,
+    blockhash_query: &BlockhashQuery,
+    nonce_account: Option<&Pubkey>,
+    nonce_authority: SignerIndex,
+    fee_payer: SignerIndex,
+    compute_unit_price: Option<u64>,
+) -> ProcessResult {
+    process_portal_instructions(
+        rpc_client,
+        config,
+        vec![instruction],
+        &[],
+        sign_only,
+        dump_transaction_message,
+        blockhash_query,
+        nonce_account,
+        nonce_authority,
+        fee_payer,
+        compute_unit_price,
+    )
+    .await
 }
 
 pub async fn process_portal_subcommand(
@@ -798,23 +840,40 @@ pub async fn process_portal_subcommand(
         } => {
             let portal_program_id = resolve_portal_program_id(config, *portal_program_id)?;
             let authority = config.signers[*authority];
+            let delegated_account_pubkey = config.signers[*delegated_account].pubkey();
             let delegation_record_pda =
-                find_delegation_record_pda(&portal_program_id, delegated_account);
-            let instruction = Instruction {
+                find_delegation_record_pda(&portal_program_id, &delegated_account_pubkey);
+
+            // Generate a fresh buffer keypair, create a 0-byte account owned by
+            // owner_program in the same tx, then run delegate. Portal's buffer-data
+            // copy is a no-op for the keypair-wallet flow (both delegated_account
+            // and buffer have 0 bytes).
+            let buffer_keypair = Keypair::new();
+            let create_buffer_ix = system_instruction::create_account(
+                &authority.pubkey(),
+                &buffer_keypair.pubkey(),
+                BUFFER_RENT_FOR_ZERO_BYTES,
+                0,
+                owner_program,
+            );
+
+            let delegate_ix = Instruction {
                 program_id: portal_program_id,
                 accounts: vec![
                     AccountMeta::new(authority.pubkey(), true),
-                    AccountMeta::new(*delegated_account, false),
+                    AccountMeta::new(delegated_account_pubkey, true),
                     AccountMeta::new_readonly(*owner_program, false),
                     AccountMeta::new(delegation_record_pda, false),
                     AccountMeta::new_readonly(system_program::id(), false),
+                    AccountMeta::new_readonly(buffer_keypair.pubkey(), false),
                 ],
                 data: encode_delegate(*grid_id),
             };
-            process_portal_instruction(
+            process_portal_instructions(
                 rpc_client,
                 config,
-                instruction,
+                vec![create_buffer_ix, delegate_ix],
+                &[&buffer_keypair],
                 *sign_only,
                 *dump_transaction_message,
                 blockhash_query,
