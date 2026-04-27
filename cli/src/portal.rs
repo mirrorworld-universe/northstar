@@ -29,10 +29,6 @@ use {
     std::{rc::Rc, str::FromStr},
 };
 
-/// Rent-exempt minimum lamports for a 0-byte account. Hardcoded so the keypair-wallet
-/// delegate flow works in `sign_only` mode (no RPC available to compute it).
-const BUFFER_RENT_FOR_ZERO_BYTES: u64 = 890_880;
-
 const LOCALNET_DEFAULT_PORTAL_PROGRAM_ID: &str = "5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf";
 const DEVNET_DEFAULT_PORTAL_PROGRAM_ID: &str = "74iiMCqFw1afWyp3tdh9pUqfRfCRq7gfdC2YZoNGpovt";
 const DEFAULT_GRID_ID: &str = "0";
@@ -446,7 +442,9 @@ fn parse_delegate(
         command: CliCommand::Portal(PortalCliCommand::Delegate {
             portal_program_id,
             authority: signer_info.index_of(Some(authority_pubkey)).unwrap(),
-            delegated_account: signer_info.index_of(Some(delegated_account_pubkey)).unwrap(),
+            delegated_account: signer_info
+                .index_of(Some(delegated_account_pubkey))
+                .unwrap(),
             owner_program,
             grid_id: value_of(matches, "grid_id").unwrap(),
             sign_only,
@@ -849,10 +847,11 @@ pub async fn process_portal_subcommand(
             // copy is a no-op for the keypair-wallet flow (both delegated_account
             // and buffer have 0 bytes).
             let buffer_keypair = Keypair::new();
+            let buffer_rent = rpc_client.get_minimum_balance_for_rent_exemption(0).await?;
             let create_buffer_ix = system_instruction::create_account(
                 &authority.pubkey(),
                 &buffer_keypair.pubkey(),
-                BUFFER_RENT_FOR_ZERO_BYTES,
+                buffer_rent,
                 0,
                 owner_program,
             );
