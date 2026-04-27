@@ -5,8 +5,8 @@ use {
     solana_ledger::transaction_balances::compile_collected_balances,
     solana_message::{AddressLoader, VersionedMessage, v0::LoadedAddresses},
     solana_pubkey::Pubkey,
-    solana_rpc::er_history::ErHistoryStore,
-    solana_runtime::{bank::Bank, bank_forks::BankForks},
+    solana_rpc::{er_history::ErHistoryStore, rpc_subscriptions::RpcSubscriptions},
+    solana_runtime::{bank::Bank, bank_forks::BankForks, commitment::CommitmentSlots},
     solana_sdk_ids::{bpf_loader, bpf_loader_upgradeable, system_program, sysvar},
     solana_send_transaction_service::{
         send_transaction_service_stats::SendTransactionServiceStats,
@@ -47,6 +47,8 @@ pub struct EphemeralTransactionClient {
     active: Arc<AtomicBool>,
     /// In-memory ER transaction history shared with RPC handlers.
     er_history_store: Arc<ErHistoryStore>,
+    /// ER PubSub notifier. Wired after `RpcSubscriptions` is constructed.
+    rpc_subscriptions: Arc<RwLock<Option<Arc<RpcSubscriptions>>>>,
 }
 
 impl Clone for EphemeralTransactionClient {
@@ -58,6 +60,7 @@ impl Clone for EphemeralTransactionClient {
             touched_accounts: Arc::clone(&self.touched_accounts),
             active: Arc::clone(&self.active),
             er_history_store: Arc::clone(&self.er_history_store),
+            rpc_subscriptions: Arc::clone(&self.rpc_subscriptions),
         }
     }
 }
@@ -95,7 +98,12 @@ impl EphemeralTransactionClient {
             touched_accounts,
             active,
             er_history_store,
+            rpc_subscriptions: Arc::new(RwLock::new(None)),
         }
+    }
+
+    pub fn set_rpc_subscriptions(&self, rpc_subscriptions: Arc<RpcSubscriptions>) {
+        *self.rpc_subscriptions.write().unwrap() = Some(rpc_subscriptions);
     }
 
     pub fn bank(&self) -> Arc<Bank> {
@@ -227,7 +235,8 @@ impl EphemeralTransactionClient {
             None,
         );
 
-        self.record_transaction_history(bank, tx, &commit_results, balance_collector);
+        self.record_transaction_history(bank, tx.clone(), &commit_results, balance_collector);
+        self.notify_transaction_subscribers(bank, &tx);
 
         for (tx_idx, result) in commit_results.iter().enumerate() {
             if let Err(e) = result {
@@ -235,6 +244,20 @@ impl EphemeralTransactionClient {
             }
         }
         Ok(())
+    }
+
+    fn notify_transaction_subscribers(&self, bank: &Bank, tx: &VersionedTransaction) {
+        let Some(rpc_subscriptions) = self.rpc_subscriptions.read().unwrap().clone() else {
+            return;
+        };
+        let slot = bank.slot();
+        rpc_subscriptions.notify_signatures_received((slot, tx.signatures.clone()));
+        rpc_subscriptions.notify_subscribers(CommitmentSlots {
+            slot,
+            root: slot,
+            highest_confirmed_slot: slot,
+            highest_super_majority_root: slot,
+        });
     }
 
     fn history_recording_config() -> ExecutionRecordingConfig {

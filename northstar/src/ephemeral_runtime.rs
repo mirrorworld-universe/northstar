@@ -376,6 +376,8 @@ impl EphemeralRuntime {
             None,
         ));
 
+        tx_client.set_rpc_subscriptions(rpc_subscriptions.clone());
+
         let (pubsub_service, pubsub_trigger) = {
             let (trigger, pubsub_svc) =
                 PubSubService::new(PubSubConfig::default(), &rpc_subscriptions, ws_addr);
