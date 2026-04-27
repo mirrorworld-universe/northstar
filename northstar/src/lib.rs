@@ -625,6 +625,7 @@ mod portal_e2e_tests {
         delegated_account: Pubkey,
         owner_program: Pubkey,
         delegation_record_pda: Pubkey,
+        buffer: Pubkey,
         grid_id: u64,
     ) -> Instruction {
         let ix = PortalInstruction::Delegate { grid_id };
@@ -633,12 +634,11 @@ mod portal_e2e_tests {
             program_id,
             accounts: vec![
                 AccountMeta::new(payer, true),
-                // Portal requires `delegated_account` to sign — proves the original controller
-                // (keypair holder, or owner program via invoke_signed for PDAs) consented.
                 AccountMeta::new(delegated_account, true),
                 AccountMeta::new_readonly(owner_program, false),
                 AccountMeta::new(delegation_record_pda, false),
                 AccountMeta::new_readonly(system_program::id(), false),
+                AccountMeta::new_readonly(buffer, false),
             ],
             data,
         }
@@ -749,12 +749,14 @@ mod portal_e2e_tests {
             .unwrap();
 
         let owner_program = Pubkey::new_unique();
-        // Portal::Delegate requires the delegated account to sign — use a Keypair
-        // (matches the keypair-wallet flow that NorthStarSDK exercises in production).
         let delegated_keypair = Keypair::new();
         let delegated_account = delegated_keypair.pubkey();
         let portal_owned_account = AccountSharedData::new(1_000_000, 100, &program_id);
         bank.store_account(&delegated_account, &portal_owned_account);
+
+        let buffer = Pubkey::new_unique();
+        let buffer_account = AccountSharedData::new(1_000_000, 100, &owner_program);
+        bank.store_account(&buffer, &buffer_account);
 
         let grid_id = 1u64;
         let (session_pda, _) = find_session_pda(&program_id, &owner_pubkey, grid_id);
@@ -786,6 +788,7 @@ mod portal_e2e_tests {
             delegated_account,
             owner_program,
             delegation_record_pda,
+            buffer,
             grid_id,
         );
         let blockhash = bank.last_blockhash();
@@ -852,29 +855,32 @@ mod portal_e2e_tests {
             .unwrap();
 
         let owner_program = Pubkey::new_unique();
-        // Portal::Delegate requires the delegated account to sign.
         let delegated_keypair = Keypair::new();
         let delegated_account = delegated_keypair.pubkey();
         let delegated_account_data = (0..100).map(|i| (i as u8) ^ 0xAB).collect::<Vec<_>>();
-        let mut l1_account_before_delegation =
-            AccountSharedData::new(1_000_000, delegated_account_data.len(), &owner_program);
-        l1_account_before_delegation
-            .data_as_mut_slice()
-            .copy_from_slice(&delegated_account_data);
 
-        // Simulate L1 owner handoff to portal before delegate instruction.
-        // Data written before delegation must survive both owner transfer and delegation.
-        let mut portal_owned_account = l1_account_before_delegation.clone();
-        portal_owned_account.set_owner(program_id);
+        // Pre-stage delegated_account: Portal-owned, zero data (post-buffer-dance).
+        let portal_owned_account =
+            AccountSharedData::new(1_000_000, delegated_account_data.len(), &program_id);
         bank.store_account(&delegated_account, &portal_owned_account);
 
-        let l1_snapshot_before_delegate = bank
-            .get_account(&delegated_account)
-            .expect("delegated account should exist on L1 before delegate tx");
+        // Pre-stage buffer: owner_program-owned, holding the data Portal will copy back
+        // into delegated_account.
+        let buffer = Pubkey::new_unique();
+        let mut buffer_account =
+            AccountSharedData::new(1_000_000, delegated_account_data.len(), &owner_program);
+        buffer_account
+            .data_as_mut_slice()
+            .copy_from_slice(&delegated_account_data);
+        bank.store_account(&buffer, &buffer_account);
+
+        let buffer_snapshot_before_delegate = bank
+            .get_account(&buffer)
+            .expect("buffer should exist on L1 before delegate tx");
         assert_eq!(
-            l1_snapshot_before_delegate.data(),
+            buffer_snapshot_before_delegate.data(),
             delegated_account_data.as_slice(),
-            "L1 account data should match bytes written before delegation"
+            "buffer should hold the data Portal will install into delegated_account"
         );
 
         let grid_id = 1u64;
@@ -909,6 +915,7 @@ mod portal_e2e_tests {
             delegated_account,
             owner_program,
             delegation_record_pda,
+            buffer,
             grid_id,
         );
         let blockhash = bank.last_blockhash();
