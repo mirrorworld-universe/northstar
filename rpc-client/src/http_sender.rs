@@ -50,6 +50,12 @@ impl HttpSender {
             url,
             reqwest::Client::builder()
                 .default_headers(Self::default_headers())
+                // Sonic: RPC responses are small JSON blobs; avoid proxy-induced
+                // compressed/chunked response decode stalls (observed through Cloudflare).
+                .no_gzip()
+                .no_brotli()
+                .no_zstd()
+                .no_deflate()
                 .timeout(timeout)
                 .pool_idle_timeout(timeout)
                 .build()
@@ -93,6 +99,12 @@ impl HttpSender {
                 format!("rust/{}", solana_version::Version::default()).as_str(),
             )
             .unwrap(),
+        );
+        // Sonic: keep RPC JSON responses uncompressed. This avoids intermediary
+        // compressed/chunked body decode stalls while preserving normal RPC semantics.
+        default_headers.append(
+            header::ACCEPT_ENCODING,
+            header::HeaderValue::from_static("identity"),
         );
         default_headers
     }
@@ -151,6 +163,8 @@ impl RpcSender for HttpSender {
                 client
                     .post(&self.url)
                     .header(CONTENT_TYPE, "application/json")
+                    // Sonic: enforce uncompressed responses even for custom clients.
+                    .header(header::ACCEPT_ENCODING, "identity")
                     .body(request_json)
                     .send()
                     .await
