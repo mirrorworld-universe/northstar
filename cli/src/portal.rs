@@ -5,6 +5,7 @@ use {
         nonce::check_nonce_account,
     },
     clap::{App, AppSettings, Arg, ArgMatches, SubCommand},
+    northstar_portal::DelegationRecord,
     solana_account::Account,
     solana_clap_utils::{
         compute_budget::{COMPUTE_UNIT_PRICE_ARG, ComputeUnitLimit, compute_unit_price_arg},
@@ -83,7 +84,7 @@ pub enum PortalCliCommand {
         portal_program_id: Option<Pubkey>,
         authority: SignerIndex,
         delegated_account: SignerIndex,
-        owner_program: Pubkey,
+        owner_program: Option<Pubkey>,
         grid_id: u64,
         sign_only: bool,
         dump_transaction_message: bool,
@@ -97,7 +98,7 @@ pub enum PortalCliCommand {
         portal_program_id: Option<Pubkey>,
         authority: SignerIndex,
         delegated_account: Pubkey,
-        owner_program: Pubkey,
+        owner_program: Option<Pubkey>,
         sign_only: bool,
         dump_transaction_message: bool,
         blockhash_query: BlockhashQuery,
@@ -248,8 +249,11 @@ fn owner_program_arg<'a, 'b>() -> Arg<'a, 'b> {
     Arg::with_name("owner_program")
         .value_name("OWNER_PROGRAM")
         .takes_value(true)
-        .required(true)
-        .help("Original owner program id for delegated account")
+        .required(false)
+        .help(
+            "Original owner program id for delegated account [default: account owner or system \
+             program]",
+        )
 }
 
 pub fn parse_portal_subcommand(
@@ -420,7 +424,7 @@ fn parse_delegate(
     let (delegated_account_signer, delegated_account_pubkey) =
         signer_of(matches, "delegated_account", wallet_manager)?;
     let delegated_account_pubkey = delegated_account_pubkey.unwrap();
-    let owner_program = pubkey_of_signer(matches, "owner_program", wallet_manager)?.unwrap();
+    let owner_program = pubkey_of_signer(matches, "owner_program", wallet_manager)?;
     let authority = default_signer.signer_from_path(matches, wallet_manager)?;
     let authority_pubkey = authority.pubkey();
     let sign_only = matches.is_present(SIGN_ONLY_ARG.name);
@@ -468,7 +472,7 @@ fn parse_undelegate(
     let portal_program_id = pubkey_of(matches, "portal_program_id");
     let delegated_account =
         pubkey_of_signer(matches, "delegated_account", wallet_manager)?.unwrap();
-    let owner_program = pubkey_of_signer(matches, "owner_program", wallet_manager)?.unwrap();
+    let owner_program = pubkey_of_signer(matches, "owner_program", wallet_manager)?;
     let authority = default_signer.signer_from_path(matches, wallet_manager)?;
     let authority_pubkey = authority.pubkey();
     let sign_only = matches.is_present(SIGN_ONLY_ARG.name);
@@ -551,6 +555,37 @@ fn find_deposit_receipt_pda(program_id: &Pubkey, session: &Pubkey, recipient: &P
         program_id,
     )
     .0
+}
+
+fn delegation_record_owner_program(account: &Account) -> Result<Pubkey, CliError> {
+    if account.data.len() != DelegationRecord::LEN {
+        return Err(CliError::BadParameter(format!(
+            "Delegation record has invalid size: expected {}, got {}",
+            DelegationRecord::LEN,
+            account.data.len()
+        )));
+    }
+    if account.data[0] != DelegationRecord::DISCRIMINATOR {
+        return Err(CliError::BadParameter(format!(
+            "Delegation record has invalid discriminator: expected {}, got {}",
+            DelegationRecord::DISCRIMINATOR,
+            account.data[0]
+        )));
+    }
+
+    let mut owner_program = [0; 32];
+    owner_program.copy_from_slice(&account.data[1..33]);
+    Ok(Pubkey::from(owner_program))
+}
+
+fn default_owner_program_for_delegate(
+    account: Option<&Account>,
+    portal_program_id: &Pubkey,
+) -> Pubkey {
+    account
+        .filter(|account| account.owner != *portal_program_id)
+        .map(|account| account.owner)
+        .unwrap_or_else(system_program::id)
 }
 
 fn encode_open_session(grid_id: u64, ttl_slots: u64, fee_cap: u64) -> Vec<u8> {
@@ -889,6 +924,9 @@ pub async fn process_portal_subcommand(
                 .get_account_with_commitment(&delegated_account_pubkey, config.commitment)
                 .await?
                 .value;
+            let owner_program = (*owner_program).unwrap_or_else(|| {
+                default_owner_program_for_delegate(delegated_account.as_ref(), &portal_program_id)
+            });
 
             let mut instructions = vec![];
             if let Some(instruction) = delegated_account_staging_instruction(
@@ -911,7 +949,7 @@ pub async fn process_portal_subcommand(
                 &buffer_keypair.pubkey(),
                 rent_exempt_lamports,
                 0,
-                owner_program,
+                &owner_program,
             );
             instructions.push(create_buffer_ix);
 
@@ -920,7 +958,7 @@ pub async fn process_portal_subcommand(
                 accounts: vec![
                     AccountMeta::new(authority.pubkey(), true),
                     AccountMeta::new(delegated_account_pubkey, true),
-                    AccountMeta::new_readonly(*owner_program, false),
+                    AccountMeta::new_readonly(owner_program, false),
                     AccountMeta::new(delegation_record_pda, false),
                     AccountMeta::new_readonly(system_program::id(), false),
                     AccountMeta::new_readonly(buffer_keypair.pubkey(), false),
@@ -960,12 +998,27 @@ pub async fn process_portal_subcommand(
             let authority = config.signers[*authority];
             let delegation_record_pda =
                 find_delegation_record_pda(&portal_program_id, delegated_account);
+            let owner_program = if let Some(owner_program) = *owner_program {
+                owner_program
+            } else {
+                let delegation_record = rpc_client
+                    .get_account_with_commitment(&delegation_record_pda, config.commitment)
+                    .await?
+                    .value
+                    .ok_or_else(|| {
+                        CliError::BadParameter(format!(
+                            "Delegation record {delegation_record_pda} not found; pass \
+                             OWNER_PROGRAM explicitly"
+                        ))
+                    })?;
+                delegation_record_owner_program(&delegation_record)?
+            };
             let instruction = Instruction {
                 program_id: portal_program_id,
                 accounts: vec![
                     AccountMeta::new(authority.pubkey(), true),
                     AccountMeta::new(*delegated_account, false),
-                    AccountMeta::new_readonly(*owner_program, false),
+                    AccountMeta::new_readonly(owner_program, false),
                     AccountMeta::new(delegation_record_pda, false),
                     AccountMeta::new_readonly(system_program::id(), false),
                 ],
@@ -1109,6 +1162,64 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_portal_delegate_defaults_owner_program() {
+        let (default_signer, _keypair, _tmp) = make_default_signer();
+        let delegated_keypair = Keypair::new();
+        let delegated_file = NamedTempFile::new().unwrap();
+        write_keypair_file(&delegated_keypair, delegated_file.path()).unwrap();
+        let delegated_path = delegated_file.path().to_str().unwrap();
+        let matches = get_clap_app("test", "desc", "version").get_matches_from(vec![
+            "test",
+            "portal",
+            "delegate",
+            delegated_path,
+            "--sign-only",
+            "--blockhash",
+            "11111111111111111111111111111111",
+        ]);
+
+        let command = parse_command(&matches, &default_signer, &mut None)
+            .unwrap()
+            .command;
+        assert!(matches!(
+            command,
+            CliCommand::Portal(PortalCliCommand::Delegate {
+                owner_program: None,
+                grid_id: 0,
+                sign_only: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_parse_portal_undelegate_defaults_owner_program() {
+        let (default_signer, _keypair, _tmp) = make_default_signer();
+        let delegated_account = Pubkey::new_unique().to_string();
+        let matches = get_clap_app("test", "desc", "version").get_matches_from(vec![
+            "test",
+            "portal",
+            "undelegate",
+            delegated_account.as_str(),
+            "--sign-only",
+            "--blockhash",
+            "11111111111111111111111111111111",
+        ]);
+
+        let command = parse_command(&matches, &default_signer, &mut None)
+            .unwrap()
+            .command;
+        assert!(matches!(
+            command,
+            CliCommand::Portal(PortalCliCommand::Undelegate {
+                owner_program: None,
+                sign_only: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn test_parse_portal_open_session_default_fee_cap() {
         let (default_signer, _keypair, _tmp) = make_default_signer();
         let matches = get_clap_app("test", "desc", "version").get_matches_from(vec![
@@ -1133,6 +1244,68 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn test_delegation_record_owner_program_decodes_owner() {
+        let owner_program = Pubkey::new_unique();
+        let mut data = vec![0; DelegationRecord::LEN];
+        data[0] = DelegationRecord::DISCRIMINATOR;
+        data[1..33].copy_from_slice(owner_program.as_ref());
+        let account = Account {
+            lamports: 1,
+            data,
+            owner: Pubkey::new_unique(),
+            executable: false,
+            rent_epoch: 0,
+        };
+
+        assert_eq!(
+            delegation_record_owner_program(&account).unwrap(),
+            owner_program
+        );
+    }
+
+    #[test]
+    fn test_default_owner_program_for_delegate_uses_system_for_missing_account() {
+        assert_eq!(
+            default_owner_program_for_delegate(None, &Pubkey::new_unique()),
+            system_program::id()
+        );
+    }
+
+    #[test]
+    fn test_default_owner_program_for_delegate_uses_existing_owner() {
+        let owner_program = Pubkey::new_unique();
+        let account = Account {
+            lamports: 1,
+            data: vec![],
+            owner: owner_program,
+            executable: false,
+            rent_epoch: 0,
+        };
+
+        assert_eq!(
+            default_owner_program_for_delegate(Some(&account), &Pubkey::new_unique()),
+            owner_program
+        );
+    }
+
+    #[test]
+    fn test_default_owner_program_for_delegate_uses_system_for_portal_owned_account() {
+        let portal_program_id = Pubkey::new_unique();
+        let account = Account {
+            lamports: 1,
+            data: vec![],
+            owner: portal_program_id,
+            executable: false,
+            rent_epoch: 0,
+        };
+
+        assert_eq!(
+            default_owner_program_for_delegate(Some(&account), &portal_program_id),
+            system_program::id()
+        );
     }
 
     #[test]
