@@ -7715,6 +7715,7 @@ dependencies = [
  "hex",
  "humantime",
  "log",
+ "northstar-portal",
  "num-traits",
  "pretty-hex",
  "reqwest 0.12.28",
