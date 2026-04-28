@@ -81,7 +81,7 @@ pub struct EphemeralRuntime {
     _portal_program_id: Pubkey,
 
     _tx_client: EphemeralTransactionClient,
-    _settings: EphemeralRollupSettings,
+    settings: EphemeralRollupSettings,
     _ledger_dir: TempDir,
     _runtime: Arc<TokioRuntime>,
 }
@@ -131,12 +131,17 @@ impl EphemeralRuntime {
         bank.set_tick_height(bank.max_tick_height() - ticks_per_slot);
     }
 
+    fn configure_bank_fees(bank: &mut Bank, fee_structure: &solana_fee_structure::FeeStructure) {
+        bank.set_ephemeral_fee_structure(fee_structure);
+    }
+
     fn freeze_and_rotate_bank_for_rpc(
         bank_forks: &Arc<RwLock<BankForks>>,
         block_commitment_cache: &Arc<RwLock<BlockCommitmentCache>>,
         optimistically_confirmed_bank: &Arc<RwLock<OptimisticallyConfirmedBank>>,
         rpc_subscriptions: Option<&Arc<RpcSubscriptions>>,
         er_history_store: &Arc<ErHistoryStore>,
+        er_fee_structure: &solana_fee_structure::FeeStructure,
     ) -> Arc<Bank> {
         let (frozen_slot, frozen_bank, next_bank_slot, next_bank_arc) = {
             let current_bank = bank_forks.read().unwrap().working_bank();
@@ -146,8 +151,9 @@ impl EphemeralRuntime {
             let frozen_slot = current_bank.slot();
             let frozen_bank = current_bank.clone();
             let next_bank_slot = frozen_slot.saturating_add(1);
-            let next_bank =
+            let mut next_bank =
                 Bank::new_from_parent_ephemeral(current_bank, &Pubkey::default(), next_bank_slot);
+            Self::configure_bank_fees(&mut next_bank, er_fee_structure);
             let next_bank_arc = {
                 let mut bank_forks_write = bank_forks.write().unwrap();
                 let inserted = bank_forks_write.insert(next_bank);
@@ -199,10 +205,15 @@ impl EphemeralRuntime {
             parent_bank.epoch(),
             parent_bank.get_slots_in_epoch(parent_bank.epoch()),
         );
-        let bank = Bank::new_from_parent_ephemeral_isolated(
+        let mut bank = Bank::new_from_parent_ephemeral_isolated(
             parent_bank.clone(),
             &Pubkey::default(),
             ephemeral_slot,
+        );
+        Self::configure_bank_fees(&mut bank, &settings.er_fee_structure);
+        info!(
+            "EphemeralRuntime::new: ER fees configured at {} lamports/signature",
+            settings.er_fee_structure.lamports_per_signature
         );
         info!(
             "EphemeralRuntime::new: ER bank created, slot={}, epoch={}",
@@ -290,6 +301,7 @@ impl EphemeralRuntime {
             &optimistically_confirmed_bank,
             None,
             &er_history_store,
+            &settings.er_fee_structure,
         );
 
         let leader_schedule_cache = Arc::new(LeaderScheduleCache::default());
@@ -441,7 +453,7 @@ impl EphemeralRuntime {
             er_history_store,
             _portal_program_id: portal_program_id,
 
-            _settings: settings,
+            settings,
             _tx_client: tx_client,
             _ledger_dir: ledger_dir,
             _runtime: runtime,
@@ -482,6 +494,7 @@ impl EphemeralRuntime {
                 crate::slot_advancer::Config {
                     slot_duration: Duration::from_millis(400),
                     manager_account: Pubkey::default(),
+                    er_fee_structure: self.settings.er_fee_structure.clone(),
                 },
                 advancer_exit,
                 Some(self.rpc_subscriptions.clone()),
@@ -569,10 +582,15 @@ impl EphemeralRuntime {
                 ephemeral_slot,
                 parent_bank.epoch(),
             );
-            let bank = Bank::new_from_parent_ephemeral_isolated(
+            let mut bank = Bank::new_from_parent_ephemeral_isolated(
                 parent_bank,
                 &Pubkey::default(),
                 ephemeral_slot,
+            );
+            Self::configure_bank_fees(&mut bank, &self.settings.er_fee_structure);
+            info!(
+                "reset_to_new_parent: ER fees configured at {} lamports/signature",
+                self.settings.er_fee_structure.lamports_per_signature
             );
             info!(
                 "reset_to_new_parent: ER bank created, slot={}, epoch={}",
@@ -611,6 +629,7 @@ impl EphemeralRuntime {
                 &self.optimistically_confirmed_bank,
                 Some(&self.rpc_subscriptions),
                 &self.er_history_store,
+                &self.settings.er_fee_structure,
             );
 
             // 5. Clear session state
@@ -634,6 +653,7 @@ impl EphemeralRuntime {
             crate::slot_advancer::Config {
                 slot_duration: Duration::from_millis(400),
                 manager_account: Pubkey::default(),
+                er_fee_structure: self.settings.er_fee_structure.clone(),
             },
             advancer_exit,
             Some(self.rpc_subscriptions.clone()),
@@ -660,6 +680,7 @@ impl EphemeralRuntime {
             &self.optimistically_confirmed_bank,
             Some(&self.rpc_subscriptions),
             &self.er_history_store,
+            &self.settings.er_fee_structure,
         );
     }
 
@@ -745,9 +766,11 @@ mod tests {
     use {
         super::*,
         solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
+        solana_compute_budget_interface::ComputeBudgetInstruction,
+        solana_fee_structure::FeeStructure,
         solana_gossip::contact_info::ContactInfo,
         solana_keypair::{Keypair, Signer},
-        solana_message::Message,
+        solana_message::{Message, SanitizedMessage},
         solana_net_utils::SocketAddrSpace,
         solana_rpc_client::rpc_client::RpcClient,
         solana_rpc_client_types::config::{CommitmentConfig, RpcSendTransactionConfig},
@@ -756,7 +779,7 @@ mod tests {
         solana_system_interface::instruction::transfer,
         solana_transaction::Transaction,
         solana_transaction_status::{TransactionConfirmationStatus, UiTransactionEncoding},
-        std::{net::TcpListener, time::Duration},
+        std::{collections::HashSet, net::TcpListener, time::Duration},
     };
 
     fn create_test_cluster_info() -> Arc<ClusterInfo> {
@@ -786,6 +809,31 @@ mod tests {
         bank.store_account(pubkey, &account);
     }
 
+    fn er_fee_structure(lamports_per_signature: u64) -> FeeStructure {
+        FeeStructure {
+            lamports_per_signature,
+            lamports_per_write_lock: 0,
+            compute_fee_bins: vec![],
+        }
+    }
+
+    fn sanitized_transfer_message(bank: &Bank, fee_payer: &Pubkey) -> SanitizedMessage {
+        let receiver = Pubkey::new_unique();
+        let instruction = transfer(fee_payer, &receiver, 1);
+        let message =
+            Message::new_with_blockhash(&[instruction], Some(fee_payer), &bank.last_blockhash());
+        SanitizedMessage::try_from_legacy_message(message, &HashSet::new()).unwrap()
+    }
+
+    fn sanitized_priority_fee_message(bank: &Bank, fee_payer: &Pubkey) -> SanitizedMessage {
+        let message = Message::new_with_blockhash(
+            &[ComputeBudgetInstruction::set_compute_unit_price(1_000_000)],
+            Some(fee_payer),
+            &bank.last_blockhash(),
+        );
+        SanitizedMessage::try_from_legacy_message(message, &HashSet::new()).unwrap()
+    }
+
     fn create_runtime() -> (Arc<Bank>, EphemeralRuntime) {
         let parent_bank = Arc::new(create_test_bank());
         let cluster_info = create_test_cluster_info();
@@ -795,6 +843,7 @@ mod tests {
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
+            er_fee_structure: er_fee_structure(0),
             delegated_accounts: vec![],
         };
         let portal_program_id = Pubkey::new_unique();
@@ -814,6 +863,116 @@ mod tests {
 
     fn rpc_client(runtime: &EphemeralRuntime) -> RpcClient {
         RpcClient::new(runtime.rpc_addr())
+    }
+
+    #[test]
+    fn test_zero_er_fee_structure_returns_zero_fee() {
+        let (_, mut runtime) = create_runtime();
+        let bank = runtime.bank();
+        let fee_payer = Pubkey::new_unique();
+        let message = sanitized_transfer_message(&bank, &fee_payer);
+
+        assert_eq!(bank.last_blockhash_and_lamports_per_signature().1, 0);
+        assert_eq!(bank.get_fee_for_message(&message), Some(0));
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_reapplying_same_er_fee_structure_does_not_age_blockhashes() {
+        let mut bank = create_test_bank();
+        bank.register_unique_recent_blockhash_for_test();
+        let old_valid_hash = bank.last_blockhash();
+        for _ in 0..40 {
+            bank.register_unique_recent_blockhash_for_test();
+        }
+        assert!(bank.is_hash_valid_for_age(&old_valid_hash, solana_clock::MAX_PROCESSING_AGE));
+
+        for _ in 0..120 {
+            bank.set_ephemeral_fee_structure(&er_fee_structure(0));
+        }
+
+        assert!(bank.is_hash_valid_for_age(&old_valid_hash, solana_clock::MAX_PROCESSING_AGE));
+    }
+
+    #[test]
+    fn test_zero_er_fee_structure_ignores_priority_fee() {
+        let (_, mut runtime) = create_runtime();
+        let bank = runtime.bank();
+        let fee_payer = Pubkey::new_unique();
+        let message = sanitized_priority_fee_message(&bank, &fee_payer);
+
+        assert_eq!(bank.last_blockhash_and_lamports_per_signature().1, 0);
+        assert_eq!(bank.get_fee_for_message(&message), Some(0));
+
+        runtime.shutdown();
+    }
+
+    fn create_runtime_with_fee(lamports_per_signature: u64) -> EphemeralRuntime {
+        let parent_bank = Arc::new(create_test_bank());
+        let cluster_info = create_test_cluster_info();
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: er_fee_structure(lamports_per_signature),
+            delegated_accounts: vec![],
+        };
+        EphemeralRuntime::new(
+            parent_bank,
+            cluster_info,
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_nonzero_er_fee_structure_is_preserved() {
+        let lamports_per_signature = 5_000;
+        let mut runtime = create_runtime_with_fee(lamports_per_signature);
+        let bank = runtime.bank();
+        let fee_payer = Pubkey::new_unique();
+        let message = sanitized_transfer_message(&bank, &fee_payer);
+
+        assert_eq!(
+            bank.last_blockhash_and_lamports_per_signature().1,
+            lamports_per_signature
+        );
+        assert_eq!(
+            bank.get_fee_for_message(&message),
+            Some(lamports_per_signature)
+        );
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_nonzero_er_fee_structure_survives_slot_advancement() {
+        let lamports_per_signature = 5_000;
+        let mut runtime = create_runtime_with_fee(lamports_per_signature);
+        runtime.activate();
+        std::thread::sleep(Duration::from_millis(900));
+        let bank = runtime.bank();
+        let fee_payer = Pubkey::new_unique();
+        let message = sanitized_transfer_message(&bank, &fee_payer);
+
+        assert_eq!(
+            bank.last_blockhash_and_lamports_per_signature().1,
+            lamports_per_signature
+        );
+        assert_eq!(
+            bank.get_fee_for_message(&message),
+            Some(lamports_per_signature)
+        );
+
+        runtime.shutdown();
     }
 
     #[test]
@@ -847,6 +1006,7 @@ mod tests {
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
             delegated_accounts: vec![],
         };
         let mut runtime = EphemeralRuntime::new(
@@ -890,6 +1050,7 @@ mod tests {
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
             delegated_accounts: vec![],
         };
         let mut runtime = EphemeralRuntime::new(
@@ -964,6 +1125,7 @@ mod tests {
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
             delegated_accounts: vec![],
         };
         let mut runtime = EphemeralRuntime::new(
@@ -1070,6 +1232,7 @@ mod tests {
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
             delegated_accounts: vec![],
         };
         let mut runtime = EphemeralRuntime::new(
@@ -1145,6 +1308,7 @@ mod tests {
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
             delegated_accounts: vec![],
         };
         let mut runtime = EphemeralRuntime::new(
@@ -1202,6 +1366,7 @@ mod tests {
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
             delegated_accounts: vec![],
         };
         let mut runtime = EphemeralRuntime::new(
@@ -1284,6 +1449,7 @@ mod tests {
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
             delegated_accounts: vec![],
         };
         let mut runtime = EphemeralRuntime::new(
@@ -1364,6 +1530,7 @@ mod tests {
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
             delegated_accounts: vec![],
         };
         let mut runtime = EphemeralRuntime::new(
@@ -1455,6 +1622,7 @@ mod tests {
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
             delegated_accounts: vec![],
         };
         let mut runtime = EphemeralRuntime::new(
@@ -1522,6 +1690,7 @@ mod tests {
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
             delegated_accounts: vec![],
         };
 
@@ -1602,6 +1771,7 @@ mod tests {
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
             delegated_accounts: vec![delegated_pubkey],
         };
 
@@ -1650,6 +1820,7 @@ mod tests {
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
             delegated_accounts: vec![delegated_pubkey],
         };
 
@@ -1689,6 +1860,7 @@ mod tests {
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
             delegated_accounts: vec![nonexistent_pubkey],
         };
 
@@ -1738,6 +1910,7 @@ mod tests {
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
             delegated_accounts: vec![delegated1, delegated2, wrong_owner, Pubkey::new_unique()],
         };
 
@@ -1788,6 +1961,7 @@ mod tests {
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
             delegated_accounts: vec![delegated1, delegated2],
         };
 
