@@ -81,6 +81,7 @@ struct StagedScenario {
 impl StagedScenario {
     fn new(inner: DelegateScenario) -> Self {
         let mut program_test = ProgramTest::default();
+        program_test.prefer_bpf(true);
         program_test.add_program("northstar_portal", PORTAL_PROGRAM_ID, None);
         Self {
             inner,
