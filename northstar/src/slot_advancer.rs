@@ -1,5 +1,7 @@
 use {
+    crate::EphemeralRollupSettings,
     log::{debug, info},
+    solana_fee_structure::FeeStructure,
     solana_hash::Hash,
     solana_pubkey::Pubkey,
     solana_rpc::{
@@ -29,6 +31,9 @@ pub struct Config {
     pub slot_duration: Duration,
     /// Pubkey that will be the parent of all banks created by the advancer.
     pub manager_account: Pubkey,
+    /// Explicit ER transaction fee model.
+    /// Use `lamports_per_signature = 0` for demo/devnet gasless ER transactions.
+    pub er_fee_structure: FeeStructure,
 }
 
 impl Default for Config {
@@ -36,6 +41,7 @@ impl Default for Config {
         Self {
             slot_duration: Duration::from_millis(10),
             manager_account: Pubkey::default(),
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
         }
     }
 }
@@ -159,11 +165,12 @@ impl SlotAdvancer {
                 let current_bank_slot = current_bank.slot();
                 let frozen_bank = current_bank.clone();
                 let next_bank_slot = current_bank_slot.saturating_add(1);
-                let next_bank = Bank::new_from_parent_ephemeral(
+                let mut next_bank = Bank::new_from_parent_ephemeral(
                     current_bank,
                     &config.manager_account,
                     next_bank_slot,
                 );
+                next_bank.set_ephemeral_fee_structure(&config.er_fee_structure);
 
                 let next_bank_arc = {
                     let mut bank_forks_write = bank_forks.write().unwrap();
@@ -335,6 +342,7 @@ mod tests {
             Config {
                 slot_duration: Duration::from_millis(5),
                 manager_account: Pubkey::default(),
+                er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
             },
             exit.clone(),
             Some(rpc_subscriptions),
@@ -514,6 +522,7 @@ mod tests {
         let config = Config {
             slot_duration: Duration::from_millis(5),
             manager_account: Pubkey::default(),
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
         };
         let block_commitment_cache = create_block_commitment_cache(initial_bank.slot());
         let optimistically_confirmed_bank =
@@ -568,6 +577,7 @@ mod tests {
             Config {
                 slot_duration: Duration::from_millis(5),
                 manager_account: Pubkey::default(),
+                er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
             },
             exit.clone(),
             None,

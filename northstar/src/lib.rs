@@ -2,6 +2,7 @@ use {
     log::*,
     portal_state::{PortalAccount, try_parse_raw_portal_account},
     solana_account::{AccountSharedData, ReadableAccount},
+    solana_fee_structure::FeeStructure,
     solana_gossip::cluster_info::ClusterInfo,
     solana_keypair::Keypair,
     solana_pubkey::Pubkey,
@@ -32,8 +33,29 @@ pub struct EphemeralRollupSettings {
     pub owner: Pubkey,
     pub grid_id: u64,
     pub ttl_slots: u64,
+    /// Explicit ER transaction fee model.
+    ///
+    /// `Self::zero_fee_structure()` enables demo/devnet gasless ER
+    /// transactions while keeping non-zero fee configs available for future
+    /// examples.
+    pub er_fee_structure: FeeStructure,
     pub fee_cap: u64,
     pub delegated_accounts: Vec<Pubkey>,
+}
+
+impl EphemeralRollupSettings {
+    /// Explicit zero-fee ER model for demos/devnet.
+    ///
+    /// Keep every fee component at zero, not only signature fees. In
+    /// particular, this must not inherit `FeeStructure::default()` because its
+    /// defaults are L1-oriented and may grow more non-zero components over time.
+    pub fn zero_fee_structure() -> FeeStructure {
+        FeeStructure {
+            lamports_per_signature: 0,
+            lamports_per_write_lock: 0,
+            compute_fee_bins: vec![],
+        }
+    }
 }
 
 /// Events detected on L1 that are relevant to ephemeral rollups.
@@ -356,6 +378,7 @@ impl Manager {
             owner: Pubkey::default(),
             grid_id: 0,
             ttl_slots: 0,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
             fee_cap: 0,
             delegated_accounts: vec![],
         };
@@ -980,6 +1003,7 @@ mod portal_e2e_tests {
             grid_id: *grid_id,
             ttl_slots: *ttl_slots,
             fee_cap: *fee_cap,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
             delegated_accounts: vec![*delegated_account],
         };
 
@@ -1095,6 +1119,7 @@ mod portal_e2e_tests {
             grid_id,
             ttl_slots: 1000,
             fee_cap: 5_000_000_000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
             delegated_accounts: vec![],
         };
 
@@ -1622,6 +1647,7 @@ mod ephemeral_accounts_background_service_regression {
             grid_id: 0,
             ttl_slots: 10_000,
             fee_cap: 1_000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
             delegated_accounts: vec![],
         };
         let mut er_runtime = EphemeralRuntime::new(

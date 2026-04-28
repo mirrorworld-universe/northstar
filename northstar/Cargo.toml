@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 solana-account.workspace = true
 solana-clock.workspace = true
+solana-fee-structure.workspace = true
 solana-genesis-config.workspace = true
 solana-hash.workspace = true
 solana-keypair.workspace = true
@@ -52,10 +53,10 @@ borsh = { workspace = true }
 [dev-dependencies]
 agave-snapshots.workspace = true
 solana-address-lookup-table-interface.workspace = true
+solana-compute-budget-interface.workspace = true
 solana-rent.workspace = true
 serde_json = { workspace = true }
 solana-ledger = { workspace = true, features = ["agave-unstable-api"] }
 solana-runtime = { workspace = true, features = ["agave-unstable-api", "dev-context-only-utils"] }
 solana-instruction = { workspace = true }
-solana-fee-structure.workspace = true
 solana-transaction-context.workspace = true
