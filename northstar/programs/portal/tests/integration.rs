@@ -112,6 +112,7 @@ const PORTAL_PROGRAM_ID: Pubkey =
 
 async fn setup() -> ProgramTestContext {
     let mut program_test = ProgramTest::default();
+    program_test.prefer_bpf(true);
     program_test.add_program("northstar_portal", PORTAL_PROGRAM_ID, None);
     program_test.start_with_context().await
 }

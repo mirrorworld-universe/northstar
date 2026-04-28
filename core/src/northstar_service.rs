@@ -285,6 +285,7 @@ mod tests {
         delegated_account: Pubkey,
         owner_program: Pubkey,
         delegation_record_pda: Pubkey,
+        buffer: Pubkey,
         grid_id: u64,
     ) -> Instruction {
         let ix = PortalInstruction::Delegate { grid_id };
@@ -293,10 +294,11 @@ mod tests {
             program_id,
             accounts: vec![
                 AccountMeta::new(payer, true),
-                AccountMeta::new(delegated_account, false),
+                AccountMeta::new(delegated_account, true),
                 AccountMeta::new_readonly(owner_program, false),
                 AccountMeta::new(delegation_record_pda, false),
                 AccountMeta::new_readonly(system_program::id(), false),
+                AccountMeta::new_readonly(buffer, false),
             ],
             data,
         }
@@ -675,9 +677,14 @@ mod tests {
             .unwrap();
 
         let delegated_owner_program = Pubkey::new_unique();
-        let delegated_account = Pubkey::new_unique();
+        let delegated_account_keypair = Keypair::new();
+        let delegated_account = delegated_account_keypair.pubkey();
+        let delegate_buffer = Pubkey::new_unique();
         let delegated_portal_account = AccountSharedData::new(1_000_000, 0, &program_id);
+        let delegate_buffer_account =
+            AccountSharedData::new(1_000_000, 0, &delegated_owner_program);
         root_bank.store_account(&delegated_account, &delegated_portal_account);
+        root_bank.store_account(&delegate_buffer, &delegate_buffer_account);
 
         let grid_id = 7u64;
         let deposit_amount = 1_000_000_000u64;
@@ -766,13 +773,14 @@ mod tests {
             delegated_account,
             delegated_owner_program,
             delegation_record_pda,
+            delegate_buffer,
             grid_id,
         );
         let blockhash = delegate_bank.last_blockhash();
         let delegate_tx = Transaction::new_signed_with_payer(
             &[delegate_ix],
             Some(&owner.pubkey()),
-            &[&owner],
+            &[&owner, &delegated_account_keypair],
             blockhash,
         );
         delegate_bank.process_transaction(&delegate_tx).unwrap();
