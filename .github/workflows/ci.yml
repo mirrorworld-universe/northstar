@@ -37,6 +37,15 @@ jobs:
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+      - name: Cache Solana platform tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/solana
+            ~/.local/share/solana/install/releases/*/solana-release/bin/platform-tools-sdk
+          key: ${{ runner.os }}-solana-platform-tools-v2-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-solana-platform-tools-v2-
       - run: cargo clippy --all --tests -- -D warnings
 
   test:
@@ -53,4 +62,13 @@ jobs:
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+      - name: Cache Solana platform tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/solana
+            ~/.local/share/solana/install/releases/*/solana-release/bin/platform-tools-sdk
+          key: ${{ runner.os }}-solana-platform-tools-v2-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-solana-platform-tools-v2-
       - run: cargo test -p solana-core -p northstar -p northstar-portal --no-fail-fast
