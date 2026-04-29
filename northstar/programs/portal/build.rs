@@ -6,6 +6,7 @@ use std::{
 
 const BUILD_SBF_GUARD: &str = "NORTHSTAR_PORTAL_BUILD_SBF_RUNNING";
 const PROGRAM_SO: &str = "northstar_portal.so";
+const SBF_TARGET_DIR: &str = "northstar-portal-sbf";
 
 fn main() {
     println!("cargo:rerun-if-env-changed=BPF_OUT_DIR");
@@ -20,6 +21,7 @@ fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace_root.join("target/deploy"));
     let sbf_out_dir = absolute_path(sbf_out_dir);
+    let sbf_target_dir = workspace_root.join("target").join(SBF_TARGET_DIR);
 
     println!("cargo:rustc-env=BPF_OUT_DIR={}", sbf_out_dir.display());
     println!("cargo:rustc-env=SBF_OUT_DIR={}", sbf_out_dir.display());
@@ -43,6 +45,9 @@ fn main() {
         .arg(manifest_dir.join("Cargo.toml"))
         .arg("--sbf-out-dir")
         .arg(&sbf_out_dir)
+        .arg("--")
+        .arg("--target-dir")
+        .arg(&sbf_target_dir)
         .env(BUILD_SBF_GUARD, "1");
     remove_cargo_driver_env(&mut command);
 
