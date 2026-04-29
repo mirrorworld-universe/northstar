@@ -92,8 +92,7 @@ pub const DEFAULT_PORTAL_PROGRAM_ID: Pubkey =
     Pubkey::from_str_const("5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf");
 
 /// Sonic: Portal program binary embedded at compile time.
-// XXX: its hacky. Probably should be set in build.rs and use `CARGO_TARGET_DIR` or smth
-static PORTAL_PROGRAM_BINARY: &[u8] = include_bytes!("../../target/deploy/northstar_portal.so");
+static PORTAL_PROGRAM_BINARY: &[u8] = include_bytes!(env!("NORTHSTAR_PORTAL_PROGRAM_SO"));
 
 #[derive(Clone)]
 pub struct AccountInfo<'a> {
