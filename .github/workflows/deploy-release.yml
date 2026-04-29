@@ -34,9 +34,7 @@ jobs:
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
-      - name: Build SBF programs
-        run: cargo build-sbf -- -p northstar-portal
-      - run: BPF_OUT_DIR=target/deploy cargo clippy --all --tests -- -D warnings
+      - run: cargo clippy --all --tests -- -D warnings
 
   test:
     name: Test
@@ -54,9 +52,7 @@ jobs:
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
-      - name: Build SBF programs
-        run: cargo build-sbf -- -p northstar-portal
-      - run: BPF_OUT_DIR=target/deploy cargo test --all
+      - run: cargo test -p solana-core -p northstar -p northstar-portal --no-fail-fast
 
   deploy:
     name: Build and Deploy on Devnet
