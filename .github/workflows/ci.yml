@@ -7,8 +7,8 @@ on:
     branches: [master, main]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: global-self-hosted-runner
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -27,6 +27,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Clean stale build artifacts
+        run: |
+          pkill -9 rustc || true
+          pkill -9 cargo || true
+          rm -rf target
+          rm -rf ~/.cargo/registry/src/**/.cargo-lock*
       - run: rustup component add clippy
       - uses: Swatinem/rust-cache@v2
       - name: Install dependencies
@@ -53,6 +59,12 @@ jobs:
     runs-on: [self-hosted, devnet]
     steps:
       - uses: actions/checkout@v4
+      - name: Clean stale build artifacts
+        run: |
+          pkill -9 rustc || true
+          pkill -9 cargo || true
+          rm -rf target
+          rm -rf ~/.cargo/registry/src/**/.cargo-lock*
       - uses: Swatinem/rust-cache@v2
       - name: Install dependencies
         run: |
