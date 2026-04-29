@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/ensure-rust-toolchain
       - run: rustup toolchain install nightly --component rustfmt
       - run: cargo +nightly fmt --all -- --check
 
@@ -27,6 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/ensure-rust-toolchain
       - name: Clean stale build artifacts
         run: |
           pkill -9 rustc || true
@@ -59,6 +61,7 @@ jobs:
     runs-on: [self-hosted, devnet]
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/ensure-rust-toolchain
       - name: Clean stale build artifacts
         run: |
           pkill -9 rustc || true

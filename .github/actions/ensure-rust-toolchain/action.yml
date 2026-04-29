@@ -1,0 +1,14 @@
+name: 'Ensure Rust toolchain'
+description: 'Ensures the Rust toolchain is installed and available on the PATH'
+runs:
+  using: "composite"
+  steps:
+    - name: Ensure Rust toolchain
+      shell: bash
+      run: |
+        if [ ! -f "$HOME/.cargo/bin/rustup" ]; then
+          echo "Rust missing, reinstalling..."
+          rm -rf $HOME/.cargo $HOME/.rustup
+          curl https://sh.rustup.rs -sSf | sh -s -- -y
+        fi
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH

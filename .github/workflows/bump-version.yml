@@ -26,6 +26,8 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.VERSION_BUMP_PAT }}
 
+      - uses: ./.github/actions/ensure-rust-toolchain
+
       - name: Setup
         run: |
           # install toml-cli
