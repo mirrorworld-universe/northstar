@@ -1,10 +1,11 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
     time::SystemTime,
 };
 
+const BUILD_SBF_GUARD: &str = "NORTHSTAR_PORTAL_BUILD_SBF_RUNNING";
 const PROGRAM_SO: &str = "northstar_portal.so";
 
 fn main() {
@@ -16,7 +17,8 @@ fn main() {
         .or_else(|| env::var_os("SBF_OUT_DIR"))
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace_root.join("target/deploy"));
-    let program_so = absolute_path(sbf_out_dir).join(PROGRAM_SO);
+    let sbf_out_dir = absolute_path(sbf_out_dir);
+    let program_so = sbf_out_dir.join(PROGRAM_SO);
 
     println!("cargo:rerun-if-env-changed=BPF_OUT_DIR");
     println!("cargo:rerun-if-env-changed=SBF_OUT_DIR");
@@ -29,34 +31,88 @@ fn main() {
     );
 
     if needs_portal_build(&portal_manifest, &portal_src, &program_so) {
-        build_portal(&portal_manifest);
+        build_portal(&portal_manifest, &sbf_out_dir);
     }
 
     if !program_so.exists() {
         panic!(
-            "portal program binary missing at {}; northstar-portal build.rs should have produced \
-             it",
-            program_so.display()
+            "portal program binary missing at {}; `cargo build-sbf --manifest-path {}` should \
+             have produced it",
+            program_so.display(),
+            portal_manifest.display()
         );
     }
 }
 
-fn build_portal(portal_manifest: &Path) {
+fn build_portal(portal_manifest: &Path, sbf_out_dir: &Path) {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    let target_dir = out_dir.join("portal-check-target");
+    let target_dir = out_dir.join("portal-sbf-target");
+    let output = run_cargo_build_sbf(portal_manifest, sbf_out_dir, &target_dir, false);
+    if !output.status.success() {
+        emit_command_output(&output);
+        if should_retry_with_force_tools_install(&output) {
+            eprintln!(
+                "`cargo build-sbf` failed with status {}; retrying with `--force-tools-install` \
+                 in case cached Solana platform tools are corrupt",
+                output.status
+            );
+            let retry_output = run_cargo_build_sbf(portal_manifest, sbf_out_dir, &target_dir, true);
+            if !retry_output.status.success() {
+                emit_command_output(&retry_output);
+                panic!(
+                    "`cargo build-sbf --force-tools-install` failed with status {}",
+                    retry_output.status
+                );
+            }
+        } else {
+            panic!("`cargo build-sbf` failed with status {}", output.status);
+        }
+    }
+}
+
+fn run_cargo_build_sbf(
+    portal_manifest: &Path,
+    sbf_out_dir: &Path,
+    target_dir: &Path,
+    force_tools_install: bool,
+) -> Output {
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(cargo)
-        .arg("check")
+    let mut command = Command::new(cargo);
+    command.arg("build-sbf");
+    if force_tools_install {
+        command.arg("--force-tools-install");
+    }
+    command
         .arg("--manifest-path")
         .arg(portal_manifest)
+        .arg("--sbf-out-dir")
+        .arg(sbf_out_dir)
+        .arg("--")
         .arg("--target-dir")
         .arg(target_dir)
-        .status()
-        .unwrap_or_else(|err| panic!("failed to run `cargo check` for northstar-portal: {err}"));
+        .env(BUILD_SBF_GUARD, "1");
+    remove_cargo_driver_env(&mut command);
 
-    if !status.success() {
-        panic!("`cargo check` for northstar-portal failed with status {status}");
-    }
+    command
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run `cargo build-sbf`: {err}"))
+}
+
+fn emit_command_output(output: &Output) {
+    eprint!("{}", String::from_utf8_lossy(&output.stdout));
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+}
+
+fn should_retry_with_force_tools_install(output: &Output) -> bool {
+    let mut text = String::new();
+    text.push_str(&String::from_utf8_lossy(&output.stdout));
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+
+    text.contains("--force-tools-install")
+        || (text.contains("platform-tools")
+            && (text.contains("not a directory")
+                || text.contains("No such file")
+                || text.contains("corrupt")))
 }
 
 fn needs_portal_build(portal_manifest: &Path, portal_src: &Path, program_so: &Path) -> bool {
@@ -96,6 +152,15 @@ fn absolute_path(path: PathBuf) -> PathBuf {
         env::current_dir()
             .unwrap_or_else(|err| panic!("failed to determine current directory: {err}"))
             .join(path)
+    }
+}
+
+fn remove_cargo_driver_env(command: &mut Command) {
+    for (key, _) in env::vars_os() {
+        let key = key.to_string_lossy();
+        if key.contains("RUSTFLAGS") || key.contains("RUSTC") || key.contains("RUSTDOC") {
+            command.env_remove(key.as_ref());
+        }
     }
 }
 

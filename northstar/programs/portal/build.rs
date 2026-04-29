@@ -25,7 +25,7 @@ fn main() {
     println!("cargo:rustc-env=BPF_OUT_DIR={}", sbf_out_dir.display());
     println!("cargo:rustc-env=SBF_OUT_DIR={}", sbf_out_dir.display());
 
-    if env::var_os(BUILD_SBF_GUARD).is_some() || is_sbf_target() {
+    if env::var_os(BUILD_SBF_GUARD).is_some() || is_sbf_target() || running_under_clippy() {
         return;
     }
 
@@ -153,6 +153,13 @@ fn absolute_path(path: PathBuf) -> PathBuf {
 fn is_sbf_target() -> bool {
     env::var("TARGET").is_ok_and(|target| target.contains("sbf"))
         || env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|arch| arch == "sbf")
+}
+
+fn running_under_clippy() -> bool {
+    ["RUSTC_WORKSPACE_WRAPPER", "RUSTC_WRAPPER", "RUSTC"]
+        .iter()
+        .filter_map(env::var_os)
+        .any(|value| value.to_string_lossy().contains("clippy"))
 }
 
 fn needs_sbf_rebuild(manifest_dir: &Path, program_so: &Path) -> bool {
