@@ -52,7 +52,7 @@ jobs:
           version=$(cargo build-sbf --version | awk '/platform-tools/{print $2}')
           echo "platform_tools_version=$version" >> "$GITHUB_OUTPUT"
       - name: Cache Solana platform tools
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cache/solana
@@ -90,7 +90,7 @@ jobs:
           version=$(cargo build-sbf --version | awk '/platform-tools/{print $2}')
           echo "platform_tools_version=$version" >> "$GITHUB_OUTPUT"
       - name: Cache Solana platform tools
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cache/solana
