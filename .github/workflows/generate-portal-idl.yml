@@ -1,0 +1,47 @@
+name: Generate Portal IDL
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [release]
+
+concurrency:
+  group: generate-portal-idl-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  PORTAL_PROGRAM_ID: GikCSCpYUq7QR7esoK6GM4UbJzKgdKNvS5bR1rBYH5E4
+
+jobs:
+  generate:
+    name: Generate IDL
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/ensure-rust-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install Shank CLI
+        run: cargo install shank-cli --version 0.4.8 --locked
+
+      - name: Type-check IDL annotations
+        run: NORTHSTAR_PORTAL_BUILD_SBF_RUNNING=1 cargo check -p northstar-portal --features idl
+
+      - name: Generate portal IDL
+        run: |
+          shank idl \
+            --crate-root northstar/programs/portal \
+            --out-dir target/idl \
+            --program-id "$PORTAL_PROGRAM_ID"
+
+      - name: Upload IDL artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: northstar-portal-idl
+          path: target/idl/northstar_portal.json
+          if-no-files-found: error
