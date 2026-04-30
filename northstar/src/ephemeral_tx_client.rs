@@ -209,9 +209,7 @@ impl TransactionClient for EphemeralTransactionClient {
                     &self.delegated_accounts,
                 );
 
-                if let Err(e) = self.execute_transaction(&bank, tx.clone()) {
-                    debug!("Tx execution failed: {e}");
-                }
+                self.execute_transaction(&bank, tx.clone());
 
                 // Mark writable accounts as touched (even on failure, since the fee payer was debited)
                 Self::mark_writable_as_touched(&tx, &self.touched_accounts);
@@ -221,21 +219,34 @@ impl TransactionClient for EphemeralTransactionClient {
 
 impl EphemeralTransactionClient {
     // TODO: Convert it to accept vector of transaction so we batch execution
-    fn execute_transaction(
-        &self,
-        bank: &Bank,
-        tx: VersionedTransaction,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let batch = bank.prepare_entry_batch(vec![tx.clone()])?;
-        let (commit_results, balance_collector) = bank.load_execute_and_commit_transactions(
-            &batch,
-            usize::MAX, // TODO: Use appropriate age limit for ephemeral rollup
-            Self::history_recording_config(),
-            &mut ExecuteTimings::default(),
-            None,
-        );
+    fn execute_transaction(&self, bank: &Bank, tx: VersionedTransaction) {
+        let commit_results = match bank.prepare_entry_batch(vec![tx.clone()]) {
+            Ok(batch) => {
+                let (commit_results, balance_collector) = bank
+                    .load_execute_and_commit_transactions(
+                        &batch,
+                        usize::MAX, // TODO: Use appropriate age limit for ephemeral rollup
+                        Self::history_recording_config(),
+                        &mut ExecuteTimings::default(),
+                        None,
+                    );
+                self.record_transaction_history(
+                    bank,
+                    tx.clone(),
+                    &commit_results,
+                    balance_collector,
+                );
+                commit_results
+            }
+            Err(e) => {
+                debug!("Tx batch preparation failed: {e}");
+                // Record the failed transaction so callers can discover it via
+                // getSignatureStatuses / getTransaction instead of getting null.
+                self.record_failed_transaction(bank, tx.clone(), e);
+                return;
+            }
+        };
 
-        self.record_transaction_history(bank, tx.clone(), &commit_results, balance_collector);
         self.notify_transaction_subscribers(bank, &tx);
 
         for (tx_idx, result) in commit_results.iter().enumerate() {
@@ -243,7 +254,43 @@ impl EphemeralTransactionClient {
                 debug!("Tx {tx_idx} failed: {e}");
             }
         }
-        Ok(())
+    }
+
+    /// Record a transaction that failed before it could even be prepared
+    /// (e.g. expired blockhash, sanitization error). Without this, callers
+    /// who received the signature from `sendTransaction` would get `null`
+    /// from `getSignatureStatuses` / `getTransaction` with no way to know
+    /// what happened.
+    fn record_failed_transaction(
+        &self,
+        bank: &Bank,
+        tx: VersionedTransaction,
+        err: solana_transaction::TransactionError,
+    ) {
+        let loaded_addresses = Self::resolve_loaded_addresses(bank, &tx);
+        let meta = TransactionStatusMeta {
+            status: Err(err),
+            fee: 0,
+            pre_balances: vec![],
+            post_balances: vec![],
+            inner_instructions: None,
+            log_messages: None,
+            pre_token_balances: Some(vec![]),
+            post_token_balances: Some(vec![]),
+            rewards: Some(vec![]),
+            loaded_addresses,
+            return_data: None,
+            compute_units_consumed: Some(0),
+            cost_units: None,
+        };
+
+        let _ = self.er_history_store.record_transaction(
+            bank,
+            VersionedTransactionWithStatusMeta {
+                transaction: tx,
+                meta,
+            },
+        );
     }
 
     fn notify_transaction_subscribers(&self, bank: &Bank, tx: &VersionedTransaction) {
@@ -296,10 +343,6 @@ impl EphemeralTransactionClient {
         commit_results: &[TransactionCommitResult],
         balance_collector: Option<BalanceCollector>,
     ) {
-        let Some(Ok(committed_tx)) = commit_results.first() else {
-            return;
-        };
-
         let (balances, token_balances) =
             compile_collected_balances(balance_collector.unwrap_or_default());
         let pre_balances = balances.pre_balances.into_iter().next().unwrap_or_default();
@@ -320,23 +363,45 @@ impl EphemeralTransactionClient {
             .unwrap_or_default();
 
         let loaded_addresses = Self::resolve_loaded_addresses(bank, &tx);
-        let meta = TransactionStatusMeta {
-            status: committed_tx.status.clone(),
-            fee: committed_tx.fee_details.total_fee(),
-            pre_balances,
-            post_balances,
-            inner_instructions: committed_tx
-                .inner_instructions
-                .clone()
-                .map(|inner| map_inner_instructions(inner).collect()),
-            log_messages: committed_tx.log_messages.clone(),
-            pre_token_balances: Some(pre_token_balances),
-            post_token_balances: Some(post_token_balances),
-            rewards: Some(vec![]),
-            loaded_addresses,
-            return_data: committed_tx.return_data.clone(),
-            compute_units_consumed: Some(committed_tx.executed_units),
-            cost_units: None,
+        let meta = match commit_results.first() {
+            Some(Ok(committed_tx)) => TransactionStatusMeta {
+                status: committed_tx.status.clone(),
+                fee: committed_tx.fee_details.total_fee(),
+                pre_balances,
+                post_balances,
+                inner_instructions: committed_tx
+                    .inner_instructions
+                    .clone()
+                    .map(|inner| map_inner_instructions(inner).collect()),
+                log_messages: committed_tx.log_messages.clone(),
+                pre_token_balances: Some(pre_token_balances),
+                post_token_balances: Some(post_token_balances),
+                rewards: Some(vec![]),
+                loaded_addresses,
+                return_data: committed_tx.return_data.clone(),
+                compute_units_consumed: Some(committed_tx.executed_units),
+                cost_units: None,
+            },
+            Some(Err(err)) => {
+                // Record failed transactions so callers can discover the error
+                // instead of getting a null signature status.
+                TransactionStatusMeta {
+                    status: Err(err.clone()),
+                    fee: 0,
+                    pre_balances,
+                    post_balances,
+                    inner_instructions: None,
+                    log_messages: None,
+                    pre_token_balances: Some(pre_token_balances),
+                    post_token_balances: Some(post_token_balances),
+                    rewards: Some(vec![]),
+                    loaded_addresses,
+                    return_data: None,
+                    compute_units_consumed: Some(0),
+                    cost_units: None,
+                }
+            }
+            None => return,
         };
 
         let _ = self.er_history_store.record_transaction(
@@ -1130,5 +1195,119 @@ mod tests {
 
         // Should be rejected because existing_non_delegated exists on L1 and is not delegated
         assert!(!client.is_transaction_allowed(&tx));
+    }
+
+    #[test]
+    fn test_failed_transaction_recorded_in_er_history() {
+        // Regression: a transaction that fails execution (e.g. expired blockhash)
+        // must still be recorded in ER history so that getSignatureStatuses
+        // and getTransaction return the error instead of null.
+        let fee_payer = Keypair::new();
+        let recipient = Pubkey::new_unique();
+        let (bank, bank_forks) = create_test_bank_forks_with_accounts(&[
+            (fee_payer.pubkey(), 10_000_000),
+            (recipient, 1_000_000),
+        ]);
+        let er_history_store = Arc::new(ErHistoryStore::default());
+        let client = create_client_with_history(bank_forks, vec![], er_history_store.clone());
+
+        // Build a tx with a fabricated (expired) blockhash
+        let fake_blockhash = solana_hash::Hash::new_unique();
+        let tx = Transaction::new_signed_with_payer(
+            &[solana_system_interface::instruction::transfer(
+                &fee_payer.pubkey(),
+                &recipient,
+                1,
+            )],
+            Some(&fee_payer.pubkey()),
+            &[&fee_payer],
+            fake_blockhash,
+        );
+        let tx = VersionedTransaction::from(tx);
+        let signature = tx.signatures[0];
+
+        // Simulate a pre-execution failure (e.g. BlockhashNotFound) via
+        // record_failed_transaction, which is the path taken when
+        // prepare_entry_batch returns an error.
+        client.record_failed_transaction(
+            &bank,
+            tx,
+            solana_transaction::TransactionError::BlockhashNotFound,
+        );
+
+        // The signature must be findable in ER history
+        er_history_store.finalize_slot(&bank);
+        let status = er_history_store
+            .get_signature_status(&signature)
+            .expect("failed tx should be recorded in ER history");
+        assert_eq!(
+            status.err,
+            Some(solana_transaction::TransactionError::BlockhashNotFound),
+            "status should carry BlockhashNotFound error"
+        );
+
+        // Also verify via getTransaction
+        let recorded = er_history_store
+            .get_transaction(
+                &signature,
+                solana_rpc_client_types::config::CommitmentConfig::confirmed(),
+            )
+            .expect("failed tx should be retrievable via getTransaction");
+        let meta = recorded
+            .tx_with_meta
+            .get_status_meta()
+            .expect("failed tx should have status meta");
+        assert_eq!(
+            meta.status,
+            Err(solana_transaction::TransactionError::BlockhashNotFound),
+            "failed tx meta status should be BlockhashNotFound"
+        );
+    }
+
+    #[test]
+    fn test_commit_error_transaction_recorded_in_er_history() {
+        // Regression: a transaction that fails during commit (not just pre-execution)
+        // must also be recorded in ER history with its error.
+        let fee_payer = Keypair::new();
+        let recipient = Pubkey::new_unique();
+        let (bank, bank_forks) = create_test_bank_forks_with_accounts(&[
+            (fee_payer.pubkey(), 10_000_000),
+            (recipient, 1_000_000),
+        ]);
+        let er_history_store = Arc::new(ErHistoryStore::default());
+        let client = create_client_with_history(bank_forks, vec![], er_history_store.clone());
+
+        let blockhash = bank.last_blockhash();
+        let tx = Transaction::new_signed_with_payer(
+            &[solana_system_interface::instruction::transfer(
+                &fee_payer.pubkey(),
+                &recipient,
+                1,
+            )],
+            Some(&fee_payer.pubkey()),
+            &[&fee_payer],
+            blockhash,
+        );
+        let tx = VersionedTransaction::from(tx);
+        let signature = tx.signatures[0];
+
+        // Simulate a commit-result error (e.g. insufficient funds) directly
+        client.record_transaction_history(
+            &bank,
+            tx,
+            &[Err(
+                solana_transaction::TransactionError::InsufficientFundsForRent { account_index: 0 },
+            )],
+            None,
+        );
+
+        er_history_store.finalize_slot(&bank);
+        let status = er_history_store
+            .get_signature_status(&signature)
+            .expect("commit-failed tx should be recorded in ER history");
+        assert!(
+            status.err.is_some(),
+            "commit-failed tx status should carry an error"
+        );
     }
 }
