@@ -114,9 +114,13 @@ impl EphemeralTransactionClient {
     /// Returns `true` if the transaction is allowed, `false` if it
     /// touches non-delegated writable accounts.
     // TODO: handle https://solana.com/developers/guides/advanced/lookup-tables
-    fn is_transaction_allowed(&self, tx: &VersionedTransaction) -> bool {
+    fn is_transaction_allowed_on_bank(
+        bank: &Bank,
+        tx: &VersionedTransaction,
+        delegated_accounts: &HashSet<Pubkey>,
+    ) -> bool {
         // If delegation set is empty, allow everything (unrestricted mode)
-        if self.delegated_accounts.read().unwrap().is_empty() {
+        if delegated_accounts.is_empty() {
             return true;
         }
 
@@ -128,7 +132,9 @@ impl EphemeralTransactionClient {
             if i == 0 {
                 continue;
             }
-            if message.is_maybe_writable(i, None) && !self.is_allowed_writable(key) {
+            if message.is_maybe_writable(i, None)
+                && !Self::is_allowed_writable_on_bank(bank, key, delegated_accounts)
+            {
                 return false;
             }
         }
@@ -136,7 +142,11 @@ impl EphemeralTransactionClient {
         true
     }
 
-    fn is_allowed_writable(&self, key: &Pubkey) -> bool {
+    fn is_allowed_writable_on_bank(
+        bank: &Bank,
+        key: &Pubkey,
+        delegated_accounts: &HashSet<Pubkey>,
+    ) -> bool {
         // Always allow native programs and sysvars
         if system_program::check_id(key)
             || sysvar::check_id(key)
@@ -147,14 +157,13 @@ impl EphemeralTransactionClient {
         }
 
         // Allow delegated accounts
-        if self.delegated_accounts.read().unwrap().contains(key) {
+        if delegated_accounts.contains(key) {
             return true;
         }
 
         // Allow new accounts (not on L1) to be created
         // The bank read will walk ancestors — if the account
         // doesn't exist anywhere, it's a new account.
-        let bank = self.bank();
         if bank.get_account(key).is_none() {
             return true;
         }
@@ -177,7 +186,7 @@ impl TransactionClient for EphemeralTransactionClient {
             );
             return;
         }
-        wire_transactions
+        let txs: Vec<VersionedTransaction> = wire_transactions
             .into_iter()
             .filter_map(|wire_tx| match bincode::deserialize(&wire_tx) {
                 Ok(tx) => Some(tx),
@@ -186,12 +195,20 @@ impl TransactionClient for EphemeralTransactionClient {
                     None
                 }
             })
-            .for_each(|tx: VersionedTransaction| {
-                let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
-                let bank = self.bank();
+            .collect();
 
-                // Delegation filter: reject transactions that write to non-delegated accounts
-                if !self.is_transaction_allowed(&tx) {
+        if txs.is_empty() {
+            return;
+        }
+
+        let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
+        let bank = self.bank();
+        let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
+        let txs: Vec<_> = txs
+            .into_iter()
+            .filter(|tx| {
+                let allowed = Self::is_transaction_allowed_on_bank(&bank, tx, &delegated_accounts);
+                if !allowed {
                     warn!(
                         "Transaction rejected: writes to non-delegated accounts. sig={}",
                         tx.signatures
@@ -199,61 +216,67 @@ impl TransactionClient for EphemeralTransactionClient {
                             .map(|s| s.to_string())
                             .unwrap_or_default(),
                     );
-                    return;
                 }
+                allowed
+            })
+            .collect();
 
-                Self::zero_untouched_writable_accounts(
-                    &bank,
-                    &tx,
-                    &self.touched_accounts,
-                    &self.delegated_accounts,
-                );
+        if txs.is_empty() {
+            return;
+        }
 
-                self.execute_transaction(&bank, tx.clone());
+        Self::zero_untouched_writable_accounts_for_batch(
+            &bank,
+            &txs,
+            &self.touched_accounts,
+            &delegated_accounts,
+        );
 
-                // Mark writable accounts as touched (even on failure, since the fee payer was debited)
-                Self::mark_writable_as_touched(&tx, &self.touched_accounts);
-            });
+        if let Err(e) = self.execute_transactions(&bank, txs.clone()) {
+            debug!("Tx batch execution failed: {e}");
+        }
+
+        // Mark writable accounts as touched (even on failure, since fee payers may be debited)
+        Self::mark_writable_as_touched_for_batch(&txs, &self.touched_accounts);
     }
 }
 
 impl EphemeralTransactionClient {
-    // TODO: Convert it to accept vector of transaction so we batch execution
-    fn execute_transaction(&self, bank: &Bank, tx: VersionedTransaction) {
-        let commit_results = match bank.prepare_entry_batch(vec![tx.clone()]) {
-            Ok(batch) => {
-                let (commit_results, balance_collector) = bank
-                    .load_execute_and_commit_transactions(
-                        &batch,
-                        usize::MAX, // TODO: Use appropriate age limit for ephemeral rollup
-                        Self::history_recording_config(),
-                        &mut ExecuteTimings::default(),
-                        None,
-                    );
-                self.record_transaction_history(
-                    bank,
-                    tx.clone(),
-                    &commit_results,
-                    balance_collector,
-                );
-                commit_results
-            }
+    fn execute_transactions(
+        &self,
+        bank: &Bank,
+        txs: Vec<VersionedTransaction>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let batch = match bank.prepare_entry_batch(txs.clone()) {
+            Ok(batch) => batch,
             Err(e) => {
                 debug!("Tx batch preparation failed: {e}");
-                // Record the failed transaction so callers can discover it via
-                // getSignatureStatuses / getTransaction instead of getting null.
-                self.record_failed_transaction(bank, tx.clone(), e);
-                return;
+                // Record each failed transaction so callers can discover the error
+                // via getSignatureStatuses / getTransaction instead of getting null.
+                for tx in &txs {
+                    self.record_failed_transaction(bank, tx.clone(), e.clone());
+                }
+                return Err(e.into());
             }
         };
+        let (commit_results, balance_collector) = bank.load_execute_and_commit_transactions(
+            &batch,
+            usize::MAX, // TODO: Use appropriate age limit for ephemeral rollup
+            Self::history_recording_config(),
+            &mut ExecuteTimings::default(),
+            None,
+        );
 
-        self.notify_transaction_subscribers(bank, &tx);
+        self.record_transaction_history_for_batch(bank, &txs, &commit_results, balance_collector);
+        self.notify_transaction_subscribers(bank, &txs);
 
         for (tx_idx, result) in commit_results.iter().enumerate() {
             if let Err(e) = result {
                 debug!("Tx {tx_idx} failed: {e}");
             }
         }
+
+        Ok(())
     }
 
     /// Record a transaction that failed before it could even be prepared
@@ -293,12 +316,16 @@ impl EphemeralTransactionClient {
         );
     }
 
-    fn notify_transaction_subscribers(&self, bank: &Bank, tx: &VersionedTransaction) {
+    fn notify_transaction_subscribers(&self, bank: &Bank, txs: &[VersionedTransaction]) {
         let Some(rpc_subscriptions) = self.rpc_subscriptions.read().unwrap().clone() else {
             return;
         };
         let slot = bank.slot();
-        rpc_subscriptions.notify_signatures_received((slot, tx.signatures.clone()));
+        let signatures = txs
+            .iter()
+            .flat_map(|tx| tx.signatures.iter().copied())
+            .collect();
+        rpc_subscriptions.notify_signatures_received((slot, signatures));
         rpc_subscriptions.notify_subscribers(CommitmentSlots {
             slot,
             root: slot,
@@ -336,35 +363,70 @@ impl EphemeralTransactionClient {
         }
     }
 
-    fn record_transaction_history(
+    fn record_transaction_history_for_batch(
         &self,
         bank: &Bank,
-        tx: VersionedTransaction,
+        txs: &[VersionedTransaction],
         commit_results: &[TransactionCommitResult],
         balance_collector: Option<BalanceCollector>,
     ) {
         let (balances, token_balances) =
             compile_collected_balances(balance_collector.unwrap_or_default());
-        let pre_balances = balances.pre_balances.into_iter().next().unwrap_or_default();
-        let post_balances = balances
-            .post_balances
-            .into_iter()
-            .next()
-            .unwrap_or_default();
-        let pre_token_balances = token_balances
-            .pre_token_balances
-            .into_iter()
-            .next()
-            .unwrap_or_default();
-        let post_token_balances = token_balances
-            .post_token_balances
-            .into_iter()
-            .next()
-            .unwrap_or_default();
 
-        let loaded_addresses = Self::resolve_loaded_addresses(bank, &tx);
-        let meta = match commit_results.first() {
-            Some(Ok(committed_tx)) => TransactionStatusMeta {
+        for (tx_idx, (tx, commit_result)) in txs.iter().zip(commit_results).enumerate() {
+            let Ok(committed_tx) = commit_result else {
+                // Record failed transactions so callers can discover the error
+                // instead of getting a null signature status.
+                let err = commit_result.clone().unwrap_err();
+                let loaded_addresses = Self::resolve_loaded_addresses(bank, tx);
+                let meta = TransactionStatusMeta {
+                    status: Err(err),
+                    fee: 0,
+                    pre_balances: vec![],
+                    post_balances: vec![],
+                    inner_instructions: None,
+                    log_messages: None,
+                    pre_token_balances: Some(vec![]),
+                    post_token_balances: Some(vec![]),
+                    rewards: Some(vec![]),
+                    loaded_addresses,
+                    return_data: None,
+                    compute_units_consumed: Some(0),
+                    cost_units: None,
+                };
+                let _ = self.er_history_store.record_transaction(
+                    bank,
+                    VersionedTransactionWithStatusMeta {
+                        transaction: tx.clone(),
+                        meta,
+                    },
+                );
+                continue;
+            };
+
+            let pre_balances = balances
+                .pre_balances
+                .get(tx_idx)
+                .cloned()
+                .unwrap_or_default();
+            let post_balances = balances
+                .post_balances
+                .get(tx_idx)
+                .cloned()
+                .unwrap_or_default();
+            let pre_token_balances = token_balances
+                .pre_token_balances
+                .get(tx_idx)
+                .cloned()
+                .unwrap_or_default();
+            let post_token_balances = token_balances
+                .post_token_balances
+                .get(tx_idx)
+                .cloned()
+                .unwrap_or_default();
+
+            let loaded_addresses = Self::resolve_loaded_addresses(bank, tx);
+            let meta = TransactionStatusMeta {
                 status: committed_tx.status.clone(),
                 fee: committed_tx.fee_details.total_fee(),
                 pre_balances,
@@ -381,36 +443,16 @@ impl EphemeralTransactionClient {
                 return_data: committed_tx.return_data.clone(),
                 compute_units_consumed: Some(committed_tx.executed_units),
                 cost_units: None,
-            },
-            Some(Err(err)) => {
-                // Record failed transactions so callers can discover the error
-                // instead of getting a null signature status.
-                TransactionStatusMeta {
-                    status: Err(err.clone()),
-                    fee: 0,
-                    pre_balances,
-                    post_balances,
-                    inner_instructions: None,
-                    log_messages: None,
-                    pre_token_balances: Some(pre_token_balances),
-                    post_token_balances: Some(post_token_balances),
-                    rewards: Some(vec![]),
-                    loaded_addresses,
-                    return_data: None,
-                    compute_units_consumed: Some(0),
-                    cost_units: None,
-                }
-            }
-            None => return,
-        };
+            };
 
-        let _ = self.er_history_store.record_transaction(
-            bank,
-            VersionedTransactionWithStatusMeta {
-                transaction: tx,
-                meta,
-            },
-        );
+            let _ = self.er_history_store.record_transaction(
+                bank,
+                VersionedTransactionWithStatusMeta {
+                    transaction: tx.clone(),
+                    meta,
+                },
+            );
+        }
     }
 
     /// Check if a key is an infrastructure account (system program, sysvars, etc.)
@@ -421,85 +463,90 @@ impl EphemeralTransactionClient {
 
     /// Zero the balance of untouched writable accounts before transaction execution.
     /// This prevents users from spending inherited L1 balances on the ER.
-    // XXX: this is very very suboptimal. This can accept multiple transactions
-    // We need to also mark zeroed accounts as touched
-    fn zero_untouched_writable_accounts(
+    fn zero_untouched_writable_accounts_for_batch(
         bank: &Bank,
-        tx: &VersionedTransaction,
+        txs: &[VersionedTransaction],
         touched: &RwLock<HashSet<Pubkey>>,
-        delegated: &RwLock<HashSet<Pubkey>>,
+        delegated: &HashSet<Pubkey>,
     ) {
-        let delegated_read = delegated.read().unwrap();
         // Unrestricted mode - no zeroing (empty delegation set means dev/test mode)
-        if delegated_read.is_empty() {
+        if delegated.is_empty() {
             return;
         }
 
         let touched_read = touched.read().unwrap();
-        let message = &tx.message;
-        let static_keys = message.static_account_keys();
+        let mut accounts_to_zero = HashSet::new();
 
-        // Zero writable accounts (skip fee payer at index 0, handled separately below)
-        for (i, key) in static_keys.iter().enumerate() {
-            // Skip fee payer (index 0) - handled separately
-            if i == 0 {
-                continue;
+        for tx in txs {
+            let message = &tx.message;
+            let static_keys = message.static_account_keys();
+
+            for (i, key) in static_keys.iter().enumerate() {
+                if !message.is_maybe_writable(i, None) {
+                    continue;
+                }
+
+                // Skip delegated accounts - they keep their L1 balance
+                if delegated.contains(key) {
+                    continue;
+                }
+
+                // Skip already-touched accounts - their balance is real
+                if touched_read.contains(key) {
+                    continue;
+                }
+
+                // Skip accounts already queued by an earlier tx in this batch
+                if accounts_to_zero.contains(key) {
+                    continue;
+                }
+
+                // Skip infrastructure accounts
+                if Self::is_infrastructure_account(key) {
+                    continue;
+                }
+
+                accounts_to_zero.insert(*key);
             }
+        }
+        drop(touched_read);
 
-            // Only process writable accounts
-            if !message.is_maybe_writable(i, None) {
-                continue;
-            }
+        if accounts_to_zero.is_empty() {
+            return;
+        }
 
-            // Skip delegated accounts - they keep their L1 balance
-            if delegated_read.contains(key) {
-                continue;
-            }
-
-            // Skip already-touched accounts - their balance is real
-            if touched_read.contains(key) {
-                continue;
-            }
-
-            // Skip infrastructure accounts
-            if Self::is_infrastructure_account(key) {
-                continue;
-            }
-
+        let mut zeroed_accounts = Vec::new();
+        for key in &accounts_to_zero {
             // Zero the inherited L1 balance
             if let Some(mut account) = bank.get_account(key) {
                 if account.lamports() > 0 {
                     account.set_lamports(0);
                     bank.store_account(key, &account);
+                    zeroed_accounts.push(*key);
                 }
             }
         }
 
-        // Also zero fee payer (index 0) if untouched and not delegated
-        if let Some(fee_payer) = static_keys.first() {
-            if !delegated_read.contains(fee_payer)
-                && !touched_read.contains(fee_payer)
-                && !Self::is_infrastructure_account(fee_payer)
-            {
-                if let Some(mut account) = bank.get_account(fee_payer) {
-                    if account.lamports() > 0 {
-                        account.set_lamports(0);
-                        bank.store_account(fee_payer, &account);
-                    }
-                }
-            }
+        if !zeroed_accounts.is_empty() {
+            touched.write().unwrap().extend(zeroed_accounts);
         }
     }
 
-    /// Mark all writable accounts in a transaction as touched.
-    fn mark_writable_as_touched(tx: &VersionedTransaction, touched: &RwLock<HashSet<Pubkey>>) {
+    /// Mark all writable accounts in a transaction batch as touched.
+    fn mark_writable_as_touched_for_batch(
+        txs: &[VersionedTransaction],
+        touched: &RwLock<HashSet<Pubkey>>,
+    ) {
         let mut touched_write = touched.write().unwrap();
-        let message = &tx.message;
-        let static_keys = message.static_account_keys();
 
-        for (i, key) in static_keys.iter().enumerate() {
-            if message.is_maybe_writable(i, None) {
-                touched_write.insert(*key);
+        for tx in txs {
+            let message = &tx.message;
+            let static_keys = message.static_account_keys();
+
+            for (i, key) in static_keys.iter().enumerate() {
+                if message.is_maybe_writable(i, None) {
+                    touched_write.insert(*key);
+                }
             }
         }
     }
@@ -588,11 +635,11 @@ mod tests {
         let tx = VersionedTransaction::from(tx);
 
         // Zero untouched accounts
-        EphemeralTransactionClient::zero_untouched_writable_accounts(
+        EphemeralTransactionClient::zero_untouched_writable_accounts_for_batch(
             &bank,
-            &tx,
+            std::slice::from_ref(&tx),
             &touched,
-            &delegated_set,
+            &delegated_set.read().unwrap(),
         );
 
         // Verify user's balance is zeroed (or account is removed/zeroed)
@@ -644,11 +691,11 @@ mod tests {
         let tx = VersionedTransaction::from(tx);
 
         // Zero untouched accounts
-        EphemeralTransactionClient::zero_untouched_writable_accounts(
+        EphemeralTransactionClient::zero_untouched_writable_accounts_for_batch(
             &bank,
-            &tx,
+            std::slice::from_ref(&tx),
             &touched,
-            &delegated_set,
+            &delegated_set.read().unwrap(),
         );
 
         // Verify user's balance is preserved
@@ -686,11 +733,11 @@ mod tests {
         let tx = VersionedTransaction::from(tx);
 
         // Zero untouched accounts
-        EphemeralTransactionClient::zero_untouched_writable_accounts(
+        EphemeralTransactionClient::zero_untouched_writable_accounts_for_batch(
             &bank,
-            &tx,
+            std::slice::from_ref(&tx),
             &touched,
-            &delegated_set,
+            &delegated_set.read().unwrap(),
         );
 
         // Verify delegated account keeps its balance
@@ -730,11 +777,11 @@ mod tests {
         let tx = VersionedTransaction::from(tx);
 
         // Zero untouched accounts
-        EphemeralTransactionClient::zero_untouched_writable_accounts(
+        EphemeralTransactionClient::zero_untouched_writable_accounts_for_batch(
             &bank,
-            &tx,
+            std::slice::from_ref(&tx),
             &touched,
-            &delegated_set,
+            &delegated_set.read().unwrap(),
         );
 
         // Verify user's balance is preserved (no zeroing in unrestricted mode)
@@ -743,6 +790,48 @@ mod tests {
             user_account.lamports(),
             100_000_000_000,
             "Account should keep balance in unrestricted mode"
+        );
+    }
+
+    #[test]
+    fn test_zeroing_marks_zeroed_account_touched() {
+        let bank = create_test_bank();
+        let delegated_pubkey = Pubkey::new_unique();
+        bank.store_account(
+            &delegated_pubkey,
+            &AccountSharedData::new(1_000_000, 0, &Pubkey::new_unique()),
+        );
+
+        let user_pubkey = Pubkey::new_unique();
+        fund_account(&bank, &user_pubkey, 100_000_000_000);
+
+        let delegated_set: Arc<RwLock<HashSet<Pubkey>>> =
+            Arc::new(RwLock::new(vec![delegated_pubkey].into_iter().collect()));
+        let touched = Arc::new(RwLock::new(HashSet::new()));
+
+        let blockhash = bank.last_blockhash();
+        let ix = solana_system_interface::instruction::transfer(
+            &user_pubkey,
+            &Pubkey::new_unique(),
+            1_000_000,
+        );
+        let tx = Transaction::new_unsigned(Message::new_with_blockhash(
+            &[ix],
+            Some(&user_pubkey),
+            &blockhash,
+        ));
+        let tx = VersionedTransaction::from(tx);
+
+        EphemeralTransactionClient::zero_untouched_writable_accounts_for_batch(
+            &bank,
+            std::slice::from_ref(&tx),
+            &touched,
+            &delegated_set.read().unwrap(),
+        );
+
+        assert!(
+            touched.read().unwrap().contains(&user_pubkey),
+            "Zeroed account should be marked touched"
         );
     }
 
@@ -814,6 +903,59 @@ mod tests {
     }
 
     #[test]
+    fn test_send_transactions_in_batch_executes_multiple_transfers_and_records_history() {
+        let fee_payer_a = Keypair::new();
+        let fee_payer_b = Keypair::new();
+        let recipient_a = Pubkey::new_unique();
+        let recipient_b = Pubkey::new_unique();
+        let bank = create_test_bank();
+        fund_account(&bank, &fee_payer_a.pubkey(), 10_000_000);
+        fund_account(&bank, &fee_payer_b.pubkey(), 10_000_000);
+        let blockhash = bank.last_blockhash();
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let bank = bank_forks.read().unwrap().root_bank();
+        let er_history_store = Arc::new(ErHistoryStore::default());
+        let client = create_client_with_history(bank_forks, vec![], er_history_store.clone());
+
+        let tx_a = create_transfer_tx(&fee_payer_a, fee_payer_a.pubkey(), recipient_a, blockhash);
+        let signature_a = tx_a.signatures[0];
+        let tx_b = create_transfer_tx(&fee_payer_b, fee_payer_b.pubkey(), recipient_b, blockhash);
+        let signature_b = tx_b.signatures[0];
+
+        <EphemeralTransactionClient as TransactionClient>::send_transactions_in_batch(
+            &client,
+            vec![
+                bincode::serialize(&tx_a).unwrap(),
+                bincode::serialize(&tx_b).unwrap(),
+            ],
+            &SendTransactionServiceStats::default(),
+        );
+
+        assert_eq!(bank.get_balance(&recipient_a), 1_000_000);
+        assert_eq!(bank.get_balance(&recipient_b), 1_000_000);
+
+        er_history_store.finalize_slot(&bank);
+        assert!(
+            er_history_store
+                .get_transaction(
+                    &signature_a,
+                    solana_rpc_client_types::config::CommitmentConfig::confirmed(),
+                )
+                .is_some(),
+            "first transaction should be recorded in ER history"
+        );
+        assert!(
+            er_history_store
+                .get_transaction(
+                    &signature_b,
+                    solana_rpc_client_types::config::CommitmentConfig::confirmed(),
+                )
+                .is_some(),
+            "second transaction should be recorded in ER history"
+        );
+    }
+
+    #[test]
     fn test_record_transaction_history_preserves_logs_cpi_and_return_data() {
         let fee_payer = Keypair::new();
         let recipient = Pubkey::new_unique();
@@ -848,9 +990,9 @@ mod tests {
             data: vec![0xAA, 0xBB, 0xCC],
         };
 
-        client.record_transaction_history(
+        client.record_transaction_history_for_batch(
             &bank,
-            tx,
+            std::slice::from_ref(&tx),
             &[Ok(
                 solana_svm::transaction_commit_result::CommittedTransaction {
                     status: Ok(()),
@@ -959,9 +1101,9 @@ mod tests {
         .unwrap();
         let signature = tx.signatures[0];
 
-        client.record_transaction_history(
+        client.record_transaction_history_for_batch(
             &bank,
-            tx,
+            std::slice::from_ref(&tx),
             &[Ok(
                 solana_svm::transaction_commit_result::CommittedTransaction {
                     status: Ok(()),
@@ -1012,7 +1154,11 @@ mod tests {
             bank.last_blockhash(),
         );
 
-        assert!(client.is_transaction_allowed(&tx));
+        assert!(EphemeralTransactionClient::is_transaction_allowed_on_bank(
+            &bank,
+            &tx,
+            &client.delegated_accounts.read().unwrap()
+        ));
     }
 
     #[test]
@@ -1040,7 +1186,11 @@ mod tests {
             bank.last_blockhash(),
         );
 
-        assert!(!client.is_transaction_allowed(&tx));
+        assert!(!EphemeralTransactionClient::is_transaction_allowed_on_bank(
+            &bank,
+            &tx,
+            &client.delegated_accounts.read().unwrap()
+        ));
     }
 
     #[test]
@@ -1063,7 +1213,11 @@ mod tests {
         );
 
         // Fee payer should always be allowed
-        assert!(client.is_transaction_allowed(&tx));
+        assert!(EphemeralTransactionClient::is_transaction_allowed_on_bank(
+            &bank,
+            &tx,
+            &client.delegated_accounts.read().unwrap()
+        ));
     }
 
     #[test]
@@ -1085,7 +1239,11 @@ mod tests {
         );
 
         // System program should always be allowed
-        assert!(client.is_transaction_allowed(&tx));
+        assert!(EphemeralTransactionClient::is_transaction_allowed_on_bank(
+            &bank,
+            &tx,
+            &client.delegated_accounts.read().unwrap()
+        ));
     }
 
     #[test]
@@ -1114,7 +1272,11 @@ mod tests {
         );
 
         // Empty delegation set = unrestricted mode, all allowed
-        assert!(client.is_transaction_allowed(&tx));
+        assert!(EphemeralTransactionClient::is_transaction_allowed_on_bank(
+            &bank,
+            &tx,
+            &client.delegated_accounts.read().unwrap()
+        ));
     }
 
     #[test]
@@ -1137,7 +1299,11 @@ mod tests {
         );
 
         // Fee payer should always be allowed
-        assert!(client.is_transaction_allowed(&tx));
+        assert!(EphemeralTransactionClient::is_transaction_allowed_on_bank(
+            &bank,
+            &tx,
+            &client.delegated_accounts.read().unwrap()
+        ));
     }
 
     #[test]
@@ -1165,7 +1331,11 @@ mod tests {
         );
 
         // Should be allowed because new_account doesn't exist on L1
-        assert!(client.is_transaction_allowed(&tx));
+        assert!(EphemeralTransactionClient::is_transaction_allowed_on_bank(
+            &bank,
+            &tx,
+            &client.delegated_accounts.read().unwrap()
+        ));
     }
 
     #[test]
@@ -1194,7 +1364,11 @@ mod tests {
         );
 
         // Should be rejected because existing_non_delegated exists on L1 and is not delegated
-        assert!(!client.is_transaction_allowed(&tx));
+        assert!(!EphemeralTransactionClient::is_transaction_allowed_on_bank(
+            &bank,
+            &tx,
+            &client.delegated_accounts.read().unwrap()
+        ));
     }
 
     #[test]
@@ -1292,9 +1466,9 @@ mod tests {
         let signature = tx.signatures[0];
 
         // Simulate a commit-result error (e.g. insufficient funds) directly
-        client.record_transaction_history(
+        client.record_transaction_history_for_batch(
             &bank,
-            tx,
+            std::slice::from_ref(&tx),
             &[Err(
                 solana_transaction::TransactionError::InsufficientFundsForRent { account_index: 0 },
             )],
