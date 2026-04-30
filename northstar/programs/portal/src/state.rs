@@ -3,6 +3,7 @@ use {
     pinocchio::pubkey::Pubkey,
 };
 
+#[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Session {
     pub discriminator: u8,
@@ -31,6 +32,7 @@ impl Session {
     }
 }
 
+#[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct FeeVault {
     pub discriminator: u8,
@@ -49,6 +51,7 @@ impl FeeVault {
     }
 }
 
+#[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct DelegationRecord {
     pub discriminator: u8,
@@ -68,6 +71,7 @@ impl DelegationRecord {
     }
 }
 
+#[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct DepositReceipt {
     pub discriminator: u8,

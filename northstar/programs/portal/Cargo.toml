@@ -10,12 +10,14 @@ crate-type = ["cdylib", "lib"]
 [features]
 default = []
 bpf-entrypoint = []
+idl = ["dep:shank"]
 
 [dependencies]
 pinocchio = "0.9"
 pinocchio-system = "0.4"
 pinocchio-log = "0.5"
 borsh = { version = "1", default-features = false, features = ["derive"] }
+shank = { version = "0.4.8", optional = true }
 
 [dev-dependencies]
 solana-program-test = { workspace = true }
