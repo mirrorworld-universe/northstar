@@ -10,6 +10,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  AGAVE_INSTALL_URL: https://release.anza.xyz/v4.0.0-beta.7/install
+  NORTHSTAR_DEVNET_RPC: https://api.devnet.sonic.game
+  NORTHSTAR_PORTAL_PROGRAM_ID: 74iiMCqFw1afWyp3tdh9pUqfRfCRq7gfdC2YZoNGpovt
 
 jobs:
   fmt:
@@ -34,7 +37,7 @@ jobs:
           sudo apt-get install -y protobuf-compiler libprotobuf-dev libudev-dev libclang-dev
       - name: Install Solana tools
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          sh -c "$(curl -sSfL "$AGAVE_INSTALL_URL")"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
       - run: cargo clippy --all --tests -- -D warnings
 
@@ -65,8 +68,33 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ensure-rust-toolchain
 
+      - name: Install Solana tools
+        run: |
+          sh -c "$(curl -sSfL "$AGAVE_INSTALL_URL")"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+
       - name: Build portal SBF program
         run: ./cargo-build-sbf --manifest-path northstar/programs/portal/Cargo.toml
+
+      - name: Deploy portal SBF program
+        env:
+          NORTHSTAR_PORTAL_UPGRADE_AUTHORITY: ${{ vars.NORTHSTAR_PORTAL_UPGRADE_AUTHORITY }}
+          NORTHSTAR_PORTAL_UPGRADE_AUTHORITY_KEYPAIR: ${{ secrets.NORTHSTAR_PORTAL_UPGRADE_AUTHORITY_KEYPAIR }}
+        run: |
+          if [[ -n "${NORTHSTAR_PORTAL_UPGRADE_AUTHORITY_KEYPAIR:-}" ]]; then
+            UPGRADE_AUTHORITY="$RUNNER_TEMP/northstar-portal-upgrade-authority.json"
+            printf '%s' "$NORTHSTAR_PORTAL_UPGRADE_AUTHORITY_KEYPAIR" > "$UPGRADE_AUTHORITY"
+            chmod 600 "$UPGRADE_AUTHORITY"
+          else
+            UPGRADE_AUTHORITY="${NORTHSTAR_PORTAL_UPGRADE_AUTHORITY:-}"
+          fi
+          test -n "$UPGRADE_AUTHORITY"
+          solana program deploy \
+            --url "$NORTHSTAR_DEVNET_RPC" \
+            --program-id "$NORTHSTAR_PORTAL_PROGRAM_ID" \
+            --upgrade-authority "$UPGRADE_AUTHORITY" \
+            --use-rpc \
+            target/deploy/northstar_portal.so
 
       - name: Build validator binary
         run: cargo build --release --target-dir /home/ubuntu/northstar/ --bin agave-validator
@@ -78,4 +106,3 @@ jobs:
 
       - name: Restart validator
         run: sudo systemctl restart northstar-validator
-
