@@ -293,6 +293,20 @@ impl Manager {
         undelegated_account
     }
 
+    fn delegated_owner_program(&self, bank: &Bank, delegated_account: &Pubkey) -> Option<Pubkey> {
+        let (record_pubkey, _) = Pubkey::find_program_address(
+            &[b"delegation", delegated_account.as_ref()],
+            &self.config.portal_program_id,
+        );
+        let record_account = bank.get_account(&record_pubkey)?;
+        let PortalAccount::DelegationRecord(record) =
+            try_parse_raw_portal_account(record_account.data())?
+        else {
+            return None;
+        };
+        Some(record.owner_program.into())
+    }
+
     fn find_undelegated_account(
         &self,
         bank: &Bank,
@@ -492,13 +506,27 @@ impl Manager {
     /// the delegated set so transactions are allowed to write to it.
     /// Only processes when a session is active.
     pub fn handle_delegation(&self, bank: &Bank, delegated_account: &Pubkey) {
+        let owner_program = self.delegated_owner_program(bank, delegated_account);
+        self.handle_delegation_with_owner_program(bank, delegated_account, owner_program);
+    }
+
+    pub fn handle_delegation_with_owner_program(
+        &self,
+        bank: &Bank,
+        delegated_account: &Pubkey,
+        owner_program: Option<Pubkey>,
+    ) {
         if let Some(runtime) = &self.runtime {
             if !runtime.is_active() {
                 warn!("Ignoring delegation for {delegated_account}: no active session");
                 return;
             }
             if let Some(account_data) = bank.get_account(delegated_account) {
-                runtime.handle_delegation(delegated_account, account_data);
+                runtime.handle_delegation_with_owner_program(
+                    delegated_account,
+                    account_data,
+                    owner_program,
+                );
             } else {
                 warn!(
                     "Cannot handle delegation: account {} not found on L1",
@@ -514,7 +542,7 @@ mod portal_e2e_tests {
     use {
         super::*,
         agave_logger::setup,
-        northstar_portal::{OpenSession, PortalInstruction},
+        northstar_portal::{DelegationRecord, OpenSession, PortalInstruction},
         solana_account::{AccountSharedData, WritableAccount},
         solana_gossip::contact_info::ContactInfo,
         solana_instruction::{AccountMeta, Instruction},
@@ -577,6 +605,26 @@ mod portal_e2e_tests {
 
     fn find_delegation_record_pda(program_id: &Pubkey, delegated_account: &Pubkey) -> (Pubkey, u8) {
         Pubkey::find_program_address(&[b"delegation", delegated_account.as_ref()], program_id)
+    }
+
+    fn store_delegation_record(
+        bank: &Bank,
+        program_id: &Pubkey,
+        delegated_account: &Pubkey,
+        owner_program: &Pubkey,
+        grid_id: u64,
+    ) {
+        let (record_pubkey, bump) = find_delegation_record_pda(program_id, delegated_account);
+        let record = DelegationRecord {
+            discriminator: DelegationRecord::DISCRIMINATOR,
+            owner_program: owner_program.to_bytes(),
+            grid_id,
+            bump,
+        };
+        let data = borsh::to_vec(&record).unwrap();
+        let mut account = AccountSharedData::new(1_000_000, data.len(), program_id);
+        account.data_as_mut_slice().copy_from_slice(&data);
+        bank.store_account(&record_pubkey, &account);
     }
 
     fn find_deposit_receipt_pda(
@@ -1035,6 +1083,11 @@ mod portal_e2e_tests {
         let account = account_opt.unwrap();
         let account_data = account.data();
         assert_eq!(
+            account.owner(),
+            &owner_program,
+            "ER account owner should be the delegated owner program"
+        );
+        assert_eq!(
             account_data,
             delegated_account_data.as_slice(),
             "ER account data should match bytes written before delegation"
@@ -1079,6 +1132,7 @@ mod portal_e2e_tests {
         bank.transfer(100_000_000_000, &mint_keypair, &owner_pubkey)
             .unwrap();
 
+        let owner_program = Pubkey::new_unique();
         let delegated_account_pubkey = Pubkey::new_unique();
         let delegated_data = vec![0xDE; 64];
         let mut delegated_account =
@@ -1145,7 +1199,11 @@ mod portal_e2e_tests {
         let account_data = parent_bank
             .get_account(&delegated_account_pubkey)
             .expect("Account should exist on L1");
-        runtime.handle_delegation(&delegated_account_pubkey, account_data.clone());
+        runtime.handle_delegation_with_owner_program(
+            &delegated_account_pubkey,
+            account_data.clone(),
+            Some(owner_program),
+        );
 
         assert!(
             runtime
@@ -1163,6 +1221,11 @@ mod portal_e2e_tests {
             &delegated_data[..],
             "Account data should match L1 data"
         );
+        assert_eq!(
+            er_account.owner(),
+            &owner_program,
+            "ER account owner should be remapped to owner program"
+        );
         assert_eq!(er_account.lamports(), 5_000_000_000);
 
         std::thread::sleep(Duration::from_secs(2));
@@ -1174,6 +1237,66 @@ mod portal_e2e_tests {
 
         runtime.shutdown();
     }
+
+    #[test]
+    fn test_manager_handle_delegation_infers_owner_program() {
+        setup();
+
+        let (bank, _bank_forks, program_id, _mint_keypair) = setup_bank_with_portal();
+        let owner_program = Pubkey::new_unique();
+        let delegated_account_pubkey = Pubkey::new_unique();
+        let delegated_data = vec![0xAB; 32];
+        let mut delegated_account =
+            AccountSharedData::new(5_000_000_000, delegated_data.len(), &program_id);
+        delegated_account
+            .data_as_mut_slice()
+            .copy_from_slice(&delegated_data);
+        bank.store_account(&delegated_account_pubkey, &delegated_account);
+        store_delegation_record(
+            &bank,
+            &program_id,
+            &delegated_account_pubkey,
+            &owner_program,
+            1,
+        );
+        bank.freeze();
+
+        let manager_config = ManagerConfig {
+            portal_program_id: program_id,
+            manager_account: Arc::new(Keypair::new()),
+        };
+        let mut manager = Manager::new(manager_config);
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 1,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        manager
+            .create_ephemeral_runtime(
+                bank.clone(),
+                create_test_cluster_info(),
+                settings,
+                find_free_addr(),
+            )
+            .expect("Failed to create ephemeral runtime");
+
+        manager.handle_delegation(&bank, &delegated_account_pubkey);
+
+        let runtime = manager.runtime.as_ref().expect("runtime should exist");
+        let er_account = runtime
+            .bank()
+            .get_account(&delegated_account_pubkey)
+            .expect("Delegated account should be readable on ER");
+        assert_eq!(er_account.owner(), &owner_program);
+        assert_eq!(er_account.data(), &delegated_data[..]);
+
+        manager.shutdown_runtime();
+    }
+
     #[test]
     fn test_e2e_deposit_fee_detected() {
         setup();
