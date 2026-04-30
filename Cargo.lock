@@ -75,10 +75,10 @@ dependencies = [
  "rayon",
  "serde",
  "solana-bls-signatures",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-signer-store",
  "thiserror 2.0.18",
- "wincode",
+ "wincode 0.4.4",
 ]
 
 [[package]]
@@ -103,7 +103,7 @@ dependencies = [
  "solana-epoch-schedule",
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-keypair",
  "solana-pubkey 4.1.0",
  "solana-sha256-hasher",
@@ -132,7 +132,7 @@ version = "4.0.0-rc.0"
 dependencies = [
  "log",
  "solana-clock",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-signature",
  "solana-transaction",
  "solana-transaction-status",
@@ -163,7 +163,7 @@ dependencies = [
  "serde_yaml 0.9.34+deprecated",
  "solana-clap-utils",
  "solana-config-interface",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-keypair",
  "solana-message",
  "solana-pubkey 4.1.0",
@@ -292,7 +292,7 @@ dependencies = [
  "solana-accounts-db",
  "solana-clock",
  "solana-genesis-config",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-lattice-hash",
  "solana-measure",
  "solana-metrics",
@@ -332,7 +332,7 @@ dependencies = [
  "solana-epoch-rewards",
  "solana-epoch-schedule",
  "solana-fee-calculator",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-keccak-hasher",
  "solana-last-restart-slot",
@@ -371,7 +371,7 @@ dependencies = [
  "agave-transaction-view",
  "bincode",
  "criterion",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-keypair",
  "solana-message",
@@ -439,7 +439,7 @@ dependencies = [
  "solana-genesis-utils",
  "solana-geyser-plugin-manager",
  "solana-gossip",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-inflation",
  "solana-keypair",
  "solana-ledger",
@@ -518,7 +518,7 @@ dependencies = [
  "solana-frozen-abi-macro",
  "solana-genesis-config",
  "solana-gossip",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-keypair",
  "solana-ledger",
  "solana-measure",
@@ -542,7 +542,7 @@ dependencies = [
  "test-case",
  "thiserror 2.0.18",
  "tokio-util 0.7.18",
- "wincode",
+ "wincode 0.4.4",
 ]
 
 [[package]]
@@ -563,12 +563,12 @@ dependencies = [
  "solana-epoch-schedule",
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-pubkey 4.1.0",
  "solana-signer-store",
  "tempfile",
  "thiserror 2.0.18",
- "wincode",
+ "wincode 0.4.4",
 ]
 
 [[package]]
@@ -582,7 +582,7 @@ dependencies = [
  "solana-clap-utils",
  "solana-cli-config",
  "solana-cli-output",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-metrics",
  "solana-native-token",
  "solana-notifier",
@@ -778,7 +778,7 @@ dependencies = [
  "proc-macro-error2",
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -916,7 +916,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62945a2f7e6de02a31fe400aa489f0e0f5b2502e69f95f853adb82a96c7a6b60"
 dependencies = [
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -942,7 +942,7 @@ dependencies = [
  "num-traits",
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -1017,7 +1017,7 @@ checksum = "213888f660fddcca0d257e88e54ac05bca01885f258ccdf695bafd77031bb69d"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -1082,7 +1082,7 @@ checksum = "3109e49b1e4909e9db6515a30c633684d68cdeaa252f215214cb4fa1a5bfee2c"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
  "synstructure",
 ]
 
@@ -1094,7 +1094,7 @@ checksum = "7b18050c2cd6fe86c3a76584ef5e0baf286d038cda203eb6223df2cc413565f7"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -1177,7 +1177,7 @@ checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -1304,7 +1304,7 @@ dependencies = [
  "proc-macro-error",
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -1401,7 +1401,7 @@ dependencies = [
  "regex",
  "rustc-hash 2.1.1",
  "shlex",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -1546,7 +1546,7 @@ dependencies = [
  "proc-macro-crate 3.1.0",
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -1645,7 +1645,7 @@ checksum = "f9abbd1bc6865053c427f7198e6af43bfdedc55ab791faed4fbd361d789575ff"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -1774,7 +1774,7 @@ checksum = "45565fc9416b9896014f5732ac776f810ee53a66730c17e4020c3ec064a8f88f"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -1909,7 +1909,7 @@ dependencies = [
  "heck 0.5.0",
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2310,7 +2310,7 @@ checksum = "f46882e17999c6cc590af592290432be3bce0428cb0d5f8b6715e4dc7b383eb3"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2334,7 +2334,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "strsim 0.11.1",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2345,7 +2345,7 @@ checksum = "d38308df82d1080de0afee5d069fa14b0326a88c14f15c5ccda35b4a6c414c81"
 dependencies = [
  "darling_core",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2438,7 +2438,7 @@ checksum = "ef941ded77d15ca19b40374869ac6000af1c9f2a4c0f3d4c70926287e6364a8f"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2449,7 +2449,7 @@ checksum = "30542c1ad912e0e3d22a1935c290e12e8a29d704a420177a31faad4a601a0800"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2484,7 +2484,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "rustc_version 0.4.1",
- "syn 2.0.116",
+ "syn 2.0.117",
  "unicode-xid",
 ]
 
@@ -2597,7 +2597,7 @@ checksum = "788160fb30de9cdd857af31c6a2675904b16ece8fc2737b2c7127ba368c9d0f4"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2719,7 +2719,7 @@ dependencies = [
  "enum-ordinalize 4.3.0",
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2771,7 +2771,7 @@ dependencies = [
  "heck 0.5.0",
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2791,7 +2791,7 @@ checksum = "685adfa4d6f3d765a26bc5dbc936577de9abf756c1feeb3089b01dd395034842"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2824,7 +2824,7 @@ checksum = "0d28318a75d4aead5c4db25382e8ef717932d0346600cacae6357eb5941bc5ff"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -3151,7 +3151,7 @@ checksum = "e835b70203e41293343137df5c0664546da5745f82ec9b84d40be8336958447b"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -3891,7 +3891,7 @@ checksum = "1ec89e9337638ecdc08744df490b221a7399bf8d164eb52a665454e60e075ad6"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -4134,7 +4134,7 @@ checksum = "03343451ff899767262ec32146f6d559dd759fdadf42ff0e227c7c48f72594b4"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -4691,7 +4691,7 @@ dependencies = [
  "cfg-if 1.0.4",
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -4712,7 +4712,7 @@ checksum = "59b43b4fd69e3437618106f7754f34021b831a514f9e1a98ae863cabcd8d8dad"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -4800,7 +4800,7 @@ dependencies = [
  "solana-fee-structure",
  "solana-genesis-config",
  "solana-gossip",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-keypair",
  "solana-ledger",
@@ -4843,7 +4843,7 @@ dependencies = [
  "pinocchio-system",
  "shank",
  "solana-account",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-keypair",
  "solana-program-test",
@@ -4915,7 +4915,7 @@ checksum = "ed3955f1a9c7c0c15e092f9c887db08b1fc683305fdf6eb6684f22555355e202"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -4988,7 +4988,7 @@ dependencies = [
  "proc-macro-crate 3.1.0",
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -5068,7 +5068,7 @@ checksum = "a948666b637a0f465e8564c73e89d4dde00d72d4d473cc972f390fc3dcee7d9c"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -5759,7 +5759,7 @@ checksum = "9e2e25ee72f5b24d773cae88422baddefff7714f97aab68d96fe2b6fc4a28fb2"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -5826,9 +5826,9 @@ dependencies = [
 
 [[package]]
 name = "quote"
-version = "1.0.44"
+version = "1.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21b2ebcf727b7760c461f091f9f0f539b77b8e87f2fd88131e7f1b433b3cece4"
+checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
 dependencies = [
  "proc-macro2",
 ]
@@ -6688,7 +6688,7 @@ checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -6735,7 +6735,7 @@ dependencies = [
  "darling",
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -6786,7 +6786,7 @@ checksum = "0a7d91949b85b0d2fb687445e448b40d322b6b3e4af6b44a29b21d9a5f33e6d9"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -7121,7 +7121,7 @@ dependencies = [
  "solana-config-interface",
  "solana-epoch-schedule",
  "solana-fee-calculator",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-loader-v3-interface",
  "solana-nonce",
@@ -7190,7 +7190,7 @@ dependencies = [
  "solana-core",
  "solana-faucet",
  "solana-gossip",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-keypair",
  "solana-local-cluster",
@@ -7262,7 +7262,7 @@ dependencies = [
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
  "solana-genesis-config",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-keypair",
  "solana-lattice-hash",
@@ -7333,7 +7333,7 @@ dependencies = [
  "solana-program-error",
  "solana-sanitize",
  "solana-sha256-hasher",
- "wincode",
+ "wincode 0.4.4",
 ]
 
 [[package]]
@@ -7374,7 +7374,7 @@ dependencies = [
  "solana-banks-server",
  "solana-clock",
  "solana-commitment-config",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-message",
  "solana-program-pack",
  "solana-pubkey 4.1.0",
@@ -7401,7 +7401,7 @@ dependencies = [
  "solana-account",
  "solana-clock",
  "solana-commitment-config",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-message",
  "solana-pubkey 4.1.0",
  "solana-signature",
@@ -7424,7 +7424,7 @@ dependencies = [
  "solana-client",
  "solana-clock",
  "solana-commitment-config",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-message",
  "solana-net-utils",
  "solana-pubkey 4.1.0",
@@ -7483,7 +7483,7 @@ checksum = "7116e1d942a2432ca3f514625104757ab8a56233787e95144c93950029e31176"
 dependencies = [
  "blake3",
  "solana-define-syscall 4.0.1",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
 ]
 
 [[package]]
@@ -7499,7 +7499,7 @@ dependencies = [
  "solana-bloom",
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-sanitize",
  "solana-sha256-hasher",
  "solana-signature",
@@ -7647,7 +7647,7 @@ dependencies = [
  "agave-feature-set",
  "solana-bpf-loader-program",
  "solana-compute-budget-program",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-loader-v4-program",
  "solana-program-runtime",
  "solana-pubkey 4.1.0",
@@ -7691,7 +7691,7 @@ dependencies = [
  "solana-cluster-type",
  "solana-commitment-config",
  "solana-derivation-path",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-keypair",
  "solana-message",
  "solana-native-token",
@@ -7723,7 +7723,7 @@ dependencies = [
  "solana-cluster-type",
  "solana-commitment-config",
  "solana-derivation-path",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-keypair",
  "solana-message",
  "solana-native-token",
@@ -7790,7 +7790,7 @@ dependencies = [
  "solana-feature-gate-interface",
  "solana-fee-calculator",
  "solana-fee-structure",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-keypair",
  "solana-loader-v3-interface",
@@ -7877,7 +7877,7 @@ dependencies = [
  "solana-cli-config",
  "solana-clock",
  "solana-epoch-info",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-keypair",
  "solana-message",
  "solana-packet 4.0.0",
@@ -7918,7 +7918,7 @@ dependencies = [
  "solana-commitment-config",
  "solana-connection-cache",
  "solana-epoch-info",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-keypair",
  "solana-measure",
@@ -8060,7 +8060,7 @@ dependencies = [
  "solana-compute-budget",
  "solana-compute-budget-instruction",
  "solana-compute-budget-interface",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-keypair",
  "solana-message",
@@ -8242,7 +8242,7 @@ dependencies = [
  "solana-geyser-plugin-manager",
  "solana-gossip",
  "solana-hard-forks",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-keypair",
  "solana-leader-schedule",
@@ -8339,7 +8339,7 @@ dependencies = [
  "solana-fee-structure",
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-keypair",
  "solana-message",
@@ -8495,7 +8495,7 @@ dependencies = [
  "solana-bls-signatures",
  "solana-clock",
  "solana-entry",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-keypair",
  "solana-measure",
  "solana-merkle-tree",
@@ -8513,7 +8513,7 @@ dependencies = [
  "solana-transaction",
  "solana-transaction-error",
  "thiserror 2.0.18",
- "wincode",
+ "wincode 0.4.4",
 ]
 
 [[package]]
@@ -8548,7 +8548,7 @@ checksum = "1ee8beac9bff4db9225e57d532d169b0be5e447f1e6601a2f50f27a01bf5518f"
 dependencies = [
  "siphasher 0.3.11",
  "solana-address 2.2.0",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
 ]
 
 [[package]]
@@ -8607,7 +8607,7 @@ dependencies = [
  "serde",
  "solana-cli-output",
  "solana-faucet",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-keypair",
  "solana-message",
@@ -8739,7 +8739,7 @@ checksum = "5396c179ca7d76f866b102eb3819ca3922bdaa33c9ada8005f4e98fd59ab65f5"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -8830,7 +8830,7 @@ dependencies = [
  "log",
  "solana-download-utils",
  "solana-genesis-config",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-rpc-client",
  "thiserror 2.0.18",
 ]
@@ -8851,7 +8851,7 @@ dependencies = [
  "solana-accounts-db",
  "solana-clock",
  "solana-entry",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-ledger",
  "solana-pubkey 4.1.0",
  "solana-rpc",
@@ -8906,7 +8906,7 @@ dependencies = [
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
  "solana-gossip",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-keypair",
  "solana-ledger",
  "solana-measure",
@@ -8971,14 +8971,14 @@ version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "337c246447142f660f778cf6cb582beba8e28deb05b3b24bfb9ffd7c562e5f41"
 dependencies = [
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
 ]
 
 [[package]]
 name = "solana-hash"
-version = "4.2.0"
+version = "4.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8064ea1d591ec791be95245058ca40f4f5345d390c200069d0f79bbf55bfae55"
+checksum = "f1b113239362cee7093bfb250467138f079a2a03673181dc15bff6ccd677912d"
 dependencies = [
  "borsh",
  "bytemuck",
@@ -8990,7 +8990,7 @@ dependencies = [
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
  "solana-sanitize",
- "wincode",
+ "wincode 0.5.3",
 ]
 
 [[package]]
@@ -9062,7 +9062,7 @@ checksum = "ed1c0d16d6fdeba12291a1f068cdf0d479d9bff1141bf44afd7aa9d485f65ef8"
 dependencies = [
  "sha3",
  "solana-define-syscall 4.0.1",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
 ]
 
 [[package]]
@@ -9210,7 +9210,7 @@ dependencies = [
  "solana-frozen-abi-macro",
  "solana-genesis-config",
  "solana-genesis-utils",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-keypair",
  "solana-leader-schedule",
@@ -9263,7 +9263,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "trees",
- "wincode",
+ "wincode 0.4.4",
 ]
 
 [[package]]
@@ -9370,7 +9370,7 @@ dependencies = [
  "solana-genesis-utils",
  "solana-gossip",
  "solana-hard-forks",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-keypair",
  "solana-leader-schedule",
  "solana-ledger",
@@ -9421,7 +9421,7 @@ version = "4.0.0-rc.0"
 dependencies = [
  "fast-math",
  "hex",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-sha256-hasher",
 ]
 
@@ -9437,7 +9437,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "solana-address 2.2.0",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-sanitize",
  "solana-sdk-ids",
@@ -9544,7 +9544,7 @@ dependencies = [
  "log",
  "reqwest 0.12.28",
  "serde_json",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
 ]
 
 [[package]]
@@ -9616,7 +9616,7 @@ dependencies = [
  "solana-clock",
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-keypair",
  "solana-message",
  "solana-metrics",
@@ -9656,7 +9656,7 @@ dependencies = [
  "shuttle",
  "solana-clock",
  "solana-entry",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-keypair",
  "solana-leader-schedule",
  "solana-ledger",
@@ -9865,7 +9865,7 @@ dependencies = [
  "solana-fee-structure",
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-instruction-error",
  "solana-keypair",
@@ -9927,7 +9927,7 @@ dependencies = [
  "solana-epoch-schedule",
  "solana-fee-calculator",
  "solana-genesis-config",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-keypair",
  "solana-loader-v3-interface",
@@ -10155,7 +10155,7 @@ dependencies = [
  "solana-fee-structure",
  "solana-genesis-config",
  "solana-gossip",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-keypair",
  "solana-ledger",
@@ -10244,7 +10244,7 @@ dependencies = [
  "solana-epoch-info",
  "solana-epoch-schedule",
  "solana-feature-gate-interface",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-keypair",
  "solana-message",
@@ -10296,7 +10296,7 @@ dependencies = [
  "solana-clap-utils",
  "solana-commitment-config",
  "solana-fee-calculator",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-keypair",
  "solana-message",
  "solana-nonce",
@@ -10359,7 +10359,7 @@ dependencies = [
  "solana-clock",
  "solana-commitment-config",
  "solana-connection-cache",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-keypair",
  "solana-net-utils",
  "solana-pubkey 4.1.0",
@@ -10462,7 +10462,7 @@ dependencies = [
  "solana-frozen-abi-macro",
  "solana-genesis-config",
  "solana-hard-forks",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-inflation",
  "solana-instruction",
  "solana-instruction-error",
@@ -10528,7 +10528,7 @@ dependencies = [
  "tempfile",
  "test-case",
  "thiserror 2.0.18",
- "wincode",
+ "wincode 0.4.4",
 ]
 
 [[package]]
@@ -10545,7 +10545,7 @@ dependencies = [
  "solana-compute-budget",
  "solana-compute-budget-instruction",
  "solana-compute-budget-interface",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-keypair",
  "solana-message",
@@ -10607,7 +10607,7 @@ dependencies = [
  "bs58",
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -10684,7 +10684,7 @@ dependencies = [
  "solana-clock",
  "solana-fee-calculator",
  "solana-genesis-config",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-keypair",
  "solana-measure",
  "solana-metrics",
@@ -10741,7 +10741,7 @@ checksum = "db7dc3011ea4c0334aaaa7e7128cb390ecf546b28d412e9bf2064680f57f588f"
 dependencies = [
  "sha2 0.10.9",
  "solana-define-syscall 4.0.1",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
 ]
 
 [[package]]
@@ -10781,7 +10781,7 @@ dependencies = [
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
  "solana-sanitize",
- "wincode",
+ "wincode 0.4.4",
 ]
 
 [[package]]
@@ -10814,7 +10814,7 @@ checksum = "2585f70191623887329dfb5078da3a00e15e3980ea67f42c2e10b07028419f43"
 dependencies = [
  "serde",
  "serde_derive",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-sdk-ids",
  "solana-sysvar-id",
 ]
@@ -10919,7 +10919,7 @@ dependencies = [
  "serde",
  "smpl_jwt",
  "solana-clock",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-keypair",
  "solana-message",
  "solana-metrics",
@@ -10950,7 +10950,7 @@ dependencies = [
  "protobuf-src",
  "serde",
  "solana-account-decoder",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-message",
  "solana-pubkey 4.1.0",
@@ -11043,7 +11043,7 @@ dependencies = [
  "solana-fee-structure",
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-instructions-sysvar",
  "solana-keypair",
@@ -11191,7 +11191,7 @@ dependencies = [
 name = "solana-svm-transaction"
 version = "4.0.0-rc.0"
 dependencies = [
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-message",
  "solana-nonce",
  "solana-pubkey 4.1.0",
@@ -11255,7 +11255,7 @@ dependencies = [
  "solana-bincode",
  "solana-compute-budget",
  "solana-fee-calculator",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-nonce",
  "solana-nonce-account",
@@ -11311,7 +11311,7 @@ dependencies = [
  "solana-fee-calculator",
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-last-restart-slot",
  "solana-program-entrypoint",
@@ -11428,7 +11428,7 @@ dependencies = [
  "solana-cli-output",
  "solana-clock",
  "solana-commitment-config",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-keypair",
  "solana-message",
@@ -11467,7 +11467,7 @@ dependencies = [
  "solana-commitment-config",
  "solana-connection-cache",
  "solana-epoch-info",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-keypair",
  "solana-message",
  "solana-net-utils",
@@ -11566,7 +11566,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "solana-address 2.2.0",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-instruction-error",
  "solana-message",
@@ -11622,7 +11622,7 @@ dependencies = [
  "bincode",
  "log",
  "rand 0.9.2",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-keypair",
  "solana-packet 4.0.0",
  "solana-perf",
@@ -11650,7 +11650,7 @@ dependencies = [
  "solana-account-decoder",
  "solana-address-lookup-table-interface",
  "solana-clock",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-loader-v2-interface",
  "solana-loader-v3-interface",
@@ -11727,7 +11727,7 @@ dependencies = [
  "solana-entry",
  "solana-genesis-config",
  "solana-gossip",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-keypair",
  "solana-ledger",
  "solana-measure",
@@ -11753,7 +11753,7 @@ dependencies = [
  "static_assertions",
  "test-case",
  "thiserror 2.0.18",
- "wincode",
+ "wincode 0.4.4",
 ]
 
 [[package]]
@@ -11805,7 +11805,7 @@ dependencies = [
  "solana-clock",
  "solana-cost-model",
  "solana-entry",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-keypair",
  "solana-ledger",
  "solana-metrics",
@@ -11865,7 +11865,7 @@ dependencies = [
  "solana-clock",
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-keypair",
  "solana-packet 4.0.0",
@@ -11901,7 +11901,7 @@ dependencies = [
  "solana-clock",
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-instruction-error",
  "solana-pubkey 4.1.0",
@@ -11934,7 +11934,7 @@ dependencies = [
  "solana-fee-calculator",
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
- "solana-hash 4.2.0",
+ "solana-hash 4.3.0",
  "solana-instruction",
  "solana-keypair",
  "solana-packet 4.0.0",
@@ -12117,7 +12117,7 @@ checksum = "d9e8418ea6269dcfb01c712f0444d2c75542c04448b480e87de59d2865edc750"
 dependencies = [
  "quote",
  "spl-discriminator-syn",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -12129,7 +12129,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "sha2 0.10.9",
- "syn 2.0.116",
+ "syn 2.0.117",
  "thiserror 1.0.69",
 ]
 
@@ -12365,7 +12365,7 @@ dependencies = [
  "heck 0.5.0",
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -12393,9 +12393,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "2.0.116"
+version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3df424c70518695237746f84cede799c9c58fcb37450d7b23716568cc8bc69cb"
+checksum = "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -12425,7 +12425,7 @@ checksum = "c8af7666ab7b6390ab78131fb5b0fce11d6b7a6951602017c35fa82800708971"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -12586,7 +12586,7 @@ dependencies = [
  "proc-macro-error",
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -12598,7 +12598,7 @@ dependencies = [
  "proc-macro-error",
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
  "test-case-core",
 ]
 
@@ -12643,7 +12643,7 @@ checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -12654,7 +12654,7 @@ checksum = "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -12819,7 +12819,7 @@ checksum = "af407857209536a95c8e56f8231ef2c2e2aff839b22e07a1ffcbc617e9db9fa5"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -13085,7 +13085,7 @@ checksum = "81383ab64e72a7a8b8e13130c49e3dab29def6d0c7d76a03087b3cf71c5c6903"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -13481,7 +13481,7 @@ dependencies = [
  "bumpalo",
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
  "wasm-bindgen-shared",
 ]
 
@@ -13604,15 +13604,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "wincode-derive"
-version = "0.4.2"
+name = "wincode"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26a7a568eda854acc9945ed136a9d50b8c6d31911584624958808ae96eee3912"
+checksum = "b4c754f1fc41250f2f742a27ba0fcc9f73df1dec23f6878490770855d43c322d"
+dependencies = [
+ "pastey",
+ "proc-macro2",
+ "quote",
+ "thiserror 2.0.18",
+ "wincode-derive",
+]
+
+[[package]]
+name = "wincode-derive"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e070787599c7c067b89598cd3eda440cca1b69eda9e0ff7c725fc8679ce9eb4"
 dependencies = [
  "darling",
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -14066,7 +14079,7 @@ checksum = "28cc31741b18cb6f1d5ff12f5b7523e3d6eb0852bbbad19d73905511d9849b95"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
  "synstructure",
 ]
 
@@ -14087,7 +14100,7 @@ checksum = "d8a8d209fdf45cf5138cbb5a506f6b52522a25afccc534d1475dad8e31105c6a"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -14107,7 +14120,7 @@ checksum = "0ea7b4a3637ea8669cedf0f1fd5c286a17f3de97b8dd5a70a6c167a1730e63a5"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
  "synstructure",
 ]
 
@@ -14128,7 +14141,7 @@ checksum = "ce36e65b0d2999d2aafac989fb249189a141aee1f53c612c1f37d72631959f69"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -14150,7 +14163,7 @@ checksum = "6eafa6dfb17584ea3e2bd6e76e0cc15ad7af12b09abdd1ca55961bed9b1063c6"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
