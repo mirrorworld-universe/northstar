@@ -120,12 +120,15 @@ pub struct EphemeralRuntime {
 }
 
 impl EphemeralRuntime {
-    fn delegation_record_pda(portal_program_id: &Pubkey, delegated_account: &Pubkey) -> Pubkey {
-        Pubkey::find_program_address(
-            &[b"delegation", delegated_account.as_ref()],
-            portal_program_id,
-        )
-        .0
+    fn delegation_record_pda(
+        portal_program_id: &Pubkey,
+        delegated_account: &Pubkey,
+    ) -> (Pubkey, u8) {
+        let (pda, bump) = northstar_portal::find_delegation_record_pda(
+            &portal_program_id.to_bytes(),
+            &delegated_account.to_bytes(),
+        );
+        (Pubkey::new_from_array(pda), bump)
     }
 
     fn effective_delegated_account(
@@ -145,7 +148,7 @@ impl EphemeralRuntime {
             return None;
         }
 
-        let record_pubkey = Self::delegation_record_pda(portal_program_id, delegated_account);
+        let (record_pubkey, _) = Self::delegation_record_pda(portal_program_id, delegated_account);
         let Some(record_account) = parent_bank.get_account(&record_pubkey) else {
             warn!(
                 "Delegated account {delegated_account} missing delegation record {record_pubkey}"
@@ -1051,12 +1054,8 @@ mod tests {
         owner_program: &Pubkey,
         grid_id: u64,
     ) {
-        let record_pubkey =
+        let (record_pubkey, bump) =
             EphemeralRuntime::delegation_record_pda(portal_program_id, delegated_account);
-        let (_, bump) = Pubkey::find_program_address(
-            &[b"delegation", delegated_account.as_ref()],
-            portal_program_id,
-        );
         let record = DelegationRecord {
             discriminator: DelegationRecord::DISCRIMINATOR,
             owner_program: owner_program.to_bytes(),

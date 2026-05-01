@@ -1,5 +1,6 @@
 use {
     log::*,
+    northstar_portal::find_delegation_record_pda as find_portal_delegation_record_pda,
     portal_state::{PortalAccount, try_parse_raw_portal_account},
     solana_account::{AccountSharedData, ReadableAccount},
     solana_fee_structure::FeeStructure,
@@ -293,18 +294,23 @@ impl Manager {
         undelegated_account
     }
 
-    fn delegated_owner_program(&self, bank: &Bank, delegated_account: &Pubkey) -> Option<Pubkey> {
-        let (record_pubkey, _) = Pubkey::find_program_address(
-            &[b"delegation", delegated_account.as_ref()],
-            &self.config.portal_program_id,
+    fn delegation_record(
+        &self,
+        bank: &Bank,
+        delegated_account: &Pubkey,
+    ) -> Option<northstar_portal::DelegationRecord> {
+        let (record_pubkey, _) = find_portal_delegation_record_pda(
+            &self.config.portal_program_id.to_bytes(),
+            &delegated_account.to_bytes(),
         );
+        let record_pubkey = Pubkey::new_from_array(record_pubkey);
         let record_account = bank.get_account(&record_pubkey)?;
         let PortalAccount::DelegationRecord(record) =
             try_parse_raw_portal_account(record_account.data())?
         else {
             return None;
         };
-        Some(record.owner_program.into())
+        Some(record)
     }
 
     fn find_undelegated_account(
@@ -506,7 +512,9 @@ impl Manager {
     /// the delegated set so transactions are allowed to write to it.
     /// Only processes when a session is active.
     pub fn handle_delegation(&self, bank: &Bank, delegated_account: &Pubkey) {
-        let owner_program = self.delegated_owner_program(bank, delegated_account);
+        let owner_program = self
+            .delegation_record(bank, delegated_account)
+            .map(|record| record.owner_program.into());
         self.handle_delegation_with_owner_program(bank, delegated_account, owner_program);
     }
 
@@ -604,7 +612,11 @@ mod portal_e2e_tests {
     }
 
     fn find_delegation_record_pda(program_id: &Pubkey, delegated_account: &Pubkey) -> (Pubkey, u8) {
-        Pubkey::find_program_address(&[b"delegation", delegated_account.as_ref()], program_id)
+        let (pda, bump) = find_portal_delegation_record_pda(
+            &program_id.to_bytes(),
+            &delegated_account.to_bytes(),
+        );
+        (Pubkey::new_from_array(pda), bump)
     }
 
     fn store_delegation_record(
