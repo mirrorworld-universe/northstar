@@ -120,6 +120,62 @@ pub struct EphemeralRuntime {
 }
 
 impl EphemeralRuntime {
+    fn delegation_record_pda(
+        portal_program_id: &Pubkey,
+        delegated_account: &Pubkey,
+    ) -> (Pubkey, u8) {
+        let (pda, bump) = northstar_portal::find_delegation_record_pda(
+            &portal_program_id.to_bytes(),
+            &delegated_account.to_bytes(),
+        );
+        (Pubkey::new_from_array(pda), bump)
+    }
+
+    fn effective_delegated_account(
+        parent_bank: &Bank,
+        portal_program_id: &Pubkey,
+        grid_id: u64,
+        delegated_account: &Pubkey,
+        account: &AccountSharedData,
+    ) -> Option<AccountSharedData> {
+        if account.owner() != portal_program_id {
+            warn!(
+                "Account {} listed as delegated but owned by {}, not portal program {}. Skipping.",
+                delegated_account,
+                account.owner(),
+                portal_program_id,
+            );
+            return None;
+        }
+
+        let (record_pubkey, _) = Self::delegation_record_pda(portal_program_id, delegated_account);
+        let Some(record_account) = parent_bank.get_account(&record_pubkey) else {
+            warn!(
+                "Delegated account {delegated_account} missing delegation record {record_pubkey}"
+            );
+            return None;
+        };
+        let Some(crate::portal_state::PortalAccount::DelegationRecord(record)) =
+            crate::portal_state::try_parse_raw_portal_account(record_account.data())
+        else {
+            warn!("Delegation record {record_pubkey} has invalid account data");
+            return None;
+        };
+
+        if record.grid_id != grid_id {
+            warn!(
+                "Delegation record {} grid {} does not match active grid {}",
+                record_pubkey, record.grid_id, grid_id,
+            );
+            return None;
+        }
+
+        let owner_program: Pubkey = record.owner_program.into();
+        let mut effective_account = account.clone();
+        effective_account.set_owner(owner_program);
+        Some(effective_account)
+    }
+
     /// Slot offset that separates ER slot numbers from L1 slot numbers.
     /// The ER and L1 share the same `AccountsDb`, whose root tracker requires
     /// `add_root` calls in monotonically increasing order.  By placing ER slots
@@ -372,18 +428,18 @@ impl EphemeralRuntime {
                 warn!("Account {pubkey} listed as delegated but does not exist on L1. Skipping.");
                 continue;
             };
-            if account.owner() != &portal_program_id {
-                warn!(
-                    "Account {} listed as delegated but owned by {}, not portal program {}. \
-                     Skipping.",
-                    pubkey,
-                    account.owner(),
-                    portal_program_id,
-                );
+            let Some(effective_account) = Self::effective_delegated_account(
+                &parent_bank,
+                &portal_program_id,
+                settings.grid_id,
+                pubkey,
+                &account,
+            ) else {
                 continue;
-            }
+            };
             info!("Delegated account {} validated and snapshotted", pubkey);
             initial_account_snapshots.insert(*pubkey, account);
+            initial_bank.store_account(pubkey, &effective_account);
             delegated_accounts.insert(*pubkey);
         }
 
@@ -843,9 +899,22 @@ impl EphemeralRuntime {
     /// Copies the account data from L1 into the ER bank and adds it to the
     /// delegated accounts set so transactions can write to it.
     pub fn handle_delegation(&self, delegated_account: &Pubkey, account_data: AccountSharedData) {
+        self.handle_delegation_with_owner_program(delegated_account, account_data, None);
+    }
+
+    pub fn handle_delegation_with_owner_program(
+        &self,
+        delegated_account: &Pubkey,
+        account_data: AccountSharedData,
+        owner_program: Option<Pubkey>,
+    ) {
         let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
         let bank = self.bank();
-        bank.store_account(delegated_account, &account_data);
+        let mut er_account = account_data.clone();
+        if let Some(owner_program) = owner_program {
+            er_account.set_owner(owner_program);
+        }
+        bank.store_account(delegated_account, &er_account);
 
         // Add to the delegated accounts set so the tx client allows writes
         self.delegated_accounts
@@ -864,8 +933,8 @@ impl EphemeralRuntime {
         info!(
             "Delegated account {} added to ER (owner: {}, lamports: {})",
             delegated_account,
-            account_data.owner(),
-            account_data.lamports()
+            er_account.owner(),
+            er_account.lamports()
         );
     }
 
@@ -920,6 +989,7 @@ impl Drop for EphemeralRuntime {
 mod tests {
     use {
         super::*,
+        northstar_portal::DelegationRecord,
         solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
         solana_compute_budget_interface::ComputeBudgetInstruction,
         solana_fee_structure::FeeStructure,
@@ -975,6 +1045,27 @@ mod tests {
     fn fund_account(bank: &Bank, pubkey: &Pubkey, lamports: u64) {
         let account = AccountSharedData::new(lamports, 0, &system_program::id());
         bank.store_account(pubkey, &account);
+    }
+
+    fn store_delegation_record(
+        bank: &Bank,
+        portal_program_id: &Pubkey,
+        delegated_account: &Pubkey,
+        owner_program: &Pubkey,
+        grid_id: u64,
+    ) {
+        let (record_pubkey, bump) =
+            EphemeralRuntime::delegation_record_pda(portal_program_id, delegated_account);
+        let record = DelegationRecord {
+            discriminator: DelegationRecord::DISCRIMINATOR,
+            owner_program: owner_program.to_bytes(),
+            grid_id,
+            bump,
+        };
+        let data = borsh::to_vec(&record).unwrap();
+        let mut account = AccountSharedData::new(1_000_000, data.len(), portal_program_id);
+        account.data_as_mut_slice().copy_from_slice(&data);
+        bank.store_account(&record_pubkey, &account);
     }
 
     fn er_fee_structure(lamports_per_signature: u64) -> FeeStructure {
@@ -2133,13 +2224,127 @@ mod tests {
     }
 
     #[test]
+    fn test_handle_delegation_with_owner_program_remaps_er_owner() {
+        agave_logger::setup();
+
+        let parent_bank = Arc::new(create_test_bank());
+        let portal_program_id = Pubkey::new_unique();
+        let owner_program = Pubkey::new_unique();
+        let delegated_pubkey = Pubkey::new_unique();
+
+        let mut delegated_l1_snapshot = AccountSharedData::new(1_000_000, 4, &portal_program_id);
+        delegated_l1_snapshot
+            .data_as_mut_slice()
+            .copy_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE]);
+        delegated_l1_snapshot.set_executable(true);
+        parent_bank.store_account(&delegated_pubkey, &delegated_l1_snapshot);
+        parent_bank.freeze();
+
+        let cluster_info = create_test_cluster_info();
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+
+        let mut runtime = EphemeralRuntime::new(
+            parent_bank,
+            cluster_info,
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            portal_program_id,
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.activate();
+
+        runtime.handle_delegation_with_owner_program(
+            &delegated_pubkey,
+            delegated_l1_snapshot.clone(),
+            Some(owner_program),
+        );
+
+        let er_account = runtime
+            .bank()
+            .get_account(&delegated_pubkey)
+            .expect("delegated account should be visible in ER");
+        assert_eq!(er_account.owner(), &owner_program);
+        assert_eq!(er_account.data(), delegated_l1_snapshot.data());
+        assert_eq!(er_account.executable(), delegated_l1_snapshot.executable());
+        assert!(runtime.delegated_accounts().contains(&delegated_pubkey));
+
+        runtime.shutdown();
+    }
+
+    #[test]
     fn test_delegation_validation_valid() {
-        // Test that a properly delegated account (owned by portal) is validated
+        let parent_bank = create_test_bank();
+        let portal_program_id = Pubkey::new_unique();
+        let owner_program = Pubkey::new_unique();
+        let delegated_pubkey = Pubkey::new_unique();
+        let grid_id = 7;
+
+        let account = AccountSharedData::new(1_000_000, 0, &portal_program_id);
+        parent_bank.store_account(&delegated_pubkey, &account);
+        store_delegation_record(
+            &parent_bank,
+            &portal_program_id,
+            &delegated_pubkey,
+            &owner_program,
+            grid_id,
+        );
+        parent_bank.freeze();
+
+        let cluster_info = create_test_cluster_info();
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![delegated_pubkey],
+        };
+
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            cluster_info,
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            portal_program_id,
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+
+        assert!(runtime.delegated_accounts().contains(&delegated_pubkey));
+        let snapshot = runtime
+            .initial_account_snapshot(&delegated_pubkey)
+            .expect("L1 snapshot should be stored");
+        assert_eq!(snapshot.owner(), &portal_program_id);
+
+        let er_account = runtime
+            .bank()
+            .get_account(&delegated_pubkey)
+            .expect("delegated account should be visible in ER");
+        assert_eq!(er_account.owner(), &owner_program);
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_delegation_validation_missing_record() {
         let parent_bank = create_test_bank();
         let portal_program_id = Pubkey::new_unique();
         let delegated_pubkey = Pubkey::new_unique();
 
-        // Create an account owned by the portal program
         let account = AccountSharedData::new(1_000_000, 0, &portal_program_id);
         parent_bank.store_account(&delegated_pubkey, &account);
         parent_bank.freeze();
@@ -2167,14 +2372,62 @@ mod tests {
         )
         .unwrap();
 
-        // Verify the delegated account is tracked
-        assert!(runtime.delegated_accounts().contains(&delegated_pubkey));
-
-        // Verify snapshot is stored
+        assert!(!runtime.delegated_accounts().contains(&delegated_pubkey));
         assert!(
             runtime
                 .initial_account_snapshot(&delegated_pubkey)
-                .is_some()
+                .is_none()
+        );
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_delegation_validation_wrong_grid() {
+        let parent_bank = create_test_bank();
+        let portal_program_id = Pubkey::new_unique();
+        let owner_program = Pubkey::new_unique();
+        let delegated_pubkey = Pubkey::new_unique();
+
+        let account = AccountSharedData::new(1_000_000, 0, &portal_program_id);
+        parent_bank.store_account(&delegated_pubkey, &account);
+        store_delegation_record(
+            &parent_bank,
+            &portal_program_id,
+            &delegated_pubkey,
+            &owner_program,
+            41,
+        );
+        parent_bank.freeze();
+
+        let cluster_info = create_test_cluster_info();
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 42,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![delegated_pubkey],
+        };
+
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            cluster_info,
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            portal_program_id,
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+
+        assert!(!runtime.delegated_accounts().contains(&delegated_pubkey));
+        assert!(
+            runtime
+                .initial_account_snapshot(&delegated_pubkey)
+                .is_none()
         );
 
         runtime.shutdown();
@@ -2182,13 +2435,11 @@ mod tests {
 
     #[test]
     fn test_delegation_validation_wrong_owner() {
-        // Test that accounts not owned by portal are rejected
         let parent_bank = create_test_bank();
         let portal_program_id = Pubkey::new_unique();
         let wrong_owner_program = Pubkey::new_unique();
         let delegated_pubkey = Pubkey::new_unique();
 
-        // Create an account owned by a different program
         let account = AccountSharedData::new(1_000_000, 0, &wrong_owner_program);
         parent_bank.store_account(&delegated_pubkey, &account);
         parent_bank.freeze();
@@ -2204,7 +2455,6 @@ mod tests {
             delegated_accounts: vec![delegated_pubkey],
         };
 
-        // Should succeed but the account should NOT be in delegated set
         let mut runtime = EphemeralRuntime::new(
             Arc::new(parent_bank),
             cluster_info,
@@ -2217,7 +2467,6 @@ mod tests {
         )
         .unwrap();
 
-        // Verify the account is NOT in delegated set (rejected due to wrong owner)
         assert!(!runtime.delegated_accounts().contains(&delegated_pubkey));
 
         runtime.shutdown();
@@ -2225,12 +2474,10 @@ mod tests {
 
     #[test]
     fn test_delegation_validation_nonexistent() {
-        // Test that nonexistent accounts are rejected
         let parent_bank = create_test_bank();
         let portal_program_id = Pubkey::new_unique();
         let nonexistent_pubkey = Pubkey::new_unique();
 
-        // Don't create the account - it doesn't exist
         parent_bank.freeze();
 
         let cluster_info = create_test_cluster_info();
@@ -2244,7 +2491,6 @@ mod tests {
             delegated_accounts: vec![nonexistent_pubkey],
         };
 
-        // Should succeed but the account should NOT be in delegated set
         let mut runtime = EphemeralRuntime::new(
             Arc::new(parent_bank),
             cluster_info,
@@ -2257,7 +2503,6 @@ mod tests {
         )
         .unwrap();
 
-        // Verify the account is NOT in delegated set (doesn't exist)
         assert!(!runtime.delegated_accounts().contains(&nonexistent_pubkey));
 
         runtime.shutdown();
@@ -2265,15 +2510,15 @@ mod tests {
 
     #[test]
     fn test_delegation_validation_multiple() {
-        // Test validation of multiple delegated accounts
         let parent_bank = create_test_bank();
         let portal_program_id = Pubkey::new_unique();
+        let owner_program1 = Pubkey::new_unique();
+        let owner_program2 = Pubkey::new_unique();
 
         let delegated1 = Pubkey::new_unique();
         let delegated2 = Pubkey::new_unique();
         let wrong_owner = Pubkey::new_unique();
 
-        // Create valid delegated accounts
         let account1 = AccountSharedData::new(1_000_000, 0, &portal_program_id);
         let account2 = AccountSharedData::new(2_000_000, 0, &portal_program_id);
         let account3 = AccountSharedData::new(3_000_000, 0, &Pubkey::new_unique()); // wrong owner
@@ -2281,6 +2526,20 @@ mod tests {
         parent_bank.store_account(&delegated1, &account1);
         parent_bank.store_account(&delegated2, &account2);
         parent_bank.store_account(&wrong_owner, &account3);
+        store_delegation_record(
+            &parent_bank,
+            &portal_program_id,
+            &delegated1,
+            &owner_program1,
+            0,
+        );
+        store_delegation_record(
+            &parent_bank,
+            &portal_program_id,
+            &delegated2,
+            &owner_program2,
+            0,
+        );
         parent_bank.freeze();
 
         let cluster_info = create_test_cluster_info();
@@ -2306,14 +2565,20 @@ mod tests {
         )
         .unwrap();
 
-        // Only 2 should be in the delegated set (valid ones)
         assert_eq!(runtime.delegated_accounts().len(), 2);
         assert!(runtime.delegated_accounts().contains(&delegated1));
         assert!(runtime.delegated_accounts().contains(&delegated2));
 
-        // Snapshots should exist for valid accounts
         assert!(runtime.initial_account_snapshot(&delegated1).is_some());
         assert!(runtime.initial_account_snapshot(&delegated2).is_some());
+        assert_eq!(
+            runtime.bank().get_account(&delegated1).unwrap().owner(),
+            &owner_program1
+        );
+        assert_eq!(
+            runtime.bank().get_account(&delegated2).unwrap().owner(),
+            &owner_program2
+        );
 
         runtime.shutdown();
     }
@@ -2325,13 +2590,28 @@ mod tests {
         let parent_bank = create_test_bank();
         let portal_program_id = Pubkey::new_unique();
 
-        // Create two delegated accounts owned by portal program
         let delegated1 = Pubkey::new_unique();
         let delegated2 = Pubkey::new_unique();
+        let owner_program1 = Pubkey::new_unique();
+        let owner_program2 = Pubkey::new_unique();
         let account1 = AccountSharedData::new(1_000_000, 0, &portal_program_id);
         let account2 = AccountSharedData::new(2_000_000, 0, &portal_program_id);
         parent_bank.store_account(&delegated1, &account1);
         parent_bank.store_account(&delegated2, &account2);
+        store_delegation_record(
+            &parent_bank,
+            &portal_program_id,
+            &delegated1,
+            &owner_program1,
+            0,
+        );
+        store_delegation_record(
+            &parent_bank,
+            &portal_program_id,
+            &delegated2,
+            &owner_program2,
+            0,
+        );
         parent_bank.freeze();
 
         let cluster_info = create_test_cluster_info();
