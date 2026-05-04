@@ -1,4 +1,4 @@
-# Agave Style Guidelines
+# Contributing to NorthStar
 
 The goal of these guidelines is to improve developer productivity by allowing
 developers to jump into any file in the codebase and not need to adapt to
@@ -11,12 +11,12 @@ conventions. These guidelines also outline the PR process etiquette.
 ## First Time Contributors
 
 First time contributors should read through this guide in its entirety before
-opening a pull request. Additionally, pull requests from external (and
-especially first time) contributors that make inconsequential changes may be
-closed without merging at the discretion of Agave maintainers. Pull requests
-will be deemed consequential or not on a case by case basis. As an example,
-spelling and/or grammar fixes will almost always be considered inconsequential,
-unless they materially correct the message.
+opening a pull request. Pull requests from external (and especially first time)
+contributors that make inconsequential changes may be closed without merging at
+the discretion of the maintainers. Pull requests will be deemed consequential
+or not on a case by case basis. As an example, spelling and/or grammar fixes
+will almost always be considered inconsequential, unless they materially correct
+the message.
 
 
 ## Pull Request style
@@ -60,8 +60,7 @@ $ ./ci/test-checks.sh
 $ ./ci/feature-check/test-feature.sh
 ```
 
-Any changes that break consensus must be behind a feature gate and must have
-a merged SIMD.
+Any changes that break consensus must be behind a feature gate.
 
 All changes should have unit and integration tests that cover at least 90% of
 added code paths. These tests should run quickly and not be flaky.
@@ -70,9 +69,9 @@ All changes should be stress-tested with relevant test cases, if relevant test c
 are not present, then write them.
 
 All changes should be benchmarked and evidence posted to the PR.
-Microbenchmark results along with mainnet/testnet validator timings or profiles,
-bench-tps or other relevant integration benchmarks. Any code that adds complexity
-should be justified by a comisurate improvement in speed.
+Microbenchmark results along with relevant integration benchmarks (e.g.
+bench-tps, validator timings or profiles). Any code that adds complexity should
+be justified by a commensurate improvement in speed.
 
 All changes should be reviewed by subject matter experts.
 
@@ -81,10 +80,10 @@ be backported to release branches.
 
 Duplicate code should generally be avoided.
 
-Features should be activated on testnet before mainnet in the closest configuration to mainnet as possible
+Features should be activated on testnet before mainnet in the closest configuration to mainnet as possible.
 Relevant metrics need to be monitored and appropriate follow-up given after feature activation.
 
-Avoid “hack” or “one-off” solutions, prefer well-architected designs which are not fragile.
+Avoid "hack" or "one-off" solutions, prefer well-architected designs which are not fragile.
 
 Only use unwrap() in cases where you can prove it will never panic, and in cases where panic on
 unwrap() is desirable, prefer .expect().
@@ -110,13 +109,13 @@ may be pulled in through crates.io.
 
 ## Getting Pull Requests Merged
 
-There is no single person assigned to watching GitHub PR queue and ushering you
-through the process. Typically, you will ask the person that wrote a component
-to review changes to it. You can find the author using `git blame` or asking on
-Discord.  When working to get your PR merged, it's most important to understand
-that changing the code is your priority and not necessarily a priority of the
-person you need an approval from. Also, while you may interact the most with
-the component author, you should aim to be inclusive of others. Providing a
+There is no single person assigned to watching the GitHub PR queue and ushering
+you through the process. Typically, you will ask the person that wrote a
+component to review changes to it. You can find the author using `git blame`.
+When working to get your PR merged, it's most important to understand that
+changing the code is your priority and not necessarily a priority of the person
+you need an approval from. Also, while you may interact the most with the
+component author, you should aim to be inclusive of others. Providing a
 detailed problem description is the most effective means of engaging both the
 component author and other potentially interested parties.
 
@@ -131,15 +130,15 @@ and add reviewers. Adding reviewers before CI succeeds is a fast path to losing
 reviewer engagement. Not only will they be notified and see the PR is not yet
 ready for them, they will also be bombarded with additional notifications
 each time you push a commit to get past CI or until they "mute" the PR. Once
-muted, you'll need to reach out over some other medium, such as Discord, to
-request they have another look. When you use draft PRs, no notifications are
-sent when you push commits and edit the PR description. Use draft PRs
-liberally.  Don't bug the humans until you have gotten past the bots.
+muted, you'll need to reach out over some other medium to request they have
+another look. When you use draft PRs, no notifications are sent when you push
+commits and edit the PR description. Use draft PRs liberally. Don't bug the
+humans until you have gotten past the bots.
 
 If your PR has received a lot of feedback and needs a lot of rework, feel free
 to convert it into a draft until issues are resolved and CI is green.
 
-Do not add reviewers to draft PRs.  GitHub doesn't automatically clear
+Do not add reviewers to draft PRs. GitHub doesn't automatically clear
 approvals when you click "Ready for Review", so a review that meant "I approve
 of the direction" suddenly has the appearance of "I approve of these changes."
 Instead, add a comment that mentions the usernames that you would like a review
@@ -210,22 +209,6 @@ the subject lines of the git commits contained in the PR. It's especially
 generous (and not expected) to rebase or reword commits such that each change
 matches the logical flow in your PR description.
 
-### The PR / Issue Labels
-
-Labels make it easier to manage and track PRs / issues.  Below some common labels
-that we use in Anza.  For the complete list of labels, please refer to the
-[label page](https://github.com/anza-xyz/agave/issues/labels):
-
-* "automerge": When a PR is labelled with "automerge", the PR will be
-automatically merged once CI passes.  In general, this label should only
-be used for small hot-fix (fewer than 100 lines) or automatic generated
-PRs.  If you're uncertain, it's usually the case that the PR is not
-qualified as "automerge".
-
-* "good first issue": If you happen to find an issue that is non-urgent and
-self-contained with moderate scope, you might want to consider attaching
-"good first issue" to it as it might be a good practice for newcomers.
-
 ### When will my PR be reviewed?
 
 PRs are typically reviewed and merged in under 7 days. If your PR has been open
@@ -248,7 +231,7 @@ additional review.
 ### When will my PR be re-reviewed?
 
 Recall that once your PR is opened, a notification is sent every time you push
-a commit.  After a reviewer adds feedback, they won't be checking on the status
+a commit. After a reviewer adds feedback, they won't be checking on the status
 of that feedback after every new commit. Instead, directly mention the reviewer
 when you feel your PR is ready for another pass.
 
@@ -354,20 +337,13 @@ struct A {}
 solana-genesis = { workspace = true,  features = ["dev-context-only-utils"] }
 ```
 
-### Public API
-
-While most Agave crates get pushed on crates.io, their API is not always guaranteed to be
-stable. Unstable API is gated behind `agave-unstable-api` feature. Breaking public API
-is acceptable only if it is gated behind `agave-unstable-api`. However, you should generally
-avoid doing so where practical, as some external teams use agave crates anyway.
-
 ### Allocator usage
 
 When possible, avoid dynamic allocations of memory. While not particularly expensive in any one
 place, it adds up over time. Thus, if your code can be expected to run often:
  * avoid `Box::clone()`, `Vec::clone()` and `.collect()` where possible
  * use `::with_capacity()`, even if you do not know the exact length of the
- resulting collection, slight overallocation is usually cheaper then reallocating
+ resulting collection, slight overallocation is usually cheaper than reallocating
  * consider using fixed length stack-allocated objects in favor of dynamic allocation
 
 ## Terminology
@@ -375,18 +351,3 @@ place, it adds up over time. Thus, if your code can be expected to run often:
 Inventing new terms is allowed, but should only be done when the term is widely
 used and understood. Avoid introducing new 3-letter terms, which can be
 confused with 3-letter acronyms.
-
-[Terms currently in use](https://solana.com/docs/terminology)
-
-
-## Design Proposals
-
-This Agave validator client's architecture is described by docs generated from markdown files in the `docs/src/`
-directory and viewable on the official [Agave Validator Client](https://docs.anza.xyz) documentation website.
-
-Current design proposals may be viewed on the docs site:
-
-1. [Accepted Proposals](https://docs.anza.xyz/proposals/accepted-design-proposals)
-2. [Implemented Proposals](https://docs.anza.xyz/implemented-proposals/implemented-proposals)
-
-New design proposals should follow this guide on [how to submit a design proposal](./docs/src/proposals.md#submit-a-design-proposal).

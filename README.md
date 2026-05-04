@@ -1,14 +1,10 @@
-<p align="center">
-  <a href="https://anza.xyz">
-    <img alt="Anza" src="https://i.postimg.cc/VkKTnMM9/agave-logo-talc-1.png" width="250" />
-  </a>
-</p>
+# NorthStar
 
-[![Agave validator](https://img.shields.io/crates/v/agave-validator.svg)](https://crates.io/crates/agave-validator)
-[![Agave documentation](https://docs.rs/agave-validator/badge.svg)](https://docs.rs/agave-validator)
-[![Build status](https://badge.buildkite.com/b2b925facfdbb575573084bb4b7e1f1ce7f395239672941bf7.svg?branch=master)](https://buildkite.com/anza/agave-secondary)
-[![Release status](https://github.com/anza-xyz/agave/actions/workflows/release.yml/badge.svg)](https://github.com/anza-xyz/agave/actions/workflows/release.yml)
-[![codecov](https://codecov.io/gh/anza-xyz/agave/branch/master/graph/badge.svg)](https://codecov.io/gh/anza-xyz/agave)
+NorthStar is the validator client for the NorthStar chain, maintained by
+Sonic SVM. It is derived from
+[Agave](https://github.com/anza-xyz/agave) — the Solana validator implementation
+by [Anza](https://www.anza.xyz/) — with extensions specific to NorthStar's
+runtime.
 
 # Building
 
@@ -40,8 +36,8 @@ $ sudo dnf install openssl-devel systemd-devel pkg-config zlib-devel llvm clang 
 ## **2. Download the source code.**
 
 ```bash
-$ git clone https://github.com/anza-xyz/agave.git
-$ cd agave
+$ git clone https://github.com/mirrorworld-universe/northstar.git
+$ cd northstar
 ```
 
 ## **3. Build.**
@@ -60,15 +56,6 @@ $ ./cargo build
 ```bash
 $ ./cargo test
 ```
-
-### Starting a local testnet
-
-Start your own testnet locally, instructions are in the [online docs](https://docs.anza.xyz/clusters/benchmark).
-
-### Accessing the remote development cluster
-
-* `devnet` - stable public cluster for development accessible via
-devnet.solana.com. Runs 24/7. Learn more about the [public clusters](https://docs.anza.xyz/clusters)
 
 # Benchmarking
 
@@ -98,14 +85,13 @@ $ scripts/coverage.sh
 $ open target/cov/lcov-local/index.html
 ```
 
-Why coverage? While most see coverage as a code quality metric, we see it primarily as a developer
-productivity metric. When a developer makes a change to the codebase, presumably it's a *solution* to
-some problem.  Our unit-test suite is how we encode the set of *problems* the codebase solves. Running
-the test suite should indicate that your change didn't *infringe* on anyone else's solutions. Adding a
-test *protects* your solution from future changes. Say you don't understand why a line of code exists,
-try deleting it and running the unit-tests. The nearest test failure should tell you what problem
-was solved by that code. If no test fails, go ahead and submit a Pull Request that asks, "what
-problem is solved by this code?" On the other hand, if a test does fail and you can think of a
-better way to solve the same problem, a Pull Request with your solution would most certainly be
-welcome! Likewise, if rewriting a test can better communicate what code it's protecting, please
-send us that patch!
+# License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the
+full license text.
+
+# Acknowledgments
+
+NorthStar is built on top of the [Agave](https://github.com/anza-xyz/agave)
+validator client. We are grateful to Anza, Solana Labs, and the wider Solana
+open-source community whose work makes this project possible.
