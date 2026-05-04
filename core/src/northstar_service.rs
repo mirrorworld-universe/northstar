@@ -49,6 +49,7 @@ impl NorthStarService {
     ) -> Self {
         // Sonic: Initialize NorthStar manager with always-on ephemeral RPC
         let mut manager = northstar::Manager::new(cfg);
+        manager.set_slot_duration(config.slot_duration);
         {
             let root_bank = bank_forks.read().unwrap().root_bank();
             if let Err(e) = manager.init_runtime(
@@ -375,7 +376,7 @@ mod tests {
             listen_addr: find_free_addr(),
             ws_addr: find_free_addr(),
             tpu_addr: find_free_addr(),
-            slot_duration: Duration::from_millis(400),
+            slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
         };
 
         // Get the bank for notifications BEFORE moving bank_forks
@@ -427,7 +428,7 @@ mod tests {
             listen_addr: find_free_addr(),
             ws_addr: find_free_addr(),
             tpu_addr: find_free_addr(),
-            slot_duration: Duration::from_millis(400),
+            slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
         };
 
         // Get a reference to the frozen bank for sending notifications BEFORE moving bank_forks
@@ -482,7 +483,7 @@ mod tests {
             listen_addr: find_free_addr(),
             ws_addr: find_free_addr(),
             tpu_addr: find_free_addr(),
-            slot_duration: Duration::from_millis(400),
+            slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
         };
 
         let service = NorthStarService::new(
@@ -551,7 +552,7 @@ mod tests {
             listen_addr: find_free_addr(),
             ws_addr: find_free_addr(),
             tpu_addr: find_free_addr(),
-            slot_duration: Duration::from_millis(400),
+            slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
         };
 
         let service = NorthStarService::new(
@@ -723,7 +724,7 @@ mod tests {
             listen_addr: find_free_addr(),
             ws_addr: find_free_addr(),
             tpu_addr: find_free_addr(),
-            slot_duration: Duration::from_millis(400),
+            slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
         };
 
         let service = NorthStarService::new(

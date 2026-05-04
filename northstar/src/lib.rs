@@ -8,7 +8,7 @@ use {
     solana_keypair::Keypair,
     solana_pubkey::Pubkey,
     solana_runtime::bank::Bank,
-    std::{net::SocketAddr, sync::Arc},
+    std::{net::SocketAddr, sync::Arc, time::Duration},
     thiserror::Error,
 };
 
@@ -19,6 +19,8 @@ pub mod portal_state;
 pub mod slot_advancer;
 
 pub use crate::ephemeral_runtime::EphemeralRuntime;
+
+pub const DEFAULT_ER_SLOT_DURATION: Duration = Duration::from_millis(50);
 
 #[derive(Error, Debug)]
 pub enum NorthStarError {
@@ -120,6 +122,7 @@ pub struct EphemeralForkMetadata {}
 /// Main manager for ephemeral rollup forks
 pub struct Manager {
     config: ManagerConfig,
+    slot_duration: Duration,
     /// Sonic: Always-on ephemeral runtime. Created once at startup via
     /// `init_runtime()`, stays alive for the validator's lifetime.
     /// The `active` flag inside gates transaction acceptance.
@@ -132,8 +135,13 @@ impl Manager {
         info!("Initializing NorthStar Manager with config: {config:?}");
         Self {
             config,
+            slot_duration: DEFAULT_ER_SLOT_DURATION,
             runtime: None,
         }
+    }
+
+    pub fn set_slot_duration(&mut self, slot_duration: Duration) {
+        self.slot_duration = slot_duration;
     }
 
     /// Sonic: Check if an ephemeral session is currently active (accepting transactions)
@@ -403,7 +411,7 @@ impl Manager {
             delegated_accounts: vec![],
         };
 
-        let runtime = EphemeralRuntime::new(
+        let runtime = EphemeralRuntime::new_with_slot_duration(
             root_bank,
             cluster_info,
             settings,
@@ -412,6 +420,7 @@ impl Manager {
             tpu_addr,
             self.config.portal_program_id,
             self.config.manager_account.clone(),
+            self.slot_duration,
         )
         .map_err(|e| {
             error!("Failed to create ephemeral runtime: {}", e);
@@ -471,7 +480,7 @@ impl Manager {
             return Ok(());
         }
 
-        let mut runtime = EphemeralRuntime::new(
+        let mut runtime = EphemeralRuntime::new_with_slot_duration(
             root_bank,
             cluster_info,
             settings,
@@ -481,6 +490,7 @@ impl Manager {
             "127.0.0.1:0".parse().unwrap(),
             self.config.portal_program_id,
             self.config.manager_account.clone(),
+            self.slot_duration,
         )
         .map_err(|e| {
             error!("Failed to create ephemeral runtime: {}", e);

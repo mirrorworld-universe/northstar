@@ -1432,8 +1432,7 @@ impl Validator {
                         tpu_addr: format!("0.0.0.0:{}", config.ephemeral_tpu_port)
                             .parse()
                             .unwrap(),
-                        // TODO: extract to some constant or make a parameter within portal program
-                        slot_duration: Duration::from_millis(400),
+                        slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
                     },
                     exit.clone(),
                 )

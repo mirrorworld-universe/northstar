@@ -115,6 +115,7 @@ pub struct EphemeralRuntime {
 
     _tx_client: EphemeralTransactionClient,
     settings: EphemeralRollupSettings,
+    slot_duration: Duration,
     _ledger_dir: TempDir,
     _runtime: Arc<TokioRuntime>,
 }
@@ -382,6 +383,30 @@ impl EphemeralRuntime {
         portal_program_id: Pubkey,
         manager_keypair: Arc<Keypair>,
     ) -> Result<Self, String> {
+        Self::new_with_slot_duration(
+            parent_bank,
+            cluster_info,
+            settings,
+            rpc_addr,
+            ws_addr,
+            tpu_addr,
+            portal_program_id,
+            manager_keypair,
+            crate::DEFAULT_ER_SLOT_DURATION,
+        )
+    }
+
+    pub fn new_with_slot_duration(
+        parent_bank: Arc<Bank>,
+        cluster_info: Arc<ClusterInfo>,
+        settings: EphemeralRollupSettings,
+        rpc_addr: SocketAddr,
+        ws_addr: SocketAddr,
+        tpu_addr: SocketAddr,
+        portal_program_id: Pubkey,
+        manager_keypair: Arc<Keypair>,
+        slot_duration: Duration,
+    ) -> Result<Self, String> {
         // Place ER slots far above L1 slots so the shared AccountsDb root
         // tracker never sees an out-of-order add_root from either side.
         let ephemeral_slot = Self::er_slot_for(&parent_bank);
@@ -561,7 +586,7 @@ impl EphemeralRuntime {
                 pubsub: advertised_ws_addr,
                 tpu_quic: advertised_tpu_addr,
                 er_root_slot: ephemeral_slot,
-                slot_duration_ms: 400,
+                slot_duration_ms: u64::try_from(slot_duration.as_millis()).unwrap_or(u64::MAX),
             }),
             Some(Arc::new(tx_client.clone()) as Arc<dyn solana_rpc::rpc::ErTxExecutor>),
         )?;
@@ -657,6 +682,7 @@ impl EphemeralRuntime {
             _portal_program_id: portal_program_id,
 
             settings,
+            slot_duration,
             _tx_client: tx_client,
             _ledger_dir: ledger_dir,
             _runtime: runtime,
@@ -695,7 +721,7 @@ impl EphemeralRuntime {
                 self.optimistically_confirmed_bank.clone(),
                 initial_bank,
                 crate::slot_advancer::Config {
-                    slot_duration: Duration::from_millis(400),
+                    slot_duration: self.slot_duration,
                     manager_account: Pubkey::default(),
                     er_fee_structure: self.settings.er_fee_structure.clone(),
                 },
@@ -862,7 +888,7 @@ impl EphemeralRuntime {
             self.optimistically_confirmed_bank.clone(),
             initial_bank,
             crate::slot_advancer::Config {
-                slot_duration: Duration::from_millis(400),
+                slot_duration: self.slot_duration,
                 manager_account: Pubkey::default(),
                 er_fee_structure: self.settings.er_fee_structure.clone(),
             },
