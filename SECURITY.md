@@ -15,8 +15,10 @@ GitHub account before submitting a report.
 
 We aim to acknowledge new advisories within 72 hours.
 
-> **TODO:** add a fallback contact email (e.g. `security@…`) for cases where
-> the GitHub advisory flow is unavailable.
+If you do not receive a response on the advisory, send an email to
+`operators@sonic.game` with the URL of the advisory you have created. **Do
+not** include exploit details in the email — keep those on the advisory
+itself.
 
 ## Scope
 
