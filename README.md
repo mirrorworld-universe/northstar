@@ -6,6 +6,12 @@ Sonic SVM. It is derived from
 by [Anza](https://www.anza.xyz/) — with extensions specific to NorthStar's
 runtime.
 
+# Resources
+
+- **Website:** [northstar.sonicsvm.org](https://northstar.sonicsvm.org)
+- **Developer docs:** [docs.northstar.sonicsvm.org](https://docs.northstar.sonicsvm.org)
+- **Technical litepaper:** [NorthStar — Programmable On-Demand Runtimes for Solana](https://github.com/mirrorworld-universe/reports/blob/master/NorthStar%20%E2%80%93%20Programmable%20On-Demand%20Runtimes%20for%20Solana.pdf)
+
 # Building
 
 ## **1. Install rustc, cargo and rustfmt.**
