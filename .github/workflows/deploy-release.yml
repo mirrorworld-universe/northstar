@@ -79,3 +79,46 @@ jobs:
       - name: Restart validator
         run: sudo systemctl restart northstar-validator
 
+      - name: Wait for validator to be fully up
+        run: |
+          sudo mkdir -p /home/ubuntu/northstar/logs
+          sudo touch /home/ubuntu/northstar/logs/validator.log
+          sudo chmod a+rw /home/ubuntu/northstar/logs/validator.log
+
+          # Stream validator logs to CI output while we wait
+          tail -f /home/ubuntu/northstar/logs/validator.log &
+          TAIL_PID=$!
+
+          cleanup() {
+            kill $TAIL_PID 2>/dev/null || true
+            wait $TAIL_PID 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          sleep 2
+
+          echo "Waiting for validator to be fully up..."
+          for i in $(seq 1 1080); do
+            if sudo systemctl is-failed --quiet northstar-validator; then
+              echo ""
+              echo "Validator service failed during startup!"
+              exit 1
+            fi
+
+            if sudo systemctl is-active --quiet northstar-validator; then
+              if curl -sf -X POST -H "Content-Type: application/json" \
+                 -d '{"jsonrpc":"2.0","id":1,"method":"getVersion"}' \
+                 http://localhost:8899 >/dev/null 2>&1; then
+                echo ""
+                echo "Validator is up and RPC is responding!"
+                exit 0
+              fi
+            fi
+            sleep 5
+          done
+
+          echo ""
+          echo "Timed out waiting for validator to be fully up"
+          exit 1
+        timeout-minutes: 90
+
