@@ -18,7 +18,7 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ./.github/actions/ensure-rust-toolchain
       - run: rustup toolchain install nightly --component rustfmt
       - run: cargo +nightly fmt --all -- --check
@@ -27,7 +27,7 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ./.github/actions/ensure-rust-toolchain
       - name: Clean stale build artifacts
         run: |
@@ -66,7 +66,7 @@ jobs:
     name: Test
     runs-on: [self-hosted, devnet]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ./.github/actions/ensure-rust-toolchain
       - name: Clean stale build artifacts
         run: |

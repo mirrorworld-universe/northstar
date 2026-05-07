@@ -16,7 +16,7 @@ jobs:
     name: Format
     runs-on: [self-hosted, devnet]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ./.github/actions/ensure-rust-toolchain
       - run: cargo +nightly fmt --all -- --check
 
@@ -25,7 +25,7 @@ jobs:
     needs: fmt
     runs-on: [self-hosted, devnet]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ./.github/actions/ensure-rust-toolchain
       - uses: Swatinem/rust-cache@v2
       - name: Install dependencies
@@ -44,7 +44,7 @@ jobs:
     needs: clippy
     runs-on: [self-hosted, devnet]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ./.github/actions/ensure-rust-toolchain
       - uses: Swatinem/rust-cache@v2
       - name: Install dependencies
@@ -62,7 +62,7 @@ jobs:
     needs: clippy
     runs-on: [self-hosted, devnet]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ./.github/actions/ensure-rust-toolchain
 
       - name: Build portal SBF program
