@@ -877,76 +877,141 @@ impl EphemeralRuntime {
                 }
             };
 
-            let er_bank = self.bank();
-            let mut hydrated = 0usize;
-            for (pubkey, account, _slot) in accounts {
-                if account.owner() != &self.portal_program_id {
-                    continue;
-                }
+            let hydrated_delegations = accounts
+                .into_iter()
+                .filter(|(_, account, _)| account.owner() == &self.portal_program_id)
+                .filter_map(|(pubkey, account, _slot)| {
+                    let (record_pubkey, _) =
+                        Self::delegation_record_pda(&self.portal_program_id, &pubkey);
+                    let record_account = self.l1_anchor_bank.get_account(&record_pubkey)?;
+                    let Some(crate::portal_state::PortalAccount::DelegationRecord(record)) =
+                        crate::portal_state::try_parse_raw_portal_account(record_account.data())
+                    else {
+                        warn!("Delegation record {record_pubkey} has invalid account data");
+                        return None;
+                    };
+                    if record.grid_id != self.settings.grid_id {
+                        return None;
+                    }
 
-                let (record_pubkey, _) =
-                    Self::delegation_record_pda(&self.portal_program_id, &pubkey);
-                let Some(record_account) = self.l1_anchor_bank.get_account(&record_pubkey) else {
-                    continue;
-                };
-                let Some(crate::portal_state::PortalAccount::DelegationRecord(record)) =
-                    crate::portal_state::try_parse_raw_portal_account(record_account.data())
-                else {
-                    warn!("Delegation record {record_pubkey} has invalid account data");
-                    continue;
-                };
-                if record.grid_id != self.settings.grid_id {
-                    continue;
-                }
+                    let owner_program = Pubkey::from(record.owner_program);
+                    let mut effective_account = account.clone();
+                    effective_account.set_owner(owner_program);
 
-                let owner_program: Pubkey = record.owner_program.into();
-                let mut effective_account = account.clone();
-                effective_account.set_owner(owner_program);
-
-                if let Some(program_account) = self.l1_anchor_bank.get_account(&owner_program) {
-                    er_bank.store_account(&owner_program, &program_account);
-                    if program_account.owner() == &bpf_loader_upgradeable::id() {
-                        match program_account.state() {
-                            Ok(UpgradeableLoaderState::Program {
-                                programdata_address,
-                            }) => {
-                                if let Some(programdata_account) =
-                                    self.l1_anchor_bank.get_account(&programdata_address)
-                                {
-                                    er_bank
-                                        .store_account(&programdata_address, &programdata_account);
-                                } else {
+                    let owner_program_account = match self
+                        .l1_anchor_bank
+                        .get_account(&owner_program)
+                    {
+                        Some(program_account) => {
+                            let programdata = match (
+                                program_account.owner() == &bpf_loader_upgradeable::id(),
+                                program_account.state(),
+                            ) {
+                                (
+                                    true,
+                                    Ok(UpgradeableLoaderState::Program {
+                                        programdata_address,
+                                    }),
+                                ) => match self.l1_anchor_bank.get_account(&programdata_address) {
+                                    Some(programdata_account) => {
+                                        Some((programdata_address, programdata_account))
+                                    }
+                                    None => {
+                                        warn!(
+                                            "Cannot hydrate owner program {owner_program}: \
+                                             programdata account {programdata_address} not found \
+                                             on L1"
+                                        );
+                                        None
+                                    }
+                                },
+                                (true, Ok(_)) => {
                                     warn!(
                                         "Cannot hydrate owner program {owner_program}: \
-                                         programdata account {programdata_address} not found on L1"
+                                         upgradeable-loader account is not Program state"
                                     );
+                                    None
                                 }
-                            }
-                            Ok(_) => warn!(
-                                "Cannot hydrate owner program {owner_program}: upgradeable-loader \
-                                 account is not Program state"
-                            ),
-                            Err(err) => warn!(
-                                "Cannot hydrate owner program {owner_program}: failed to parse \
-                                 upgradeable-loader state: {err:?}"
-                            ),
+                                (true, Err(err)) => {
+                                    warn!(
+                                        "Cannot hydrate owner program {owner_program}: failed to \
+                                         parse upgradeable-loader state: {err:?}"
+                                    );
+                                    None
+                                }
+                                _ => None,
+                            };
+                            Some((owner_program, program_account, programdata))
                         }
-                    }
-                    er_bank.remove_programs_from_cache(Some(owner_program));
-                } else {
-                    warn!(
-                        "Cannot hydrate owner program {owner_program}: program account not found \
-                         on L1"
-                    );
-                }
+                        None => {
+                            warn!(
+                                "Cannot hydrate owner program {owner_program}: program account \
+                                 not found on L1"
+                            );
+                            None
+                        }
+                    };
 
-                er_bank.store_account(&pubkey, &effective_account);
-                self.initial_account_snapshots.insert(pubkey, account);
-                self.delegated_accounts.write().unwrap().insert(pubkey);
-                self.touched_accounts.write().unwrap().insert(pubkey);
-                hydrated = hydrated.saturating_add(1);
+                    Some((pubkey, account, effective_account, owner_program_account))
+                })
+                .collect::<Vec<_>>();
+
+            let er_bank = self.bank();
+            let mut seen_owner_programs = HashSet::new();
+
+            let account_writes = hydrated_delegations
+                .iter()
+                .flat_map(
+                    |(pubkey, _account, effective_account, owner_program_account)| {
+                        let owner_program_accounts = owner_program_account
+                            .as_ref()
+                            .filter(|(owner_program, _, _)| {
+                                seen_owner_programs.insert(*owner_program)
+                            })
+                            .into_iter()
+                            .flat_map(|(owner_program, program_account, programdata)| {
+                                std::iter::once((owner_program, program_account)).chain(
+                                    programdata.as_ref().map(
+                                        |(programdata_address, programdata_account)| {
+                                            (programdata_address, programdata_account)
+                                        },
+                                    ),
+                                )
+                            });
+
+                        std::iter::once((pubkey, effective_account)).chain(owner_program_accounts)
+                    },
+                )
+                .collect::<Vec<_>>();
+            if !account_writes.is_empty() {
+                er_bank.store_accounts((er_bank.slot(), account_writes.as_slice()));
             }
+            er_bank.remove_programs_from_cache(
+                hydrated_delegations
+                    .iter()
+                    .filter_map(|(_, _, _, owner_program_account)| {
+                        owner_program_account
+                            .as_ref()
+                            .map(|(owner_program, _, _)| *owner_program)
+                    })
+                    .collect::<HashSet<_>>(),
+            );
 
+            self.initial_account_snapshots.extend(
+                hydrated_delegations
+                    .iter()
+                    .map(|(pubkey, account, _, _)| (*pubkey, account.clone())),
+            );
+            self.delegated_accounts
+                .write()
+                .unwrap()
+                .extend(hydrated_delegations.iter().map(|(pubkey, _, _, _)| *pubkey));
+            self.touched_accounts
+                .write()
+                .unwrap()
+                .extend(hydrated_delegations.iter().map(|(pubkey, _, _, _)| *pubkey));
+
+            let hydrated = hydrated_delegations.len();
             if hydrated > 0 {
                 info!("Hydrated {hydrated} existing delegated account(s) from L1 after reset");
             }
@@ -1008,7 +1073,7 @@ impl EphemeralRuntime {
 
     pub(crate) fn refresh_delegated_owner_programs_from_l1(&self, l1_bank: &Bank) {
         let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
-        let delegated_accounts = self.delegated_accounts.write().unwrap();
+        let delegated_accounts = self.delegated_accounts.read().unwrap();
         let er_bank = self.bank();
 
         let updates = delegated_accounts
