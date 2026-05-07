@@ -540,10 +540,11 @@ impl Manager {
                 return;
             }
             if let Some(account_data) = bank.get_account(delegated_account) {
-                runtime.handle_delegation_with_owner_program(
+                runtime.handle_delegation_inner(
                     delegated_account,
                     account_data,
                     owner_program,
+                    Some(bank),
                 );
             } else {
                 warn!(

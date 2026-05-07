@@ -1774,6 +1774,17 @@ impl Bank {
             .prune_by_deployment_slot(deployment_slot);
     }
 
+    /// Northstar: drop one program from this bank's program cache so an ER bank
+    /// can reload freshly hydrated L1 deployment accounts under its own runtime
+    /// environments.
+    pub fn remove_programs_from_cache(&self, program_ids: impl IntoIterator<Item = Pubkey>) {
+        self.transaction_processor
+            .global_program_cache
+            .write()
+            .unwrap()
+            .remove_programs(program_ids.into_iter());
+    }
+
     /// Epoch in which the new cooldown warmup rate for stake was activated
     pub fn new_warmup_cooldown_rate_epoch(&self) -> Option<Epoch> {
         self.feature_set

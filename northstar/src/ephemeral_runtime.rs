@@ -5,11 +5,12 @@ use {
     },
     crossbeam_channel::{Sender, unbounded},
     log::{info, warn},
-    solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
+    solana_account::{AccountSharedData, ReadableAccount, WritableAccount, state_traits::StateMut},
     solana_clock::{BankId, Slot},
     solana_gossip::cluster_info::ClusterInfo,
     solana_keypair::Keypair,
     solana_ledger::{blockstore::Blockstore, leader_schedule_cache::LeaderScheduleCache},
+    solana_loader_v3_interface::state::UpgradeableLoaderState,
     solana_pubkey::Pubkey,
     solana_rpc::{
         er_history::ErHistoryStore,
@@ -25,6 +26,7 @@ use {
         bank_forks::BankForks,
         commitment::{BlockCommitmentCache, CommitmentSlots},
     },
+    solana_sdk_ids::bpf_loader_upgradeable,
     solana_send_transaction_service::send_transaction_service,
     solana_signer::Signer,
     std::{
@@ -921,11 +923,52 @@ impl EphemeralRuntime {
         );
     }
 
+    fn hydrate_owner_program_from_l1(&self, l1_bank: &Bank, owner_program: &Pubkey) {
+        let Some(program_account) = l1_bank.get_account(owner_program) else {
+            warn!("Cannot hydrate owner program {owner_program}: program account not found on L1");
+            return;
+        };
+
+        let bank = self.bank();
+        bank.store_account(owner_program, &program_account);
+
+        if program_account.owner() == &bpf_loader_upgradeable::id() {
+            match program_account.state() {
+                Ok(UpgradeableLoaderState::Program {
+                    programdata_address,
+                }) => {
+                    if let Some(programdata_account) = l1_bank.get_account(&programdata_address) {
+                        bank.store_account(&programdata_address, &programdata_account);
+                    } else {
+                        warn!(
+                            "Cannot hydrate owner program {owner_program}: programdata account \
+                             {programdata_address} not found on L1"
+                        );
+                    }
+                }
+                Ok(_) => warn!(
+                    "Cannot hydrate owner program {owner_program}: upgradeable-loader account is \
+                     not Program state"
+                ),
+                Err(err) => warn!(
+                    "Cannot hydrate owner program {owner_program}: failed to parse \
+                     upgradeable-loader state: {err:?}"
+                ),
+            }
+        }
+
+        // The ER ProgramCache is isolated from L1. If this program was probed
+        // before L1 deployment reached the ER, a tombstone/stale entry may be
+        // cached. Drop it so next execution reloads from the hydrated accounts
+        // using the ER runtime environments.
+        bank.remove_programs_from_cache(Some(*owner_program));
+    }
+
     /// Handle a new account delegation from L1.
     /// Copies the account data from L1 into the ER bank and adds it to the
     /// delegated accounts set so transactions can write to it.
     pub fn handle_delegation(&self, delegated_account: &Pubkey, account_data: AccountSharedData) {
-        self.handle_delegation_with_owner_program(delegated_account, account_data, None);
+        self.handle_delegation_inner(delegated_account, account_data, None, None);
     }
 
     pub fn handle_delegation_with_owner_program(
@@ -934,11 +977,25 @@ impl EphemeralRuntime {
         account_data: AccountSharedData,
         owner_program: Option<Pubkey>,
     ) {
+        self.handle_delegation_inner(delegated_account, account_data, owner_program, None);
+    }
+
+    // TODO: handle multiple delegations at once to speed things up?
+    pub fn handle_delegation_inner(
+        &self,
+        delegated_account: &Pubkey,
+        account_data: AccountSharedData,
+        owner_program: Option<Pubkey>,
+        l1_bank: Option<&Bank>,
+    ) {
         let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
         let bank = self.bank();
         let mut er_account = account_data.clone();
         if let Some(owner_program) = owner_program {
             er_account.set_owner(owner_program);
+            if let Some(l1_bank) = l1_bank {
+                self.hydrate_owner_program_from_l1(l1_bank, &owner_program);
+            }
         }
         bank.store_account(delegated_account, &er_account);
 
@@ -1016,7 +1073,9 @@ mod tests {
     use {
         super::*,
         northstar_portal::DelegationRecord,
-        solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
+        solana_account::{
+            AccountSharedData, ReadableAccount, WritableAccount, state_traits::StateMut,
+        },
         solana_compute_budget_interface::ComputeBudgetInstruction,
         solana_fee_structure::FeeStructure,
         solana_gossip::contact_info::ContactInfo,
@@ -1025,7 +1084,7 @@ mod tests {
         solana_net_utils::SocketAddrSpace,
         solana_rpc_client::rpc_client::RpcClient,
         solana_rpc_client_types::config::{CommitmentConfig, RpcSendTransactionConfig},
-        solana_sdk_ids::system_program,
+        solana_sdk_ids::{bpf_loader_upgradeable, system_program},
         solana_svm::transaction_processor::ExecutionRecordingConfig,
         solana_system_interface::instruction::transfer,
         solana_transaction::Transaction,
@@ -2304,6 +2363,89 @@ mod tests {
         assert_eq!(er_account.data(), delegated_l1_snapshot.data());
         assert_eq!(er_account.executable(), delegated_l1_snapshot.executable());
         assert!(runtime.delegated_accounts().contains(&delegated_pubkey));
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_handle_delegation_from_l1_hydrates_upgradeable_owner_program() {
+        agave_logger::setup();
+
+        let (parent_bank, mut runtime) = create_runtime();
+        runtime.activate();
+
+        let l1_bank = Bank::new_from_parent(
+            parent_bank.clone(),
+            &Pubkey::default(),
+            parent_bank.slot().saturating_add(1),
+        );
+        let portal_program_id = runtime._portal_program_id;
+        let owner_program = Pubkey::new_unique();
+        let programdata_address = Pubkey::new_unique();
+        let delegated_pubkey = Pubkey::new_unique();
+
+        let mut delegated_l1_snapshot = AccountSharedData::new(1_000_000, 4, &portal_program_id);
+        delegated_l1_snapshot
+            .data_as_mut_slice()
+            .copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+        l1_bank.store_account(&delegated_pubkey, &delegated_l1_snapshot);
+
+        let mut program_account = AccountSharedData::new(
+            1_000_000,
+            UpgradeableLoaderState::size_of_program(),
+            &bpf_loader_upgradeable::id(),
+        );
+        program_account
+            .set_state(&UpgradeableLoaderState::Program {
+                programdata_address,
+            })
+            .unwrap();
+        l1_bank.store_account(&owner_program, &program_account);
+
+        let mut programdata_account = AccountSharedData::new(
+            1_000_000,
+            UpgradeableLoaderState::size_of_programdata(4),
+            &bpf_loader_upgradeable::id(),
+        );
+        programdata_account
+            .set_state(&UpgradeableLoaderState::ProgramData {
+                slot: l1_bank.slot(),
+                upgrade_authority_address: None,
+            })
+            .unwrap();
+        programdata_account.data_as_mut_slice()
+            [UpgradeableLoaderState::size_of_programdata_metadata()..]
+            .copy_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        l1_bank.store_account(&programdata_address, &programdata_account);
+
+        assert!(runtime.bank().get_account(&owner_program).is_none());
+        assert!(runtime.bank().get_account(&programdata_address).is_none());
+
+        runtime.handle_delegation_inner(
+            &delegated_pubkey,
+            delegated_l1_snapshot.clone(),
+            Some(owner_program),
+            Some(&l1_bank),
+        );
+
+        let er_program_account = runtime
+            .bank()
+            .get_account(&owner_program)
+            .expect("owner program should be hydrated into ER");
+        assert_eq!(er_program_account.owner(), &bpf_loader_upgradeable::id());
+        assert_eq!(er_program_account.data(), program_account.data());
+
+        let er_programdata_account = runtime
+            .bank()
+            .get_account(&programdata_address)
+            .expect("programdata should be hydrated into ER");
+        assert_eq!(er_programdata_account.data(), programdata_account.data());
+
+        let er_delegated_account = runtime
+            .bank()
+            .get_account(&delegated_pubkey)
+            .expect("delegated account should be visible in ER");
+        assert_eq!(er_delegated_account.owner(), &owner_program);
 
         runtime.shutdown();
     }
