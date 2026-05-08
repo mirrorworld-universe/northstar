@@ -516,6 +516,18 @@ impl Manager {
         }
     }
 
+    /// Refresh delegated owner programs from L1 when their deployment accounts
+    /// changed. This catches L1 `solana program deploy` updates that do not
+    /// emit Portal events but must still invalidate the isolated ER ProgramCache.
+    pub fn refresh_delegated_owner_programs(&self, bank: &Bank) {
+        if let Some(runtime) = &self.runtime {
+            if !runtime.is_active() {
+                return;
+            }
+            runtime.refresh_delegated_owner_programs_from_l1(bank);
+        }
+    }
+
     /// Handle a new account delegation from L1.
     /// Called by NorthStarService when an AccountDelegated event is detected on L1.
     /// Copies the account data from L1 into the ephemeral bank and adds it to
@@ -540,10 +552,11 @@ impl Manager {
                 return;
             }
             if let Some(account_data) = bank.get_account(delegated_account) {
-                runtime.handle_delegation_with_owner_program(
+                runtime.handle_delegation_inner(
                     delegated_account,
                     account_data,
                     owner_program,
+                    Some(bank),
                 );
             } else {
                 warn!(

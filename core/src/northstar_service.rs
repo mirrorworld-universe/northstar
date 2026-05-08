@@ -134,6 +134,12 @@ impl NorthStarService {
                             }
                         }
                     }
+
+                    // Program deploys update loader-owned accounts, not Portal
+                    // accounts, so they produce no L1Event. Still check active
+                    // delegations every frozen bank and refresh only when their
+                    // owner program / ProgramData account changed.
+                    manager.refresh_delegated_owner_programs(&bank);
                 }
 
                 // Cleanup on exit
