@@ -312,10 +312,6 @@ impl EphemeralRuntime {
         bank.set_tick_height(bank.max_tick_height() - ticks_per_slot);
     }
 
-    fn configure_bank_fees(bank: &mut Bank, fee_structure: &solana_fee_structure::FeeStructure) {
-        bank.set_ephemeral_fee_structure(fee_structure);
-    }
-
     fn freeze_and_rotate_bank_for_rpc(
         bank_forks: &Arc<RwLock<BankForks>>,
         block_commitment_cache: &Arc<RwLock<BlockCommitmentCache>>,
@@ -323,6 +319,7 @@ impl EphemeralRuntime {
         rpc_subscriptions: Option<&Arc<RpcSubscriptions>>,
         er_history_store: &Arc<ErHistoryStore>,
         er_fee_structure: &solana_fee_structure::FeeStructure,
+        recent_blockhash_max_age: usize,
     ) -> Arc<Bank> {
         let (frozen_slot, frozen_bank, next_bank_slot, next_bank_arc) = {
             let current_bank = bank_forks.read().unwrap().working_bank();
@@ -334,7 +331,7 @@ impl EphemeralRuntime {
             let next_bank_slot = frozen_slot.saturating_add(1);
             let mut next_bank =
                 Bank::new_from_parent_ephemeral(current_bank, &Pubkey::default(), next_bank_slot);
-            Self::configure_bank_fees(&mut next_bank, er_fee_structure);
+            next_bank.configure_er(er_fee_structure, recent_blockhash_max_age);
             let next_bank_arc = {
                 let mut bank_forks_write = bank_forks.write().unwrap();
                 let inserted = bank_forks_write.insert(next_bank);
@@ -420,12 +417,15 @@ impl EphemeralRuntime {
             parent_bank.epoch(),
             parent_bank.get_slots_in_epoch(parent_bank.epoch()),
         );
+        let transaction_max_age = crate::er_transaction_max_age_for_slot_duration(slot_duration);
+        let recent_blockhash_max_age =
+            crate::er_recent_blockhash_max_age_for_slot_duration(slot_duration);
         let mut bank = Bank::new_from_parent_ephemeral_isolated(
             parent_bank.clone(),
             &Pubkey::default(),
             ephemeral_slot,
         );
-        Self::configure_bank_fees(&mut bank, &settings.er_fee_structure);
+        bank.configure_er(&settings.er_fee_structure, recent_blockhash_max_age);
         bank.set_callback(Some(Box::new(NoopDropCallback)));
         info!(
             "EphemeralRuntime::new: ER fees configured at {} lamports/signature",
@@ -498,15 +498,17 @@ impl EphemeralRuntime {
                 highest_super_majority_root: slot,
             },
         )));
-        let tx_client = EphemeralTransactionClient::new_with_history_and_commitment_cache(
-            bank_forks.clone(),
-            bank_operation_lock.clone(),
-            delegated_set.clone(),
-            touched_accounts.clone(),
-            active.clone(),
-            er_history_store.clone(),
-            block_commitment_cache.clone(),
-        );
+        let tx_client =
+            EphemeralTransactionClient::new_with_history_commitment_cache_and_transaction_max_age(
+                bank_forks.clone(),
+                bank_operation_lock.clone(),
+                delegated_set.clone(),
+                touched_accounts.clone(),
+                active.clone(),
+                er_history_store.clone(),
+                block_commitment_cache.clone(),
+                transaction_max_age,
+            );
 
         let optimistically_confirmed_bank = Arc::new(RwLock::new(OptimisticallyConfirmedBank {
             bank: Arc::clone(&initial_bank),
@@ -519,6 +521,7 @@ impl EphemeralRuntime {
             None,
             &er_history_store,
             &settings.er_fee_structure,
+            recent_blockhash_max_age,
         );
 
         let leader_schedule_cache = Arc::new(LeaderScheduleCache::default());
@@ -822,12 +825,14 @@ impl EphemeralRuntime {
                 ephemeral_slot,
                 parent_bank.epoch(),
             );
+            let recent_blockhash_max_age =
+                crate::er_recent_blockhash_max_age_for_slot_duration(self.slot_duration);
             let mut bank = Bank::new_from_parent_ephemeral_isolated(
                 parent_bank.clone(),
                 &Pubkey::default(),
                 ephemeral_slot,
             );
-            Self::configure_bank_fees(&mut bank, &self.settings.er_fee_structure);
+            bank.configure_er(&self.settings.er_fee_structure, recent_blockhash_max_age);
             bank.set_callback(Some(Box::new(NoopDropCallback)));
             info!(
                 "reset_to_new_parent: ER fees configured at {} lamports/signature",
@@ -1025,6 +1030,7 @@ impl EphemeralRuntime {
                 Some(&self.rpc_subscriptions),
                 &self.er_history_store,
                 &self.settings.er_fee_structure,
+                recent_blockhash_max_age,
             )
         };
 
@@ -1069,6 +1075,7 @@ impl EphemeralRuntime {
             Some(&self.rpc_subscriptions),
             &self.er_history_store,
             &self.settings.er_fee_structure,
+            crate::er_recent_blockhash_max_age_for_slot_duration(self.slot_duration),
         );
     }
 
@@ -1517,7 +1524,12 @@ mod tests {
         assert!(bank.is_hash_valid_for_age(&old_valid_hash, solana_clock::MAX_PROCESSING_AGE));
 
         for _ in 0..120 {
-            bank.set_ephemeral_fee_structure(&er_fee_structure(0));
+            bank.configure_er(
+                &er_fee_structure(0),
+                crate::er_recent_blockhash_max_age_for_slot_duration(
+                    crate::DEFAULT_ER_SLOT_DURATION,
+                ),
+            );
         }
 
         assert!(bank.is_hash_valid_for_age(&old_valid_hash, solana_clock::MAX_PROCESSING_AGE));

@@ -20,7 +20,25 @@ pub mod slot_advancer;
 
 pub use crate::ephemeral_runtime::EphemeralRuntime;
 
-pub const DEFAULT_ER_SLOT_DURATION: Duration = Duration::from_millis(50);
+const DEFAULT_ER_SLOT_DURATION_MS: u64 = 50;
+pub const DEFAULT_ER_SLOT_DURATION: Duration = Duration::from_millis(DEFAULT_ER_SLOT_DURATION_MS);
+pub(crate) const DEFAULT_ER_TRANSACTION_MAX_AGE: usize = (solana_clock::MAX_PROCESSING_AGE
+    * solana_clock::DEFAULT_MS_PER_SLOT as usize)
+    .div_ceil(DEFAULT_ER_SLOT_DURATION_MS as usize);
+pub(crate) fn er_transaction_max_age_for_slot_duration(slot_duration: Duration) -> usize {
+    scale_l1_slot_age_for_er(solana_clock::MAX_PROCESSING_AGE, slot_duration)
+}
+
+pub(crate) fn er_recent_blockhash_max_age_for_slot_duration(slot_duration: Duration) -> usize {
+    scale_l1_slot_age_for_er(solana_clock::MAX_RECENT_BLOCKHASHES, slot_duration)
+}
+
+fn scale_l1_slot_age_for_er(l1_slot_age: usize, slot_duration: Duration) -> usize {
+    let er_slot_ms = usize::try_from(slot_duration.as_millis())
+        .unwrap_or(usize::MAX)
+        .max(1);
+    (l1_slot_age * solana_clock::DEFAULT_MS_PER_SLOT as usize).div_ceil(er_slot_ms)
+}
 
 #[derive(Error, Debug)]
 pub enum NorthStarError {
