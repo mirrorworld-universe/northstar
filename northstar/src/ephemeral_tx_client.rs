@@ -6,7 +6,11 @@ use {
     solana_message::{AddressLoader, VersionedMessage, v0::LoadedAddresses},
     solana_pubkey::Pubkey,
     solana_rpc::{er_history::ErHistoryStore, rpc_subscriptions::RpcSubscriptions},
-    solana_runtime::{bank::Bank, bank_forks::BankForks, commitment::CommitmentSlots},
+    solana_runtime::{
+        bank::Bank,
+        bank_forks::BankForks,
+        commitment::{BlockCommitmentCache, CommitmentSlots},
+    },
     solana_sdk_ids::{bpf_loader, bpf_loader_upgradeable, system_program, sysvar},
     solana_send_transaction_service::{
         send_transaction_service_stats::SendTransactionServiceStats,
@@ -23,7 +27,7 @@ use {
         TransactionStatusMeta, VersionedTransactionWithStatusMeta, map_inner_instructions,
     },
     std::{
-        collections::HashSet,
+        collections::{HashMap, HashSet},
         error::Error,
         sync::{
             Arc, Mutex, RwLock,
@@ -49,6 +53,11 @@ pub struct EphemeralTransactionClient {
     er_history_store: Arc<ErHistoryStore>,
     /// ER PubSub notifier. Wired after `RpcSubscriptions` is constructed.
     rpc_subscriptions: Arc<RwLock<Option<Arc<RpcSubscriptions>>>>,
+    /// ER RPC commitment cache.
+    /// Transaction execution updates only the processed slot; confirmed/finalized
+    /// continue to advance through the slot advancer's frozen-bank path.
+    block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
+    transaction_max_age: usize,
 }
 
 impl Clone for EphemeralTransactionClient {
@@ -61,6 +70,8 @@ impl Clone for EphemeralTransactionClient {
             active: Arc::clone(&self.active),
             er_history_store: Arc::clone(&self.er_history_store),
             rpc_subscriptions: Arc::clone(&self.rpc_subscriptions),
+            block_commitment_cache: Arc::clone(&self.block_commitment_cache),
+            transaction_max_age: self.transaction_max_age,
         }
     }
 }
@@ -91,6 +102,49 @@ impl EphemeralTransactionClient {
         active: Arc<AtomicBool>,
         er_history_store: Arc<ErHistoryStore>,
     ) -> Self {
+        let block_commitment_cache = Self::new_block_commitment_cache_for_bank_forks(&bank_forks);
+        Self::new_with_history_and_commitment_cache(
+            bank_forks,
+            bank_operation_lock,
+            delegated_accounts,
+            touched_accounts,
+            active,
+            er_history_store,
+            block_commitment_cache,
+        )
+    }
+
+    pub fn new_with_history_and_commitment_cache(
+        bank_forks: Arc<RwLock<BankForks>>,
+        bank_operation_lock: Arc<Mutex<()>>,
+        delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+        touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+        active: Arc<AtomicBool>,
+        er_history_store: Arc<ErHistoryStore>,
+        block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
+    ) -> Self {
+        Self::new_with_history_commitment_cache_and_transaction_max_age(
+            bank_forks,
+            bank_operation_lock,
+            delegated_accounts,
+            touched_accounts,
+            active,
+            er_history_store,
+            block_commitment_cache,
+            crate::DEFAULT_ER_TRANSACTION_MAX_AGE,
+        )
+    }
+
+    pub(crate) fn new_with_history_commitment_cache_and_transaction_max_age(
+        bank_forks: Arc<RwLock<BankForks>>,
+        bank_operation_lock: Arc<Mutex<()>>,
+        delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+        touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+        active: Arc<AtomicBool>,
+        er_history_store: Arc<ErHistoryStore>,
+        block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
+        transaction_max_age: usize,
+    ) -> Self {
         Self {
             bank_forks,
             bank_operation_lock,
@@ -99,7 +153,25 @@ impl EphemeralTransactionClient {
             active,
             er_history_store,
             rpc_subscriptions: Arc::new(RwLock::new(None)),
+            block_commitment_cache,
+            transaction_max_age,
         }
+    }
+
+    fn new_block_commitment_cache_for_bank_forks(
+        bank_forks: &Arc<RwLock<BankForks>>,
+    ) -> Arc<RwLock<BlockCommitmentCache>> {
+        let slot = bank_forks.read().unwrap().working_bank().slot();
+        Arc::new(RwLock::new(BlockCommitmentCache::new(
+            HashMap::new(),
+            0,
+            CommitmentSlots {
+                slot,
+                root: slot,
+                highest_confirmed_slot: slot,
+                highest_super_majority_root: slot,
+            },
+        )))
     }
 
     pub fn set_rpc_subscriptions(&self, rpc_subscriptions: Arc<RpcSubscriptions>) {
@@ -113,7 +185,6 @@ impl EphemeralTransactionClient {
     /// Check if a transaction only writes to allowed accounts.
     /// Returns `true` if the transaction is allowed, `false` if it
     /// touches non-delegated writable accounts.
-    // TODO: handle https://solana.com/developers/guides/advanced/lookup-tables
     fn is_transaction_allowed_on_bank(
         bank: &Bank,
         tx: &VersionedTransaction,
@@ -123,6 +194,11 @@ impl EphemeralTransactionClient {
         if delegated_accounts.is_empty() {
             return true;
         }
+
+        let loaded_addresses = match Self::load_transaction_addresses(bank, tx) {
+            Some(loaded_addresses) => loaded_addresses,
+            None => return false,
+        };
 
         let message = &tx.message;
         let static_keys = message.static_account_keys();
@@ -137,6 +213,14 @@ impl EphemeralTransactionClient {
             {
                 return false;
             }
+        }
+
+        if !loaded_addresses
+            .writable
+            .iter()
+            .all(|key| Self::is_allowed_writable_on_bank(bank, key, delegated_accounts))
+        {
+            return false;
         }
 
         true
@@ -236,12 +320,30 @@ impl TransactionClient for EphemeralTransactionClient {
             debug!("Tx batch execution failed: {e}");
         }
 
+        self.publish_processed_slot(&bank);
+
         // Mark writable accounts as touched (even on failure, since fee payers may be debited)
         Self::mark_writable_as_touched_for_batch(&txs, &self.touched_accounts);
     }
 }
 
 impl EphemeralTransactionClient {
+    fn publish_processed_slot(&self, bank: &Bank) {
+        let current_slots = self
+            .block_commitment_cache
+            .read()
+            .unwrap()
+            .commitment_slots();
+        *self.block_commitment_cache.write().unwrap() = BlockCommitmentCache::new(
+            HashMap::new(),
+            0,
+            CommitmentSlots {
+                slot: bank.slot(),
+                ..current_slots
+            },
+        );
+    }
+
     fn execute_transactions(
         &self,
         bank: &Bank,
@@ -261,7 +363,7 @@ impl EphemeralTransactionClient {
         };
         let (commit_results, balance_collector) = bank.load_execute_and_commit_transactions(
             &batch,
-            usize::MAX, // TODO: Use appropriate age limit for ephemeral rollup
+            self.transaction_max_age,
             Self::history_recording_config(),
             &mut ExecuteTimings::default(),
             None,
@@ -290,7 +392,7 @@ impl EphemeralTransactionClient {
         tx: VersionedTransaction,
         err: solana_transaction::TransactionError,
     ) {
-        let loaded_addresses = Self::resolve_loaded_addresses(bank, &tx);
+        let loaded_addresses = Self::load_transaction_addresses(bank, &tx).unwrap_or_default();
         let meta = TransactionStatusMeta {
             status: Err(err),
             fee: 0,
@@ -345,21 +447,27 @@ impl EphemeralTransactionClient {
         }
     }
 
-    fn resolve_loaded_addresses(bank: &Bank, tx: &VersionedTransaction) -> LoadedAddresses {
+    fn load_transaction_addresses(
+        bank: &Bank,
+        tx: &VersionedTransaction,
+    ) -> Option<LoadedAddresses> {
         match &tx.message {
-            VersionedMessage::Legacy(_) => LoadedAddresses::default(),
-            VersionedMessage::V0(message) => bank
-                .load_addresses(&message.address_table_lookups)
-                .unwrap_or_else(|err| {
-                    warn!(
-                        "Failed to resolve ALT addresses for ER history recording, sig={}: {err}",
-                        tx.signatures
-                            .first()
-                            .map(|signature| signature.to_string())
-                            .unwrap_or_default()
-                    );
-                    LoadedAddresses::default()
-                }),
+            VersionedMessage::Legacy(_) => Some(LoadedAddresses::default()),
+            VersionedMessage::V0(message) => {
+                match bank.load_addresses(&message.address_table_lookups) {
+                    Ok(loaded_addresses) => Some(loaded_addresses),
+                    Err(err) => {
+                        warn!(
+                            "Failed to resolve ALT addresses, sig={}: {err}",
+                            tx.signatures
+                                .first()
+                                .map(|signature| signature.to_string())
+                                .unwrap_or_default()
+                        );
+                        None
+                    }
+                }
+            }
         }
     }
 
@@ -378,7 +486,8 @@ impl EphemeralTransactionClient {
                 // Record failed transactions so callers can discover the error
                 // instead of getting a null signature status.
                 let err = commit_result.clone().unwrap_err();
-                let loaded_addresses = Self::resolve_loaded_addresses(bank, tx);
+                let loaded_addresses =
+                    Self::load_transaction_addresses(bank, tx).unwrap_or_default();
                 let meta = TransactionStatusMeta {
                     status: Err(err),
                     fee: 0,
@@ -425,7 +534,7 @@ impl EphemeralTransactionClient {
                 .cloned()
                 .unwrap_or_default();
 
-            let loaded_addresses = Self::resolve_loaded_addresses(bank, tx);
+            let loaded_addresses = Self::load_transaction_addresses(bank, tx).unwrap_or_default();
             let meta = TransactionStatusMeta {
                 status: committed_tx.status.clone(),
                 fee: committed_tx.fee_details.total_fee(),
@@ -956,6 +1065,61 @@ mod tests {
     }
 
     #[test]
+    fn test_send_transactions_in_batch_rejects_expired_recent_blockhash() {
+        let fee_payer = Keypair::new();
+        let recipient = Pubkey::new_unique();
+        let mut bank = create_test_bank();
+        fund_account(&bank, &fee_payer.pubkey(), 10_000_000);
+
+        let old_blockhash = bank.last_blockhash();
+        let tx = create_transfer_tx(&fee_payer, fee_payer.pubkey(), recipient, old_blockhash);
+        let signature = tx.signatures[0];
+
+        // ER slots are shorter than L1 slots, so keep Solana's processing-age
+        // window in wall-clock time rather than raw slot count.
+        assert_eq!(
+            crate::DEFAULT_ER_SLOT_DURATION,
+            std::time::Duration::from_millis(50)
+        );
+        let recent_blockhash_max_age =
+            crate::er_recent_blockhash_max_age_for_slot_duration(crate::DEFAULT_ER_SLOT_DURATION);
+        bank.configure_er(
+            &crate::EphemeralRollupSettings::zero_fee_structure(),
+            recent_blockhash_max_age,
+        );
+        assert_eq!(crate::DEFAULT_ER_TRANSACTION_MAX_AGE, 1200);
+        assert_eq!(recent_blockhash_max_age, 2400);
+        for _ in 0..=crate::DEFAULT_ER_TRANSACTION_MAX_AGE {
+            bank.register_unique_recent_blockhash_for_test();
+        }
+        assert!(bank.is_hash_valid_for_age(&old_blockhash, usize::MAX));
+        assert!(
+            !bank.is_hash_valid_for_age(&old_blockhash, crate::DEFAULT_ER_TRANSACTION_MAX_AGE,)
+        );
+
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let bank = bank_forks.read().unwrap().root_bank();
+        let er_history_store = Arc::new(ErHistoryStore::default());
+        let client = create_client_with_history(bank_forks, vec![], er_history_store.clone());
+
+        <EphemeralTransactionClient as TransactionClient>::send_transactions_in_batch(
+            &client,
+            vec![bincode::serialize(&tx).unwrap()],
+            &SendTransactionServiceStats::default(),
+        );
+
+        assert_eq!(bank.get_balance(&recipient), 0);
+        er_history_store.finalize_slot(&bank);
+        let status = er_history_store
+            .get_signature_status(&signature)
+            .expect("expired tx should be recorded in ER history");
+        assert_eq!(
+            status.err,
+            Some(solana_transaction::TransactionError::BlockhashNotFound),
+        );
+    }
+
+    #[test]
     fn test_record_transaction_history_preserves_logs_cpi_and_return_data() {
         let fee_payer = Keypair::new();
         let recipient = Pubkey::new_unique();
@@ -1332,6 +1496,106 @@ mod tests {
 
         // Should be allowed because new_account doesn't exist on L1
         assert!(EphemeralTransactionClient::is_transaction_allowed_on_bank(
+            &bank,
+            &tx,
+            &client.delegated_accounts.read().unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_unresolvable_alt_rejected() {
+        let fee_payer = Keypair::new();
+        let delegated_a = Pubkey::new_unique();
+        let (bank, bank_forks) = create_test_bank_forks_with_accounts(&[
+            (fee_payer.pubkey(), 10_000_000),
+            (delegated_a, 10_000_000),
+        ]);
+        let client = create_client_with_delegated(bank_forks, vec![delegated_a]);
+
+        let tx = VersionedTransaction::try_new(
+            VersionedMessage::V0(v0::Message {
+                header: MessageHeader {
+                    num_required_signatures: 1,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 0,
+                },
+                recent_blockhash: bank.last_blockhash(),
+                account_keys: vec![fee_payer.pubkey()],
+                instructions: vec![],
+                address_table_lookups: vec![MessageAddressTableLookup {
+                    account_key: Pubkey::new_unique(),
+                    writable_indexes: vec![0],
+                    readonly_indexes: vec![],
+                }],
+            }),
+            &[&fee_payer],
+        )
+        .unwrap();
+
+        assert!(!EphemeralTransactionClient::is_transaction_allowed_on_bank(
+            &bank,
+            &tx,
+            &client.delegated_accounts.read().unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_writable_alt_non_delegated_existing_account_rejected() {
+        let fee_payer = Keypair::new();
+        let delegated_a = Pubkey::new_unique();
+        let existing_non_delegated = Pubkey::new_unique();
+
+        use solana_genesis_config::GenesisConfig;
+        let genesis_config = GenesisConfig::new(&[], &[]);
+        let root_bank = Bank::new_for_tests(&genesis_config);
+        fund_account(&root_bank, &fee_payer.pubkey(), 10_000_000);
+        fund_account(&root_bank, &delegated_a, 10_000_000);
+        fund_account(&root_bank, &existing_non_delegated, 10_000_000);
+
+        let address_table_key = Pubkey::new_unique();
+        let address_table_state = AddressLookupTable {
+            meta: LookupTableMeta {
+                last_extended_slot_start_index: 1,
+                ..LookupTableMeta::default()
+            },
+            addresses: Cow::Owned(vec![existing_non_delegated]),
+        };
+        let address_table_data = Arc::new(address_table_state.serialize_for_tests().unwrap());
+        let address_table_account = AccountSharedData::create_from_existing_shared_data(
+            root_bank.get_minimum_balance_for_rent_exemption(address_table_data.len()),
+            address_table_data,
+            address_lookup_table::program::id(),
+            false,
+            0,
+        );
+        root_bank.store_account(&address_table_key, &address_table_account);
+        root_bank.freeze();
+        let bank = Bank::new_from_parent(Arc::new(root_bank), &Pubkey::new_unique(), 1);
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let bank = bank_forks.read().unwrap().root_bank();
+        let client = create_client_with_delegated(bank_forks, vec![delegated_a]);
+
+        let tx = VersionedTransaction::try_new(
+            VersionedMessage::V0(v0::Message {
+                header: MessageHeader {
+                    num_required_signatures: 1,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 0,
+                },
+                recent_blockhash: bank.last_blockhash(),
+                account_keys: vec![fee_payer.pubkey()],
+                instructions: vec![],
+                address_table_lookups: vec![MessageAddressTableLookup {
+                    account_key: address_table_key,
+                    writable_indexes: vec![0],
+                    readonly_indexes: vec![],
+                }],
+            }),
+            &[&fee_payer],
+        )
+        .unwrap();
+
+        assert!(!EphemeralTransactionClient::is_transaction_allowed_on_bank(
             &bank,
             &tx,
             &client.delegated_accounts.read().unwrap()

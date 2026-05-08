@@ -4804,6 +4804,7 @@ dependencies = [
  "solana-instruction",
  "solana-keypair",
  "solana-ledger",
+ "solana-loader-v3-interface",
  "solana-message",
  "solana-net-utils",
  "solana-perf",

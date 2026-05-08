@@ -8,7 +8,7 @@ use {
     solana_keypair::Keypair,
     solana_pubkey::Pubkey,
     solana_runtime::bank::Bank,
-    std::{net::SocketAddr, sync::Arc},
+    std::{net::SocketAddr, sync::Arc, time::Duration},
     thiserror::Error,
 };
 
@@ -19,6 +19,26 @@ pub mod portal_state;
 pub mod slot_advancer;
 
 pub use crate::ephemeral_runtime::EphemeralRuntime;
+
+const DEFAULT_ER_SLOT_DURATION_MS: u64 = 50;
+pub const DEFAULT_ER_SLOT_DURATION: Duration = Duration::from_millis(DEFAULT_ER_SLOT_DURATION_MS);
+pub(crate) const DEFAULT_ER_TRANSACTION_MAX_AGE: usize = (solana_clock::MAX_PROCESSING_AGE
+    * solana_clock::DEFAULT_MS_PER_SLOT as usize)
+    .div_ceil(DEFAULT_ER_SLOT_DURATION_MS as usize);
+pub(crate) fn er_transaction_max_age_for_slot_duration(slot_duration: Duration) -> usize {
+    scale_l1_slot_age_for_er(solana_clock::MAX_PROCESSING_AGE, slot_duration)
+}
+
+pub(crate) fn er_recent_blockhash_max_age_for_slot_duration(slot_duration: Duration) -> usize {
+    scale_l1_slot_age_for_er(solana_clock::MAX_RECENT_BLOCKHASHES, slot_duration)
+}
+
+fn scale_l1_slot_age_for_er(l1_slot_age: usize, slot_duration: Duration) -> usize {
+    let er_slot_ms = usize::try_from(slot_duration.as_millis())
+        .unwrap_or(usize::MAX)
+        .max(1);
+    (l1_slot_age * solana_clock::DEFAULT_MS_PER_SLOT as usize).div_ceil(er_slot_ms)
+}
 
 #[derive(Error, Debug)]
 pub enum NorthStarError {
@@ -120,6 +140,7 @@ pub struct EphemeralForkMetadata {}
 /// Main manager for ephemeral rollup forks
 pub struct Manager {
     config: ManagerConfig,
+    slot_duration: Duration,
     /// Sonic: Always-on ephemeral runtime. Created once at startup via
     /// `init_runtime()`, stays alive for the validator's lifetime.
     /// The `active` flag inside gates transaction acceptance.
@@ -132,8 +153,13 @@ impl Manager {
         info!("Initializing NorthStar Manager with config: {config:?}");
         Self {
             config,
+            slot_duration: DEFAULT_ER_SLOT_DURATION,
             runtime: None,
         }
+    }
+
+    pub fn set_slot_duration(&mut self, slot_duration: Duration) {
+        self.slot_duration = slot_duration;
     }
 
     /// Sonic: Check if an ephemeral session is currently active (accepting transactions)
@@ -403,7 +429,7 @@ impl Manager {
             delegated_accounts: vec![],
         };
 
-        let runtime = EphemeralRuntime::new(
+        let runtime = EphemeralRuntime::new_with_slot_duration(
             root_bank,
             cluster_info,
             settings,
@@ -412,6 +438,7 @@ impl Manager {
             tpu_addr,
             self.config.portal_program_id,
             self.config.manager_account.clone(),
+            self.slot_duration,
         )
         .map_err(|e| {
             error!("Failed to create ephemeral runtime: {}", e);
@@ -471,7 +498,7 @@ impl Manager {
             return Ok(());
         }
 
-        let mut runtime = EphemeralRuntime::new(
+        let mut runtime = EphemeralRuntime::new_with_slot_duration(
             root_bank,
             cluster_info,
             settings,
@@ -481,6 +508,7 @@ impl Manager {
             "127.0.0.1:0".parse().unwrap(),
             self.config.portal_program_id,
             self.config.manager_account.clone(),
+            self.slot_duration,
         )
         .map_err(|e| {
             error!("Failed to create ephemeral runtime: {}", e);
@@ -503,6 +531,18 @@ impl Manager {
                 return;
             }
             runtime.credit_deposit(depositor, lamports);
+        }
+    }
+
+    /// Refresh delegated owner programs from L1 when their deployment accounts
+    /// changed. This catches L1 `solana program deploy` updates that do not
+    /// emit Portal events but must still invalidate the isolated ER ProgramCache.
+    pub fn refresh_delegated_owner_programs(&self, bank: &Bank) {
+        if let Some(runtime) = &self.runtime {
+            if !runtime.is_active() {
+                return;
+            }
+            runtime.refresh_delegated_owner_programs_from_l1(bank);
         }
     }
 
@@ -530,10 +570,11 @@ impl Manager {
                 return;
             }
             if let Some(account_data) = bank.get_account(delegated_account) {
-                runtime.handle_delegation_with_owner_program(
+                runtime.handle_delegation_inner(
                     delegated_account,
                     account_data,
                     owner_program,
+                    Some(bank),
                 );
             } else {
                 warn!(

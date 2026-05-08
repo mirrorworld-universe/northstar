@@ -66,6 +66,14 @@ impl BlockhashQueue {
         self.last_hash.expect("no hash has been set")
     }
 
+    // Sonic: allow ER banks to keep recent blockhashes for Solana-equivalent wall-clock time.
+    pub fn set_max_age(&mut self, max_age: usize) {
+        self.max_age = max_age;
+        self.hashes.retain(|_, info| {
+            Self::is_hash_index_valid(self.last_hash_index, self.max_age, info.hash_index)
+        });
+    }
+
     pub fn get_lamports_per_signature(&self, hash: &Hash) -> Option<u64> {
         self.hashes
             .get(hash)

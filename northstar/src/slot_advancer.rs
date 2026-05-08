@@ -173,7 +173,10 @@ impl SlotAdvancer {
                     &config.manager_account,
                     next_bank_slot,
                 );
-                next_bank.set_ephemeral_fee_structure(&config.er_fee_structure);
+                next_bank.configure_er(
+                    &config.er_fee_structure,
+                    crate::er_recent_blockhash_max_age_for_slot_duration(config.slot_duration),
+                );
 
                 let next_bank_arc = {
                     let mut bank_forks_write = bank_forks.write().unwrap();

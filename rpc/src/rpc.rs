@@ -4221,16 +4221,13 @@ pub mod rpc_full {
 
             // Sonic: ER fast path — preflight (if requested) has already run
             // above; bypass `SendTransactionService` queue/retry and execute
-            // the wire transaction synchronously on the ER bank.
+            // the wire transaction on the ER bank before returning.  Clients
+            // commonly fetch accounts immediately after `sendTransaction`; if
+            // we only enqueue execution, processed reads can race and observe
+            // the pre-transaction bank.
             if let Some(executor) = meta.er_tx_executor.clone() {
-                // Dispatch on blocking pool so the JSON-RPC HTTP I/O thread
-                // returns immediately. Otherwise tx execution serializes all
-                // RPC traffic and stalls the deploy under burst.
-                let signature_str = signature.to_string();
-                meta.runtime.spawn_blocking(move || {
-                    executor.execute_wire(wire_transaction);
-                });
-                return Ok(signature_str);
+                executor.execute_wire(wire_transaction);
+                return Ok(signature.to_string());
             }
 
             _send_transaction(
