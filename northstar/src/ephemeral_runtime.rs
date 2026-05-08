@@ -610,6 +610,7 @@ impl EphemeralRuntime {
         ));
 
         tx_client.set_rpc_subscriptions(rpc_subscriptions.clone());
+        tx_client.set_block_commitment_cache(block_commitment_cache.clone());
 
         let (pubsub_service, pubsub_trigger) = {
             let (trigger, pubsub_svc) =
@@ -1385,6 +1386,79 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(receiver_balance, transfer_amount);
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_send_transaction_result_is_immediately_visible_at_processed_commitment() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        let sender_keypair = Keypair::new();
+        let sender_pubkey = sender_keypair.pubkey();
+        let receiver_pubkey = Pubkey::new_unique();
+        let sender_initial = 100_000_000_000u64;
+        let transfer_amount = 10_000_000_000u64;
+        fund_account(&parent_bank, &sender_pubkey, sender_initial);
+        parent_bank.freeze();
+
+        let cluster_info = create_test_cluster_info();
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            cluster_info,
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.activate();
+        let rpc_client = rpc_client(&runtime);
+
+        std::thread::sleep(Duration::from_secs(2));
+
+        let blockhash = rpc_client
+            .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
+            .unwrap()
+            .0;
+        let instruction = transfer(&sender_pubkey, &receiver_pubkey, transfer_amount);
+        let tx = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&sender_pubkey),
+            &[&sender_keypair],
+            blockhash,
+        );
+
+        rpc_client
+            .send_transaction_with_config(
+                &tx,
+                RpcSendTransactionConfig {
+                    skip_preflight: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let receiver_balance = rpc_client
+            .get_balance_with_commitment(&receiver_pubkey, CommitmentConfig::processed())
+            .unwrap()
+            .value;
+        assert_eq!(
+            receiver_balance, transfer_amount,
+            "processed RPC should observe transaction writes after sendTransaction returns"
+        );
 
         runtime.shutdown();
     }
