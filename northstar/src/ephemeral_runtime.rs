@@ -481,14 +481,6 @@ impl EphemeralRuntime {
         let active = Arc::new(AtomicBool::new(false));
         let session_pda: Arc<RwLock<Option<Pubkey>>> = Arc::new(RwLock::new(None));
         let er_history_store = Arc::new(ErHistoryStore::default());
-        let tx_client = EphemeralTransactionClient::new_with_history(
-            bank_forks.clone(),
-            bank_operation_lock.clone(),
-            delegated_set.clone(),
-            touched_accounts.clone(),
-            active.clone(),
-            er_history_store.clone(),
-        );
 
         let ledger_dir = TempDir::new().map_err(|e| e.to_string())?;
         let blockstore = Arc::new(Blockstore::open(ledger_dir.path()).map_err(|e| e.to_string())?);
@@ -504,6 +496,15 @@ impl EphemeralRuntime {
                 highest_super_majority_root: slot,
             },
         )));
+        let tx_client = EphemeralTransactionClient::new_with_history_and_commitment_cache(
+            bank_forks.clone(),
+            bank_operation_lock.clone(),
+            delegated_set.clone(),
+            touched_accounts.clone(),
+            active.clone(),
+            er_history_store.clone(),
+            block_commitment_cache.clone(),
+        );
 
         let optimistically_confirmed_bank = Arc::new(RwLock::new(OptimisticallyConfirmedBank {
             bank: Arc::clone(&initial_bank),
@@ -1385,6 +1386,79 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(receiver_balance, transfer_amount);
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_send_transaction_result_is_immediately_visible_at_processed_commitment() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        let sender_keypair = Keypair::new();
+        let sender_pubkey = sender_keypair.pubkey();
+        let receiver_pubkey = Pubkey::new_unique();
+        let sender_initial = 100_000_000_000u64;
+        let transfer_amount = 10_000_000_000u64;
+        fund_account(&parent_bank, &sender_pubkey, sender_initial);
+        parent_bank.freeze();
+
+        let cluster_info = create_test_cluster_info();
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            owner: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            cluster_info,
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.activate();
+        let rpc_client = rpc_client(&runtime);
+
+        std::thread::sleep(Duration::from_secs(2));
+
+        let blockhash = rpc_client
+            .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
+            .unwrap()
+            .0;
+        let instruction = transfer(&sender_pubkey, &receiver_pubkey, transfer_amount);
+        let tx = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&sender_pubkey),
+            &[&sender_keypair],
+            blockhash,
+        );
+
+        rpc_client
+            .send_transaction_with_config(
+                &tx,
+                RpcSendTransactionConfig {
+                    skip_preflight: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let receiver_balance = rpc_client
+            .get_balance_with_commitment(&receiver_pubkey, CommitmentConfig::processed())
+            .unwrap()
+            .value;
+        assert_eq!(
+            receiver_balance, transfer_amount,
+            "processed RPC should observe transaction writes after sendTransaction returns"
+        );
 
         runtime.shutdown();
     }

@@ -6,7 +6,11 @@ use {
     solana_message::{AddressLoader, VersionedMessage, v0::LoadedAddresses},
     solana_pubkey::Pubkey,
     solana_rpc::{er_history::ErHistoryStore, rpc_subscriptions::RpcSubscriptions},
-    solana_runtime::{bank::Bank, bank_forks::BankForks, commitment::CommitmentSlots},
+    solana_runtime::{
+        bank::Bank,
+        bank_forks::BankForks,
+        commitment::{BlockCommitmentCache, CommitmentSlots},
+    },
     solana_sdk_ids::{bpf_loader, bpf_loader_upgradeable, system_program, sysvar},
     solana_send_transaction_service::{
         send_transaction_service_stats::SendTransactionServiceStats,
@@ -23,7 +27,7 @@ use {
         TransactionStatusMeta, VersionedTransactionWithStatusMeta, map_inner_instructions,
     },
     std::{
-        collections::HashSet,
+        collections::{HashMap, HashSet},
         error::Error,
         sync::{
             Arc, Mutex, RwLock,
@@ -49,6 +53,10 @@ pub struct EphemeralTransactionClient {
     er_history_store: Arc<ErHistoryStore>,
     /// ER PubSub notifier. Wired after `RpcSubscriptions` is constructed.
     rpc_subscriptions: Arc<RwLock<Option<Arc<RpcSubscriptions>>>>,
+    /// ER RPC commitment cache.
+    /// Transaction execution updates only the processed slot; confirmed/finalized
+    /// continue to advance through the slot advancer's frozen-bank path.
+    block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
 }
 
 impl Clone for EphemeralTransactionClient {
@@ -61,6 +69,7 @@ impl Clone for EphemeralTransactionClient {
             active: Arc::clone(&self.active),
             er_history_store: Arc::clone(&self.er_history_store),
             rpc_subscriptions: Arc::clone(&self.rpc_subscriptions),
+            block_commitment_cache: Arc::clone(&self.block_commitment_cache),
         }
     }
 }
@@ -91,6 +100,27 @@ impl EphemeralTransactionClient {
         active: Arc<AtomicBool>,
         er_history_store: Arc<ErHistoryStore>,
     ) -> Self {
+        let block_commitment_cache = Self::new_block_commitment_cache_for_bank_forks(&bank_forks);
+        Self::new_with_history_and_commitment_cache(
+            bank_forks,
+            bank_operation_lock,
+            delegated_accounts,
+            touched_accounts,
+            active,
+            er_history_store,
+            block_commitment_cache,
+        )
+    }
+
+    pub fn new_with_history_and_commitment_cache(
+        bank_forks: Arc<RwLock<BankForks>>,
+        bank_operation_lock: Arc<Mutex<()>>,
+        delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+        touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+        active: Arc<AtomicBool>,
+        er_history_store: Arc<ErHistoryStore>,
+        block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
+    ) -> Self {
         Self {
             bank_forks,
             bank_operation_lock,
@@ -99,7 +129,24 @@ impl EphemeralTransactionClient {
             active,
             er_history_store,
             rpc_subscriptions: Arc::new(RwLock::new(None)),
+            block_commitment_cache,
         }
+    }
+
+    fn new_block_commitment_cache_for_bank_forks(
+        bank_forks: &Arc<RwLock<BankForks>>,
+    ) -> Arc<RwLock<BlockCommitmentCache>> {
+        let slot = bank_forks.read().unwrap().working_bank().slot();
+        Arc::new(RwLock::new(BlockCommitmentCache::new(
+            HashMap::new(),
+            0,
+            CommitmentSlots {
+                slot,
+                root: slot,
+                highest_confirmed_slot: slot,
+                highest_super_majority_root: slot,
+            },
+        )))
     }
 
     pub fn set_rpc_subscriptions(&self, rpc_subscriptions: Arc<RpcSubscriptions>) {
@@ -236,12 +283,30 @@ impl TransactionClient for EphemeralTransactionClient {
             debug!("Tx batch execution failed: {e}");
         }
 
+        self.publish_processed_slot(&bank);
+
         // Mark writable accounts as touched (even on failure, since fee payers may be debited)
         Self::mark_writable_as_touched_for_batch(&txs, &self.touched_accounts);
     }
 }
 
 impl EphemeralTransactionClient {
+    fn publish_processed_slot(&self, bank: &Bank) {
+        let current_slots = self
+            .block_commitment_cache
+            .read()
+            .unwrap()
+            .commitment_slots();
+        *self.block_commitment_cache.write().unwrap() = BlockCommitmentCache::new(
+            HashMap::new(),
+            0,
+            CommitmentSlots {
+                slot: bank.slot(),
+                ..current_slots
+            },
+        );
+    }
+
     fn execute_transactions(
         &self,
         bank: &Bank,
