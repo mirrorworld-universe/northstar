@@ -113,7 +113,6 @@ impl EphemeralTransactionClient {
     /// Check if a transaction only writes to allowed accounts.
     /// Returns `true` if the transaction is allowed, `false` if it
     /// touches non-delegated writable accounts.
-    // TODO: handle https://solana.com/developers/guides/advanced/lookup-tables
     fn is_transaction_allowed_on_bank(
         bank: &Bank,
         tx: &VersionedTransaction,
@@ -123,6 +122,11 @@ impl EphemeralTransactionClient {
         if delegated_accounts.is_empty() {
             return true;
         }
+
+        let loaded_addresses = match Self::load_transaction_addresses(bank, tx) {
+            Some(loaded_addresses) => loaded_addresses,
+            None => return false,
+        };
 
         let message = &tx.message;
         let static_keys = message.static_account_keys();
@@ -137,6 +141,14 @@ impl EphemeralTransactionClient {
             {
                 return false;
             }
+        }
+
+        if !loaded_addresses
+            .writable
+            .iter()
+            .all(|key| Self::is_allowed_writable_on_bank(bank, key, delegated_accounts))
+        {
+            return false;
         }
 
         true
@@ -290,7 +302,7 @@ impl EphemeralTransactionClient {
         tx: VersionedTransaction,
         err: solana_transaction::TransactionError,
     ) {
-        let loaded_addresses = Self::resolve_loaded_addresses(bank, &tx);
+        let loaded_addresses = Self::load_transaction_addresses(bank, &tx).unwrap_or_default();
         let meta = TransactionStatusMeta {
             status: Err(err),
             fee: 0,
@@ -345,21 +357,27 @@ impl EphemeralTransactionClient {
         }
     }
 
-    fn resolve_loaded_addresses(bank: &Bank, tx: &VersionedTransaction) -> LoadedAddresses {
+    fn load_transaction_addresses(
+        bank: &Bank,
+        tx: &VersionedTransaction,
+    ) -> Option<LoadedAddresses> {
         match &tx.message {
-            VersionedMessage::Legacy(_) => LoadedAddresses::default(),
-            VersionedMessage::V0(message) => bank
-                .load_addresses(&message.address_table_lookups)
-                .unwrap_or_else(|err| {
-                    warn!(
-                        "Failed to resolve ALT addresses for ER history recording, sig={}: {err}",
-                        tx.signatures
-                            .first()
-                            .map(|signature| signature.to_string())
-                            .unwrap_or_default()
-                    );
-                    LoadedAddresses::default()
-                }),
+            VersionedMessage::Legacy(_) => Some(LoadedAddresses::default()),
+            VersionedMessage::V0(message) => {
+                match bank.load_addresses(&message.address_table_lookups) {
+                    Ok(loaded_addresses) => Some(loaded_addresses),
+                    Err(err) => {
+                        warn!(
+                            "Failed to resolve ALT addresses, sig={}: {err}",
+                            tx.signatures
+                                .first()
+                                .map(|signature| signature.to_string())
+                                .unwrap_or_default()
+                        );
+                        None
+                    }
+                }
+            }
         }
     }
 
@@ -378,7 +396,8 @@ impl EphemeralTransactionClient {
                 // Record failed transactions so callers can discover the error
                 // instead of getting a null signature status.
                 let err = commit_result.clone().unwrap_err();
-                let loaded_addresses = Self::resolve_loaded_addresses(bank, tx);
+                let loaded_addresses =
+                    Self::load_transaction_addresses(bank, tx).unwrap_or_default();
                 let meta = TransactionStatusMeta {
                     status: Err(err),
                     fee: 0,
@@ -425,7 +444,7 @@ impl EphemeralTransactionClient {
                 .cloned()
                 .unwrap_or_default();
 
-            let loaded_addresses = Self::resolve_loaded_addresses(bank, tx);
+            let loaded_addresses = Self::load_transaction_addresses(bank, tx).unwrap_or_default();
             let meta = TransactionStatusMeta {
                 status: committed_tx.status.clone(),
                 fee: committed_tx.fee_details.total_fee(),
@@ -1332,6 +1351,106 @@ mod tests {
 
         // Should be allowed because new_account doesn't exist on L1
         assert!(EphemeralTransactionClient::is_transaction_allowed_on_bank(
+            &bank,
+            &tx,
+            &client.delegated_accounts.read().unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_unresolvable_alt_rejected() {
+        let fee_payer = Keypair::new();
+        let delegated_a = Pubkey::new_unique();
+        let (bank, bank_forks) = create_test_bank_forks_with_accounts(&[
+            (fee_payer.pubkey(), 10_000_000),
+            (delegated_a, 10_000_000),
+        ]);
+        let client = create_client_with_delegated(bank_forks, vec![delegated_a]);
+
+        let tx = VersionedTransaction::try_new(
+            VersionedMessage::V0(v0::Message {
+                header: MessageHeader {
+                    num_required_signatures: 1,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 0,
+                },
+                recent_blockhash: bank.last_blockhash(),
+                account_keys: vec![fee_payer.pubkey()],
+                instructions: vec![],
+                address_table_lookups: vec![MessageAddressTableLookup {
+                    account_key: Pubkey::new_unique(),
+                    writable_indexes: vec![0],
+                    readonly_indexes: vec![],
+                }],
+            }),
+            &[&fee_payer],
+        )
+        .unwrap();
+
+        assert!(!EphemeralTransactionClient::is_transaction_allowed_on_bank(
+            &bank,
+            &tx,
+            &client.delegated_accounts.read().unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_writable_alt_non_delegated_existing_account_rejected() {
+        let fee_payer = Keypair::new();
+        let delegated_a = Pubkey::new_unique();
+        let existing_non_delegated = Pubkey::new_unique();
+
+        use solana_genesis_config::GenesisConfig;
+        let genesis_config = GenesisConfig::new(&[], &[]);
+        let root_bank = Bank::new_for_tests(&genesis_config);
+        fund_account(&root_bank, &fee_payer.pubkey(), 10_000_000);
+        fund_account(&root_bank, &delegated_a, 10_000_000);
+        fund_account(&root_bank, &existing_non_delegated, 10_000_000);
+
+        let address_table_key = Pubkey::new_unique();
+        let address_table_state = AddressLookupTable {
+            meta: LookupTableMeta {
+                last_extended_slot_start_index: 1,
+                ..LookupTableMeta::default()
+            },
+            addresses: Cow::Owned(vec![existing_non_delegated]),
+        };
+        let address_table_data = Arc::new(address_table_state.serialize_for_tests().unwrap());
+        let address_table_account = AccountSharedData::create_from_existing_shared_data(
+            root_bank.get_minimum_balance_for_rent_exemption(address_table_data.len()),
+            address_table_data,
+            address_lookup_table::program::id(),
+            false,
+            0,
+        );
+        root_bank.store_account(&address_table_key, &address_table_account);
+        root_bank.freeze();
+        let bank = Bank::new_from_parent(Arc::new(root_bank), &Pubkey::new_unique(), 1);
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let bank = bank_forks.read().unwrap().root_bank();
+        let client = create_client_with_delegated(bank_forks, vec![delegated_a]);
+
+        let tx = VersionedTransaction::try_new(
+            VersionedMessage::V0(v0::Message {
+                header: MessageHeader {
+                    num_required_signatures: 1,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 0,
+                },
+                recent_blockhash: bank.last_blockhash(),
+                account_keys: vec![fee_payer.pubkey()],
+                instructions: vec![],
+                address_table_lookups: vec![MessageAddressTableLookup {
+                    account_key: address_table_key,
+                    writable_indexes: vec![0],
+                    readonly_indexes: vec![],
+                }],
+            }),
+            &[&fee_payer],
+        )
+        .unwrap();
+
+        assert!(!EphemeralTransactionClient::is_transaction_allowed_on_bank(
             &bank,
             &tx,
             &client.delegated_accounts.read().unwrap()
