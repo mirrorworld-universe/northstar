@@ -6202,16 +6202,13 @@ impl Bank {
         &self.fee_structure
     }
 
-    /// Sonic: Configure the transaction fee model for a Northstar Ephemeral Rollup bank.
-    ///
-    /// This must be called before the bank registers new blockhashes. Registered
-    /// ER blockhashes carry `fee_structure.lamports_per_signature`; `0` makes
-    /// fee calculation return zero, including priority fees.
-    pub fn set_ephemeral_fee_structure(&mut self, fee_structure: &FeeStructure) {
+    /// Sonic: Configure Northstar Ephemeral Rollup bank parameters.
+    pub fn configure_er(&mut self, fee_structure: &FeeStructure, blockhash_queue_max_age: usize) {
         self.fee_rate_governor = FeeRateGovernor::new(fee_structure.lamports_per_signature, 0);
         self.fee_structure = fee_structure.clone();
 
         let mut blockhash_queue = self.blockhash_queue.write().unwrap();
+        blockhash_queue.set_max_age(blockhash_queue_max_age);
         let last_hash = blockhash_queue.last_hash();
         if blockhash_queue.get_lamports_per_signature(&last_hash)
             != Some(fee_structure.lamports_per_signature)

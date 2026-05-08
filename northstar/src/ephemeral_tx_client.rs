@@ -57,6 +57,7 @@ pub struct EphemeralTransactionClient {
     /// Transaction execution updates only the processed slot; confirmed/finalized
     /// continue to advance through the slot advancer's frozen-bank path.
     block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
+    transaction_max_age: usize,
 }
 
 impl Clone for EphemeralTransactionClient {
@@ -70,6 +71,7 @@ impl Clone for EphemeralTransactionClient {
             er_history_store: Arc::clone(&self.er_history_store),
             rpc_subscriptions: Arc::clone(&self.rpc_subscriptions),
             block_commitment_cache: Arc::clone(&self.block_commitment_cache),
+            transaction_max_age: self.transaction_max_age,
         }
     }
 }
@@ -121,6 +123,28 @@ impl EphemeralTransactionClient {
         er_history_store: Arc<ErHistoryStore>,
         block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
     ) -> Self {
+        Self::new_with_history_commitment_cache_and_transaction_max_age(
+            bank_forks,
+            bank_operation_lock,
+            delegated_accounts,
+            touched_accounts,
+            active,
+            er_history_store,
+            block_commitment_cache,
+            crate::DEFAULT_ER_TRANSACTION_MAX_AGE,
+        )
+    }
+
+    pub(crate) fn new_with_history_commitment_cache_and_transaction_max_age(
+        bank_forks: Arc<RwLock<BankForks>>,
+        bank_operation_lock: Arc<Mutex<()>>,
+        delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+        touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+        active: Arc<AtomicBool>,
+        er_history_store: Arc<ErHistoryStore>,
+        block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
+        transaction_max_age: usize,
+    ) -> Self {
         Self {
             bank_forks,
             bank_operation_lock,
@@ -130,6 +154,7 @@ impl EphemeralTransactionClient {
             er_history_store,
             rpc_subscriptions: Arc::new(RwLock::new(None)),
             block_commitment_cache,
+            transaction_max_age,
         }
     }
 
@@ -326,7 +351,7 @@ impl EphemeralTransactionClient {
         };
         let (commit_results, balance_collector) = bank.load_execute_and_commit_transactions(
             &batch,
-            usize::MAX, // TODO: Use appropriate age limit for ephemeral rollup
+            self.transaction_max_age,
             Self::history_recording_config(),
             &mut ExecuteTimings::default(),
             None,
@@ -1017,6 +1042,61 @@ mod tests {
                 )
                 .is_some(),
             "second transaction should be recorded in ER history"
+        );
+    }
+
+    #[test]
+    fn test_send_transactions_in_batch_rejects_expired_recent_blockhash() {
+        let fee_payer = Keypair::new();
+        let recipient = Pubkey::new_unique();
+        let mut bank = create_test_bank();
+        fund_account(&bank, &fee_payer.pubkey(), 10_000_000);
+
+        let old_blockhash = bank.last_blockhash();
+        let tx = create_transfer_tx(&fee_payer, fee_payer.pubkey(), recipient, old_blockhash);
+        let signature = tx.signatures[0];
+
+        // ER slots are shorter than L1 slots, so keep Solana's processing-age
+        // window in wall-clock time rather than raw slot count.
+        assert_eq!(
+            crate::DEFAULT_ER_SLOT_DURATION,
+            std::time::Duration::from_millis(50)
+        );
+        let recent_blockhash_max_age =
+            crate::er_recent_blockhash_max_age_for_slot_duration(crate::DEFAULT_ER_SLOT_DURATION);
+        bank.configure_er(
+            &crate::EphemeralRollupSettings::zero_fee_structure(),
+            recent_blockhash_max_age,
+        );
+        assert_eq!(crate::DEFAULT_ER_TRANSACTION_MAX_AGE, 1200);
+        assert_eq!(recent_blockhash_max_age, 2400);
+        for _ in 0..=crate::DEFAULT_ER_TRANSACTION_MAX_AGE {
+            bank.register_unique_recent_blockhash_for_test();
+        }
+        assert!(bank.is_hash_valid_for_age(&old_blockhash, usize::MAX));
+        assert!(
+            !bank.is_hash_valid_for_age(&old_blockhash, crate::DEFAULT_ER_TRANSACTION_MAX_AGE,)
+        );
+
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let bank = bank_forks.read().unwrap().root_bank();
+        let er_history_store = Arc::new(ErHistoryStore::default());
+        let client = create_client_with_history(bank_forks, vec![], er_history_store.clone());
+
+        <EphemeralTransactionClient as TransactionClient>::send_transactions_in_batch(
+            &client,
+            vec![bincode::serialize(&tx).unwrap()],
+            &SendTransactionServiceStats::default(),
+        );
+
+        assert_eq!(bank.get_balance(&recipient), 0);
+        er_history_store.finalize_slot(&bank);
+        let status = er_history_store
+            .get_signature_status(&signature)
+            .expect("expired tx should be recorded in ER history");
+        assert_eq!(
+            status.err,
+            Some(solana_transaction::TransactionError::BlockhashNotFound),
         );
     }
 
