@@ -481,14 +481,6 @@ impl EphemeralRuntime {
         let active = Arc::new(AtomicBool::new(false));
         let session_pda: Arc<RwLock<Option<Pubkey>>> = Arc::new(RwLock::new(None));
         let er_history_store = Arc::new(ErHistoryStore::default());
-        let tx_client = EphemeralTransactionClient::new_with_history(
-            bank_forks.clone(),
-            bank_operation_lock.clone(),
-            delegated_set.clone(),
-            touched_accounts.clone(),
-            active.clone(),
-            er_history_store.clone(),
-        );
 
         let ledger_dir = TempDir::new().map_err(|e| e.to_string())?;
         let blockstore = Arc::new(Blockstore::open(ledger_dir.path()).map_err(|e| e.to_string())?);
@@ -504,6 +496,15 @@ impl EphemeralRuntime {
                 highest_super_majority_root: slot,
             },
         )));
+        let tx_client = EphemeralTransactionClient::new_with_history_and_commitment_cache(
+            bank_forks.clone(),
+            bank_operation_lock.clone(),
+            delegated_set.clone(),
+            touched_accounts.clone(),
+            active.clone(),
+            er_history_store.clone(),
+            block_commitment_cache.clone(),
+        );
 
         let optimistically_confirmed_bank = Arc::new(RwLock::new(OptimisticallyConfirmedBank {
             bank: Arc::clone(&initial_bank),
@@ -610,7 +611,6 @@ impl EphemeralRuntime {
         ));
 
         tx_client.set_rpc_subscriptions(rpc_subscriptions.clone());
-        tx_client.set_block_commitment_cache(block_commitment_cache.clone());
 
         let (pubsub_service, pubsub_trigger) = {
             let (trigger, pubsub_svc) =
