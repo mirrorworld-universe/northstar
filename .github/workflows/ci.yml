@@ -7,7 +7,7 @@ on:
     branches: [master, main]
 
 concurrency:
-  group: global-self-hosted-runner
+  group: ci-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -64,7 +64,7 @@ jobs:
 
   test:
     name: Test
-    runs-on: [self-hosted, devnet]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ensure-rust-toolchain
