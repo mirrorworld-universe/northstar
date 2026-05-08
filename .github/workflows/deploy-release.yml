@@ -18,6 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ensure-rust-toolchain
+      - run: rustup toolchain install nightly --component rustfmt
       - run: cargo +nightly fmt --all -- --check
 
   clippy:
