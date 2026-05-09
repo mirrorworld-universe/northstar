@@ -40,3 +40,6 @@ log-*/
 
 # Local agent instructions
 **/AGENTS.local.md
+
+# Vim
+*.swp
