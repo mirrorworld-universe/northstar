@@ -605,12 +605,25 @@ mod tests {
             None,
         );
 
-        thread::sleep(Duration::from_millis(200));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            let latest_slot = bank_forks.read().unwrap().working_bank().slot();
+            if latest_slot > initial_slot + 5 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
         exit.store(true, Ordering::Relaxed);
         advancer.join();
 
         let working_bank = bank_forks.read().unwrap().working_bank();
-        assert!(working_bank.slot() > initial_slot + 5);
+        assert!(
+            working_bank.slot() > initial_slot + 5,
+            "slot advancer only reached slot {} from initial slot {}",
+            working_bank.slot(),
+            initial_slot
+        );
         assert!(
             working_bank.parents().len() <= 2,
             "ER working bank parent chain grew too deep: {}",
