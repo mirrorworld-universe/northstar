@@ -60,7 +60,7 @@ jobs:
 
   deploy:
     name: Build and Deploy on Devnet
-    needs: clippy
+    needs: test
     runs-on: [devnet]
     steps:
       - uses: actions/checkout@v4
