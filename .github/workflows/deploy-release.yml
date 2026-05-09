@@ -28,6 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ensure-rust-toolchain
+      - run: rustup component add clippy
       - uses: Swatinem/rust-cache@v2
       - name: Install dependencies
         run: |
