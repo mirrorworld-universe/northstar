@@ -86,6 +86,14 @@ impl NorthStarService {
                         continue;
                     };
 
+                    let latest_l1_slot = bank_forks
+                        .read()
+                        .unwrap()
+                        .root_bank()
+                        .slot()
+                        .max(bank.slot());
+                    manager.update_latest_l1_slot(latest_l1_slot);
+
                     // Check for L1 events from the portal program
                     let l1_events = manager.get_l1_events(&bank);
 
@@ -140,6 +148,7 @@ impl NorthStarService {
                     // delegations every frozen bank and refresh only when their
                     // owner program / ProgramData account changed.
                     manager.refresh_delegated_owner_programs(&bank);
+                    manager.mark_synced_through(bank.slot());
                 }
 
                 // Cleanup on exit
@@ -173,7 +182,10 @@ mod tests {
         solana_net_utils::SocketAddrSpace,
         solana_pubkey::Pubkey,
         solana_rent::Rent,
-        solana_rpc::optimistically_confirmed_bank_tracker::BankNotification,
+        solana_rpc::{
+            northstar::RpcNorthStarSyncStatus,
+            optimistically_confirmed_bank_tracker::BankNotification,
+        },
         solana_rpc_client_api::{config::RpcSendTransactionConfig, request::RpcRequest},
         solana_runtime::{
             bank::Bank,
@@ -576,6 +588,23 @@ mod tests {
         let rpc = RpcClient::new(format!("http://{}", config.listen_addr));
         std::thread::sleep(Duration::from_secs(2));
 
+        let initial_sync_status: RpcNorthStarSyncStatus = rpc
+            .send(
+                RpcRequest::Custom {
+                    method: "northstarSysGetSyncStatus",
+                },
+                serde_json::Value::Null,
+            )
+            .unwrap();
+        assert_eq!(
+            initial_sync_status,
+            RpcNorthStarSyncStatus {
+                is_syncing: false,
+                latest_synced_slot: bank_for_open.slot(),
+                latest_l1_slot: bank_for_open.slot(),
+            }
+        );
+
         let slot_before = rpc
             .get_slot_with_commitment(CommitmentConfig::processed())
             .unwrap();
@@ -610,6 +639,23 @@ mod tests {
             )
             .unwrap();
         assert_eq!(session_from_rpc, Some(session_pda.to_string()));
+
+        let sync_status_after_activate: RpcNorthStarSyncStatus = rpc
+            .send(
+                RpcRequest::Custom {
+                    method: "northstarSysGetSyncStatus",
+                },
+                serde_json::Value::Null,
+            )
+            .unwrap();
+        assert_eq!(
+            sync_status_after_activate,
+            RpcNorthStarSyncStatus {
+                is_syncing: false,
+                latest_synced_slot: bank_for_open.slot(),
+                latest_l1_slot: bank_for_open.slot(),
+            }
+        );
 
         let close_bank = Bank::new_from_parent(
             bank_for_open.clone(),

@@ -4,6 +4,7 @@ use solana_runtime::installed_scheduler_pool::BankWithScheduler;
 use {
     crate::{
         er_history::ErHistoryStore, filter::filter_allows, max_slots::MaxSlots,
+        northstar::NorthStarSyncStatus,
         optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
         parsed_token_accounts::*, rpc_cache::LargestAccountsCache, rpc_health::*,
     },
@@ -276,6 +277,8 @@ pub struct JsonRpcRequestProcessor {
     pub(crate) er_history_store: Option<Arc<ErHistoryStore>>,
     /// Sonic: Optional single-node contact info override for ephemeral rollup RPC.
     pub(crate) er_node_info: Option<ErNodeInfo>,
+    /// Sonic: Optional NorthStar L1 sync cursor for ephemeral rollup RPC.
+    pub(crate) northstar_sync_status: Option<Arc<NorthStarSyncStatus>>,
     /// Sonic: Optional synchronous transaction executor for ephemeral rollup RPC.
     /// When set, `sendTransaction` bypasses `SendTransactionService` and executes
     /// the wire transaction directly on the ER bank, with no queue, no batching,
@@ -484,6 +487,7 @@ impl JsonRpcRequestProcessor {
                 session_pda: None,
                 er_history_store: None,
                 er_node_info: None,
+                northstar_sync_status: None,
                 er_tx_executor: None,
             },
             transaction_receiver,
@@ -508,6 +512,11 @@ impl JsonRpcRequestProcessor {
     /// Sonic: Set single-node contact info for ephemeral rollup RPC.
     pub fn set_er_node_info(&mut self, er_node_info: ErNodeInfo) {
         self.er_node_info = Some(er_node_info);
+    }
+
+    /// Sonic: Set NorthStar L1 sync cursor for ephemeral rollup RPC.
+    pub fn set_northstar_sync_status(&mut self, status: Arc<NorthStarSyncStatus>) {
+        self.northstar_sync_status = Some(status);
     }
 
     /// Sonic: Set synchronous ER transaction executor (bypasses
@@ -598,6 +607,7 @@ impl JsonRpcRequestProcessor {
             session_pda: None,
             er_history_store: None,
             er_node_info: None,
+            northstar_sync_status: None,
             er_tx_executor: None,
         }
     }

@@ -1,5 +1,59 @@
 /// Sonic: NorthStar ephemeral rollup RPC methods
-use {crate::rpc::JsonRpcRequestProcessor, jsonrpc_core::Result, jsonrpc_derive::rpc, log::debug};
+use {
+    crate::rpc::JsonRpcRequestProcessor,
+    jsonrpc_core::Result,
+    jsonrpc_derive::rpc,
+    log::debug,
+    serde::{Deserialize, Serialize},
+    solana_clock::Slot,
+    std::sync::atomic::{AtomicU64, Ordering},
+};
+
+/// Sonic: Shared NorthStar L1 sync cursor exposed by `northstarSysGetSyncStatus`.
+#[derive(Debug)]
+pub struct NorthStarSyncStatus {
+    latest_synced_slot: AtomicU64,
+    latest_l1_slot: AtomicU64,
+}
+
+impl NorthStarSyncStatus {
+    pub fn new(initial_slot: Slot) -> Self {
+        Self::new_with_slots(initial_slot, initial_slot)
+    }
+
+    pub fn new_with_slots(latest_synced_slot: Slot, latest_l1_slot: Slot) -> Self {
+        Self {
+            latest_synced_slot: AtomicU64::new(latest_synced_slot),
+            latest_l1_slot: AtomicU64::new(latest_l1_slot),
+        }
+    }
+
+    pub fn update_latest_l1_slot(&self, slot: Slot) {
+        self.latest_l1_slot.fetch_max(slot, Ordering::Relaxed);
+    }
+
+    pub fn mark_synced_through(&self, slot: Slot) {
+        self.latest_synced_slot.fetch_max(slot, Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> RpcNorthStarSyncStatus {
+        let latest_synced_slot = self.latest_synced_slot.load(Ordering::Relaxed);
+        let latest_l1_slot = self.latest_l1_slot.load(Ordering::Relaxed);
+        RpcNorthStarSyncStatus {
+            is_syncing: latest_synced_slot < latest_l1_slot,
+            latest_synced_slot,
+            latest_l1_slot,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcNorthStarSyncStatus {
+    pub is_syncing: bool,
+    pub latest_synced_slot: Slot,
+    pub latest_l1_slot: Slot,
+}
 
 #[rpc]
 pub trait NorthStar {
@@ -10,6 +64,9 @@ pub trait NorthStar {
 
     #[rpc(meta, name = "getSessionPda")]
     fn get_session_pda(&self, meta: Self::Metadata) -> Result<Option<String>>;
+
+    #[rpc(meta, name = "northstarSysGetSyncStatus")]
+    fn get_sync_status(&self, meta: Self::Metadata) -> Result<RpcNorthStarSyncStatus>;
 }
 
 pub struct NorthStarImpl;
@@ -44,5 +101,17 @@ impl NorthStar for NorthStarImpl {
                 data: None,
             }),
         }
+    }
+
+    fn get_sync_status(&self, meta: Self::Metadata) -> Result<RpcNorthStarSyncStatus> {
+        debug!("northstar_sys_get_sync_status rpc request received");
+        meta.northstar_sync_status
+            .as_ref()
+            .map(|status| status.snapshot())
+            .ok_or_else(|| jsonrpc_core::Error {
+                code: jsonrpc_core::ErrorCode::InvalidRequest,
+                message: "northstarSysGetSyncStatus is not available on this node".to_string(),
+                data: None,
+            })
     }
 }
