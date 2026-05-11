@@ -33,20 +33,20 @@ pub fn process_open_session(
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
-    let owner = &accounts[0];
+    let payer = &accounts[0];
     let session = &accounts[1];
     let fee_vault = &accounts[2];
     let _system_program = &accounts[3];
 
-    let owner_key = owner.key();
+    let payer_key = payer.key();
 
-    if !owner.is_signer() {
-        pinocchio_log::log!("ERROR: OpenSession failed: owner is not signer");
+    if !payer.is_signer() {
+        pinocchio_log::log!("ERROR: OpenSession failed: payer is not signer");
         return Err(PortalError::Unauthorized.into());
     }
 
-    let (expected_session_key, session_bump) = find_session_pda(program_id, owner_key, grid_id);
-    let (expected_fee_vault_key, fee_vault_bump) = find_fee_vault_pda(program_id, owner_key);
+    let (expected_session_key, session_bump) = find_session_pda(program_id);
+    let (expected_fee_vault_key, fee_vault_bump) = find_fee_vault_pda(program_id);
 
     if session.key() != &expected_session_key {
         pinocchio_log::log!("ERROR: OpenSession failed: session PDA mismatch");
@@ -65,18 +65,15 @@ pub fn process_open_session(
     let fee_vault_lamports = rent.minimum_balance(FeeVault::LEN);
 
     // Create Session PDA
-    let grid_id_bytes = grid_id.to_le_bytes();
     let session_bump_bytes = [session_bump];
     let session_seeds = &[
         Seed::from(Session::SEED_PREFIX),
-        Seed::from(owner_key),
-        Seed::from(grid_id_bytes.as_ref()),
         Seed::from(session_bump_bytes.as_ref()),
     ];
     let session_signer = Signer::from(session_seeds);
 
     CreateAccount {
-        from: owner,
+        from: payer,
         to: session,
         lamports: session_lamports,
         space: Session::LEN as u64,
@@ -88,13 +85,12 @@ pub fn process_open_session(
     let fee_vault_bump_bytes = [fee_vault_bump];
     let fee_vault_seeds = &[
         Seed::from(FeeVault::SEED_PREFIX),
-        Seed::from(owner_key.as_ref()),
         Seed::from(fee_vault_bump_bytes.as_ref()),
     ];
     let fee_vault_signer = Signer::from(fee_vault_seeds);
 
     CreateAccount {
-        from: owner,
+        from: payer,
         to: fee_vault,
         lamports: fee_vault_lamports,
         space: FeeVault::LEN as u64,
@@ -105,7 +101,6 @@ pub fn process_open_session(
     // Write Session state
     let session_state = Session {
         discriminator: Session::DISCRIMINATOR,
-        owner: *owner_key,
         grid_id,
         ttl_slots,
         fee_cap,
@@ -119,7 +114,7 @@ pub fn process_open_session(
     // Write FeeVault state
     let fee_vault_state = FeeVault {
         discriminator: FeeVault::DISCRIMINATOR,
-        authority: *owner_key,
+        authority: *payer_key,
         bump: fee_vault_bump,
     };
     let mut fee_vault_data = fee_vault.try_borrow_mut_data()?;

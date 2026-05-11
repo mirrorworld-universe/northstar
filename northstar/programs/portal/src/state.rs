@@ -7,7 +7,6 @@ use {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Session {
     pub discriminator: u8,
-    pub owner: Pubkey,
     pub grid_id: u64,
     pub ttl_slots: u64,
     pub fee_cap: u64,
@@ -17,7 +16,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub const LEN: usize = 82;
+    pub const LEN: usize = 50;
     pub const SEED_PREFIX: &[u8] = b"session";
     pub const DISCRIMINATOR: u8 = 1;
 
@@ -100,7 +99,6 @@ mod tests {
     fn test_session_len() {
         let session = Session {
             discriminator: Session::DISCRIMINATOR,
-            owner: [0x42; 32],
             grid_id: 123,
             ttl_slots: 1000,
             fee_cap: 5000,
@@ -152,7 +150,6 @@ mod tests {
     fn test_session_is_expired() {
         let session = Session {
             discriminator: Session::DISCRIMINATOR,
-            owner: [0; 32],
             grid_id: 1,
             ttl_slots: 100,
             fee_cap: 1000,

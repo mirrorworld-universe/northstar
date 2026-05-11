@@ -93,7 +93,6 @@ impl NorthStarService {
                         match event {
                             L1Event::SessionOpened {
                                 session_pda,
-                                owner: _,
                                 grid_id: _,
                                 ttl_slots: _,
                                 fee_cap: _,
@@ -246,13 +245,12 @@ mod tests {
         (bank, bank_forks, program_id, mint_keypair)
     }
 
-    fn find_session_pda(program_id: &Pubkey, owner: &Pubkey, grid_id: u64) -> (Pubkey, u8) {
-        let grid_id_bytes = grid_id.to_le_bytes();
-        Pubkey::find_program_address(&[b"session", owner.as_ref(), &grid_id_bytes], program_id)
+    fn find_session_pda(program_id: &Pubkey) -> (Pubkey, u8) {
+        Pubkey::find_program_address(&[b"session"], program_id)
     }
 
-    fn find_fee_vault_pda(program_id: &Pubkey, owner: &Pubkey) -> (Pubkey, u8) {
-        Pubkey::find_program_address(&[b"fee_vault", owner.as_ref()], program_id)
+    fn find_fee_vault_pda(program_id: &Pubkey) -> (Pubkey, u8) {
+        Pubkey::find_program_address(&[b"fee_vault"], program_id)
     }
 
     fn find_delegation_record_pda(program_id: &Pubkey, delegated_account: &Pubkey) -> (Pubkey, u8) {
@@ -343,9 +341,8 @@ mod tests {
         owner: Pubkey,
         session_pda: Pubkey,
         fee_vault_pda: Pubkey,
-        grid_id: u64,
     ) -> Instruction {
-        let ix = PortalInstruction::CloseSession { grid_id };
+        let ix = PortalInstruction::CloseSession;
         let data = borsh::to_vec(&ix).unwrap();
         Instruction {
             program_id,
@@ -527,8 +524,8 @@ mod tests {
             .unwrap();
 
         let grid_id = 1u64;
-        let (session_pda, _) = find_session_pda(&program_id, &owner.pubkey(), grid_id);
-        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id, &owner.pubkey());
+        let (session_pda, _) = find_session_pda(&program_id);
+        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id);
 
         let open_ix = build_open_session_ix(
             program_id,
@@ -616,13 +613,8 @@ mod tests {
             &Pubkey::default(),
             bank_for_open.slot() + 3,
         );
-        let close_ix = build_close_session_ix(
-            program_id,
-            owner.pubkey(),
-            session_pda,
-            fee_vault_pda,
-            grid_id,
-        );
+        let close_ix =
+            build_close_session_ix(program_id, owner.pubkey(), session_pda, fee_vault_pda);
         let blockhash = close_bank.last_blockhash();
         let close_tx = Transaction::new_signed_with_payer(
             &[close_ix],
@@ -697,8 +689,8 @@ mod tests {
         let deposit_amount = 1_000_000_000u64;
         let transfer_amount = 500_000_000u64;
         let third_party = Pubkey::new_unique();
-        let (session_pda, _) = find_session_pda(&program_id, &owner.pubkey(), grid_id);
-        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id, &owner.pubkey());
+        let (session_pda, _) = find_session_pda(&program_id);
+        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id);
         let (delegation_record_pda, _) =
             find_delegation_record_pda(&program_id, &delegated_account);
 
