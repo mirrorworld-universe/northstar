@@ -1972,7 +1972,7 @@ mod tests {
             .0;
         assert_ne!(blockhash, solana_hash::Hash::default());
 
-        // Send a transaction — it should be silently dropped by the inactive tx client
+        // Send a transaction — inactive ER RPC must reject it.
         let instruction = transfer(&sender_pubkey, &receiver_pubkey, transfer_amount);
         let tx = Transaction::new_signed_with_payer(
             &[instruction],
@@ -1981,11 +1981,15 @@ mod tests {
             blockhash,
         );
 
-        // sendTransaction RPC must survive preflight even while runtime is inactive.
-        // The tx is still dropped internally because the runtime rejects execution.
-        rpc_client
+        // sendTransaction RPC must survive preflight even while runtime is inactive,
+        // but it must reject the user instead of accepting and silently dropping.
+        let err = rpc_client
             .send_transaction_with_config(&tx, RpcSendTransactionConfig::default())
-            .unwrap();
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Ephemeral rollup is not active"),
+            "unexpected inactive sendTransaction error: {err}"
+        );
 
         std::thread::sleep(Duration::from_secs(2));
 
