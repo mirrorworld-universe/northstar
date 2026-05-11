@@ -54,7 +54,7 @@ jobs:
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
-      - run: cargo test -p solana-core -p northstar -p northstar-portal --no-fail-fast
+      - run: cargo test -p solana-core -p solana-svm -p northstar -p northstar-portal --no-fail-fast
 
   deploy:
     name: Build and Deploy on Devnet
@@ -120,4 +120,3 @@ jobs:
           echo "Timed out waiting for validator to be fully up"
           exit 1
         timeout-minutes: 90
-
