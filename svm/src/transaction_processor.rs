@@ -303,7 +303,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         }
     }
 
-    // Northstar: like `new_from`, but with a freshly-constructed `ProgramCache`.
+    // Northstar: like `new_from`, but with an isolated `ProgramCache`.
     //
     // Used by the ephemeral rollup so its `ProgramCache` (and the cooperative
     // loading-task waiter inside it) is fully isolated from the L1 validator's
@@ -311,16 +311,21 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
     // the loader's cooperative-loading wait when L1 banking concurrently
     // mutated the same `ProgramCache` slot.
     //
-    // Environments and builtin program ids are still cloned from `self` so the
-    // ER inherits the same compiled syscalls, validator features, and builtin
-    // entrypoints as L1.
+    // Environments, builtin program ids, and builtin cache entries are still
+    // cloned from `self` so the ER inherits the same compiled syscalls,
+    // validator features, and builtin entrypoints as L1. Builtin entries are
+    // required because builtins do not have reloadable loader-owned accounts.
     pub fn new_from_isolated_cache(&self, slot: Slot, epoch: Epoch) -> Self {
+        let global_program_cache = Arc::new(RwLock::new(ProgramCache::new_with_builtin_entries(
+            slot,
+            &self.global_program_cache.read().unwrap(),
+        )));
         Self {
             slot,
             epoch,
             sysvar_cache: RwLock::<SysvarCache>::default(),
             epoch_boundary_preparation: self.epoch_boundary_preparation.clone(),
-            global_program_cache: Arc::new(RwLock::new(ProgramCache::new(slot))),
+            global_program_cache,
             environments: self.environments.clone(),
             builtin_program_ids: RwLock::new(self.builtin_program_ids.read().unwrap().clone()),
             execution_cost: self.execution_cost,
@@ -2119,6 +2124,60 @@ mod tests {
             |_invoke_context, _param0, _param1, _param2, _param3, _param4| {},
         );
         assert_eq!(entry, Arc::new(program));
+    }
+
+    #[test]
+    fn test_new_from_isolated_cache_preserves_builtin_entries() {
+        let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
+        let parent = TransactionBatchProcessor::new(0, 0, Arc::downgrade(&fork_graph), None, None);
+
+        let key = Pubkey::new_unique();
+        let name = "isolated_builtin";
+        let program = ProgramCacheEntry::new_builtin(
+            0,
+            name.len(),
+            |_invoke_context, _param0, _param1, _param2, _param3, _param4| {},
+        );
+        parent.add_builtin(key, program);
+
+        let isolated = parent.new_from_isolated_cache(1, 0);
+        isolated
+            .global_program_cache
+            .write()
+            .unwrap()
+            .set_fork_graph(Arc::downgrade(&fork_graph));
+        let mock_bank = MockBankCallback::default();
+        let account_loader = (&mock_bank).into();
+        let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::new(isolated.slot);
+        let program_runtime_environments = isolated.get_environments_for_epoch(isolated.epoch);
+        let builtins = isolated
+            .builtin_program_ids
+            .read()
+            .unwrap()
+            .iter()
+            .map(|key| (*key, 0))
+            .collect::<HashMap<Pubkey, Slot>>();
+
+        isolated.replenish_program_cache(
+            &account_loader,
+            &builtins,
+            &program_runtime_environments,
+            &mut program_cache_for_tx_batch,
+            &mut ExecuteTimings::default(),
+            false,
+            true,
+            false,
+        );
+
+        let entry = program_cache_for_tx_batch.find(&key).unwrap();
+
+        // Repeating code because ProgramCacheEntry does not implement clone.
+        let program = ProgramCacheEntry::new_builtin(
+            0,
+            name.len(),
+            |_invoke_context, _param0, _param1, _param2, _param3, _param4| {},
+        );
+        assert_eq!(&*entry, &program);
     }
 
     #[test]

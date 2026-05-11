@@ -98,4 +98,4 @@ jobs:
           key: ${{ runner.os }}-solana-platform-tools-v3-${{ steps.solana_tools.outputs.platform_tools_version }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-solana-platform-tools-v3-${{ steps.solana_tools.outputs.platform_tools_version }}-
-      - run: cargo test -p solana-core -p northstar -p northstar-portal --no-fail-fast
+      - run: cargo test -p solana-core -p solana-svm -p northstar -p northstar-portal --no-fail-fast
