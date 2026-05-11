@@ -815,6 +815,28 @@ impl<FG: ForkGraph> ProgramCache<FG> {
         }
     }
 
+    // Northstar: build an isolated cache that carries only builtin entries.
+    // ER root banks need their own loading-task waiter, but builtin ids have
+    // no backing account to reload from if their cache entries are missing.
+    pub fn new_with_builtin_entries(root_slot: Slot, source: &Self) -> Self {
+        let mut new = Self::new(root_slot);
+        let IndexImplementation::V1 { entries, .. } = &source.index;
+        let IndexImplementation::V1 {
+            entries: new_entries,
+            ..
+        } = &mut new.index;
+        let builtins_extend = entries.iter().filter_map(|(program_id, slot_versions)| {
+            let builtin_entries = slot_versions
+                .iter()
+                .filter(|entry| matches!(entry.program, ProgramCacheEntryType::Builtin(_)))
+                .cloned()
+                .collect::<Vec<_>>();
+            (!builtin_entries.is_empty()).then_some((*program_id, builtin_entries))
+        });
+        new_entries.extend(builtins_extend);
+        new
+    }
+
     pub fn set_fork_graph(&mut self, fork_graph: Weak<RwLock<FG>>) {
         self.fork_graph = Some(fork_graph);
     }
