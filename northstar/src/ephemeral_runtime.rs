@@ -4,8 +4,10 @@ use {
         ephemeral_tx_client::EphemeralTransactionClient, slot_advancer::SlotAdvancer,
     },
     crossbeam_channel::{Sender, unbounded},
-    log::{info, warn},
-    solana_account::{AccountSharedData, ReadableAccount, WritableAccount, state_traits::StateMut},
+    log::{debug, info, warn},
+    solana_account::{
+        AccountSharedData, PROGRAM_OWNERS, ReadableAccount, WritableAccount, state_traits::StateMut,
+    },
     solana_clock::{BankId, Slot},
     solana_gossip::cluster_info::ClusterInfo,
     solana_keypair::Keypair,
@@ -1011,15 +1013,18 @@ impl EphemeralRuntime {
             if !account_writes.is_empty() {
                 er_bank.store_accounts((er_bank.slot(), account_writes.as_slice()));
             }
-            er_bank.remove_programs_from_cache(
+            Self::remove_reloadable_programs_from_cache(
+                &er_bank,
+                "reset hydration",
                 hydrated_delegations
                     .iter()
                     .filter_map(|(_, _, _, owner_program_account)| {
                         owner_program_account
                             .as_ref()
-                            .map(|(owner_program, _, _)| *owner_program)
-                    })
-                    .collect::<HashSet<_>>(),
+                            .map(|(owner_program, program_account, _)| {
+                                (*owner_program, program_account)
+                            })
+                    }),
             );
 
             self.initial_account_snapshots.extend(
@@ -1084,6 +1089,40 @@ impl EphemeralRuntime {
     /// Returns the initial snapshot of a delegated account.
     pub fn initial_account_snapshot(&self, pubkey: &Pubkey) -> Option<&AccountSharedData> {
         self.initial_account_snapshots.get(pubkey)
+    }
+
+    fn is_reloadable_program_account(account: &AccountSharedData) -> bool {
+        PROGRAM_OWNERS.contains(account.owner())
+    }
+
+    fn remove_reloadable_programs_from_cache<'a>(
+        bank: &Bank,
+        context: &str,
+        programs: impl IntoIterator<Item = (Pubkey, &'a AccountSharedData)>,
+    ) {
+        let mut reloadable = Vec::new();
+        let mut skipped = Vec::new();
+        for (program_id, account) in programs {
+            if Self::is_reloadable_program_account(account) {
+                reloadable.push(program_id);
+            } else {
+                skipped.push((program_id, *account.owner()));
+            }
+        }
+
+        if !reloadable.is_empty() {
+            debug!(
+                "ER ProgramCache invalidation ({context}): removing reloadable programs \
+                 {reloadable:?}"
+            );
+            bank.remove_programs_from_cache(reloadable);
+        }
+        if !skipped.is_empty() {
+            debug!(
+                "ER ProgramCache invalidation ({context}): keeping non-reloadable/native programs \
+                 {skipped:?}"
+            );
+        }
     }
 
     fn publish_bank_for_rpc(&self) {
@@ -1192,8 +1231,13 @@ impl EphemeralRuntime {
             })
             .collect::<Vec<_>>();
         er_bank.store_accounts((er_bank.slot(), updated_accounts.as_slice()));
-        er_bank
-            .remove_programs_from_cache(updates.iter().map(|(owner_program, _, _)| *owner_program));
+        Self::remove_reloadable_programs_from_cache(
+            &er_bank,
+            "owner refresh",
+            updates
+                .iter()
+                .map(|(owner_program, program_account, _)| (*owner_program, program_account)),
+        );
 
         let refreshed = updates.len();
         drop(delegated_accounts);
@@ -1261,7 +1305,11 @@ impl EphemeralRuntime {
                             ),
                         }
                     }
-                    bank.remove_programs_from_cache(Some(owner_program));
+                    Self::remove_reloadable_programs_from_cache(
+                        &bank,
+                        "delegation hydration",
+                        Some((owner_program, &program_account)),
+                    );
                 } else {
                     warn!(
                         "Cannot hydrate owner program {owner_program}: program account not found \
@@ -1358,9 +1406,13 @@ mod tests {
         solana_rpc_client::rpc_client::RpcClient,
         solana_rpc_client_types::config::{CommitmentConfig, RpcSendTransactionConfig},
         solana_sdk_ids::{bpf_loader_upgradeable, system_program},
+        solana_send_transaction_service::{
+            send_transaction_service_stats::SendTransactionServiceStats,
+            transaction_client::TransactionClient,
+        },
         solana_svm::transaction_processor::ExecutionRecordingConfig,
         solana_system_interface::instruction::transfer,
-        solana_transaction::Transaction,
+        solana_transaction::{Transaction, versioned::VersionedTransaction},
         solana_transaction_status::{TransactionConfirmationStatus, UiTransactionEncoding},
         std::{collections::HashSet, net::TcpListener, sync::atomic::AtomicU64, time::Duration},
     };
@@ -2880,6 +2932,40 @@ mod tests {
         );
         assert!(runtime.bank().get_account(&programdata_address).is_some());
 
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_system_owned_delegation_keeps_system_builtin_executable() {
+        let (parent_bank, mut runtime) = create_runtime();
+        runtime.activate();
+
+        let delegated_signer = Keypair::new();
+        let delegated_l1_account =
+            AccountSharedData::new(1_000_000_000, 0, &runtime.portal_program_id);
+        runtime.handle_delegation_inner(
+            &delegated_signer.pubkey(),
+            delegated_l1_account,
+            Some(system_program::id()),
+            Some(&parent_bank),
+        );
+
+        let recipient = Pubkey::new_unique();
+        let transaction = Transaction::new_signed_with_payer(
+            &[transfer(&delegated_signer.pubkey(), &recipient, 1_000_000)],
+            Some(&delegated_signer.pubkey()),
+            &[&delegated_signer],
+            runtime.bank().last_blockhash(),
+        );
+        let versioned_transaction = VersionedTransaction::from(transaction);
+
+        TransactionClient::send_transactions_in_batch(
+            &runtime._tx_client,
+            vec![bincode::serialize(&versioned_transaction).unwrap()],
+            &SendTransactionServiceStats::default(),
+        );
+
+        assert_eq!(runtime.bank().get_balance(&recipient), 1_000_000);
         runtime.shutdown();
     }
 
