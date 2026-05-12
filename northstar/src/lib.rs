@@ -172,6 +172,20 @@ impl Manager {
         self.runtime.is_some()
     }
 
+    /// Sonic: Update latest L1 slot observed by the NorthStar sync loop.
+    pub fn update_latest_l1_slot(&self, slot: u64) {
+        if let Some(runtime) = &self.runtime {
+            runtime.update_latest_l1_slot(slot);
+        }
+    }
+
+    /// Sonic: Mark L1 events synced through `slot`.
+    pub fn mark_synced_through(&self, slot: u64) {
+        if let Some(runtime) = &self.runtime {
+            runtime.mark_synced_through(slot);
+        }
+    }
+
     /// Get the RPC address of the runtime, if initialized
     pub fn runtime_addr(&self) -> Option<String> {
         self.runtime.as_ref().map(|r| r.rpc_addr())

@@ -15,6 +15,7 @@ use {
     solana_rpc::{
         er_history::ErHistoryStore,
         max_slots::MaxSlots,
+        northstar::NorthStarSyncStatus,
         optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
         rpc::{ErNodeInfo, JsonRpcConfig},
         rpc_pubsub_service::{PubSubConfig, PubSubService},
@@ -111,6 +112,8 @@ pub struct EphemeralRuntime {
     active: Arc<AtomicBool>,
     /// Sonic: Current session PDA, shared with the RPC handler.
     session_pda: Arc<RwLock<Option<Pubkey>>>,
+    /// Sonic: L1 sync cursor, shared with the RPC handler.
+    sync_status: Arc<NorthStarSyncStatus>,
     /// Sonic: In-memory ER transaction history for Phase 1 history APIs.
     er_history_store: Arc<ErHistoryStore>,
     portal_program_id: Pubkey,
@@ -482,6 +485,7 @@ impl EphemeralRuntime {
         // Sonic: Starts inactive — transactions rejected until activate() is called
         let active = Arc::new(AtomicBool::new(false));
         let session_pda: Arc<RwLock<Option<Pubkey>>> = Arc::new(RwLock::new(None));
+        let sync_status = Arc::new(NorthStarSyncStatus::new(parent_bank.slot()));
         let er_history_store = Arc::new(ErHistoryStore::default());
 
         let ledger_dir = TempDir::new().map_err(|e| e.to_string())?;
@@ -594,6 +598,7 @@ impl EphemeralRuntime {
                 er_root_slot: ephemeral_slot,
                 slot_duration_ms: u64::try_from(slot_duration.as_millis()).unwrap_or(u64::MAX),
             }),
+            Some(sync_status.clone()),
             Some(Arc::new(tx_client.clone()) as Arc<dyn solana_rpc::rpc::ErTxExecutor>),
         )?;
 
@@ -684,6 +689,7 @@ impl EphemeralRuntime {
             retired_bank_forks_reaper_pause,
             active,
             session_pda,
+            sync_status,
             er_history_store,
             portal_program_id,
 
@@ -769,6 +775,16 @@ impl EphemeralRuntime {
         self.session_pda.clone()
     }
 
+    /// Sonic: Update latest L1 slot observed by the NorthStar sync loop.
+    pub fn update_latest_l1_slot(&self, slot: Slot) {
+        self.sync_status.update_latest_l1_slot(slot);
+    }
+
+    /// Sonic: Mark L1 events synced through `slot`.
+    pub fn mark_synced_through(&self, slot: Slot) {
+        self.sync_status.mark_synced_through(slot);
+    }
+
     pub fn bank(&self) -> Arc<Bank> {
         self.bank_forks.read().unwrap().working_bank()
     }
@@ -805,6 +821,9 @@ impl EphemeralRuntime {
     /// clears session state, and starts a new SlotAdvancer.
     /// Called when a new session opens to get a fresh L1 snapshot.
     pub fn reset_to_new_parent(&mut self, parent_bank: Arc<Bank>) {
+        self.sync_status.update_latest_l1_slot(parent_bank.slot());
+        self.sync_status.mark_synced_through(parent_bank.slot());
+
         // 1. Stop old slot advancer
         self.advancer_exit.store(true, Ordering::Relaxed);
         if let Some(advancer) = self.slot_advancer.take() {
@@ -1972,7 +1991,7 @@ mod tests {
             .0;
         assert_ne!(blockhash, solana_hash::Hash::default());
 
-        // Send a transaction — it should be silently dropped by the inactive tx client
+        // Send a transaction — inactive ER RPC must reject it.
         let instruction = transfer(&sender_pubkey, &receiver_pubkey, transfer_amount);
         let tx = Transaction::new_signed_with_payer(
             &[instruction],
@@ -1981,11 +2000,15 @@ mod tests {
             blockhash,
         );
 
-        // sendTransaction RPC must survive preflight even while runtime is inactive.
-        // The tx is still dropped internally because the runtime rejects execution.
-        rpc_client
+        // sendTransaction RPC must survive preflight even while runtime is inactive,
+        // but it must reject the user instead of accepting and silently dropping.
+        let err = rpc_client
             .send_transaction_with_config(&tx, RpcSendTransactionConfig::default())
-            .unwrap();
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Ephemeral rollup is not active"),
+            "unexpected inactive sendTransaction error: {err}"
+        );
 
         std::thread::sleep(Duration::from_secs(2));
 

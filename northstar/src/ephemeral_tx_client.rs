@@ -668,13 +668,22 @@ impl NotifyKeyUpdate for EphemeralTransactionClient {
 }
 
 impl solana_rpc::rpc::ErTxExecutor for EphemeralTransactionClient {
-    fn execute_wire(&self, wire_transaction: Vec<u8>) {
+    fn execute_wire(
+        &self,
+        wire_transaction: Vec<u8>,
+    ) -> std::result::Result<(), solana_rpc::rpc::ErTxError> {
+        if !self.active.load(Ordering::Relaxed) {
+            warn!("Ephemeral rollup not active, rejecting RPC transaction");
+            return Err(solana_rpc::rpc::ErTxError::NotActive);
+        }
+
         let stats = SendTransactionServiceStats::default();
         <Self as TransactionClient>::send_transactions_in_batch(
             self,
             vec![wire_transaction],
             &stats,
         );
+        Ok(())
     }
 }
 
