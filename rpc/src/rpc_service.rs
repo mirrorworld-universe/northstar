@@ -556,11 +556,13 @@ impl JsonRpcService {
             config.max_complete_transaction_status_slot,
             config.prioritization_fee_cache,
             runtime,
-            None, // delegated_accounts: not an ephemeral rollup node
-            None, // session_pda: not an ephemeral rollup node
-            None, // er_history_store: not an ephemeral rollup node
-            None, // er_node_info: not an ephemeral rollup node
-            None, // er_tx_executor: not an ephemeral rollup node
+            // Sonic: non-ER RPC service has no ephemeral rollup state.
+            None, // delegated_accounts
+            None, // session_pda
+            None, // er_history_store
+            None, // er_node_info
+            None, // northstar_sync_status
+            None, // er_tx_executor
         )?;
         Ok(json_rpc_service)
     }
@@ -604,6 +606,8 @@ impl JsonRpcService {
         er_history_store: Option<Arc<ErHistoryStore>>,
         // Sonic: Optional single-node contact info for ephemeral rollup RPC.
         er_node_info: Option<ErNodeInfo>,
+        // Sonic: Optional NorthStar L1 sync cursor for ephemeral rollup RPC.
+        northstar_sync_status: Option<Arc<NorthStarSyncStatus>>,
         // Sonic: Optional synchronous tx executor — bypasses queue/preflight
         // and executes wire transactions in-process on the ER bank.
         er_tx_executor: Option<Arc<dyn crate::rpc::ErTxExecutor>>,
@@ -633,6 +637,7 @@ impl JsonRpcService {
             session_pda,
             er_history_store,
             er_node_info,
+            northstar_sync_status,
             er_tx_executor,
         )
     }
@@ -674,6 +679,8 @@ impl JsonRpcService {
         er_history_store: Option<Arc<ErHistoryStore>>,
         // Sonic: Optional single-node contact info for ephemeral rollup RPC.
         er_node_info: Option<ErNodeInfo>,
+        // Sonic: Optional NorthStar L1 sync cursor for ephemeral rollup RPC.
+        northstar_sync_status: Option<Arc<NorthStarSyncStatus>>,
         // Sonic: Optional synchronous tx executor for ephemeral rollup RPC.
         er_tx_executor: Option<Arc<dyn crate::rpc::ErTxExecutor>>,
     ) -> Result<Self, String> {
@@ -782,6 +789,9 @@ impl JsonRpcService {
         }
         if let Some(er_node_info) = er_node_info {
             request_processor.set_er_node_info(er_node_info);
+        }
+        if let Some(status) = northstar_sync_status {
+            request_processor.set_northstar_sync_status(status);
         }
         if let Some(er_tx_executor) = er_tx_executor {
             request_processor.set_er_tx_executor(er_tx_executor);
@@ -1017,12 +1027,13 @@ mod tests {
             Arc::new(AtomicU64::default()),
             Some(Arc::new(PrioritizationFeeCache::default())),
             runtime,
-            // Sonic:
-            None,
-            None,
-            None,
-            None,
-            None,
+            // Sonic: test non-ER RPC service has no ephemeral rollup state.
+            None, // delegated_accounts
+            None, // session_pda
+            None, // er_history_store
+            None, // er_node_info
+            None, // northstar_sync_status
+            None, // er_tx_executor
         )
         .expect("assume successful JsonRpcService start");
         let thread = rpc_service.thread_hdl.thread();

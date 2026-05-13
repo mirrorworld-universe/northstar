@@ -5,7 +5,7 @@ use {
         nonce::check_nonce_account,
     },
     clap::{App, AppSettings, Arg, ArgMatches, SubCommand},
-    northstar_portal::DelegationRecord,
+    northstar_portal::{DelegationRecord, OpenSession, PortalInstruction},
     solana_account::Account,
     solana_clap_utils::{
         compute_budget::{COMPUTE_UNIT_PRICE_ARG, ComputeUnitLimit, compute_unit_price_arg},
@@ -56,7 +56,6 @@ pub enum PortalCliCommand {
     CloseSession {
         portal_program_id: Option<Pubkey>,
         owner: SignerIndex,
-        grid_id: u64,
         sign_only: bool,
         dump_transaction_message: bool,
         blockhash_query: BlockhashQuery,
@@ -68,8 +67,6 @@ pub enum PortalCliCommand {
     DepositFee {
         portal_program_id: Option<Pubkey>,
         depositor: SignerIndex,
-        session_owner: Pubkey,
-        grid_id: u64,
         recipient: Pubkey,
         lamports: u64,
         sign_only: bool,
@@ -132,24 +129,21 @@ impl PortalSubCommands for App<'_, '_> {
                 .subcommand(portal_tx_subcommand(
                     SubCommand::with_name("close-session")
                         .alias("cs")
-                        .about("Close expired Portal session")
-                        .arg(portal_program_id_arg())
-                        .arg(grid_id_arg()),
+                        .about("Close Portal session")
+                        .arg(portal_program_id_arg()),
                 ))
                 .subcommand(portal_tx_subcommand(
                     SubCommand::with_name("deposit-fee")
                         .alias("df")
                         .about("Deposit SOL into Portal session")
                         .arg(portal_program_id_arg())
-                        .arg(grid_id_arg())
-                        .arg(session_owner_arg())
                         .arg(lamports_arg().index(1))
                         .arg(
                             Arg::with_name("recipient")
                                 .long("recipient")
                                 .value_name("RECIPIENT")
                                 .takes_value(true)
-                                .help("Deposit receipt recipient pubkey [default: session owner]"),
+                                .help("Deposit receipt recipient pubkey [default: depositor]"),
                         ),
                 ))
                 .subcommand(portal_tx_subcommand(
@@ -227,14 +221,6 @@ fn lamports_arg<'a, 'b>() -> Arg<'a, 'b> {
         .required(true)
         .validator(is_amount)
         .help("Amount in SOL")
-}
-
-fn session_owner_arg<'a, 'b>() -> Arg<'a, 'b> {
-    Arg::with_name("session_owner")
-        .long("session-owner")
-        .value_name("SESSION_OWNER")
-        .takes_value(true)
-        .help("Portal session owner pubkey [default: sender]")
 }
 
 fn delegated_account_arg<'a, 'b>() -> Arg<'a, 'b> {
@@ -350,7 +336,6 @@ fn parse_close_session(
         command: CliCommand::Portal(PortalCliCommand::CloseSession {
             portal_program_id,
             owner: signer_info.index_of(Some(owner_pubkey)).unwrap(),
-            grid_id: value_of(matches, "grid_id").unwrap(),
             sign_only,
             dump_transaction_message,
             blockhash_query,
@@ -371,10 +356,8 @@ fn parse_deposit_fee(
     let portal_program_id = pubkey_of(matches, "portal_program_id");
     let depositor = default_signer.signer_from_path(matches, wallet_manager)?;
     let depositor_pubkey = depositor.pubkey();
-    let session_owner =
-        pubkey_of_signer(matches, "session_owner", wallet_manager)?.unwrap_or(depositor_pubkey);
     let recipient =
-        pubkey_of_signer(matches, "recipient", wallet_manager)?.unwrap_or(session_owner);
+        pubkey_of_signer(matches, "recipient", wallet_manager)?.unwrap_or(depositor_pubkey);
     let lamports = lamports_of_sol(matches, "lamports")
         .ok_or_else(|| CliError::BadParameter("Invalid amount".to_string()))?;
     let sign_only = matches.is_present(SIGN_ONLY_ARG.name);
@@ -397,8 +380,6 @@ fn parse_deposit_fee(
         command: CliCommand::Portal(PortalCliCommand::DepositFee {
             portal_program_id,
             depositor: signer_info.index_of(Some(depositor_pubkey)).unwrap(),
-            session_owner,
-            grid_id: value_of(matches, "grid_id").unwrap(),
             recipient,
             lamports,
             sign_only,
@@ -533,16 +514,12 @@ fn resolve_portal_program_id(
         })
 }
 
-fn find_session_pda(program_id: &Pubkey, owner: &Pubkey, grid_id: u64) -> Pubkey {
-    Pubkey::find_program_address(
-        &[b"session", owner.as_ref(), &grid_id.to_le_bytes()],
-        program_id,
-    )
-    .0
+fn find_session_pda(program_id: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"session"], program_id).0
 }
 
-fn find_fee_vault_pda(program_id: &Pubkey, owner: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"fee_vault", owner.as_ref()], program_id).0
+fn find_fee_vault_pda(program_id: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"fee_vault"], program_id).0
 }
 
 fn find_delegation_record_pda(program_id: &Pubkey, delegated_account: &Pubkey) -> Pubkey {
@@ -586,36 +563,6 @@ fn default_owner_program_for_delegate(
         .filter(|account| account.owner != *portal_program_id)
         .map(|account| account.owner)
         .unwrap_or_else(system_program::id)
-}
-
-fn encode_open_session(grid_id: u64, ttl_slots: u64, fee_cap: u64) -> Vec<u8> {
-    let mut data = vec![0];
-    data.extend_from_slice(&grid_id.to_le_bytes());
-    data.extend_from_slice(&ttl_slots.to_le_bytes());
-    data.extend_from_slice(&fee_cap.to_le_bytes());
-    data
-}
-
-fn encode_close_session(grid_id: u64) -> Vec<u8> {
-    let mut data = vec![1];
-    data.extend_from_slice(&grid_id.to_le_bytes());
-    data
-}
-
-fn encode_deposit_fee(lamports: u64) -> Vec<u8> {
-    let mut data = vec![2];
-    data.extend_from_slice(&lamports.to_le_bytes());
-    data
-}
-
-fn encode_delegate(grid_id: u64) -> Vec<u8> {
-    let mut data = vec![3];
-    data.extend_from_slice(&grid_id.to_le_bytes());
-    data
-}
-
-fn encode_undelegate() -> Vec<u8> {
-    vec![4]
 }
 
 fn delegated_account_staging_instruction(
@@ -784,8 +731,8 @@ pub async fn process_portal_subcommand(
         } => {
             let portal_program_id = resolve_portal_program_id(config, *portal_program_id)?;
             let owner = config.signers[*owner];
-            let session_pda = find_session_pda(&portal_program_id, &owner.pubkey(), *grid_id);
-            let fee_vault_pda = find_fee_vault_pda(&portal_program_id, &owner.pubkey());
+            let session_pda = find_session_pda(&portal_program_id);
+            let fee_vault_pda = find_fee_vault_pda(&portal_program_id);
             let instruction = Instruction {
                 program_id: portal_program_id,
                 accounts: vec![
@@ -794,7 +741,12 @@ pub async fn process_portal_subcommand(
                     AccountMeta::new(fee_vault_pda, false),
                     AccountMeta::new_readonly(system_program::id(), false),
                 ],
-                data: encode_open_session(*grid_id, *ttl_slots, *fee_cap),
+                data: borsh::to_vec(&PortalInstruction::OpenSession(OpenSession {
+                    grid_id: *grid_id,
+                    ttl_slots: *ttl_slots,
+                    fee_cap: *fee_cap,
+                }))
+                .unwrap(),
             };
             process_portal_instruction(
                 rpc_client,
@@ -813,7 +765,6 @@ pub async fn process_portal_subcommand(
         PortalCliCommand::CloseSession {
             portal_program_id,
             owner,
-            grid_id,
             sign_only,
             dump_transaction_message,
             blockhash_query,
@@ -824,8 +775,8 @@ pub async fn process_portal_subcommand(
         } => {
             let portal_program_id = resolve_portal_program_id(config, *portal_program_id)?;
             let owner = config.signers[*owner];
-            let session_pda = find_session_pda(&portal_program_id, &owner.pubkey(), *grid_id);
-            let fee_vault_pda = find_fee_vault_pda(&portal_program_id, &owner.pubkey());
+            let session_pda = find_session_pda(&portal_program_id);
+            let fee_vault_pda = find_fee_vault_pda(&portal_program_id);
             let instruction = Instruction {
                 program_id: portal_program_id,
                 accounts: vec![
@@ -834,7 +785,7 @@ pub async fn process_portal_subcommand(
                     AccountMeta::new(fee_vault_pda, false),
                     AccountMeta::new_readonly(system_program::id(), false),
                 ],
-                data: encode_close_session(*grid_id),
+                data: borsh::to_vec(&PortalInstruction::CloseSession).unwrap(),
             };
             process_portal_instruction(
                 rpc_client,
@@ -853,8 +804,6 @@ pub async fn process_portal_subcommand(
         PortalCliCommand::DepositFee {
             portal_program_id,
             depositor,
-            session_owner,
-            grid_id,
             recipient,
             lamports,
             sign_only,
@@ -867,7 +816,7 @@ pub async fn process_portal_subcommand(
         } => {
             let portal_program_id = resolve_portal_program_id(config, *portal_program_id)?;
             let depositor = config.signers[*depositor];
-            let session_pda = find_session_pda(&portal_program_id, session_owner, *grid_id);
+            let session_pda = find_session_pda(&portal_program_id);
             let deposit_receipt_pda =
                 find_deposit_receipt_pda(&portal_program_id, &session_pda, recipient);
             let instruction = Instruction {
@@ -879,7 +828,10 @@ pub async fn process_portal_subcommand(
                     AccountMeta::new_readonly(*recipient, false),
                     AccountMeta::new_readonly(system_program::id(), false),
                 ],
-                data: encode_deposit_fee(*lamports),
+                data: borsh::to_vec(&PortalInstruction::DepositFee {
+                    lamports: *lamports,
+                })
+                .unwrap(),
             };
             process_portal_instruction(
                 rpc_client,
@@ -963,7 +915,7 @@ pub async fn process_portal_subcommand(
                     AccountMeta::new_readonly(system_program::id(), false),
                     AccountMeta::new_readonly(buffer_keypair.pubkey(), false),
                 ],
-                data: encode_delegate(*grid_id),
+                data: borsh::to_vec(&PortalInstruction::Delegate { grid_id: *grid_id }).unwrap(),
             };
             instructions.push(delegate_ix);
             process_portal_instructions(
@@ -1022,7 +974,7 @@ pub async fn process_portal_subcommand(
                     AccountMeta::new(delegation_record_pda, false),
                     AccountMeta::new_readonly(system_program::id(), false),
                 ],
-                data: encode_undelegate(),
+                data: borsh::to_vec(&PortalInstruction::Undelegate).unwrap(),
             };
             process_portal_instruction(
                 rpc_client,
@@ -1096,14 +1048,12 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_portal_deposit_fee_defaults_recipient_to_session_owner() {
+    fn test_parse_portal_deposit_fee_defaults_recipient_to_depositor() {
         let (default_signer, keypair, _tmp) = make_default_signer();
         let matches = get_clap_app("test", "desc", "version").get_matches_from(vec![
             "test",
             "portal",
             "deposit-fee",
-            "--grid",
-            "9",
             "0.000000042",
             "--sign-only",
             "--blockhash",
@@ -1116,12 +1066,10 @@ mod tests {
         assert!(matches!(
             command,
             CliCommand::Portal(PortalCliCommand::DepositFee {
-                session_owner,
                 recipient,
-                grid_id: 9,
                 lamports: 42,
                 ..
-            }) if session_owner == keypair.pubkey() && recipient == keypair.pubkey()
+            }) if recipient == keypair.pubkey()
         ));
     }
 

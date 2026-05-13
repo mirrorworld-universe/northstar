@@ -4,6 +4,7 @@ use solana_runtime::installed_scheduler_pool::BankWithScheduler;
 use {
     crate::{
         er_history::ErHistoryStore, filter::filter_allows, max_slots::MaxSlots,
+        northstar::NorthStarSyncStatus,
         optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
         parsed_token_accounts::*, rpc_cache::LargestAccountsCache, rpc_health::*,
     },
@@ -276,6 +277,8 @@ pub struct JsonRpcRequestProcessor {
     pub(crate) er_history_store: Option<Arc<ErHistoryStore>>,
     /// Sonic: Optional single-node contact info override for ephemeral rollup RPC.
     pub(crate) er_node_info: Option<ErNodeInfo>,
+    /// Sonic: Optional NorthStar L1 sync cursor for ephemeral rollup RPC.
+    pub(crate) northstar_sync_status: Option<Arc<NorthStarSyncStatus>>,
     /// Sonic: Optional synchronous transaction executor for ephemeral rollup RPC.
     /// When set, `sendTransaction` bypasses `SendTransactionService` and executes
     /// the wire transaction directly on the ER bank, with no queue, no batching,
@@ -283,12 +286,18 @@ pub struct JsonRpcRequestProcessor {
     pub(crate) er_tx_executor: Option<Arc<dyn ErTxExecutor>>,
 }
 
+/// Sonic: Error returned by ER `sendTransaction` fast path.
+#[derive(Debug)]
+pub enum ErTxError {
+    NotActive,
+}
+
 /// Sonic: Synchronous executor used by ER `sendTransaction` to bypass
 /// `SendTransactionService` (queue/batch/retry are pointless on a single
 /// in-process ER node).
 pub trait ErTxExecutor: std::marker::Send + std::marker::Sync {
     /// Execute one wire-encoded transaction synchronously.
-    fn execute_wire(&self, wire_transaction: Vec<u8>);
+    fn execute_wire(&self, wire_transaction: Vec<u8>) -> std::result::Result<(), ErTxError>;
 }
 impl Metadata for JsonRpcRequestProcessor {}
 
@@ -478,6 +487,7 @@ impl JsonRpcRequestProcessor {
                 session_pda: None,
                 er_history_store: None,
                 er_node_info: None,
+                northstar_sync_status: None,
                 er_tx_executor: None,
             },
             transaction_receiver,
@@ -502,6 +512,11 @@ impl JsonRpcRequestProcessor {
     /// Sonic: Set single-node contact info for ephemeral rollup RPC.
     pub fn set_er_node_info(&mut self, er_node_info: ErNodeInfo) {
         self.er_node_info = Some(er_node_info);
+    }
+
+    /// Sonic: Set NorthStar L1 sync cursor for ephemeral rollup RPC.
+    pub fn set_northstar_sync_status(&mut self, status: Arc<NorthStarSyncStatus>) {
+        self.northstar_sync_status = Some(status);
     }
 
     /// Sonic: Set synchronous ER transaction executor (bypasses
@@ -592,6 +607,7 @@ impl JsonRpcRequestProcessor {
             session_pda: None,
             er_history_store: None,
             er_node_info: None,
+            northstar_sync_status: None,
             er_tx_executor: None,
         }
     }
@@ -4226,8 +4242,24 @@ pub mod rpc_full {
             // we only enqueue execution, processed reads can race and observe
             // the pre-transaction bank.
             if let Some(executor) = meta.er_tx_executor.clone() {
-                executor.execute_wire(wire_transaction);
+                executor
+                    .execute_wire(wire_transaction)
+                    .map_err(|err| match err {
+                        ErTxError::NotActive => {
+                            Error::from(RpcCustomError::EphemeralRollupNotActive)
+                        }
+                    })?;
                 return Ok(signature.to_string());
+            }
+
+            // Sonic: ER-configured RPC must never fall back to L1 TPU forwarding.
+            // If no ER executor is installed, the rollup is not available for writes.
+            if meta.delegated_accounts.is_some()
+                || meta.session_pda.is_some()
+                || meta.er_history_store.is_some()
+                || meta.er_node_info.is_some()
+            {
+                return Err(RpcCustomError::EphemeralRollupNotActive.into());
             }
 
             _send_transaction(
@@ -7242,7 +7274,7 @@ pub mod tests {
             ..
         } = config;
         let runtime = service_runtime(rpc_threads, rpc_blocking_threads, rpc_niceness_adj);
-        let (meta, receiver) = JsonRpcRequestProcessor::new(
+        let (mut meta, receiver) = JsonRpcRequestProcessor::new(
             config,
             None,
             bank_forks.clone(),
@@ -7391,11 +7423,32 @@ pub mod tests {
             r#"{{"jsonrpc":"2.0","id":1,"method":"sendTransaction","params":["{}"]}}"#,
             bs58::encode(serialize(&bad_transaction).unwrap()).into_string()
         );
-        let res = io.handle_request_sync(&req, meta);
+        let res = io.handle_request_sync(&req, meta.clone());
         assert_eq!(
             res,
             Some(
                 r#"{"jsonrpc":"2.0","error":{"code":-32602,"message":"invalid transaction: Transaction failed to sanitize accounts offsets correctly"},"id":1}"#.to_string(),
+            )
+        );
+
+        // Sonic: ER-configured RPC without an ER executor must reject writes
+        // instead of falling back to L1 TPU forwarding.
+        meta.set_session_pda(Arc::new(RwLock::new(None)));
+        let er_transaction = system_transaction::transfer(
+            &mint_keypair,
+            &solana_pubkey::new_rand(),
+            42,
+            recent_blockhash,
+        );
+        let req = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"sendTransaction","params":["{}", {{"skipPreflight": true}}]}}"#,
+            bs58::encode(serialize(&er_transaction).unwrap()).into_string()
+        );
+        let res = io.handle_request_sync(&req, meta);
+        assert_eq!(
+            res,
+            Some(
+                r#"{"jsonrpc":"2.0","error":{"code":-34001,"message":"Ephemeral rollup is not active"},"id":1}"#.to_string(),
             )
         );
     }

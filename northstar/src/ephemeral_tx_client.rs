@@ -1,5 +1,5 @@
 use {
-    log::{debug, warn},
+    log::{debug, trace, warn},
     solana_account::{ReadableAccount, WritableAccount},
     solana_keypair::Keypair,
     solana_ledger::transaction_balances::compile_collected_balances,
@@ -317,7 +317,7 @@ impl TransactionClient for EphemeralTransactionClient {
         );
 
         if let Err(e) = self.execute_transactions(&bank, txs.clone()) {
-            debug!("Tx batch execution failed: {e}");
+            warn!("ER tx batch execution failed: {e}");
         }
 
         self.publish_processed_slot(&bank);
@@ -349,10 +349,49 @@ impl EphemeralTransactionClient {
         bank: &Bank,
         txs: Vec<VersionedTransaction>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let tx_sigs = txs
+            .iter()
+            .map(|tx| {
+                tx.signatures
+                    .first()
+                    .map(|sig| sig.to_string())
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        if log::log_enabled!(log::Level::Trace) {
+            let tx_programs = txs
+                .iter()
+                .map(|tx| {
+                    tx.message
+                        .instructions()
+                        .iter()
+                        .filter_map(|ix| {
+                            tx.message
+                                .static_account_keys()
+                                .get(ix.program_id_index as usize)
+                        })
+                        .map(|program_id| program_id.to_string())
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            trace!(
+                "ER tx batch executing: slot={}, count={}, sigs={tx_sigs:?}, \
+                 programs={tx_programs:?}",
+                bank.slot(),
+                txs.len(),
+            );
+        } else {
+            debug!(
+                "ER tx batch executing: slot={}, count={}, sigs={tx_sigs:?}",
+                bank.slot(),
+                txs.len(),
+            );
+        }
+
         let batch = match bank.prepare_entry_batch(txs.clone()) {
             Ok(batch) => batch,
             Err(e) => {
-                debug!("Tx batch preparation failed: {e}");
+                warn!("ER tx batch preparation failed: {e}; sigs={tx_sigs:?}");
                 // Record each failed transaction so callers can discover the error
                 // via getSignatureStatuses / getTransaction instead of getting null.
                 for tx in &txs {
@@ -374,7 +413,10 @@ impl EphemeralTransactionClient {
 
         for (tx_idx, result) in commit_results.iter().enumerate() {
             if let Err(e) = result {
-                debug!("Tx {tx_idx} failed: {e}");
+                warn!(
+                    "ER tx failed: index={tx_idx}, sig={}, err={e}",
+                    tx_sigs.get(tx_idx).map(String::as_str).unwrap_or_default()
+                );
             }
         }
 
@@ -668,13 +710,22 @@ impl NotifyKeyUpdate for EphemeralTransactionClient {
 }
 
 impl solana_rpc::rpc::ErTxExecutor for EphemeralTransactionClient {
-    fn execute_wire(&self, wire_transaction: Vec<u8>) {
+    fn execute_wire(
+        &self,
+        wire_transaction: Vec<u8>,
+    ) -> std::result::Result<(), solana_rpc::rpc::ErTxError> {
+        if !self.active.load(Ordering::Relaxed) {
+            warn!("Ephemeral rollup not active, rejecting RPC transaction");
+            return Err(solana_rpc::rpc::ErTxError::NotActive);
+        }
+
         let stats = SendTransactionServiceStats::default();
         <Self as TransactionClient>::send_transactions_in_batch(
             self,
             vec![wire_transaction],
             &stats,
         );
+        Ok(())
     }
 }
 

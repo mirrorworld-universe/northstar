@@ -4,8 +4,10 @@ use {
         ephemeral_tx_client::EphemeralTransactionClient, slot_advancer::SlotAdvancer,
     },
     crossbeam_channel::{Sender, unbounded},
-    log::{info, warn},
-    solana_account::{AccountSharedData, ReadableAccount, WritableAccount, state_traits::StateMut},
+    log::{debug, info, warn},
+    solana_account::{
+        AccountSharedData, PROGRAM_OWNERS, ReadableAccount, WritableAccount, state_traits::StateMut,
+    },
     solana_clock::{BankId, Slot},
     solana_gossip::cluster_info::ClusterInfo,
     solana_keypair::Keypair,
@@ -15,6 +17,7 @@ use {
     solana_rpc::{
         er_history::ErHistoryStore,
         max_slots::MaxSlots,
+        northstar::NorthStarSyncStatus,
         optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
         rpc::{ErNodeInfo, JsonRpcConfig},
         rpc_pubsub_service::{PubSubConfig, PubSubService},
@@ -111,6 +114,8 @@ pub struct EphemeralRuntime {
     active: Arc<AtomicBool>,
     /// Sonic: Current session PDA, shared with the RPC handler.
     session_pda: Arc<RwLock<Option<Pubkey>>>,
+    /// Sonic: L1 sync cursor, shared with the RPC handler.
+    sync_status: Arc<NorthStarSyncStatus>,
     /// Sonic: In-memory ER transaction history for Phase 1 history APIs.
     er_history_store: Arc<ErHistoryStore>,
     portal_program_id: Pubkey,
@@ -482,6 +487,7 @@ impl EphemeralRuntime {
         // Sonic: Starts inactive — transactions rejected until activate() is called
         let active = Arc::new(AtomicBool::new(false));
         let session_pda: Arc<RwLock<Option<Pubkey>>> = Arc::new(RwLock::new(None));
+        let sync_status = Arc::new(NorthStarSyncStatus::new(parent_bank.slot()));
         let er_history_store = Arc::new(ErHistoryStore::default());
 
         let ledger_dir = TempDir::new().map_err(|e| e.to_string())?;
@@ -594,6 +600,7 @@ impl EphemeralRuntime {
                 er_root_slot: ephemeral_slot,
                 slot_duration_ms: u64::try_from(slot_duration.as_millis()).unwrap_or(u64::MAX),
             }),
+            Some(sync_status.clone()),
             Some(Arc::new(tx_client.clone()) as Arc<dyn solana_rpc::rpc::ErTxExecutor>),
         )?;
 
@@ -684,6 +691,7 @@ impl EphemeralRuntime {
             retired_bank_forks_reaper_pause,
             active,
             session_pda,
+            sync_status,
             er_history_store,
             portal_program_id,
 
@@ -769,6 +777,16 @@ impl EphemeralRuntime {
         self.session_pda.clone()
     }
 
+    /// Sonic: Update latest L1 slot observed by the NorthStar sync loop.
+    pub fn update_latest_l1_slot(&self, slot: Slot) {
+        self.sync_status.update_latest_l1_slot(slot);
+    }
+
+    /// Sonic: Mark L1 events synced through `slot`.
+    pub fn mark_synced_through(&self, slot: Slot) {
+        self.sync_status.mark_synced_through(slot);
+    }
+
     pub fn bank(&self) -> Arc<Bank> {
         self.bank_forks.read().unwrap().working_bank()
     }
@@ -805,6 +823,9 @@ impl EphemeralRuntime {
     /// clears session state, and starts a new SlotAdvancer.
     /// Called when a new session opens to get a fresh L1 snapshot.
     pub fn reset_to_new_parent(&mut self, parent_bank: Arc<Bank>) {
+        self.sync_status.update_latest_l1_slot(parent_bank.slot());
+        self.sync_status.mark_synced_through(parent_bank.slot());
+
         // 1. Stop old slot advancer
         self.advancer_exit.store(true, Ordering::Relaxed);
         if let Some(advancer) = self.slot_advancer.take() {
@@ -992,15 +1013,18 @@ impl EphemeralRuntime {
             if !account_writes.is_empty() {
                 er_bank.store_accounts((er_bank.slot(), account_writes.as_slice()));
             }
-            er_bank.remove_programs_from_cache(
+            Self::remove_reloadable_programs_from_cache(
+                &er_bank,
+                "reset hydration",
                 hydrated_delegations
                     .iter()
                     .filter_map(|(_, _, _, owner_program_account)| {
                         owner_program_account
                             .as_ref()
-                            .map(|(owner_program, _, _)| *owner_program)
-                    })
-                    .collect::<HashSet<_>>(),
+                            .map(|(owner_program, program_account, _)| {
+                                (*owner_program, program_account)
+                            })
+                    }),
             );
 
             self.initial_account_snapshots.extend(
@@ -1065,6 +1089,40 @@ impl EphemeralRuntime {
     /// Returns the initial snapshot of a delegated account.
     pub fn initial_account_snapshot(&self, pubkey: &Pubkey) -> Option<&AccountSharedData> {
         self.initial_account_snapshots.get(pubkey)
+    }
+
+    fn is_reloadable_program_account(account: &AccountSharedData) -> bool {
+        PROGRAM_OWNERS.contains(account.owner())
+    }
+
+    fn remove_reloadable_programs_from_cache<'a>(
+        bank: &Bank,
+        context: &str,
+        programs: impl IntoIterator<Item = (Pubkey, &'a AccountSharedData)>,
+    ) {
+        let mut reloadable = Vec::new();
+        let mut skipped = Vec::new();
+        for (program_id, account) in programs {
+            if Self::is_reloadable_program_account(account) {
+                reloadable.push(program_id);
+            } else {
+                skipped.push((program_id, *account.owner()));
+            }
+        }
+
+        if !reloadable.is_empty() {
+            debug!(
+                "ER ProgramCache invalidation ({context}): removing reloadable programs \
+                 {reloadable:?}"
+            );
+            bank.remove_programs_from_cache(reloadable);
+        }
+        if !skipped.is_empty() {
+            debug!(
+                "ER ProgramCache invalidation ({context}): keeping non-reloadable/native programs \
+                 {skipped:?}"
+            );
+        }
     }
 
     fn publish_bank_for_rpc(&self) {
@@ -1173,8 +1231,13 @@ impl EphemeralRuntime {
             })
             .collect::<Vec<_>>();
         er_bank.store_accounts((er_bank.slot(), updated_accounts.as_slice()));
-        er_bank
-            .remove_programs_from_cache(updates.iter().map(|(owner_program, _, _)| *owner_program));
+        Self::remove_reloadable_programs_from_cache(
+            &er_bank,
+            "owner refresh",
+            updates
+                .iter()
+                .map(|(owner_program, program_account, _)| (*owner_program, program_account)),
+        );
 
         let refreshed = updates.len();
         drop(delegated_accounts);
@@ -1242,7 +1305,11 @@ impl EphemeralRuntime {
                             ),
                         }
                     }
-                    bank.remove_programs_from_cache(Some(owner_program));
+                    Self::remove_reloadable_programs_from_cache(
+                        &bank,
+                        "delegation hydration",
+                        Some((owner_program, &program_account)),
+                    );
                 } else {
                     warn!(
                         "Cannot hydrate owner program {owner_program}: program account not found \
@@ -1339,9 +1406,13 @@ mod tests {
         solana_rpc_client::rpc_client::RpcClient,
         solana_rpc_client_types::config::{CommitmentConfig, RpcSendTransactionConfig},
         solana_sdk_ids::{bpf_loader_upgradeable, system_program},
+        solana_send_transaction_service::{
+            send_transaction_service_stats::SendTransactionServiceStats,
+            transaction_client::TransactionClient,
+        },
         solana_svm::transaction_processor::ExecutionRecordingConfig,
         solana_system_interface::instruction::transfer,
-        solana_transaction::Transaction,
+        solana_transaction::{Transaction, versioned::VersionedTransaction},
         solana_transaction_status::{TransactionConfirmationStatus, UiTransactionEncoding},
         std::{collections::HashSet, net::TcpListener, sync::atomic::AtomicU64, time::Duration},
     };
@@ -1474,7 +1545,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -1553,7 +1623,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -1642,7 +1711,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -1686,7 +1754,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -1760,7 +1827,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -1834,7 +1900,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -1941,7 +2006,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -1972,7 +2036,7 @@ mod tests {
             .0;
         assert_ne!(blockhash, solana_hash::Hash::default());
 
-        // Send a transaction — it should be silently dropped by the inactive tx client
+        // Send a transaction — inactive ER RPC must reject it.
         let instruction = transfer(&sender_pubkey, &receiver_pubkey, transfer_amount);
         let tx = Transaction::new_signed_with_payer(
             &[instruction],
@@ -1981,11 +2045,15 @@ mod tests {
             blockhash,
         );
 
-        // sendTransaction RPC must survive preflight even while runtime is inactive.
-        // The tx is still dropped internally because the runtime rejects execution.
-        rpc_client
+        // sendTransaction RPC must survive preflight even while runtime is inactive,
+        // but it must reject the user instead of accepting and silently dropping.
+        let err = rpc_client
             .send_transaction_with_config(&tx, RpcSendTransactionConfig::default())
-            .unwrap();
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Ephemeral rollup is not active"),
+            "unexpected inactive sendTransaction error: {err}"
+        );
 
         std::thread::sleep(Duration::from_secs(2));
 
@@ -2013,7 +2081,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -2075,7 +2142,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -2162,7 +2228,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -2220,7 +2285,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -2297,7 +2361,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -2370,7 +2433,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -2451,7 +2513,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -2543,7 +2604,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -2611,7 +2671,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -2697,7 +2756,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -2861,6 +2919,40 @@ mod tests {
     }
 
     #[test]
+    fn test_system_owned_delegation_keeps_system_builtin_executable() {
+        let (parent_bank, mut runtime) = create_runtime();
+        runtime.activate();
+
+        let delegated_signer = Keypair::new();
+        let delegated_l1_account =
+            AccountSharedData::new(1_000_000_000, 0, &runtime.portal_program_id);
+        runtime.handle_delegation_inner(
+            &delegated_signer.pubkey(),
+            delegated_l1_account,
+            Some(system_program::id()),
+            Some(&parent_bank),
+        );
+
+        let recipient = Pubkey::new_unique();
+        let transaction = Transaction::new_signed_with_payer(
+            &[transfer(&delegated_signer.pubkey(), &recipient, 1_000_000)],
+            Some(&delegated_signer.pubkey()),
+            &[&delegated_signer],
+            runtime.bank().last_blockhash(),
+        );
+        let versioned_transaction = VersionedTransaction::from(transaction);
+
+        TransactionClient::send_transactions_in_batch(
+            &runtime._tx_client,
+            vec![bincode::serialize(&versioned_transaction).unwrap()],
+            &SendTransactionServiceStats::default(),
+        );
+
+        assert_eq!(runtime.bank().get_balance(&recipient), 1_000_000);
+        runtime.shutdown();
+    }
+
+    #[test]
     fn test_refresh_delegated_owner_programs_updates_programdata_and_invalidates_cache() {
         agave_logger::setup();
 
@@ -2986,7 +3078,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -3034,7 +3125,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -3085,7 +3175,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 42,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -3129,7 +3218,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -3165,7 +3253,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -3227,7 +3314,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -3299,7 +3385,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
