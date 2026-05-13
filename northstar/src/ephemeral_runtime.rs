@@ -96,6 +96,10 @@ pub struct EphemeralRuntime {
     delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
     /// Shared with EphemeralTransactionClient - tracks accounts that have been written to on this ER.
     touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+    /// Sonic: Thin in-memory source of truth for ER-local account writes across
+    /// L1 reanchors. Rehydrated into the current Bank so existing SVM/RPC code
+    /// paths can keep using normal Bank account access.
+    er_account_overlay: Arc<RwLock<HashMap<Pubkey, AccountSharedData>>>,
     /// Sonic: Hold current L1 anchor bank alive even if ER banks sever parent
     /// links. Without this, dropping the ER root would drop the unrooted L1
     /// parent bank and purge its slot from the shared AccountsDb.
@@ -483,6 +487,21 @@ impl EphemeralRuntime {
 
         let delegated_set = Arc::new(RwLock::new(delegated_accounts.clone()));
         let touched_accounts = Arc::new(RwLock::new(HashSet::new()));
+        let er_account_overlay = Arc::new(RwLock::new(
+            initial_account_snapshots
+                .iter()
+                .filter_map(|(pubkey, account)| {
+                    Self::effective_delegated_account(
+                        &parent_bank,
+                        &portal_program_id,
+                        settings.grid_id,
+                        pubkey,
+                        account,
+                    )
+                    .map(|effective| (*pubkey, effective))
+                })
+                .collect::<HashMap<_, _>>(),
+        ));
         let bank_operation_lock = Arc::new(Mutex::new(()));
         // Sonic: Starts inactive — transactions rejected until activate() is called
         let active = Arc::new(AtomicBool::new(false));
@@ -505,12 +524,13 @@ impl EphemeralRuntime {
             },
         )));
         let tx_client =
-            EphemeralTransactionClient::new_with_history_commitment_cache_and_transaction_max_age(
+            EphemeralTransactionClient::new_with_history_overlay_commitment_cache_and_transaction_max_age(
                 bank_forks.clone(),
                 bank_operation_lock.clone(),
                 delegated_set.clone(),
                 touched_accounts.clone(),
                 active.clone(),
+                er_account_overlay.clone(),
                 er_history_store.clone(),
                 block_commitment_cache.clone(),
                 transaction_max_age,
@@ -683,6 +703,7 @@ impl EphemeralRuntime {
             initial_account_snapshots,
             delegated_accounts: delegated_set,
             touched_accounts,
+            er_account_overlay,
             l1_anchor_bank: parent_bank,
             retired_bank_forks_sender: Some(retired_bank_forks_sender),
             retired_bank_forks_reaper: Some(retired_bank_forks_reaper),
@@ -896,6 +917,7 @@ impl EphemeralRuntime {
             self.initial_account_snapshots.clear();
             self.delegated_accounts.write().unwrap().clear();
             self.touched_accounts.write().unwrap().clear();
+            self.er_account_overlay.write().unwrap().clear();
             let accounts = match self.l1_anchor_bank.get_all_accounts(false) {
                 Ok(accounts) => accounts,
                 Err(_) => {
@@ -1040,6 +1062,11 @@ impl EphemeralRuntime {
                 .write()
                 .unwrap()
                 .extend(hydrated_delegations.iter().map(|(pubkey, _, _, _)| *pubkey));
+            self.er_account_overlay.write().unwrap().extend(
+                hydrated_delegations
+                    .iter()
+                    .map(|(pubkey, _, effective_account, _)| (*pubkey, effective_account.clone())),
+            );
 
             let hydrated = hydrated_delegations.len();
             if hydrated > 0 {
@@ -1079,6 +1106,127 @@ impl EphemeralRuntime {
         ));
 
         info!("EphemeralRuntime reset to new L1 parent, ER slot {}", slot);
+    }
+
+    fn apply_er_account_overlay_to_bank(&self, bank: &Bank) -> usize {
+        let overlay_snapshot = self
+            .er_account_overlay
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(pubkey, account)| (*pubkey, account.clone()))
+            .collect::<Vec<_>>();
+        if overlay_snapshot.is_empty() {
+            return 0;
+        }
+
+        let account_writes = overlay_snapshot
+            .iter()
+            .map(|(pubkey, account)| (pubkey, account))
+            .collect::<Vec<_>>();
+        bank.store_accounts((bank.slot(), account_writes.as_slice()));
+        overlay_snapshot.len()
+    }
+
+    /// Sonic: Re-anchor the active ER onto a fresh L1 bank while preserving the
+    /// ER-local account overlay. This is the per-L1-block path: stop the slot
+    /// advancer, create a fresh ER bank whose parent is the new L1 bank, replay
+    /// the thin in-memory ER overlay, publish the bank for RPC, then resume the
+    /// advancer if the session is still active.
+    pub fn reanchor_to_l1_parent(&mut self, parent_bank: Arc<Bank>) {
+        self.sync_status.update_latest_l1_slot(parent_bank.slot());
+        self.sync_status.mark_synced_through(parent_bank.slot());
+
+        if !self.is_active() {
+            return;
+        }
+
+        self.advancer_exit.store(true, Ordering::Relaxed);
+        if let Some(advancer) = self.slot_advancer.take() {
+            advancer.join();
+        }
+
+        let bank_operation_lock = self.bank_operation_lock.clone();
+        let _bank_operation_guard = bank_operation_lock.lock().unwrap();
+
+        // ER slot numbers are an ER-local clock. Do not derive the next
+        // reanchor slot from L1 slot duration; just keep the ER clock
+        // moving forward and far above L1 slots.
+        const ER_SLOT_OFFSET: Slot = 1u64 << 40;
+        let current_er_tip = self.bank_forks.read().unwrap().working_bank().slot();
+        let ephemeral_slot = if current_er_tip >= ER_SLOT_OFFSET {
+            current_er_tip.saturating_add(1)
+        } else {
+            Self::er_slot_for(&parent_bank)
+        };
+        info!(
+            "reanchor_to_l1_parent: parent_slot={}, ephemeral_slot={}, parent_epoch={}",
+            parent_bank.slot(),
+            ephemeral_slot,
+            parent_bank.epoch(),
+        );
+
+        let recent_blockhash_max_age =
+            crate::er_recent_blockhash_max_age_for_slot_duration(self.slot_duration);
+        let mut bank = Bank::new_from_parent_ephemeral_isolated(
+            parent_bank.clone(),
+            &Pubkey::default(),
+            ephemeral_slot,
+        );
+        bank.configure_er(&self.settings.er_fee_structure, recent_blockhash_max_age);
+        bank.set_callback(Some(Box::new(NoopDropCallback)));
+        Self::prepare_initial_working_bank(&bank);
+
+        let new_bf_arc = BankForks::new_rw_arc_ephemeral(bank);
+        let new_bf = Arc::try_unwrap(new_bf_arc)
+            .unwrap_or_else(|_| panic!("just created, refcount must be 1"))
+            .into_inner()
+            .expect("lock not poisoned");
+        let old_bf = std::mem::replace(&mut *self.bank_forks.write().unwrap(), new_bf);
+        self.retire_bank_forks(old_bf);
+
+        self.bank_forks
+            .read()
+            .unwrap()
+            .root_bank()
+            .set_fork_graph_in_program_cache(Arc::downgrade(&self.bank_forks));
+
+        self.l1_anchor_bank = parent_bank;
+
+        let er_bank = self.bank();
+        let overlaid = self.apply_er_account_overlay_to_bank(&er_bank);
+        if overlaid > 0 {
+            info!("Rehydrated {overlaid} ER overlay account(s) after L1 reanchor");
+        }
+
+        let initial_bank = Self::freeze_and_rotate_bank_for_rpc(
+            &self.bank_forks,
+            &self.block_commitment_cache,
+            &self.optimistically_confirmed_bank,
+            Some(&self.rpc_subscriptions),
+            &self.er_history_store,
+            &self.settings.er_fee_structure,
+            recent_blockhash_max_age,
+        );
+        drop(_bank_operation_guard);
+
+        let advancer_exit = Arc::new(AtomicBool::new(false));
+        self.advancer_exit = advancer_exit.clone();
+        self.slot_advancer = Some(crate::slot_advancer::SlotAdvancer::new_with_history(
+            self.bank_forks.clone(),
+            self.bank_operation_lock.clone(),
+            self.block_commitment_cache.clone(),
+            self.optimistically_confirmed_bank.clone(),
+            initial_bank,
+            crate::slot_advancer::Config {
+                slot_duration: self.slot_duration,
+                manager_account: Pubkey::default(),
+                er_fee_structure: self.settings.er_fee_structure.clone(),
+            },
+            advancer_exit,
+            Some(self.rpc_subscriptions.clone()),
+            Some(self.er_history_store.clone()),
+        ));
     }
 
     /// Returns a clone of the delegated account pubkeys set.
@@ -1319,6 +1467,10 @@ impl EphemeralRuntime {
             }
         }
         bank.store_account(delegated_account, &er_account);
+        self.er_account_overlay
+            .write()
+            .unwrap()
+            .insert(*delegated_account, er_account.clone());
 
         // Add to the delegated accounts set so the tx client allows writes
         self.delegated_accounts
@@ -1365,6 +1517,10 @@ impl EphemeralRuntime {
             account.set_owner(solana_sdk_ids::system_program::id());
         }
         bank.store_account(depositor, &account);
+        self.er_account_overlay
+            .write()
+            .unwrap()
+            .insert(*depositor, account.clone());
 
         // Mark as touched so the balance isn't zeroed later
         self.touched_accounts.write().unwrap().insert(*depositor);
@@ -2210,6 +2366,161 @@ mod tests {
             );
         }
 
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_reanchor_picks_up_fresh_l1_readonly_state() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        let readonly_account = Pubkey::new_unique();
+        fund_account(&parent_bank, &readonly_account, 1_000_000);
+        parent_bank.freeze();
+        let parent_bank = Arc::new(parent_bank);
+
+        let cluster_info = create_test_cluster_info();
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            parent_bank.clone(),
+            cluster_info,
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.activate();
+
+        let new_parent = Bank::new_from_parent(parent_bank, &Pubkey::default(), 1);
+        fund_account(&new_parent, &readonly_account, 2_000_000);
+        new_parent.freeze();
+        runtime.reanchor_to_l1_parent(Arc::new(new_parent));
+
+        assert_eq!(runtime.bank().get_balance(&readonly_account), 2_000_000);
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_reanchor_preserves_er_touched_overlay() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        let depositor = Pubkey::new_unique();
+        fund_account(&parent_bank, &depositor, 1_000_000);
+        parent_bank.freeze();
+        let parent_bank = Arc::new(parent_bank);
+
+        let cluster_info = create_test_cluster_info();
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            parent_bank.clone(),
+            cluster_info,
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.activate();
+        runtime.credit_deposit(&depositor, 50_000);
+        assert_eq!(runtime.bank().get_balance(&depositor), 50_000);
+
+        let new_parent = Bank::new_from_parent(parent_bank, &Pubkey::default(), 1);
+        fund_account(&new_parent, &depositor, 9_000_000);
+        new_parent.freeze();
+        runtime.reanchor_to_l1_parent(Arc::new(new_parent));
+
+        assert_eq!(
+            runtime.bank().get_balance(&depositor),
+            50_000,
+            "ER overlay must win over later L1 base state for touched accounts"
+        );
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_reanchor_preserves_delegated_overlay_owner_remap() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        let portal_program_id = Pubkey::new_unique();
+        let delegated_account = Pubkey::new_unique();
+        let owner_program = Pubkey::new_unique();
+        let grid_id = 42;
+        let portal_owned_account = AccountSharedData::new(1_000_000, 8, &portal_program_id);
+        parent_bank.store_account(&delegated_account, &portal_owned_account);
+        store_delegation_record(
+            &parent_bank,
+            &portal_program_id,
+            &delegated_account,
+            &owner_program,
+            grid_id,
+        );
+        parent_bank.freeze();
+        let parent_bank = Arc::new(parent_bank);
+
+        let cluster_info = create_test_cluster_info();
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            grid_id,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![delegated_account],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            parent_bank.clone(),
+            cluster_info,
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            portal_program_id,
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.activate();
+        assert_eq!(
+            runtime
+                .bank()
+                .get_account(&delegated_account)
+                .unwrap()
+                .owner(),
+            &owner_program
+        );
+
+        let new_parent = Bank::new_from_parent(parent_bank, &Pubkey::default(), 1);
+        new_parent.freeze();
+        runtime.reanchor_to_l1_parent(Arc::new(new_parent));
+
+        assert_eq!(
+            runtime
+                .bank()
+                .get_account(&delegated_account)
+                .unwrap()
+                .owner(),
+            &owner_program,
+            "delegated account should keep ER owner remap; L1 base remains portal-owned"
+        );
         runtime.shutdown();
     }
 

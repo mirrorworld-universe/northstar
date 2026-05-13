@@ -1,6 +1,6 @@
 use {
     log::{debug, trace, warn},
-    solana_account::{ReadableAccount, WritableAccount},
+    solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
     solana_keypair::Keypair,
     solana_ledger::transaction_balances::compile_collected_balances,
     solana_message::{AddressLoader, VersionedMessage, v0::LoadedAddresses},
@@ -46,6 +46,10 @@ pub struct EphemeralTransactionClient {
     /// Accounts that have been written to on this ER.
     /// Once touched, their balance is "real" (not inherited from L1).
     touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+    /// Sonic: Thin in-memory ER account overlay. This is the source of truth
+    /// for ER-local writes across L1 reanchors; the current Bank is rehydrated
+    /// from it so existing SVM/RPC paths keep working.
+    er_account_overlay: Arc<RwLock<HashMap<Pubkey, AccountSharedData>>>,
     /// When false, all transactions are rejected.
     /// Shared with EphemeralRuntime — set to true when a session is active.
     active: Arc<AtomicBool>,
@@ -67,6 +71,7 @@ impl Clone for EphemeralTransactionClient {
             bank_operation_lock: Arc::clone(&self.bank_operation_lock),
             delegated_accounts: Arc::clone(&self.delegated_accounts),
             touched_accounts: Arc::clone(&self.touched_accounts),
+            er_account_overlay: Arc::clone(&self.er_account_overlay),
             active: Arc::clone(&self.active),
             er_history_store: Arc::clone(&self.er_history_store),
             rpc_subscriptions: Arc::clone(&self.rpc_subscriptions),
@@ -84,12 +89,31 @@ impl EphemeralTransactionClient {
         touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
         active: Arc<AtomicBool>,
     ) -> Self {
-        Self::new_with_history(
+        Self::new_with_history_and_overlay(
             bank_forks,
             bank_operation_lock,
             delegated_accounts,
             touched_accounts,
             active,
+            Arc::new(RwLock::new(HashMap::new())),
+        )
+    }
+
+    pub(crate) fn new_with_history_and_overlay(
+        bank_forks: Arc<RwLock<BankForks>>,
+        bank_operation_lock: Arc<Mutex<()>>,
+        delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+        touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+        active: Arc<AtomicBool>,
+        er_account_overlay: Arc<RwLock<HashMap<Pubkey, AccountSharedData>>>,
+    ) -> Self {
+        Self::new_with_history_overlay(
+            bank_forks,
+            bank_operation_lock,
+            delegated_accounts,
+            touched_accounts,
+            active,
+            er_account_overlay,
             Arc::new(ErHistoryStore::default()),
         )
     }
@@ -102,13 +126,34 @@ impl EphemeralTransactionClient {
         active: Arc<AtomicBool>,
         er_history_store: Arc<ErHistoryStore>,
     ) -> Self {
-        let block_commitment_cache = Self::new_block_commitment_cache_for_bank_forks(&bank_forks);
-        Self::new_with_history_and_commitment_cache(
+        Self::new_with_history_overlay(
             bank_forks,
             bank_operation_lock,
             delegated_accounts,
             touched_accounts,
             active,
+            Arc::new(RwLock::new(HashMap::new())),
+            er_history_store,
+        )
+    }
+
+    pub(crate) fn new_with_history_overlay(
+        bank_forks: Arc<RwLock<BankForks>>,
+        bank_operation_lock: Arc<Mutex<()>>,
+        delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+        touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+        active: Arc<AtomicBool>,
+        er_account_overlay: Arc<RwLock<HashMap<Pubkey, AccountSharedData>>>,
+        er_history_store: Arc<ErHistoryStore>,
+    ) -> Self {
+        let block_commitment_cache = Self::new_block_commitment_cache_for_bank_forks(&bank_forks);
+        Self::new_with_history_overlay_and_commitment_cache(
+            bank_forks,
+            bank_operation_lock,
+            delegated_accounts,
+            touched_accounts,
+            active,
+            er_account_overlay,
             er_history_store,
             block_commitment_cache,
         )
@@ -123,24 +168,48 @@ impl EphemeralTransactionClient {
         er_history_store: Arc<ErHistoryStore>,
         block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
     ) -> Self {
-        Self::new_with_history_commitment_cache_and_transaction_max_age(
+        Self::new_with_history_overlay_and_commitment_cache(
             bank_forks,
             bank_operation_lock,
             delegated_accounts,
             touched_accounts,
             active,
+            Arc::new(RwLock::new(HashMap::new())),
+            er_history_store,
+            block_commitment_cache,
+        )
+    }
+
+    pub(crate) fn new_with_history_overlay_and_commitment_cache(
+        bank_forks: Arc<RwLock<BankForks>>,
+        bank_operation_lock: Arc<Mutex<()>>,
+        delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+        touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+        active: Arc<AtomicBool>,
+        er_account_overlay: Arc<RwLock<HashMap<Pubkey, AccountSharedData>>>,
+        er_history_store: Arc<ErHistoryStore>,
+        block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
+    ) -> Self {
+        Self::new_with_history_overlay_commitment_cache_and_transaction_max_age(
+            bank_forks,
+            bank_operation_lock,
+            delegated_accounts,
+            touched_accounts,
+            active,
+            er_account_overlay,
             er_history_store,
             block_commitment_cache,
             crate::DEFAULT_ER_TRANSACTION_MAX_AGE,
         )
     }
 
-    pub(crate) fn new_with_history_commitment_cache_and_transaction_max_age(
+    pub(crate) fn new_with_history_overlay_commitment_cache_and_transaction_max_age(
         bank_forks: Arc<RwLock<BankForks>>,
         bank_operation_lock: Arc<Mutex<()>>,
         delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
         touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
         active: Arc<AtomicBool>,
+        er_account_overlay: Arc<RwLock<HashMap<Pubkey, AccountSharedData>>>,
         er_history_store: Arc<ErHistoryStore>,
         block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
         transaction_max_age: usize,
@@ -150,6 +219,7 @@ impl EphemeralTransactionClient {
             bank_operation_lock,
             delegated_accounts,
             touched_accounts,
+            er_account_overlay,
             active,
             er_history_store,
             rpc_subscriptions: Arc::new(RwLock::new(None)),
@@ -309,6 +379,8 @@ impl TransactionClient for EphemeralTransactionClient {
             return;
         }
 
+        let writable_accounts = Self::writable_accounts_for_batch(&bank, &txs);
+
         Self::zero_untouched_writable_accounts_for_batch(
             &bank,
             &txs,
@@ -320,6 +392,7 @@ impl TransactionClient for EphemeralTransactionClient {
             warn!("ER tx batch execution failed: {e}");
         }
 
+        self.capture_overlay_accounts(&bank, &writable_accounts);
         self.publish_processed_slot(&bank);
 
         // Mark writable accounts as touched (even on failure, since fee payers may be debited)
@@ -328,6 +401,21 @@ impl TransactionClient for EphemeralTransactionClient {
 }
 
 impl EphemeralTransactionClient {
+    fn capture_overlay_accounts(&self, bank: &Bank, writable_accounts: &HashSet<Pubkey>) {
+        if writable_accounts.is_empty() {
+            return;
+        }
+
+        let overlay_updates = writable_accounts
+            .iter()
+            .map(|key| (*key, bank.get_account(key).unwrap_or_default()))
+            .collect::<Vec<_>>();
+        self.er_account_overlay
+            .write()
+            .unwrap()
+            .extend(overlay_updates);
+    }
+
     fn publish_processed_slot(&self, bank: &Bank) {
         let current_slots = self
             .block_commitment_cache
@@ -681,6 +769,23 @@ impl EphemeralTransactionClient {
         if !zeroed_accounts.is_empty() {
             touched.write().unwrap().extend(zeroed_accounts);
         }
+    }
+
+    fn writable_accounts_for_batch(bank: &Bank, txs: &[VersionedTransaction]) -> HashSet<Pubkey> {
+        txs.iter()
+            .flat_map(|tx| {
+                tx.message
+                    .static_account_keys()
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, key)| tx.message.is_maybe_writable(i, None).then_some(*key))
+                    .chain(
+                        Self::load_transaction_addresses(bank, tx)
+                            .map(|loaded_addresses| loaded_addresses.writable)
+                            .unwrap_or(vec![]),
+                    )
+            })
+            .collect()
     }
 
     /// Mark all writable accounts in a transaction batch as touched.
