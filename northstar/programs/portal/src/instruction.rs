@@ -3,17 +3,17 @@ use borsh::{BorshDeserialize, BorshSerialize};
 #[cfg_attr(feature = "idl", derive(shank::ShankInstruction))]
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
 pub enum PortalInstruction {
-    #[cfg_attr(feature = "idl", account(0, name = "owner", sig, mut))]
+    #[cfg_attr(feature = "idl", account(0, name = "payer", sig, mut))]
     #[cfg_attr(feature = "idl", account(1, name = "session", mut))]
     #[cfg_attr(feature = "idl", account(2, name = "fee_vault", mut))]
     #[cfg_attr(feature = "idl", account(3, name = "system_program"))]
     OpenSession(OpenSession),
 
-    #[cfg_attr(feature = "idl", account(0, name = "owner", sig, mut))]
+    #[cfg_attr(feature = "idl", account(0, name = "closer", sig, mut))]
     #[cfg_attr(feature = "idl", account(1, name = "session", mut))]
     #[cfg_attr(feature = "idl", account(2, name = "fee_vault", mut))]
     #[cfg_attr(feature = "idl", account(3, name = "system_program"))]
-    CloseSession { grid_id: u64 },
+    CloseSession,
 
     #[cfg_attr(feature = "idl", account(0, name = "depositor", sig, mut))]
     #[cfg_attr(feature = "idl", account(1, name = "session"))]

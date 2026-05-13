@@ -1545,7 +1545,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -1624,7 +1623,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -1713,7 +1711,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -1757,7 +1754,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -1831,7 +1827,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -1905,7 +1900,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -2012,7 +2006,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -2088,7 +2081,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -2150,7 +2142,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -2237,7 +2228,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -2295,7 +2285,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -2372,7 +2361,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -2445,7 +2433,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -2526,7 +2513,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -2618,7 +2604,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -2686,7 +2671,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -2772,7 +2756,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -3095,7 +3078,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -3143,7 +3125,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -3194,7 +3175,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 42,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -3238,7 +3218,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -3274,7 +3253,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -3336,7 +3314,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -3408,7 +3385,6 @@ mod tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 100,
             fee_cap: 1000,

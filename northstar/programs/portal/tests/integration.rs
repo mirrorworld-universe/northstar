@@ -12,13 +12,12 @@ use {
     solana_transaction::Transaction,
 };
 
-fn find_session_pda(program_id: &Pubkey, owner: &Pubkey, grid_id: u64) -> (Pubkey, u8) {
-    let grid_id_bytes = grid_id.to_le_bytes();
-    Pubkey::find_program_address(&[b"session", owner.as_ref(), &grid_id_bytes], program_id)
+fn find_session_pda(program_id: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[b"session"], program_id)
 }
 
-fn find_fee_vault_pda(program_id: &Pubkey, owner: &Pubkey) -> (Pubkey, u8) {
-    Pubkey::find_program_address(&[b"fee_vault", owner.as_ref()], program_id)
+fn find_fee_vault_pda(program_id: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[b"fee_vault"], program_id)
 }
 
 fn find_deposit_receipt_pda(
@@ -65,9 +64,8 @@ fn build_close_session_ix(
     owner: &Pubkey,
     session_pda: &Pubkey,
     fee_vault_pda: &Pubkey,
-    grid_id: u64,
 ) -> Instruction {
-    let ix = PortalInstruction::CloseSession { grid_id };
+    let ix = PortalInstruction::CloseSession;
     let data = borsh::to_vec(&ix).unwrap();
 
     Instruction {
@@ -127,8 +125,8 @@ async fn test_full_lifecycle() {
     let banks = &mut context.banks_client;
     let payer = &context.payer;
 
-    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID, &payer.pubkey(), 1);
-    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID, &payer.pubkey());
+    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID);
+    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID);
 
     let open_ix = build_open_session_ix(
         &PORTAL_PROGRAM_ID,
@@ -217,7 +215,6 @@ async fn test_full_lifecycle() {
         &payer_pubkey,
         &session_pda_addr,
         &fee_vault_pda_addr,
-        1,
     );
 
     let tx = Transaction::new_signed_with_payer(
@@ -236,13 +233,13 @@ async fn test_full_lifecycle() {
 }
 
 #[tokio::test]
-async fn test_cannot_close_active_session() {
+async fn test_can_close_active_session() {
     let mut context = setup().await;
     let banks = &mut context.banks_client;
     let payer = &context.payer;
 
-    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID, &payer.pubkey(), 1);
-    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID, &payer.pubkey());
+    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID);
+    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID);
 
     let open_ix = build_open_session_ix(
         &PORTAL_PROGRAM_ID,
@@ -264,14 +261,15 @@ async fn test_cannot_close_active_session() {
         &payer.pubkey(),
         &session_pda,
         &fee_vault_pda,
-        1,
     );
 
     let blockhash = banks.get_latest_blockhash().await.unwrap();
     let tx =
         Transaction::new_signed_with_payer(&[close_ix], Some(&payer.pubkey()), &[payer], blockhash);
-    let result = banks.process_transaction(tx).await;
-    assert!(result.is_err());
+    banks.process_transaction(tx).await.unwrap();
+
+    let session_data = get_account_data(banks, &session_pda).await;
+    assert!(session_data.is_none() || session_data.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -293,8 +291,8 @@ async fn test_cannot_deposit_to_wrong_vault() {
     );
     banks.process_transaction(tx).await.unwrap();
 
-    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID, &payer.pubkey(), 1);
-    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID, &payer.pubkey());
+    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID);
+    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID);
 
     let open_ix = build_open_session_ix(
         &PORTAL_PROGRAM_ID,
@@ -348,8 +346,8 @@ async fn test_multiple_deposits_accumulate() {
     let banks = &mut context.banks_client;
     let payer = &context.payer;
 
-    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID, &payer.pubkey(), 1);
-    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID, &payer.pubkey());
+    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID);
+    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID);
 
     let open_ix = build_open_session_ix(
         &PORTAL_PROGRAM_ID,
@@ -409,7 +407,7 @@ async fn test_multiple_deposits_accumulate() {
 }
 
 #[tokio::test]
-async fn test_independent_grid_sessions() {
+async fn test_global_session_prevents_second_open() {
     let mut context = setup().await;
     let banks = &mut context.banks_client;
     let payer = &context.payer;
@@ -427,14 +425,14 @@ async fn test_independent_grid_sessions() {
     );
     banks.process_transaction(tx).await.unwrap();
 
-    let (session_pda_1, _) = find_session_pda(&PORTAL_PROGRAM_ID, &payer.pubkey(), 1);
-    let (fee_vault_pda_1, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID, &payer.pubkey());
+    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID);
+    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID);
 
     let open_ix_1 = build_open_session_ix(
         &PORTAL_PROGRAM_ID,
         &payer.pubkey(),
-        &session_pda_1,
-        &fee_vault_pda_1,
+        &session_pda,
+        &fee_vault_pda,
         1,
         100,
         5_000_000_000,
@@ -449,15 +447,12 @@ async fn test_independent_grid_sessions() {
     );
     banks.process_transaction(tx).await.unwrap();
 
-    let (session_pda_2, _) = find_session_pda(&PORTAL_PROGRAM_ID, &user_b.pubkey(), 1);
-    let (fee_vault_pda_2, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID, &user_b.pubkey());
-
     let open_ix_2 = build_open_session_ix(
         &PORTAL_PROGRAM_ID,
         &user_b.pubkey(),
-        &session_pda_2,
-        &fee_vault_pda_2,
-        1,
+        &session_pda,
+        &fee_vault_pda,
+        2,
         100,
         5_000_000_000,
     );
@@ -469,69 +464,8 @@ async fn test_independent_grid_sessions() {
         &[&user_b],
         blockhash,
     );
-    banks.process_transaction(tx).await.unwrap();
-
-    let session_data_1 = get_account_data(banks, &session_pda_1).await.unwrap();
-    let session_1 = Session::try_from_slice(&session_data_1).unwrap();
-    assert_eq!(session_1.grid_id, 1);
-
-    let session_data_2 = get_account_data(banks, &session_pda_2).await.unwrap();
-    let session_2 = Session::try_from_slice(&session_data_2).unwrap();
-    assert_eq!(session_2.grid_id, 1);
-
-    let (
-        current_slot,
-        new_blockhash,
-        payer_keypair,
-        payer_pubkey,
-        session_pda_1_addr,
-        fee_vault_pda_addr,
-    ) = {
-        let banks = &mut context.banks_client;
-        let payer = &context.payer;
-        let current_slot = banks.get_root_slot().await.unwrap();
-        let new_blockhash = banks.get_latest_blockhash().await.unwrap();
-        let payer_keypair = payer.insecure_clone();
-        let payer_pubkey = payer_keypair.pubkey();
-        let session_pda_1_addr = session_pda_1;
-        let fee_vault_pda_addr = fee_vault_pda_1;
-        (
-            current_slot,
-            new_blockhash,
-            payer_keypair,
-            payer_pubkey,
-            session_pda_1_addr,
-            fee_vault_pda_addr,
-        )
-    };
-
-    context.warp_to_slot(current_slot + 110).unwrap();
-    context.last_blockhash = new_blockhash;
-
-    let banks = &mut context.banks_client;
-
-    let close_ix_1 = build_close_session_ix(
-        &PORTAL_PROGRAM_ID,
-        &payer_pubkey,
-        &session_pda_1_addr,
-        &fee_vault_pda_addr,
-        1,
-    );
-
-    let tx = Transaction::new_signed_with_payer(
-        &[close_ix_1],
-        Some(&payer_pubkey),
-        &[&payer_keypair],
-        context.last_blockhash,
-    );
-    banks.process_transaction(tx).await.unwrap();
-
-    let session_data_1 = get_account_data(banks, &session_pda_1_addr).await;
-    assert!(session_data_1.is_none() || session_data_1.unwrap().is_empty());
-
-    let session_data_2 = get_account_data(banks, &session_pda_2).await.unwrap();
-    let session_2 = Session::try_from_slice(&session_data_2).unwrap();
-    assert_eq!(session_2.grid_id, 1);
+    let result = banks.process_transaction(tx).await;
+    assert!(result.is_err(), "only one global session can exist");
 }
 
 /// Test: Multiple users can deposit to the same FeeVault
@@ -558,8 +492,8 @@ async fn test_anyone_can_deposit_to_vault() {
     banks.process_transaction(tx).await.unwrap();
 
     // User A (payer) opens a session
-    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID, &payer.pubkey(), 1);
-    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID, &payer.pubkey());
+    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID);
+    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID);
 
     let open_ix = build_open_session_ix(
         &PORTAL_PROGRAM_ID,
@@ -691,8 +625,8 @@ async fn test_third_party_deposit_for_recipient() {
     banks.process_transaction(tx).await.unwrap();
 
     // User A (payer) opens a session
-    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID, &payer.pubkey(), 1);
-    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID, &payer.pubkey());
+    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID);
+    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID);
 
     let open_ix = build_open_session_ix(
         &PORTAL_PROGRAM_ID,
@@ -745,8 +679,8 @@ async fn test_cumulative_deposit_receipt() {
     let banks = &mut context.banks_client;
     let payer = &context.payer;
 
-    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID, &payer.pubkey(), 1);
-    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID, &payer.pubkey());
+    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID);
+    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID);
 
     let open_ix = build_open_session_ix(
         &PORTAL_PROGRAM_ID,
@@ -814,8 +748,8 @@ async fn test_deposit_to_expired_session_fails() {
     let banks = &mut context.banks_client;
     let payer_pubkey = context.payer.pubkey();
 
-    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID, &payer_pubkey, 1);
-    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID, &payer_pubkey);
+    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID);
+    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID);
 
     // Open session with short TTL (10 slots)
     let open_ix = build_open_session_ix(

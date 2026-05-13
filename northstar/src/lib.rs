@@ -51,7 +51,6 @@ pub type Result<T> = std::result::Result<T, NorthStarError>;
 #[derive(Debug, Clone)]
 pub struct EphemeralRollupSettings {
     pub session_pda: Pubkey,
-    pub owner: Pubkey,
     pub grid_id: u64,
     pub ttl_slots: u64,
     /// Explicit ER transaction fee model.
@@ -88,17 +87,12 @@ pub enum L1Event {
     /// A new Session PDA was created on L1
     SessionOpened {
         session_pda: Pubkey,
-        owner: Pubkey,
         grid_id: u64,
         ttl_slots: u64,
         fee_cap: u64,
     },
     /// A Session PDA was closed on L1
-    SessionClosed {
-        session_pda: Pubkey,
-        owner: Pubkey,
-        grid_id: u64,
-    },
+    SessionClosed { session_pda: Pubkey, grid_id: u64 },
     /// An account was delegated to the portal program
     AccountDelegated {
         delegation_record_pda: Pubkey,
@@ -227,7 +221,6 @@ impl Manager {
                 self.is_new_in_slot(bank, &pubkey)
                     .then_some(L1Event::SessionOpened {
                         session_pda: pubkey,
-                        owner: session.owner.into(),
                         grid_id: session.grid_id,
                         ttl_slots: session.ttl_slots,
                         fee_cap: session.fee_cap,
@@ -397,7 +390,6 @@ impl Manager {
         match try_parse_raw_portal_account(prev_account.data())? {
             PortalAccount::Session(session) => Some(L1Event::SessionClosed {
                 session_pda: *pubkey,
-                owner: session.owner.into(),
                 grid_id: session.grid_id,
             }),
             // Find the delegated account that was undelegated
@@ -435,7 +427,6 @@ impl Manager {
 
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::default(),
-            owner: Pubkey::default(),
             grid_id: 0,
             ttl_slots: 0,
             er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
@@ -657,13 +648,12 @@ mod portal_e2e_tests {
         (bank, bank_forks, program_id, mint_keypair)
     }
 
-    fn find_session_pda(program_id: &Pubkey, owner: &Pubkey, grid_id: u64) -> (Pubkey, u8) {
-        let grid_id_bytes = grid_id.to_le_bytes();
-        Pubkey::find_program_address(&[b"session", owner.as_ref(), &grid_id_bytes], program_id)
+    fn find_session_pda(program_id: &Pubkey) -> (Pubkey, u8) {
+        Pubkey::find_program_address(&[b"session"], program_id)
     }
 
-    fn find_fee_vault_pda(program_id: &Pubkey, owner: &Pubkey) -> (Pubkey, u8) {
-        Pubkey::find_program_address(&[b"fee_vault", owner.as_ref()], program_id)
+    fn find_fee_vault_pda(program_id: &Pubkey) -> (Pubkey, u8) {
+        Pubkey::find_program_address(&[b"fee_vault"], program_id)
     }
 
     fn find_delegation_record_pda(program_id: &Pubkey, delegated_account: &Pubkey) -> (Pubkey, u8) {
@@ -813,8 +803,8 @@ mod portal_e2e_tests {
         let grid_id = 1u64;
         let ttl_slots = 1000u64;
         let fee_cap = 5_000_000_000u64;
-        let (session_pda, _) = find_session_pda(&program_id, &owner_pubkey, grid_id);
-        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id, &owner_pubkey);
+        let (session_pda, _) = find_session_pda(&program_id);
+        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id);
 
         let open_session_ix = build_open_session_ix(
             program_id,
@@ -859,13 +849,11 @@ mod portal_e2e_tests {
 
         if let L1Event::SessionOpened {
             session_pda: _,
-            owner,
             grid_id: detected_grid_id,
             ttl_slots: detected_ttl,
             fee_cap: detected_fee,
         } = session_events[0]
         {
-            assert_eq!(*owner, owner_pubkey, "Owner should match");
             assert_eq!(*detected_grid_id, grid_id, "Grid ID should match");
             assert_eq!(*detected_ttl, ttl_slots, "TTL should match");
             assert_eq!(*detected_fee, fee_cap, "Fee cap should match");
@@ -897,8 +885,8 @@ mod portal_e2e_tests {
         bank.store_account(&buffer, &buffer_account);
 
         let grid_id = 1u64;
-        let (session_pda, _) = find_session_pda(&program_id, &owner_pubkey, grid_id);
-        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id, &owner_pubkey);
+        let (session_pda, _) = find_session_pda(&program_id);
+        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id);
         let (delegation_record_pda, _) =
             find_delegation_record_pda(&program_id, &delegated_account);
 
@@ -1024,8 +1012,8 @@ mod portal_e2e_tests {
         let grid_id = 1u64;
         let ttl_slots = 1000u64;
         let fee_cap = 5_000_000_000u64;
-        let (session_pda, _) = find_session_pda(&program_id, &owner_pubkey, grid_id);
-        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id, &owner_pubkey);
+        let (session_pda, _) = find_session_pda(&program_id);
+        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id);
         let (delegation_record_pda, _) =
             find_delegation_record_pda(&program_id, &delegated_account);
 
@@ -1083,7 +1071,6 @@ mod portal_e2e_tests {
 
         let L1Event::SessionOpened {
             session_pda,
-            owner,
             grid_id,
             ttl_slots,
             fee_cap,
@@ -1114,7 +1101,6 @@ mod portal_e2e_tests {
 
         let settings = EphemeralRollupSettings {
             session_pda: *session_pda,
-            owner: *owner,
             grid_id: *grid_id,
             ttl_slots: *ttl_slots,
             fee_cap: *fee_cap,
@@ -1210,8 +1196,8 @@ mod portal_e2e_tests {
         bank.store_account(&delegated_account_pubkey, &delegated_account);
 
         let grid_id = 1u64;
-        let (session_pda, _) = find_session_pda(&program_id, &owner_pubkey, grid_id);
-        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id, &owner_pubkey);
+        let (session_pda, _) = find_session_pda(&program_id);
+        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id);
 
         let open_session_ix = build_open_session_ix(
             program_id,
@@ -1236,7 +1222,6 @@ mod portal_e2e_tests {
         let cluster_info = create_test_cluster_info();
         let settings = EphemeralRollupSettings {
             session_pda,
-            owner: owner_pubkey,
             grid_id,
             ttl_slots: 1000,
             fee_cap: 5_000_000_000,
@@ -1335,7 +1320,6 @@ mod portal_e2e_tests {
         let mut manager = Manager::new(manager_config);
         let settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 1,
             ttl_slots: 100,
             fee_cap: 1000,
@@ -1376,8 +1360,8 @@ mod portal_e2e_tests {
             .unwrap();
 
         let grid_id = 1u64;
-        let (session_pda, _) = find_session_pda(&program_id, &owner_pubkey, grid_id);
-        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id, &owner_pubkey);
+        let (session_pda, _) = find_session_pda(&program_id);
+        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id);
 
         let open_session_ix = build_open_session_ix(
             program_id,
@@ -1525,8 +1509,8 @@ mod portal_e2e_tests {
             .unwrap();
 
         let grid_id = 1u64;
-        let (session_pda, _) = find_session_pda(&program_id, &owner_pubkey, grid_id);
-        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id, &owner_pubkey);
+        let (session_pda, _) = find_session_pda(&program_id);
+        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id);
 
         let open_session_ix = build_open_session_ix(
             program_id,
@@ -1627,8 +1611,8 @@ mod portal_e2e_tests {
         let child_bank = Bank::new_from_parent(bank, &Pubkey::default(), bank_slot + 1);
 
         let grid_id = 1u64;
-        let (session_pda, _) = find_session_pda(&program_id, &owner_pubkey, grid_id);
-        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id, &owner_pubkey);
+        let (session_pda, _) = find_session_pda(&program_id);
+        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id);
 
         let open_session_ix = build_open_session_ix(
             program_id,
@@ -1833,7 +1817,6 @@ mod ephemeral_accounts_background_service_regression {
         let l1_parent = bank_forks.read().unwrap().root_bank();
         let er_settings = EphemeralRollupSettings {
             session_pda: Pubkey::new_unique(),
-            owner: Pubkey::new_unique(),
             grid_id: 0,
             ttl_slots: 10_000,
             fee_cap: 1_000,

@@ -6,20 +6,12 @@ use {
     },
     borsh::BorshDeserialize,
     pinocchio::{
-        ProgramResult,
-        account_info::AccountInfo,
-        program_error::ProgramError,
-        pubkey::Pubkey,
-        sysvars::{Sysvar, clock::Clock},
+        ProgramResult, account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey,
     },
 };
 
-pub fn process_close_session(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo],
-    grid_id: u64,
-) -> ProgramResult {
-    pinocchio_log::log!("Instruction: CloseSession, grid_id={}", grid_id);
+pub fn process_close_session(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    pinocchio_log::log!("Instruction: CloseSession");
 
     // TODO: close_session should iterate and refund all DepositReceipt PDAs
     // associated with this session back to their respective recipients.
@@ -29,19 +21,18 @@ pub fn process_close_session(
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
-    let owner = &accounts[0];
+    let closer = &accounts[0];
     let session = &accounts[1];
     let fee_vault = &accounts[2];
     let _system_program = &accounts[3];
 
-    if !owner.is_signer() {
-        pinocchio_log::log!("ERROR: CloseSession failed: owner is not signer");
+    if !closer.is_signer() {
+        pinocchio_log::log!("ERROR: CloseSession failed: closer is not signer");
         return Err(PortalError::Unauthorized.into());
     }
 
-    let owner_key = *owner.key();
-    let (expected_session_key, _) = find_session_pda(program_id, &owner_key, grid_id);
-    let (expected_fee_vault_key, _) = find_fee_vault_pda(program_id, &owner_key);
+    let (expected_session_key, _) = find_session_pda(program_id);
+    let (expected_fee_vault_key, _) = find_fee_vault_pda(program_id);
 
     if session.key() != &expected_session_key {
         pinocchio_log::log!("ERROR: CloseSession failed: session PDA mismatch");
@@ -65,23 +56,10 @@ pub fn process_close_session(
         return Err(PortalError::SessionStateInvalid.into());
     }
 
-    if session_state.owner != owner_key {
-        pinocchio_log::log!("ERROR: CloseSession failed: unauthorized owner");
-        return Err(PortalError::Unauthorized.into());
-    }
-
-    let clock = Clock::get()?;
-    let current_slot = clock.slot;
-
-    if !session_state.is_expired(current_slot) {
-        pinocchio_log::log!("ERROR: CloseSession failed: session still active");
-        return Err(PortalError::SessionStillActive.into());
-    }
-
-    // Transfer all lamports from fee_vault and session back to owner
+    // Transfer all lamports from fee_vault and session back to the closer.
     if fee_vault.lamports() > 0 {
-        let mut owner_lamports = owner.try_borrow_mut_lamports()?;
-        *owner_lamports = owner_lamports
+        let mut closer_lamports = closer.try_borrow_mut_lamports()?;
+        *closer_lamports = closer_lamports
             .checked_add(fee_vault.lamports())
             .ok_or_else(|| {
                 pinocchio_log::log!(
@@ -93,8 +71,8 @@ pub fn process_close_session(
     *fee_vault.try_borrow_mut_lamports()? = 0;
 
     if session.lamports() > 0 {
-        let mut owner_lamports = owner.try_borrow_mut_lamports()?;
-        *owner_lamports = owner_lamports
+        let mut closer_lamports = closer.try_borrow_mut_lamports()?;
+        *closer_lamports = closer_lamports
             .checked_add(session.lamports())
             .ok_or_else(|| {
                 pinocchio_log::log!(

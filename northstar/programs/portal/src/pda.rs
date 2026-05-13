@@ -15,14 +15,13 @@ fn find_program_address(seeds: &[&[u8]], program_id: &Pubkey) -> (Pubkey, u8) {
     (pda.to_bytes(), bump)
 }
 
-pub fn find_session_pda(program_id: &Pubkey, owner: &Pubkey, grid_id: u64) -> (Pubkey, u8) {
-    let grid_id_bytes = grid_id.to_le_bytes();
-    let seeds = &[Session::SEED_PREFIX, owner.as_ref(), &grid_id_bytes];
+pub fn find_session_pda(program_id: &Pubkey) -> (Pubkey, u8) {
+    let seeds = &[Session::SEED_PREFIX];
     find_program_address(seeds, program_id)
 }
 
-pub fn find_fee_vault_pda(program_id: &Pubkey, owner: &Pubkey) -> (Pubkey, u8) {
-    let seeds = &[FeeVault::SEED_PREFIX, owner.as_ref()];
+pub fn find_fee_vault_pda(program_id: &Pubkey) -> (Pubkey, u8) {
+    let seeds = &[FeeVault::SEED_PREFIX];
     find_program_address(seeds, program_id)
 }
 

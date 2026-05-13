@@ -40,8 +40,8 @@ pub unsafe extern "C" fn entrypoint(input: *mut u8) -> u64 {
         PortalInstruction::OpenSession(open_session) => {
             instructions::process_open_session(program_id, accounts, open_session)
         }
-        PortalInstruction::CloseSession { grid_id } => {
-            instructions::process_close_session(program_id, accounts, grid_id)
+        PortalInstruction::CloseSession => {
+            instructions::process_close_session(program_id, accounts)
         }
         PortalInstruction::DepositFee { lamports } => {
             instructions::process_deposit_fee(program_id, accounts, lamports)
