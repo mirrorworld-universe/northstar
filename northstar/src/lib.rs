@@ -18,7 +18,7 @@ pub mod ephemeral_tx_client;
 pub mod portal_state;
 pub mod slot_advancer;
 
-pub use crate::ephemeral_runtime::EphemeralRuntime;
+pub use crate::ephemeral_runtime::{EphemeralRuntime, ErStateDiff, ErStateDiffAccount};
 
 const DEFAULT_ER_SLOT_DURATION_MS: u64 = 50;
 pub const DEFAULT_ER_SLOT_DURATION: Duration = Duration::from_millis(DEFAULT_ER_SLOT_DURATION_MS);
@@ -193,6 +193,13 @@ impl Manager {
     /// Get the session PDA Arc, if runtime initialized
     pub fn session_pda(&self) -> Option<Arc<std::sync::RwLock<Option<Pubkey>>>> {
         self.runtime.as_ref().map(|r| r.session_pda())
+    }
+
+    /// Compute current ER-vs-L1 state diff/hash, if runtime exists.
+    pub fn state_diff_from_l1(&self) -> Option<ErStateDiff> {
+        self.runtime
+            .as_ref()
+            .map(|runtime| runtime.state_diff_from_l1())
     }
 
     /// Sonic: Shutdown the always-on runtime (called at validator exit)

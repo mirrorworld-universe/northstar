@@ -5,11 +5,13 @@ edition = "2021"
 
 [dependencies]
 solana-account.workspace = true
+solana-accounts-db.workspace = true
 solana-clock.workspace = true
 solana-fee-structure.workspace = true
 solana-genesis-config.workspace = true
 solana-hash.workspace = true
 solana-keypair.workspace = true
+solana-lattice-hash.workspace = true
 solana-message.workspace = true
 solana-pubkey = { workspace = true, default-features = false }
 solana-tls-utils.workspace = true
