@@ -1,12 +1,16 @@
 use std::{
-    env, fs,
+    env,
+    fs::{self, OpenOptions},
     path::{Path, PathBuf},
     process::{Command, Output},
-    time::SystemTime,
+    thread::sleep,
+    time::{Duration, SystemTime},
 };
 
 const BUILD_SBF_GUARD: &str = "NORTHSTAR_PORTAL_BUILD_SBF_RUNNING";
 const PROGRAM_SO: &str = "northstar_portal.so";
+const SBF_BUILD_LOCK: &str = "northstar_portal_sbf_build.lock";
+const STALE_LOCK_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 fn main() {
     println!("cargo:rerun-if-env-changed=BPF_OUT_DIR");
@@ -29,8 +33,20 @@ fn main() {
         return;
     }
 
+    build_portal_if_needed(&manifest_dir, &sbf_out_dir);
+}
+
+fn build_portal_if_needed(manifest_dir: &Path, sbf_out_dir: &Path) {
+    fs::create_dir_all(sbf_out_dir).unwrap_or_else(|err| {
+        panic!(
+            "failed to create SBF output directory {}: {err}",
+            sbf_out_dir.display()
+        )
+    });
+
+    let _lock = SbfBuildLock::acquire(sbf_out_dir);
     let program_so = sbf_out_dir.join(PROGRAM_SO);
-    if !needs_sbf_rebuild(&manifest_dir, &program_so) {
+    if !needs_sbf_rebuild(manifest_dir, &program_so) {
         return;
     }
 
@@ -44,12 +60,7 @@ fn main() {
         )
     });
 
-    let output = run_cargo_build_sbf(
-        &manifest_dir,
-        &nested_sbf_out_dir,
-        &nested_target_dir,
-        false,
-    );
+    let output = run_cargo_build_sbf(manifest_dir, &nested_sbf_out_dir, &nested_target_dir, false);
     if !output.status.success() {
         emit_command_output(&output);
         if should_retry_with_force_tools_install(&output) {
@@ -59,7 +70,7 @@ fn main() {
                 output.status
             );
             let retry_output =
-                run_cargo_build_sbf(&manifest_dir, &nested_sbf_out_dir, &nested_target_dir, true);
+                run_cargo_build_sbf(manifest_dir, &nested_sbf_out_dir, &nested_target_dir, true);
             if !retry_output.status.success() {
                 emit_command_output(&retry_output);
                 panic!(
@@ -80,12 +91,6 @@ fn main() {
         );
     }
 
-    fs::create_dir_all(&sbf_out_dir).unwrap_or_else(|err| {
-        panic!(
-            "failed to create SBF output directory {}: {err}",
-            sbf_out_dir.display()
-        )
-    });
     fs::copy(&nested_program_so, &program_so).unwrap_or_else(|err| {
         panic!(
             "failed to copy {} to {}: {err}",
@@ -190,6 +195,41 @@ fn newest_mtime(path: &Path) -> Option<SystemTime> {
 
 fn mtime(path: &Path) -> std::io::Result<SystemTime> {
     fs::metadata(path)?.modified()
+}
+
+struct SbfBuildLock {
+    path: PathBuf,
+}
+
+impl SbfBuildLock {
+    fn acquire(sbf_out_dir: &Path) -> Self {
+        let path = sbf_out_dir.join(SBF_BUILD_LOCK);
+        loop {
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(_) => return Self { path },
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if lock_is_stale(&path) {
+                        let _ = fs::remove_file(&path);
+                    } else {
+                        sleep(Duration::from_millis(250));
+                    }
+                }
+                Err(err) => panic!("failed to acquire SBF build lock {}: {err}", path.display()),
+            }
+        }
+    }
+}
+
+impl Drop for SbfBuildLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn lock_is_stale(path: &Path) -> bool {
+    mtime(path)
+        .and_then(|mtime| mtime.elapsed().map_err(std::io::Error::other))
+        .is_ok_and(|elapsed| elapsed > STALE_LOCK_TIMEOUT)
 }
 
 fn remove_cargo_driver_env(command: &mut Command) {
