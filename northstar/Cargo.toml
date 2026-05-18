@@ -27,7 +27,6 @@ solana-ledger.workspace = true
 solana-loader-v3-interface.workspace = true
 solana-gossip.workspace = true
 solana-validator-exit.workspace = true
-solana-rpc-client.workspace = true
 solana-rpc-client-types.workspace = true
 solana-time-utils.workspace = true
 solana-net-utils.workspace = true
@@ -56,6 +55,7 @@ agave-snapshots.workspace = true
 solana-address-lookup-table-interface.workspace = true
 solana-compute-budget-interface.workspace = true
 solana-rent.workspace = true
+solana-rpc-client.workspace = true
 serde_json = { workspace = true }
 solana-ledger = { workspace = true, features = ["agave-unstable-api"] }
 solana-runtime = { workspace = true, features = ["agave-unstable-api", "dev-context-only-utils"] }
