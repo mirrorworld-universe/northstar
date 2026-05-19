@@ -24,9 +24,10 @@ use {
         tpu_entry_notifier::TpuEntryNotifier,
         validator::{BlockProductionMethod, GeneratorConfig},
     },
+    agave_banking_stage_ingress_types::BankingPacketBatch,
     agave_votor::event::VotorEventSender,
     agave_xdp::xdp_retransmitter::XdpSender,
-    crossbeam_channel::{Receiver, bounded, unbounded},
+    crossbeam_channel::{Receiver, Sender, bounded, unbounded},
     solana_clock::Slot,
     solana_gossip::cluster_info::ClusterInfo,
     solana_keypair::Keypair,
@@ -132,6 +133,10 @@ impl Tpu {
         staked_nodes: &Arc<RwLock<StakedNodes>>,
         shared_staked_nodes_overrides: Arc<RwLock<HashMap<Pubkey, u64>>>,
         banking_tracer_channels: Channels,
+        forward_stage_channel: (
+            Sender<(BankingPacketBatch, bool)>,
+            Receiver<(BankingPacketBatch, bool)>,
+        ),
         tracer_thread_hdl: TracerThread,
         tpu_quic_server_config: SwQosQuicStreamerConfig,
         tpu_fwd_quic_server_config: SwQosQuicStreamerConfig,
@@ -241,7 +246,7 @@ impl Tpu {
         )
         .unwrap();
 
-        let (forward_stage_sender, forward_stage_receiver) = bounded(1024);
+        let (forward_stage_sender, forward_stage_receiver) = forward_stage_channel;
 
         let sigverify_threadpool = Arc::new(
             rayon::ThreadPoolBuilder::new()

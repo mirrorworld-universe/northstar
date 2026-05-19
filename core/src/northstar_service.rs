@@ -1,7 +1,7 @@
 use {
     crate::banking_trace::BankingPacketSender,
     agave_banking_stage_ingress_types::BankingPacketBatch,
-    crossbeam_channel::RecvTimeoutError,
+    crossbeam_channel::{RecvTimeoutError, Sender, TrySendError},
     log::*,
     northstar::L1Event,
     solana_gossip::cluster_info::ClusterInfo,
@@ -35,6 +35,8 @@ pub struct NorthStarServiceConfig {
     pub slot_duration: Duration,
     /// Local BankingStage non-vote sender for permissioned Portal settlement txs.
     pub settlement_sender: Option<BankingPacketSender>,
+    /// Forwarding-stage sender for propagation when this node is not current leader.
+    pub settlement_forward_sender: Option<Sender<(BankingPacketBatch, bool)>>,
 }
 
 /// NorthStar service that monitors root bank changes and creates ephemeral rollups
@@ -44,15 +46,29 @@ pub struct NorthStarService {
 
 fn submit_settlement_transactions(
     sender: &BankingPacketSender,
+    forward_sender: Option<&Sender<(BankingPacketBatch, bool)>>,
     transactions: &[Transaction],
 ) -> Result<(), crossbeam_channel::SendError<BankingPacketBatch>> {
     if transactions.is_empty() {
         return Ok(());
     }
-    sender.send(BankingPacketBatch::new(to_packet_batches(
-        transactions,
-        NUM_PACKETS,
-    )))
+
+    let batch = BankingPacketBatch::new(to_packet_batches(transactions, NUM_PACKETS));
+    sender.send(batch.clone())?;
+
+    if let Some(forward_sender) = forward_sender {
+        match forward_sender.try_send((batch, false)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                warn!("Settlement forwarding channel is full, settlement txs remain queued locally")
+            }
+            Err(TrySendError::Disconnected(_)) => warn!(
+                "Settlement forwarding channel disconnected, settlement txs remain queued locally"
+            ),
+        }
+    }
+
+    Ok(())
 }
 
 impl NorthStarService {
@@ -83,6 +99,7 @@ impl NorthStarService {
         }
 
         let settlement_sender = config.settlement_sender;
+        let settlement_forward_sender = config.settlement_forward_sender;
         let thread_hdl = Builder::new()
             .name("solNorthStar".to_string())
             .spawn(move || {
@@ -186,9 +203,11 @@ impl NorthStarService {
                                     "Skipping duplicate settlement submission for \
                                      er_slot={er_slot}"
                                 );
-                            } else if let Err(err) =
-                                submit_settlement_transactions(sender, &transactions)
-                            {
+                            } else if let Err(err) = submit_settlement_transactions(
+                                sender,
+                                settlement_forward_sender.as_ref(),
+                                &transactions,
+                            ) {
                                 warn!("Failed to enqueue Portal settlement transactions: {err}");
                             } else {
                                 info!(
@@ -451,6 +470,7 @@ mod tests {
             tpu_addr: find_free_addr(),
             slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
             settlement_sender: None,
+            settlement_forward_sender: None,
         };
 
         // Get the bank for notifications BEFORE moving bank_forks
@@ -504,6 +524,7 @@ mod tests {
             tpu_addr: find_free_addr(),
             slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
             settlement_sender: None,
+            settlement_forward_sender: None,
         };
 
         // Get a reference to the frozen bank for sending notifications BEFORE moving bank_forks
@@ -560,6 +581,7 @@ mod tests {
             tpu_addr: find_free_addr(),
             slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
             settlement_sender: None,
+            settlement_forward_sender: None,
         };
 
         let service = NorthStarService::new(
@@ -630,6 +652,7 @@ mod tests {
             tpu_addr: find_free_addr(),
             slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
             settlement_sender: None,
+            settlement_forward_sender: None,
         };
 
         let service = NorthStarService::new(
@@ -814,6 +837,7 @@ mod tests {
             tpu_addr: find_free_addr(),
             slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
             settlement_sender: None,
+            settlement_forward_sender: None,
         };
 
         let service = NorthStarService::new(
@@ -946,6 +970,7 @@ mod tests {
             tpu_addr: find_free_addr(),
             slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
             settlement_sender: None,
+            settlement_forward_sender: None,
         };
 
         let service = NorthStarService::new(
