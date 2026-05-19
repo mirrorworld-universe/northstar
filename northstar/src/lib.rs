@@ -16,9 +16,13 @@ pub mod ephemeral_runtime;
 pub mod ephemeral_tpu;
 pub mod ephemeral_tx_client;
 pub mod portal_state;
+pub mod settlement;
 pub mod slot_advancer;
 
-pub use crate::ephemeral_runtime::{EphemeralRuntime, ErStateDiff, ErStateDiffAccount};
+pub use crate::{
+    ephemeral_runtime::{EphemeralRuntime, ErStateDiff, ErStateDiffAccount},
+    settlement::{SettlementPlan, build_settlement_plan},
+};
 
 const DEFAULT_ER_SLOT_DURATION_MS: u64 = 50;
 pub const DEFAULT_ER_SLOT_DURATION: Duration = Duration::from_millis(DEFAULT_ER_SLOT_DURATION_MS);
@@ -200,6 +204,16 @@ impl Manager {
         self.runtime
             .as_ref()
             .map(|runtime| runtime.state_diff_from_l1())
+    }
+
+    /// Build data-only delegated account settlement chunks.
+    ///
+    /// Returns `None` when there are no data changes to settle, so devnet
+    /// testing does not burn SOL on empty Begin/Finish transactions.
+    pub fn settlement_plan(&self) -> Option<SettlementPlan> {
+        let runtime = self.runtime.as_ref()?;
+        let diff = runtime.state_diff_from_l1();
+        build_settlement_plan(&diff, &runtime.delegated_accounts(), runtime.bank().slot())
     }
 
     /// Sonic: Shutdown the always-on runtime (called at validator exit)
