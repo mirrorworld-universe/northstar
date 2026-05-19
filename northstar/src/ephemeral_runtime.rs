@@ -8,9 +8,11 @@ use {
     solana_account::{
         AccountSharedData, PROGRAM_OWNERS, ReadableAccount, WritableAccount, state_traits::StateMut,
     },
+    solana_accounts_db::accounts_db::AccountsDb,
     solana_clock::{BankId, Slot},
     solana_gossip::cluster_info::ClusterInfo,
     solana_keypair::Keypair,
+    solana_lattice_hash::lt_hash::{Checksum, LtHash},
     solana_ledger::{blockstore::Blockstore, leader_schedule_cache::LeaderScheduleCache},
     solana_loader_v3_interface::state::UpgradeableLoaderState,
     solana_pubkey::Pubkey,
@@ -62,6 +64,29 @@ impl DropCallback for NoopDropCallback {
 struct RetiredBankForks {
     bank_forks: BankForks,
     purge_slots: Vec<(Slot, BankId)>,
+}
+
+/// One account whose ER state hash differs from the current L1 anchor state hash.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ErStateDiffAccount {
+    pub pubkey: Pubkey,
+    pub l1_account: Option<AccountSharedData>,
+    pub er_account: AccountSharedData,
+    pub l1_lt_hash: LtHash,
+    pub er_lt_hash: LtHash,
+}
+
+/// Lattice-hash accumulator for all account changes that exist in ER but not L1.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ErStateDiff {
+    pub accounts: Vec<ErStateDiffAccount>,
+    pub lt_hash: LtHash,
+}
+
+impl ErStateDiff {
+    pub fn checksum(&self) -> Checksum {
+        self.lt_hash.checksum()
+    }
 }
 
 pub struct EphemeralRuntime {
@@ -1229,6 +1254,82 @@ impl EphemeralRuntime {
         ));
     }
 
+    fn l1_account_for_state_diff(
+        &self,
+        pubkey: &Pubkey,
+        delegated_accounts: &HashSet<Pubkey>,
+    ) -> Option<AccountSharedData> {
+        let account = self.l1_anchor_bank.get_account(pubkey)?;
+        (delegated_accounts.contains(pubkey) && account.owner() == &self.portal_program_id)
+            .then(|| {
+                Self::effective_delegated_account(
+                    &self.l1_anchor_bank,
+                    &self.portal_program_id,
+                    self.settings.grid_id,
+                    pubkey,
+                    &account,
+                )
+            })
+            .flatten()
+            .or(Some(account))
+    }
+
+    /// Compute the ER-vs-L1 account delta as a lattice hash.
+    ///
+    /// For delegated accounts, the L1 side is normalized back to the original
+    /// owner recorded in the delegation PDA. This keeps a freshly delegated but
+    /// otherwise untouched account out of the diff; only ER-local state changes
+    /// affect the accumulator.
+    pub fn state_diff_from_l1(&self) -> ErStateDiff {
+        let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
+        let mut overlay_accounts = self
+            .er_account_overlay
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(pubkey, account)| (*pubkey, account.clone()))
+            .collect::<Vec<_>>();
+        overlay_accounts.sort_by_key(|(pubkey, _)| pubkey.to_bytes());
+
+        let diff_accounts = overlay_accounts
+            .into_iter()
+            .filter_map(|(pubkey, er_account)| {
+                let l1_account = self.l1_account_for_state_diff(&pubkey, &delegated_accounts);
+                let l1_lt_hash = l1_account
+                    .as_ref()
+                    .map(|account| AccountsDb::lt_hash_account(account, &pubkey).0)
+                    .unwrap_or_else(LtHash::identity);
+                let er_lt_hash = AccountsDb::lt_hash_account(&er_account, &pubkey).0;
+                (l1_lt_hash != er_lt_hash).then_some(ErStateDiffAccount {
+                    pubkey,
+                    l1_account,
+                    er_account,
+                    l1_lt_hash,
+                    er_lt_hash,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let lt_hash = diff_accounts
+            .iter()
+            .map(|account_diff| {
+                let mut delta = LtHash::identity();
+                delta.mix_out(&account_diff.l1_lt_hash);
+                delta.mix_in(&account_diff.er_lt_hash);
+                delta
+            })
+            .reduce(|mut accum, delta| {
+                accum.mix_in(&delta);
+                accum
+            })
+            .unwrap_or_else(LtHash::identity);
+
+        ErStateDiff {
+            accounts: diff_accounts,
+            lt_hash,
+        }
+    }
+
     /// Returns a clone of the delegated account pubkeys set.
     pub fn delegated_accounts(&self) -> HashSet<Pubkey> {
         self.delegated_accounts.read().unwrap().clone()
@@ -1557,6 +1658,7 @@ mod tests {
         solana_fee_structure::FeeStructure,
         solana_gossip::contact_info::ContactInfo,
         solana_keypair::{Keypair, Signer},
+        solana_lattice_hash::lt_hash::LtHash,
         solana_message::{Message, SanitizedMessage},
         solana_net_utils::SocketAddrSpace,
         solana_rpc_client::rpc_client::RpcClient,
@@ -1724,6 +1826,110 @@ mod tests {
 
     fn rpc_client(runtime: &EphemeralRuntime) -> RpcClient {
         RpcClient::new(runtime.rpc_addr())
+    }
+
+    fn create_runtime_with_delegated_account(
+        lamports: u64,
+    ) -> (Pubkey, AccountSharedData, EphemeralRuntime) {
+        let parent_bank = Arc::new(create_test_bank());
+        let cluster_info = create_test_cluster_info();
+        let portal_program_id = Pubkey::new_unique();
+        let delegated_account = Pubkey::new_unique();
+        let owner_program = system_program::id();
+
+        let mut l1_account = AccountSharedData::new(lamports, 4, &portal_program_id);
+        l1_account
+            .data_as_mut_slice()
+            .copy_from_slice(&[1, 2, 3, 4]);
+        parent_bank.store_account(&delegated_account, &l1_account);
+        store_delegation_record(
+            &parent_bank,
+            &portal_program_id,
+            &delegated_account,
+            &owner_program,
+            0,
+        );
+
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: er_fee_structure(0),
+            delegated_accounts: vec![delegated_account],
+        };
+        let runtime = EphemeralRuntime::new(
+            parent_bank,
+            cluster_info,
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            portal_program_id,
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+
+        (delegated_account, l1_account, runtime)
+    }
+
+    #[test]
+    fn test_state_diff_from_l1_ignores_unchanged_delegated_account() {
+        let (delegated_account, _l1_account, mut runtime) =
+            create_runtime_with_delegated_account(10);
+
+        let diff = runtime.state_diff_from_l1();
+
+        assert!(runtime.delegated_accounts().contains(&delegated_account));
+        assert!(diff.accounts.is_empty());
+        assert_eq!(diff.lt_hash, LtHash::identity());
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_state_diff_from_l1_hashes_delegated_account_delta() {
+        let (delegated_account, _l1_account, mut runtime) =
+            create_runtime_with_delegated_account(10);
+
+        runtime.credit_deposit(&delegated_account, 5);
+        let diff = runtime.state_diff_from_l1();
+
+        assert_eq!(diff.accounts.len(), 1);
+        let account_diff = &diff.accounts[0];
+        assert_eq!(account_diff.pubkey, delegated_account);
+        assert_eq!(account_diff.l1_account.as_ref().unwrap().lamports(), 10);
+        assert_eq!(
+            account_diff.l1_account.as_ref().unwrap().owner(),
+            &system_program::id()
+        );
+        assert_eq!(account_diff.er_account.lamports(), 15);
+
+        let mut expected_lt_hash = LtHash::identity();
+        expected_lt_hash.mix_out(&account_diff.l1_lt_hash);
+        expected_lt_hash.mix_in(&account_diff.er_lt_hash);
+        assert_eq!(diff.lt_hash, expected_lt_hash);
+        assert_ne!(diff.checksum(), LtHash::identity().checksum());
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_state_diff_from_l1_hashes_new_er_account() {
+        let (_, mut runtime) = create_runtime();
+        let depositor = Pubkey::new_unique();
+
+        runtime.credit_deposit(&depositor, 7);
+        let diff = runtime.state_diff_from_l1();
+
+        assert_eq!(diff.accounts.len(), 1);
+        let account_diff = &diff.accounts[0];
+        assert_eq!(account_diff.pubkey, depositor);
+        assert!(account_diff.l1_account.is_none());
+        assert_eq!(account_diff.l1_lt_hash, LtHash::identity());
+        assert_eq!(account_diff.er_account.lamports(), 7);
+
+        runtime.shutdown();
     }
 
     #[test]
