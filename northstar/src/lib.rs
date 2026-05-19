@@ -5,9 +5,11 @@ use {
     solana_account::{AccountSharedData, ReadableAccount},
     solana_fee_structure::FeeStructure,
     solana_gossip::cluster_info::ClusterInfo,
+    solana_instruction::Instruction,
     solana_keypair::Keypair,
     solana_pubkey::Pubkey,
     solana_runtime::bank::Bank,
+    solana_signer::Signer,
     std::{net::SocketAddr, sync::Arc, time::Duration},
     thiserror::Error,
 };
@@ -214,6 +216,22 @@ impl Manager {
         let runtime = self.runtime.as_ref()?;
         let diff = runtime.state_diff_from_l1();
         build_settlement_plan(&diff, &runtime.delegated_accounts(), runtime.bank().slot())
+    }
+
+    /// Build Portal settlement instructions for current data-only diff.
+    ///
+    /// Returns `None` when there is no diff to submit. Callers should treat
+    /// that as a hard no-op and must not send empty Begin/Finish transactions.
+    pub fn settlement_instructions(&self) -> Option<Vec<Instruction>> {
+        let runtime = self.runtime.as_ref()?;
+        let session_pda = (*runtime.session_pda().read().unwrap())?;
+        let plan = self.settlement_plan()?;
+        let instructions = plan.portal_instructions(
+            self.config.portal_program_id,
+            session_pda,
+            self.config.manager_account.pubkey(),
+        );
+        (!instructions.is_empty()).then_some(instructions)
     }
 
     /// Sonic: Shutdown the always-on runtime (called at validator exit)
