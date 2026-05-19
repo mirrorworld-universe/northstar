@@ -2,7 +2,7 @@ use {
     crate::{
         error::PortalError,
         pda::{find_fee_vault_pda, find_session_pda},
-        state::Session,
+        state::{Session, SettlementStatus},
     },
     borsh::BorshDeserialize,
     pinocchio::{
@@ -54,6 +54,11 @@ pub fn process_close_session(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
     if !session_state.is_valid() {
         pinocchio_log::log!("ERROR: CloseSession failed: session state invalid");
         return Err(PortalError::SessionStateInvalid.into());
+    }
+
+    if session_state.settlement_status == SettlementStatus::InProgress {
+        pinocchio_log::log!("ERROR: CloseSession failed: settlement in progress");
+        return Err(PortalError::SettlementInProgress.into());
     }
 
     // Transfer all lamports from fee_vault and session back to the closer.

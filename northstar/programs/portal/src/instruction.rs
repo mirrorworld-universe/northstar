@@ -1,4 +1,7 @@
-use borsh::{BorshDeserialize, BorshSerialize};
+use {
+    borsh::{BorshDeserialize, BorshSerialize},
+    pinocchio::pubkey::Pubkey,
+};
 
 #[cfg_attr(feature = "idl", derive(shank::ShankInstruction))]
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
@@ -28,6 +31,7 @@ pub enum PortalInstruction {
     #[cfg_attr(feature = "idl", account(3, name = "owner_program"))]
     #[cfg_attr(feature = "idl", account(4, name = "delegation_record", mut))]
     #[cfg_attr(feature = "idl", account(5, name = "buffer"))]
+    #[cfg_attr(feature = "idl", account(6, name = "session"))]
     Delegate { grid_id: u64 },
 
     #[cfg_attr(feature = "idl", account(0, name = "authority", sig, mut))]
@@ -35,6 +39,7 @@ pub enum PortalInstruction {
     #[cfg_attr(feature = "idl", account(2, name = "owner_program"))]
     #[cfg_attr(feature = "idl", account(3, name = "delegation_record", mut))]
     #[cfg_attr(feature = "idl", account(4, name = "system_program"))]
+    #[cfg_attr(feature = "idl", account(5, name = "session"))]
     Undelegate,
 }
 
@@ -44,4 +49,6 @@ pub struct OpenSession {
     pub grid_id: u64,
     pub ttl_slots: u64,
     pub fee_cap: u64,
+    pub validator: Pubkey,
+    pub settlement_interval_slots: u64,
 }

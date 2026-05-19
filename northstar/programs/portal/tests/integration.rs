@@ -44,6 +44,8 @@ fn build_open_session_ix(
         grid_id,
         ttl_slots,
         fee_cap,
+        validator: owner.to_bytes(),
+        settlement_interval_slots: 10,
     });
     let data = borsh::to_vec(&ix).unwrap();
 

@@ -289,6 +289,8 @@ mod tests {
             grid_id,
             ttl_slots,
             fee_cap,
+            validator: owner.to_bytes(),
+            settlement_interval_slots: 10,
         });
         let data = borsh::to_vec(&ix).unwrap();
         Instruction {
@@ -310,6 +312,7 @@ mod tests {
         owner_program: Pubkey,
         delegation_record_pda: Pubkey,
         buffer: Pubkey,
+        session_pda: Pubkey,
         grid_id: u64,
     ) -> Instruction {
         let ix = PortalInstruction::Delegate { grid_id };
@@ -319,6 +322,7 @@ mod tests {
             accounts: vec![
                 AccountMeta::new(payer, true),
                 AccountMeta::new_readonly(system_program::id(), false),
+                AccountMeta::new_readonly(session_pda, false),
                 AccountMeta::new(delegated_account, true),
                 AccountMeta::new_readonly(owner_program, false),
                 AccountMeta::new(delegation_record_pda, false),
@@ -939,6 +943,7 @@ mod tests {
             delegated_owner_program,
             delegation_record_pda,
             delegate_buffer,
+            session_pda,
             grid_id,
         );
         let blockhash = delegate_bank.last_blockhash();

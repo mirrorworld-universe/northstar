@@ -35,6 +35,7 @@ const LOCALNET_DEFAULT_PORTAL_PROGRAM_ID: &str = "5TeWSsjg2gbxCyWVniXeCmwM7UtHTC
 const DEVNET_DEFAULT_PORTAL_PROGRAM_ID: &str = "74iiMCqFw1afWyp3tdh9pUqfRfCRq7gfdC2YZoNGpovt";
 const DEFAULT_GRID_ID: &str = "0";
 const DEFAULT_SESSION_TTL_SLOTS: &str = "78840000";
+const DEFAULT_SETTLEMENT_INTERVAL_SLOTS: &str = "150";
 const DEFAULT_FEE_CAP_SOL: &str = "1000000";
 
 #[derive(Debug, PartialEq)]
@@ -45,6 +46,8 @@ pub enum PortalCliCommand {
         grid_id: u64,
         ttl_slots: u64,
         fee_cap: u64,
+        validator: Pubkey,
+        settlement_interval_slots: u64,
         sign_only: bool,
         dump_transaction_message: bool,
         blockhash_query: BlockhashQuery,
@@ -124,7 +127,9 @@ impl PortalSubCommands for App<'_, '_> {
                         .arg(portal_program_id_arg())
                         .arg(grid_id_arg())
                         .arg(ttl_slots_arg())
-                        .arg(fee_cap_arg()),
+                        .arg(fee_cap_arg())
+                        .arg(validator_arg())
+                        .arg(settlement_interval_slots_arg()),
                 ))
                 .subcommand(portal_tx_subcommand(
                     SubCommand::with_name("close-session")
@@ -202,6 +207,25 @@ fn ttl_slots_arg<'a, 'b>() -> Arg<'a, 'b> {
         .default_value(DEFAULT_SESSION_TTL_SLOTS)
         .validator(is_parsable::<u64>)
         .help("Session TTL in slots [default: ~1 year]")
+}
+
+fn settlement_interval_slots_arg<'a, 'b>() -> Arg<'a, 'b> {
+    Arg::with_name("settlement_interval_slots")
+        .long("settlement-interval-slots")
+        .value_name("SLOTS")
+        .takes_value(true)
+        .default_value(DEFAULT_SETTLEMENT_INTERVAL_SLOTS)
+        .validator(is_parsable::<u64>)
+        .help("L1 slot interval between permissioned settlements [default: 150]")
+}
+
+fn validator_arg<'a, 'b>() -> Arg<'a, 'b> {
+    Arg::with_name("validator")
+        .long("validator")
+        .value_name("VALIDATOR_PUBKEY")
+        .takes_value(true)
+        .validator(is_valid_pubkey)
+        .help("Permissioned settlement validator pubkey [default: session owner]")
 }
 
 fn fee_cap_arg<'a, 'b>() -> Arg<'a, 'b> {
@@ -296,6 +320,8 @@ fn parse_open_session(
             grid_id: value_of(matches, "grid_id").unwrap(),
             ttl_slots: value_of(matches, "ttl_slots").unwrap(),
             fee_cap,
+            validator: pubkey_of(matches, "validator").unwrap_or(owner_pubkey),
+            settlement_interval_slots: value_of(matches, "settlement_interval_slots").unwrap(),
             sign_only,
             dump_transaction_message,
             blockhash_query,
@@ -721,6 +747,8 @@ pub async fn process_portal_subcommand(
             grid_id,
             ttl_slots,
             fee_cap,
+            validator,
+            settlement_interval_slots,
             sign_only,
             dump_transaction_message,
             blockhash_query,
@@ -745,6 +773,8 @@ pub async fn process_portal_subcommand(
                     grid_id: *grid_id,
                     ttl_slots: *ttl_slots,
                     fee_cap: *fee_cap,
+                    validator: validator.to_bytes(),
+                    settlement_interval_slots: *settlement_interval_slots,
                 }))
                 .unwrap(),
             };
@@ -866,6 +896,7 @@ pub async fn process_portal_subcommand(
             let delegated_account_pubkey = config.signers[*delegated_account].pubkey();
             let delegation_record_pda =
                 find_delegation_record_pda(&portal_program_id, &delegated_account_pubkey);
+            let session_pda = find_session_pda(&portal_program_id);
 
             // Sonic: Stage keypair-wallet delegation in one transaction. Portal::Delegate
             // requires the delegated account to already be Portal-owned, so create
@@ -910,6 +941,7 @@ pub async fn process_portal_subcommand(
                 accounts: vec![
                     AccountMeta::new(authority.pubkey(), true),
                     AccountMeta::new_readonly(system_program::id(), false),
+                    AccountMeta::new_readonly(session_pda, false),
                     AccountMeta::new(delegated_account_pubkey, true),
                     AccountMeta::new_readonly(owner_program, false),
                     AccountMeta::new(delegation_record_pda, false),
@@ -950,6 +982,7 @@ pub async fn process_portal_subcommand(
             let authority = config.signers[*authority];
             let delegation_record_pda =
                 find_delegation_record_pda(&portal_program_id, delegated_account);
+            let session_pda = find_session_pda(&portal_program_id);
             let owner_program = if let Some(owner_program) = *owner_program {
                 owner_program
             } else {
@@ -973,6 +1006,7 @@ pub async fn process_portal_subcommand(
                     AccountMeta::new_readonly(owner_program, false),
                     AccountMeta::new(delegation_record_pda, false),
                     AccountMeta::new_readonly(system_program::id(), false),
+                    AccountMeta::new_readonly(session_pda, false),
                 ],
                 data: borsh::to_vec(&PortalInstruction::Undelegate).unwrap(),
             };
