@@ -1,4 +1,5 @@
 use {
+    crate::MAX_SETTLEMENT_CHUNK,
     borsh::{BorshDeserialize, BorshSerialize},
     pinocchio::pubkey::Pubkey,
 };
@@ -41,6 +42,24 @@ pub enum PortalInstruction {
     #[cfg_attr(feature = "idl", account(4, name = "system_program"))]
     #[cfg_attr(feature = "idl", account(5, name = "session"))]
     Undelegate,
+
+    #[cfg_attr(feature = "idl", account(0, name = "validator", sig))]
+    #[cfg_attr(feature = "idl", account(1, name = "session", mut))]
+    BeginSettlement(BeginSettlement),
+
+    #[cfg_attr(feature = "idl", account(0, name = "validator", sig))]
+    #[cfg_attr(feature = "idl", account(1, name = "session"))]
+    #[cfg_attr(feature = "idl", account(2, name = "delegated_account", mut))]
+    #[cfg_attr(feature = "idl", account(3, name = "delegation_record"))]
+    WriteSettlementChunk(WriteSettlementChunk),
+
+    #[cfg_attr(feature = "idl", account(0, name = "validator", sig))]
+    #[cfg_attr(feature = "idl", account(1, name = "session", mut))]
+    FinishSettlement(FinishSettlement),
+
+    #[cfg_attr(feature = "idl", account(0, name = "authority_or_validator", sig))]
+    #[cfg_attr(feature = "idl", account(1, name = "session", mut))]
+    AbortSettlement,
 }
 
 #[cfg_attr(feature = "idl", derive(shank::ShankType))]
@@ -51,4 +70,28 @@ pub struct OpenSession {
     pub fee_cap: u64,
     pub validator: Pubkey,
     pub settlement_interval_slots: u64,
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+pub struct BeginSettlement {
+    pub er_slot: u64,
+    pub checksum: [u8; 32],
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+pub struct WriteSettlementChunk {
+    pub er_slot: u64,
+    pub checksum: [u8; 32],
+    pub account_data_offset: u32,
+    pub chunk_len: u16,
+    pub chunk: [u8; MAX_SETTLEMENT_CHUNK],
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+pub struct FinishSettlement {
+    pub er_slot: u64,
+    pub checksum: [u8; 32],
 }
