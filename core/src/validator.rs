@@ -1442,6 +1442,7 @@ impl Validator {
                             .parse()
                             .unwrap(),
                         slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
+                        settlement_sender: Some(banking_tracer_channels.non_vote_sender.clone()),
                     },
                     exit.clone(),
                 )

@@ -1,15 +1,19 @@
 use {
     log::*,
-    northstar_portal::find_delegation_record_pda as find_portal_delegation_record_pda,
+    northstar_portal::{
+        SettlementStatus, find_delegation_record_pda as find_portal_delegation_record_pda,
+    },
     portal_state::{PortalAccount, try_parse_raw_portal_account},
     solana_account::{AccountSharedData, ReadableAccount},
     solana_fee_structure::FeeStructure,
     solana_gossip::cluster_info::ClusterInfo,
+    solana_hash::Hash,
     solana_instruction::Instruction,
     solana_keypair::Keypair,
     solana_pubkey::Pubkey,
     solana_runtime::bank::Bank,
     solana_signer::Signer,
+    solana_transaction::Transaction,
     std::{net::SocketAddr, sync::Arc, time::Duration},
     thiserror::Error,
 };
@@ -232,6 +236,61 @@ impl Manager {
             self.config.manager_account.pubkey(),
         );
         (!instructions.is_empty()).then_some(instructions)
+    }
+
+    /// Build signed Portal settlement transactions if the L1 Session interval
+    /// has elapsed and a non-empty data diff exists.
+    pub fn settlement_transactions_if_due(
+        &self,
+        l1_bank: &Bank,
+        recent_blockhash: Hash,
+    ) -> Option<(u64, [u8; 32], Vec<Transaction>)> {
+        let runtime = self.runtime.as_ref()?;
+        let session_pda = (*runtime.session_pda().read().unwrap())?;
+        let session_account = l1_bank.get_account(&session_pda)?;
+        if session_account.owner() != &self.config.portal_program_id {
+            return None;
+        }
+        let PortalAccount::Session(session_state) =
+            try_parse_raw_portal_account(session_account.data())?
+        else {
+            return None;
+        };
+        if !session_state.is_valid()
+            || session_state.settlement_status == SettlementStatus::InProgress
+        {
+            return None;
+        }
+        let next_settlement_slot = session_state
+            .last_settled_l1_slot
+            .saturating_add(session_state.settlement_interval_slots);
+        if l1_bank.slot() < next_settlement_slot {
+            return None;
+        }
+
+        let plan = self.settlement_plan()?;
+        let instructions = plan.portal_instructions(
+            self.config.portal_program_id,
+            session_pda,
+            self.config.manager_account.pubkey(),
+        );
+        if instructions.is_empty() {
+            return None;
+        }
+
+        let payer = self.config.manager_account.pubkey();
+        let transactions = instructions
+            .into_iter()
+            .map(|instruction| {
+                Transaction::new_signed_with_payer(
+                    &[instruction],
+                    Some(&payer),
+                    &[self.config.manager_account.as_ref()],
+                    recent_blockhash,
+                )
+            })
+            .collect();
+        Some((plan.er_slot, plan.checksum, transactions))
     }
 
     /// Sonic: Shutdown the always-on runtime (called at validator exit)

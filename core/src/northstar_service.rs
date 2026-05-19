@@ -1,12 +1,16 @@
 use {
+    crate::banking_trace::BankingPacketSender,
+    agave_banking_stage_ingress_types::BankingPacketBatch,
     crossbeam_channel::RecvTimeoutError,
     log::*,
     northstar::L1Event,
     solana_gossip::cluster_info::ClusterInfo,
+    solana_perf::packet::{NUM_PACKETS, to_packet_batches},
     solana_rpc::optimistically_confirmed_bank_tracker::{
         BankNotification, BankNotificationReceiver,
     },
     solana_runtime::bank_forks::BankForks,
+    solana_transaction::Transaction,
     std::{
         net::SocketAddr,
         sync::{
@@ -19,7 +23,7 @@ use {
 };
 
 /// Configuration for NorthStarService
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NorthStarServiceConfig {
     /// Port for the ephemeral rollup RPC server
     pub listen_addr: SocketAddr,
@@ -29,11 +33,26 @@ pub struct NorthStarServiceConfig {
     pub tpu_addr: SocketAddr,
     /// Duration for each slot in the ephemeral rollup
     pub slot_duration: Duration,
+    /// Local BankingStage non-vote sender for permissioned Portal settlement txs.
+    pub settlement_sender: Option<BankingPacketSender>,
 }
 
 /// NorthStar service that monitors root bank changes and creates ephemeral rollups
 pub struct NorthStarService {
     thread_hdl: JoinHandle<()>,
+}
+
+fn submit_settlement_transactions(
+    sender: &BankingPacketSender,
+    transactions: &[Transaction],
+) -> Result<(), crossbeam_channel::SendError<BankingPacketBatch>> {
+    if transactions.is_empty() {
+        return Ok(());
+    }
+    sender.send(BankingPacketBatch::new(to_packet_batches(
+        transactions,
+        NUM_PACKETS,
+    )))
 }
 
 impl NorthStarService {
@@ -63,9 +82,11 @@ impl NorthStarService {
             }
         }
 
+        let settlement_sender = config.settlement_sender;
         let thread_hdl = Builder::new()
             .name("solNorthStar".to_string())
             .spawn(move || {
+                let mut last_submitted_settlement: Option<(u64, [u8; 32])> = None;
                 loop {
                     // Check for exit first
                     if exit.load(Ordering::Relaxed) {
@@ -154,6 +175,32 @@ impl NorthStarService {
                         // targeted refresh path for inactive/no-reanchor cases.
                         manager.refresh_delegated_owner_programs(&bank);
                     }
+
+                    if let Some(sender) = settlement_sender.as_ref() {
+                        if let Some((er_slot, checksum, transactions)) =
+                            manager.settlement_transactions_if_due(&bank, bank.last_blockhash())
+                        {
+                            let settlement_key = (er_slot, checksum);
+                            if last_submitted_settlement == Some(settlement_key) {
+                                debug!(
+                                    "Skipping duplicate settlement submission for \
+                                     er_slot={er_slot}"
+                                );
+                            } else if let Err(err) =
+                                submit_settlement_transactions(sender, &transactions)
+                            {
+                                warn!("Failed to enqueue Portal settlement transactions: {err}");
+                            } else {
+                                info!(
+                                    "Enqueued {} Portal settlement transactions for \
+                                     er_slot={er_slot}",
+                                    transactions.len()
+                                );
+                                last_submitted_settlement = Some(settlement_key);
+                            }
+                        }
+                    }
+
                     manager.mark_synced_through(bank.slot());
                 }
 
@@ -403,6 +450,7 @@ mod tests {
             ws_addr: find_free_addr(),
             tpu_addr: find_free_addr(),
             slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
+            settlement_sender: None,
         };
 
         // Get the bank for notifications BEFORE moving bank_forks
@@ -455,6 +503,7 @@ mod tests {
             ws_addr: find_free_addr(),
             tpu_addr: find_free_addr(),
             slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
+            settlement_sender: None,
         };
 
         // Get a reference to the frozen bank for sending notifications BEFORE moving bank_forks
@@ -510,6 +559,7 @@ mod tests {
             ws_addr: find_free_addr(),
             tpu_addr: find_free_addr(),
             slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
+            settlement_sender: None,
         };
 
         let service = NorthStarService::new(
@@ -579,6 +629,7 @@ mod tests {
             ws_addr: find_free_addr(),
             tpu_addr: find_free_addr(),
             slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
+            settlement_sender: None,
         };
 
         let service = NorthStarService::new(
@@ -762,6 +813,7 @@ mod tests {
             ws_addr: find_free_addr(),
             tpu_addr: find_free_addr(),
             slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
+            settlement_sender: None,
         };
 
         let service = NorthStarService::new(
@@ -893,6 +945,7 @@ mod tests {
             ws_addr: find_free_addr(),
             tpu_addr: find_free_addr(),
             slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
+            settlement_sender: None,
         };
 
         let service = NorthStarService::new(
