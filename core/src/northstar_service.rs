@@ -97,6 +97,7 @@ impl NorthStarService {
                     // Check for L1 events from the portal program
                     let l1_events = manager.get_l1_events(&bank);
 
+                    let mut reanchored_this_bank = false;
                     for event in l1_events {
                         match event {
                             L1Event::SessionOpened {
@@ -110,13 +111,13 @@ impl NorthStarService {
                                      runtime (PDA={session_pda})",
                                     bank.slot()
                                 );
-                                let l1_root = bank_forks.read().unwrap().root_bank();
                                 trace!(
-                                    "L1 root for ER activation: slot={}, epoch={}",
-                                    l1_root.slot(),
-                                    l1_root.epoch(),
+                                    "L1 bank for ER activation: slot={}, epoch={}",
+                                    bank.slot(),
+                                    bank.epoch(),
                                 );
-                                manager.activate_session(l1_root, session_pda);
+                                manager.activate_session(bank.clone(), session_pda);
+                                reanchored_this_bank = true;
                             }
                             L1Event::SessionClosed { session_pda, .. } => {
                                 info!(
@@ -142,11 +143,17 @@ impl NorthStarService {
                         }
                     }
 
-                    // Program deploys update loader-owned accounts, not Portal
-                    // accounts, so they produce no L1Event. Still check active
-                    // delegations every frozen bank and refresh only when their
-                    // owner program / ProgramData account changed.
-                    manager.refresh_delegated_owner_programs(&bank);
+                    // Rebase active ER state onto every new L1 frozen bank.
+                    // The ER-local overlay wins for touched/delegated accounts;
+                    // everything else is read from the new L1 parent.
+                    if manager.has_active_runtime() && !reanchored_this_bank {
+                        manager.reanchor_to_l1_parent(bank.clone());
+                    } else if !reanchored_this_bank {
+                        // Program deploys update loader-owned accounts, not Portal
+                        // accounts, so they produce no L1Event. Keep the legacy
+                        // targeted refresh path for inactive/no-reanchor cases.
+                        manager.refresh_delegated_owner_programs(&bank);
+                    }
                     manager.mark_synced_through(bank.slot());
                 }
 
@@ -705,6 +712,119 @@ mod tests {
         assert_eq!(
             slot_before_stop, slot_after_stop,
             "ER slot should stop advancing after session close"
+        );
+
+        exit.store(true, Ordering::Relaxed);
+        service.join().expect("service should join");
+    }
+
+    #[test]
+    fn test_service_reanchors_active_er_to_new_l1_block() {
+        agave_logger::setup();
+
+        let (root_bank, bank_forks, program_id, mint_keypair) = setup_bank_with_portal();
+        let owner = Keypair::new();
+        root_bank
+            .transfer(100_000_000_000, &mint_keypair, &owner.pubkey())
+            .unwrap();
+
+        let grid_id = 1u64;
+        let (session_pda, _) = find_session_pda(&program_id);
+        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id);
+        let open_ix = build_open_session_ix(
+            program_id,
+            owner.pubkey(),
+            session_pda,
+            fee_vault_pda,
+            grid_id,
+            100,
+            1_000_000,
+        );
+        let open_tx = Transaction::new_signed_with_payer(
+            &[open_ix],
+            Some(&owner.pubkey()),
+            &[&owner],
+            root_bank.last_blockhash(),
+        );
+        root_bank.process_transaction(&open_tx).unwrap();
+        root_bank.freeze();
+        let bank_for_open = bank_forks.read().unwrap().root_bank();
+
+        let cluster_info = create_test_cluster_info();
+        let (sender, receiver) = unbounded();
+        let exit = Arc::new(AtomicBool::new(false));
+        let config = NorthStarServiceConfig {
+            listen_addr: find_free_addr(),
+            ws_addr: find_free_addr(),
+            tpu_addr: find_free_addr(),
+            slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
+        };
+
+        let service = NorthStarService::new(
+            bank_forks,
+            receiver,
+            northstar::ManagerConfig {
+                portal_program_id: program_id,
+                manager_account: Arc::new(Keypair::new()),
+            },
+            cluster_info,
+            config.clone(),
+            exit.clone(),
+        );
+
+        let rpc = RpcClient::new(format!("http://{}", config.listen_addr));
+        std::thread::sleep(Duration::from_secs(2));
+        sender
+            .send((BankNotification::Frozen(bank_for_open.clone()), None))
+            .unwrap();
+
+        let mut session_from_rpc = None;
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_millis(300));
+            session_from_rpc = rpc
+                .send(
+                    RpcRequest::Custom {
+                        method: "getSessionPda",
+                    },
+                    serde_json::Value::Null,
+                )
+                .unwrap();
+            if session_from_rpc.is_some() {
+                break;
+            }
+        }
+        assert_eq!(session_from_rpc, Some(session_pda.to_string()));
+
+        let readonly_account = Pubkey::new_unique();
+        let l1_balance = 123_456_789;
+        let reanchor_bank = Bank::new_from_parent(
+            bank_for_open.clone(),
+            &Pubkey::default(),
+            bank_for_open.slot() + 1,
+        );
+        reanchor_bank.store_account(
+            &readonly_account,
+            &AccountSharedData::new(l1_balance, 0, &system_program::id()),
+        );
+        reanchor_bank.freeze();
+        sender
+            .send((BankNotification::Frozen(Arc::new(reanchor_bank)), None))
+            .unwrap();
+
+        let mut observed_balance = 0;
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_millis(300));
+            observed_balance = rpc
+                .get_balance_with_commitment(&readonly_account, CommitmentConfig::processed())
+                .unwrap()
+                .value;
+            if observed_balance == l1_balance {
+                break;
+            }
+        }
+        assert_eq!(
+            observed_balance, l1_balance,
+            "active ER should see readonly accounts from the latest L1 bank without session reopen"
         );
 
         exit.store(true, Ordering::Relaxed);

@@ -539,6 +539,17 @@ impl Manager {
         }
     }
 
+    /// Re-anchor the active ER onto the latest L1 block while preserving the
+    /// in-memory ER account overlay.
+    pub fn reanchor_to_l1_parent(&mut self, bank: Arc<Bank>) {
+        if let Some(runtime) = &mut self.runtime {
+            if !runtime.is_active() {
+                return;
+            }
+            runtime.reanchor_to_l1_parent(bank);
+        }
+    }
+
     /// Refresh delegated owner programs from L1 when their deployment accounts
     /// changed. This catches L1 `solana program deploy` updates that do not
     /// emit Portal events but must still invalidate the isolated ER ProgramCache.
