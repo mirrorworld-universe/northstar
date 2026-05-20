@@ -1,12 +1,16 @@
 use std::{
-    env, fs,
+    env,
+    fs::{self, OpenOptions},
     path::{Path, PathBuf},
     process::{Command, Output},
-    time::SystemTime,
+    thread::sleep,
+    time::{Duration, SystemTime},
 };
 
 const BUILD_SBF_GUARD: &str = "NORTHSTAR_PORTAL_BUILD_SBF_RUNNING";
 const PROGRAM_SO: &str = "northstar_portal.so";
+const SBF_BUILD_LOCK: &str = "northstar_portal_sbf_build.lock";
+const STALE_LOCK_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
@@ -25,14 +29,18 @@ fn main() {
     println!("cargo:rerun-if-changed={}", portal_manifest.display());
     println!("cargo:rerun-if-changed={}", portal_src.display());
     println!("cargo:rerun-if-changed={}", program_so.display());
+    println!("cargo:rustc-check-cfg=cfg(northstar_skip_portal_program_binary)");
     println!(
         "cargo:rustc-env=NORTHSTAR_PORTAL_PROGRAM_SO={}",
         program_so.display()
     );
 
-    if needs_portal_build(&portal_manifest, &portal_src, &program_so) {
-        build_portal(&portal_manifest, &sbf_out_dir);
+    if running_under_clippy() {
+        println!("cargo:rustc-cfg=northstar_skip_portal_program_binary");
+        return;
     }
+
+    build_portal_if_needed(&portal_manifest, &portal_src, &sbf_out_dir, &program_so);
 
     if !program_so.exists() {
         panic!(
@@ -44,7 +52,24 @@ fn main() {
     }
 }
 
-fn build_portal(portal_manifest: &Path, sbf_out_dir: &Path) {
+fn build_portal_if_needed(
+    portal_manifest: &Path,
+    portal_src: &Path,
+    sbf_out_dir: &Path,
+    program_so: &Path,
+) {
+    fs::create_dir_all(sbf_out_dir).unwrap_or_else(|err| {
+        panic!(
+            "failed to create SBF output directory {}: {err}",
+            sbf_out_dir.display()
+        )
+    });
+
+    let _lock = SbfBuildLock::acquire(sbf_out_dir);
+    if !needs_portal_build(portal_manifest, portal_src, program_so) {
+        return;
+    }
+
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let target_dir = out_dir.join("portal-sbf-target");
     let output = run_cargo_build_sbf(portal_manifest, sbf_out_dir, &target_dir, false);
@@ -153,6 +178,48 @@ fn absolute_path(path: PathBuf) -> PathBuf {
             .unwrap_or_else(|err| panic!("failed to determine current directory: {err}"))
             .join(path)
     }
+}
+
+fn running_under_clippy() -> bool {
+    ["RUSTC_WORKSPACE_WRAPPER", "RUSTC_WRAPPER", "RUSTC"]
+        .iter()
+        .filter_map(env::var_os)
+        .any(|value| value.to_string_lossy().contains("clippy"))
+}
+
+struct SbfBuildLock {
+    path: PathBuf,
+}
+
+impl SbfBuildLock {
+    fn acquire(sbf_out_dir: &Path) -> Self {
+        let path = sbf_out_dir.join(SBF_BUILD_LOCK);
+        loop {
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(_) => return Self { path },
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if lock_is_stale(&path) {
+                        let _ = fs::remove_file(&path);
+                    } else {
+                        sleep(Duration::from_millis(250));
+                    }
+                }
+                Err(err) => panic!("failed to acquire SBF build lock {}: {err}", path.display()),
+            }
+        }
+    }
+}
+
+impl Drop for SbfBuildLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn lock_is_stale(path: &Path) -> bool {
+    mtime(path)
+        .and_then(|mtime| mtime.elapsed().map_err(std::io::Error::other))
+        .is_ok_and(|elapsed| elapsed > STALE_LOCK_TIMEOUT)
 }
 
 fn remove_cargo_driver_env(command: &mut Command) {

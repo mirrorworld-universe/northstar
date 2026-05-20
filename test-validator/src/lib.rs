@@ -92,7 +92,12 @@ pub const DEFAULT_PORTAL_PROGRAM_ID: Pubkey =
     Pubkey::from_str_const("5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf");
 
 /// Sonic: Portal program binary embedded at compile time.
+#[cfg(not(northstar_skip_portal_program_binary))]
 static PORTAL_PROGRAM_BINARY: &[u8] = include_bytes!(env!("NORTHSTAR_PORTAL_PROGRAM_SO"));
+
+/// Sonic: Clippy only type-checks this crate and does not need the embedded SBF binary.
+#[cfg(northstar_skip_portal_program_binary)]
+static PORTAL_PROGRAM_BINARY: &[u8] = &[];
 
 #[derive(Clone)]
 pub struct AccountInfo<'a> {
