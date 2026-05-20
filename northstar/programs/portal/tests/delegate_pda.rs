@@ -36,19 +36,35 @@ fn build_delegate_ix(
     grid_id: u64,
     buffer: &Pubkey,
 ) -> Instruction {
+    build_delegate_ix_for_accounts(
+        payer,
+        grid_id,
+        &[(delegated_account, owner_program, delegation_record, buffer)],
+    )
+}
+
+fn build_delegate_ix_for_accounts(
+    payer: &Pubkey,
+    grid_id: u64,
+    delegations: &[(&Pubkey, &Pubkey, &Pubkey, &Pubkey)],
+) -> Instruction {
     let ix = PortalInstruction::Delegate { grid_id };
     let data = borsh::to_vec(&ix).unwrap();
 
+    let mut accounts = vec![
+        AccountMeta::new(*payer, true),
+        AccountMeta::new_readonly(system_program::id(), false),
+    ];
+    for (delegated_account, owner_program, delegation_record, buffer) in delegations {
+        accounts.push(AccountMeta::new(**delegated_account, true));
+        accounts.push(AccountMeta::new_readonly(**owner_program, false));
+        accounts.push(AccountMeta::new(**delegation_record, false));
+        accounts.push(AccountMeta::new_readonly(**buffer, false));
+    }
+
     Instruction {
         program_id: PORTAL_PROGRAM_ID,
-        accounts: vec![
-            AccountMeta::new(*payer, true),
-            AccountMeta::new(*delegated_account, true),
-            AccountMeta::new_readonly(*owner_program, false),
-            AccountMeta::new(*delegation_record, false),
-            AccountMeta::new_readonly(system_program::id(), false),
-            AccountMeta::new_readonly(*buffer, false),
-        ],
+        accounts,
         data,
     }
 }
@@ -180,7 +196,7 @@ impl RunningScenario {
             self.inner.grid_id,
             &self.inner.buffer.pubkey(),
         );
-        ix.accounts[1].is_signer = false;
+        ix.accounts[2].is_signer = false;
 
         let tx = Transaction::new_signed_with_payer(
             &[ix],
@@ -267,6 +283,143 @@ async fn delegate_requires_delegated_signer() {
     let mut running = scenario.start().await;
     let result = running.delegate_without_delegated_signer().await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn delegate_creates_multiple_records_and_restores_data() {
+    let payer = Keypair::new();
+    let delegated_a = Keypair::new();
+    let delegated_b = Keypair::new();
+    let buffer_a = Keypair::new();
+    let buffer_b = Keypair::new();
+    let owner_a = Pubkey::new_unique();
+    let owner_b = Pubkey::new_unique();
+    let grid_id = 7;
+    let data_a: Vec<u8> = (0..64).map(|i| i as u8 ^ 0x11).collect();
+    let data_b: Vec<u8> = (0..96).map(|i| i as u8 ^ 0x22).collect();
+    let (record_a, _) = find_delegation_record_pda(&delegated_a.pubkey());
+    let (record_b, _) = find_delegation_record_pda(&delegated_b.pubkey());
+
+    let mut program_test = ProgramTest::default();
+    program_test.prefer_bpf(true);
+    program_test.add_program("northstar_portal", PORTAL_PROGRAM_ID, None);
+    program_test.add_account(
+        payer.pubkey(),
+        Account {
+            lamports: 1_000_000_000,
+            data: vec![],
+            owner: system_program::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        delegated_a.pubkey(),
+        Account {
+            lamports: 10_000_000,
+            data: vec![0; data_a.len()],
+            owner: PORTAL_PROGRAM_ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        delegated_b.pubkey(),
+        Account {
+            lamports: 10_000_000,
+            data: vec![0; data_b.len()],
+            owner: PORTAL_PROGRAM_ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        buffer_a.pubkey(),
+        Account {
+            lamports: 10_000_000,
+            data: data_a.clone(),
+            owner: owner_a,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        buffer_b.pubkey(),
+        Account {
+            lamports: 10_000_000,
+            data: data_b.clone(),
+            owner: owner_b,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    let context = program_test.start_with_context().await;
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let ix = build_delegate_ix_for_accounts(
+        &payer.pubkey(),
+        grid_id,
+        &[
+            (
+                &delegated_a.pubkey(),
+                &owner_a,
+                &record_a,
+                &buffer_a.pubkey(),
+            ),
+            (
+                &delegated_b.pubkey(),
+                &owner_b,
+                &record_b,
+                &buffer_b.pubkey(),
+            ),
+        ],
+    );
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&payer.pubkey()),
+        &[&payer, &delegated_a, &delegated_b],
+        blockhash,
+    );
+
+    context
+        .banks_client
+        .process_transaction(tx)
+        .await
+        .expect("delegate many should succeed");
+
+    let record_a_account = context
+        .banks_client
+        .get_account(record_a)
+        .await
+        .unwrap()
+        .expect("record A should exist");
+    let record_b_account = context
+        .banks_client
+        .get_account(record_b)
+        .await
+        .unwrap()
+        .expect("record B should exist");
+    let parsed_a = DelegationRecord::try_from_slice(&record_a_account.data).unwrap();
+    let parsed_b = DelegationRecord::try_from_slice(&record_b_account.data).unwrap();
+    assert_eq!(parsed_a.owner_program, owner_a.to_bytes());
+    assert_eq!(parsed_a.grid_id, grid_id);
+    assert_eq!(parsed_b.owner_program, owner_b.to_bytes());
+    assert_eq!(parsed_b.grid_id, grid_id);
+
+    let delegated_a_account = context
+        .banks_client
+        .get_account(delegated_a.pubkey())
+        .await
+        .unwrap()
+        .unwrap();
+    let delegated_b_account = context
+        .banks_client
+        .get_account(delegated_b.pubkey())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(delegated_a_account.data, data_a);
+    assert_eq!(delegated_b_account.data, data_b);
 }
 
 #[tokio::test]

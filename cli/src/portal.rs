@@ -909,10 +909,10 @@ pub async fn process_portal_subcommand(
                 program_id: portal_program_id,
                 accounts: vec![
                     AccountMeta::new(authority.pubkey(), true),
+                    AccountMeta::new_readonly(system_program::id(), false),
                     AccountMeta::new(delegated_account_pubkey, true),
                     AccountMeta::new_readonly(owner_program, false),
                     AccountMeta::new(delegation_record_pda, false),
-                    AccountMeta::new_readonly(system_program::id(), false),
                     AccountMeta::new_readonly(buffer_keypair.pubkey(), false),
                 ],
                 data: borsh::to_vec(&PortalInstruction::Delegate { grid_id: *grid_id }).unwrap(),

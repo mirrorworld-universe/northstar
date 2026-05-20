@@ -23,10 +23,10 @@ pub enum PortalInstruction {
     DepositFee { lamports: u64 },
 
     #[cfg_attr(feature = "idl", account(0, name = "payer", sig, mut))]
-    #[cfg_attr(feature = "idl", account(1, name = "delegated_account", sig, mut))]
-    #[cfg_attr(feature = "idl", account(2, name = "owner_program"))]
-    #[cfg_attr(feature = "idl", account(3, name = "delegation_record", mut))]
-    #[cfg_attr(feature = "idl", account(4, name = "system_program"))]
+    #[cfg_attr(feature = "idl", account(1, name = "system_program"))]
+    #[cfg_attr(feature = "idl", account(2, name = "delegated_account", sig, mut))]
+    #[cfg_attr(feature = "idl", account(3, name = "owner_program"))]
+    #[cfg_attr(feature = "idl", account(4, name = "delegation_record", mut))]
     #[cfg_attr(feature = "idl", account(5, name = "buffer"))]
     Delegate { grid_id: u64 },
 

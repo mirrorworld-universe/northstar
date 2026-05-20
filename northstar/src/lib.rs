@@ -780,10 +780,10 @@ mod portal_e2e_tests {
             program_id,
             accounts: vec![
                 AccountMeta::new(payer, true),
+                AccountMeta::new_readonly(system_program::id(), false),
                 AccountMeta::new(delegated_account, true),
                 AccountMeta::new_readonly(owner_program, false),
                 AccountMeta::new(delegation_record_pda, false),
-                AccountMeta::new_readonly(system_program::id(), false),
                 AccountMeta::new_readonly(buffer, false),
             ],
             data,
