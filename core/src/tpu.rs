@@ -133,10 +133,8 @@ impl Tpu {
         staked_nodes: &Arc<RwLock<StakedNodes>>,
         shared_staked_nodes_overrides: Arc<RwLock<HashMap<Pubkey, u64>>>,
         banking_tracer_channels: Channels,
-        forward_stage_channel: (
-            Sender<(BankingPacketBatch, bool)>,
-            Receiver<(BankingPacketBatch, bool)>,
-        ),
+        forward_stage_sender: Sender<(BankingPacketBatch, bool)>,
+        forward_stage_receiver: Receiver<(BankingPacketBatch, bool)>,
         tracer_thread_hdl: TracerThread,
         tpu_quic_server_config: SwQosQuicStreamerConfig,
         tpu_fwd_quic_server_config: SwQosQuicStreamerConfig,
@@ -245,8 +243,6 @@ impl Tpu {
             cancel,
         )
         .unwrap();
-
-        let (forward_stage_sender, forward_stage_receiver) = forward_stage_channel;
 
         let sigverify_threadpool = Arc::new(
             rayon::ThreadPoolBuilder::new()

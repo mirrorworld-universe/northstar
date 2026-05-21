@@ -6,6 +6,7 @@ use {
 
 #[cfg_attr(feature = "idl", derive(shank::ShankInstruction))]
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum PortalInstruction {
     #[cfg_attr(feature = "idl", account(0, name = "payer", sig, mut))]
     #[cfg_attr(feature = "idl", account(1, name = "session", mut))]

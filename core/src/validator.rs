@@ -1107,8 +1107,8 @@ impl Validator {
             info!("Disabled banking trace");
         }
         let banking_tracer_channels = banking_tracer.create_channels();
-        let forward_stage_channel = bounded(1024);
-        let settlement_forward_sender = forward_stage_channel.0.clone();
+        let (forward_stage_sender, forward_stage_receiver) = bounded(1024);
+        let settlement_forward_sender = forward_stage_sender.clone();
 
         match (
             &config.block_verification_method,
@@ -1803,7 +1803,8 @@ impl Validator {
             &staked_nodes,
             config.staked_nodes_overrides.clone(),
             banking_tracer_channels,
-            forward_stage_channel,
+            forward_stage_sender,
+            forward_stage_receiver,
             tracer_thread,
             tpu_quic_server_config,
             tpu_fwd_quic_server_config,
