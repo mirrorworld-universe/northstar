@@ -1107,6 +1107,8 @@ impl Validator {
             info!("Disabled banking trace");
         }
         let banking_tracer_channels = banking_tracer.create_channels();
+        let (forward_stage_sender, forward_stage_receiver) = bounded(1024);
+        let settlement_forward_sender = forward_stage_sender.clone();
 
         match (
             &config.block_verification_method,
@@ -1442,6 +1444,8 @@ impl Validator {
                             .parse()
                             .unwrap(),
                         slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
+                        settlement_sender: Some(banking_tracer_channels.non_vote_sender.clone()),
+                        settlement_forward_sender: Some(settlement_forward_sender.clone()),
                     },
                     exit.clone(),
                 )
@@ -1799,6 +1803,8 @@ impl Validator {
             &staked_nodes,
             config.staked_nodes_overrides.clone(),
             banking_tracer_channels,
+            forward_stage_sender,
+            forward_stage_receiver,
             tracer_thread,
             tpu_quic_server_config,
             tpu_fwd_quic_server_config,

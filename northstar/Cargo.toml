@@ -10,6 +10,7 @@ solana-clock.workspace = true
 solana-fee-structure.workspace = true
 solana-genesis-config.workspace = true
 solana-hash.workspace = true
+solana-instruction.workspace = true
 solana-keypair.workspace = true
 solana-lattice-hash.workspace = true
 solana-message.workspace = true
@@ -21,6 +22,7 @@ solana-sdk-ids.workspace = true
 solana-signer.workspace = true
 solana-system-interface.workspace = true
 solana-send-transaction-service.workspace = true
+solana-sha256-hasher = { workspace = true, features = ["sha2"] }
 solana-svm-timings.workspace = true
 solana-svm.workspace = true
 solana-transaction.workspace = true

@@ -4818,6 +4818,7 @@ dependencies = [
  "solana-runtime",
  "solana-sdk-ids",
  "solana-send-transaction-service",
+ "solana-sha256-hasher",
  "solana-signer",
  "solana-streamer",
  "solana-svm",
