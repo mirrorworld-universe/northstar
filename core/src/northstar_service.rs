@@ -3,13 +3,20 @@ use {
     agave_banking_stage_ingress_types::BankingPacketBatch,
     crossbeam_channel::{RecvTimeoutError, Sender, TrySendError},
     log::*,
-    northstar::L1Event,
+    northstar::{
+        L1Event,
+        portal_state::{PortalAccount, try_parse_raw_portal_account},
+    },
+    northstar_portal::SettlementStatus,
+    solana_account::ReadableAccount,
     solana_gossip::cluster_info::ClusterInfo,
+    solana_hash::Hash,
     solana_perf::packet::{NUM_PACKETS, to_packet_batches},
     solana_rpc::optimistically_confirmed_bank_tracker::{
         BankNotification, BankNotificationReceiver,
     },
-    solana_runtime::bank_forks::BankForks,
+    solana_runtime::{bank::Bank, bank_forks::BankForks},
+    solana_signature::Signature,
     solana_transaction::Transaction,
     std::{
         net::SocketAddr,
@@ -71,6 +78,268 @@ fn submit_settlement_transactions(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingSettlementStatus {
+    Pending,
+    Confirmed,
+    Expired,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+struct PendingSettlementSubmission {
+    er_slot: u64,
+    checksum: [u8; 32],
+    signatures: Vec<Signature>,
+    recent_blockhash: Hash,
+    submitted_l1_slot: u64,
+    attempts: u64,
+}
+
+impl PendingSettlementSubmission {
+    fn new(
+        er_slot: u64,
+        checksum: [u8; 32],
+        recent_blockhash: Hash,
+        submitted_l1_slot: u64,
+        attempts: u64,
+        transactions: &[Transaction],
+    ) -> Self {
+        let signatures = transactions
+            .iter()
+            .filter_map(|transaction| transaction.signatures.first().cloned())
+            .collect();
+        Self {
+            er_slot,
+            checksum,
+            signatures,
+            recent_blockhash,
+            submitted_l1_slot,
+            attempts,
+        }
+    }
+
+    fn status(&self, bank: &Bank) -> PendingSettlementStatus {
+        if self
+            .signatures
+            .iter()
+            .any(|signature| matches!(bank.get_signature_status(signature), Some(Err(_))))
+        {
+            return PendingSettlementStatus::Failed;
+        }
+        if !self.signatures.is_empty()
+            && self
+                .signatures
+                .iter()
+                .all(|signature| matches!(bank.get_signature_status(signature), Some(Ok(()))))
+        {
+            return PendingSettlementStatus::Confirmed;
+        }
+        if !bank.is_hash_valid_for_age(&self.recent_blockhash, solana_clock::MAX_PROCESSING_AGE) {
+            return PendingSettlementStatus::Expired;
+        }
+        PendingSettlementStatus::Pending
+    }
+
+    fn failed_signature(&self, bank: &Bank) -> Option<(Signature, String)> {
+        self.signatures.iter().find_map(|signature| {
+            if let Some(Err(err)) = bank.get_signature_status(signature) {
+                Some((*signature, format!("{err:?}")))
+            } else {
+                None
+            }
+        })
+    }
+}
+
+fn pending_settlement_allows_submission(
+    pending_settlement: &mut Option<PendingSettlementSubmission>,
+    bank: &Bank,
+) -> bool {
+    let Some(pending) = pending_settlement.as_ref() else {
+        return true;
+    };
+
+    match pending.status(bank) {
+        PendingSettlementStatus::Pending => {
+            debug!(
+                "Portal settlement still unconfirmed for er_slot={} checksum={:?} attempts={} \
+                 signatures={:?}",
+                pending.er_slot, pending.checksum, pending.attempts, pending.signatures,
+            );
+            false
+        }
+        PendingSettlementStatus::Confirmed => {
+            info!(
+                "Portal settlement confirmed for er_slot={} checksum={:?} attempts={} \
+                 submitted_l1_slot={} confirmed_l1_slot={} signatures={:?}",
+                pending.er_slot,
+                pending.checksum,
+                pending.attempts,
+                pending.submitted_l1_slot,
+                bank.slot(),
+                pending.signatures,
+            );
+            *pending_settlement = None;
+            true
+        }
+        PendingSettlementStatus::Expired => {
+            warn!(
+                "Portal settlement expired before confirmation for er_slot={} checksum={:?} \
+                 attempts={} submitted_l1_slot={} current_l1_slot={} signatures={:?}; retrying",
+                pending.er_slot,
+                pending.checksum,
+                pending.attempts,
+                pending.submitted_l1_slot,
+                bank.slot(),
+                pending.signatures,
+            );
+            *pending_settlement = None;
+            true
+        }
+        PendingSettlementStatus::Failed => {
+            let failed = pending.failed_signature(bank);
+            warn!(
+                "Portal settlement transaction failed for er_slot={} checksum={:?} attempts={} \
+                 submitted_l1_slot={} current_l1_slot={} failed={:?}; retrying if session state \
+                 permits",
+                pending.er_slot,
+                pending.checksum,
+                pending.attempts,
+                pending.submitted_l1_slot,
+                bank.slot(),
+                failed,
+            );
+            *pending_settlement = None;
+            true
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StuckSettlement {
+    er_slot: u64,
+    checksum: [u8; 32],
+    started_l1_slot: u64,
+    current_l1_slot: u64,
+    settlement_interval_slots: u64,
+}
+
+fn stuck_settlement(
+    bank: &Bank,
+    portal_program_id: &solana_pubkey::Pubkey,
+    session_pda: Option<solana_pubkey::Pubkey>,
+) -> Option<StuckSettlement> {
+    let session_pda = session_pda?;
+    let session_account = bank.get_account(&session_pda)?;
+    if session_account.owner() != portal_program_id {
+        return None;
+    }
+    let PortalAccount::Session(session) = try_parse_raw_portal_account(session_account.data())?
+    else {
+        return None;
+    };
+    if session.settlement_status != SettlementStatus::InProgress {
+        return None;
+    }
+    let stuck_after_slot = session
+        .settlement_started_l1_slot
+        .saturating_add(session.settlement_interval_slots);
+    if bank.slot() <= stuck_after_slot {
+        return None;
+    }
+    Some(StuckSettlement {
+        er_slot: session.settlement_er_slot,
+        checksum: session.settlement_checksum,
+        started_l1_slot: session.settlement_started_l1_slot,
+        current_l1_slot: bank.slot(),
+        settlement_interval_slots: session.settlement_interval_slots,
+    })
+}
+
+fn should_warn_stuck_settlement(
+    last_warned_stuck_settlement: &mut Option<(u64, [u8; 32], u64)>,
+    stuck: StuckSettlement,
+) -> bool {
+    let warn_every_slots = stuck.settlement_interval_slots.max(1);
+    let should_warn = !matches!(
+        last_warned_stuck_settlement,
+        Some((er_slot, checksum, last_warn_slot))
+            if *er_slot == stuck.er_slot
+                && *checksum == stuck.checksum
+                && stuck.current_l1_slot < last_warn_slot.saturating_add(warn_every_slots)
+    );
+    if should_warn {
+        *last_warned_stuck_settlement =
+            Some((stuck.er_slot, stuck.checksum, stuck.current_l1_slot));
+    }
+    should_warn
+}
+
+fn warn_stuck_settlement_if_due(
+    bank: &Bank,
+    portal_program_id: &solana_pubkey::Pubkey,
+    session_pda: Option<solana_pubkey::Pubkey>,
+    last_warned_stuck_settlement: &mut Option<(u64, [u8; 32], u64)>,
+) {
+    let Some(stuck) = stuck_settlement(bank, portal_program_id, session_pda) else {
+        return;
+    };
+    if !should_warn_stuck_settlement(last_warned_stuck_settlement, stuck) {
+        return;
+    }
+
+    warn!(
+        "Portal settlement stuck InProgress for er_slot={} started_l1_slot={} current_l1_slot={} \
+         interval_slots={}; waiting for validator retry/abort",
+        stuck.er_slot,
+        stuck.started_l1_slot,
+        stuck.current_l1_slot,
+        stuck.settlement_interval_slots,
+    );
+}
+
+fn submit_settlement_if_due(
+    manager: &northstar::Manager,
+    bank: &Bank,
+    sender: &BankingPacketSender,
+    forward_sender: Option<&Sender<(BankingPacketBatch, bool)>>,
+    pending_settlement: &mut Option<PendingSettlementSubmission>,
+    settlement_attempts: &mut u64,
+) {
+    if !pending_settlement_allows_submission(pending_settlement, bank) {
+        return;
+    }
+
+    let recent_blockhash = bank.last_blockhash();
+    let Some((er_slot, checksum, transactions)) =
+        manager.settlement_transactions_if_due(bank, recent_blockhash)
+    else {
+        return;
+    };
+
+    if let Err(err) = submit_settlement_transactions(sender, forward_sender, &transactions) {
+        warn!("Failed to enqueue Portal settlement transactions: {err}");
+        return;
+    }
+
+    *settlement_attempts = settlement_attempts.saturating_add(1);
+    info!(
+        "Enqueued {} Portal settlement transactions for er_slot={} attempts={}",
+        transactions.len(),
+        er_slot,
+        *settlement_attempts,
+    );
+    *pending_settlement = Some(PendingSettlementSubmission::new(
+        er_slot,
+        checksum,
+        recent_blockhash,
+        bank.slot(),
+        *settlement_attempts,
+        &transactions,
+    ));
+}
+
 impl NorthStarService {
     /// Create and start the NorthStar service
     /// Sonic: Monitors root slot changes and creates ephemeral rollups based on L1 events
@@ -83,6 +352,7 @@ impl NorthStarService {
         exit: Arc<AtomicBool>,
     ) -> Self {
         // Sonic: Initialize NorthStar manager with always-on ephemeral RPC
+        let portal_program_id = cfg.portal_program_id;
         let mut manager = northstar::Manager::new(cfg);
         manager.set_slot_duration(config.slot_duration);
         {
@@ -103,7 +373,9 @@ impl NorthStarService {
         let thread_hdl = Builder::new()
             .name("solNorthStar".to_string())
             .spawn(move || {
-                let mut last_submitted_settlement: Option<(u64, [u8; 32])> = None;
+                let mut pending_settlement: Option<PendingSettlementSubmission> = None;
+                let mut settlement_attempts: u64 = 0;
+                let mut last_warned_stuck_settlement: Option<(u64, [u8; 32], u64)> = None;
                 loop {
                     // Check for exit first
                     if exit.load(Ordering::Relaxed) {
@@ -198,31 +470,22 @@ impl NorthStarService {
                         manager.refresh_delegated_owner_programs(&bank);
                     }
 
+                    warn_stuck_settlement_if_due(
+                        &bank,
+                        &portal_program_id,
+                        manager.session_pda().and_then(|pda| *pda.read().unwrap()),
+                        &mut last_warned_stuck_settlement,
+                    );
+
                     if let Some(sender) = settlement_sender.as_ref() {
-                        if let Some((er_slot, checksum, transactions)) =
-                            manager.settlement_transactions_if_due(&bank, bank.last_blockhash())
-                        {
-                            let settlement_key = (er_slot, checksum);
-                            if last_submitted_settlement == Some(settlement_key) {
-                                debug!(
-                                    "Skipping duplicate settlement submission for \
-                                     er_slot={er_slot}"
-                                );
-                            } else if let Err(err) = submit_settlement_transactions(
-                                sender,
-                                settlement_forward_sender.as_ref(),
-                                &transactions,
-                            ) {
-                                warn!("Failed to enqueue Portal settlement transactions: {err}");
-                            } else {
-                                info!(
-                                    "Enqueued {} Portal settlement transactions for \
-                                     er_slot={er_slot}",
-                                    transactions.len()
-                                );
-                                last_submitted_settlement = Some(settlement_key);
-                            }
-                        }
+                        submit_settlement_if_due(
+                            &manager,
+                            &bank,
+                            sender,
+                            settlement_forward_sender.as_ref(),
+                            &mut pending_settlement,
+                            &mut settlement_attempts,
+                        );
                     }
 
                     manager.mark_synced_through(bank.slot());
@@ -249,8 +512,8 @@ mod tests {
     use {
         super::*,
         crossbeam_channel::unbounded,
-        northstar_portal::{OpenSession, PortalInstruction},
-        solana_account::AccountSharedData,
+        northstar_portal::{OpenSession, PortalInstruction, Session, SettlementStatus},
+        solana_account::{AccountSharedData, WritableAccount},
         solana_client::rpc_client::RpcClient,
         solana_commitment_config::CommitmentConfig,
         solana_gossip::contact_info::ContactInfo,
@@ -279,6 +542,175 @@ mod tests {
         use solana_genesis_config::GenesisConfig;
         let genesis_config = GenesisConfig::new(&[], &[]);
         solana_runtime::bank::Bank::new_for_tests(&genesis_config)
+    }
+
+    fn create_processable_test_bank() -> Arc<Bank> {
+        use solana_genesis_config::GenesisConfig;
+        let genesis_config = GenesisConfig::new(&[], &[]);
+        Bank::new_with_bank_forks_for_tests(&genesis_config).0
+    }
+
+    fn fund_test_payer(bank: &Bank, payer: &Keypair) {
+        bank.store_account(
+            &payer.pubkey(),
+            &AccountSharedData::new(1_000_000_000, 0, &system_program::id()),
+        );
+    }
+
+    fn signed_test_transfer(bank: &Bank, payer: &Keypair) -> Transaction {
+        Transaction::new_signed_with_payer(
+            &[transfer(&payer.pubkey(), &Pubkey::new_unique(), 1)],
+            Some(&payer.pubkey()),
+            &[payer],
+            bank.last_blockhash(),
+        )
+    }
+
+    #[test]
+    fn pending_settlement_waits_for_confirmation_before_duplicate_submission() {
+        let bank = create_processable_test_bank();
+        let payer = Keypair::new();
+        fund_test_payer(&bank, &payer);
+        let transaction = signed_test_transfer(&bank, &payer);
+        let mut pending_settlement = Some(PendingSettlementSubmission::new(
+            7,
+            [3; 32],
+            bank.last_blockhash(),
+            bank.slot(),
+            1,
+            &[transaction],
+        ));
+
+        assert!(!pending_settlement_allows_submission(
+            &mut pending_settlement,
+            &bank,
+        ));
+        assert!(pending_settlement.is_some());
+    }
+
+    #[test]
+    fn expired_pending_settlement_allows_retry() {
+        let bank = create_processable_test_bank();
+        let payer = Keypair::new();
+        fund_test_payer(&bank, &payer);
+        let transaction = signed_test_transfer(&bank, &payer);
+        let mut pending_settlement = Some(PendingSettlementSubmission::new(
+            7,
+            [3; 32],
+            Hash::new_unique(),
+            bank.slot(),
+            1,
+            &[transaction],
+        ));
+
+        assert!(pending_settlement_allows_submission(
+            &mut pending_settlement,
+            &bank,
+        ));
+        assert!(pending_settlement.is_none());
+    }
+
+    #[test]
+    fn confirmed_pending_settlement_clears_tracking() {
+        let bank = create_processable_test_bank();
+        let payer = Keypair::new();
+        fund_test_payer(&bank, &payer);
+        let transaction = signed_test_transfer(&bank, &payer);
+        bank.status_cache.write().unwrap().insert(
+            &bank.last_blockhash(),
+            transaction.signatures[0],
+            bank.slot(),
+            Ok(()),
+        );
+        let mut pending_settlement = Some(PendingSettlementSubmission::new(
+            7,
+            [3; 32],
+            bank.last_blockhash(),
+            bank.slot(),
+            1,
+            &[transaction],
+        ));
+
+        assert!(pending_settlement_allows_submission(
+            &mut pending_settlement,
+            &bank,
+        ));
+        assert!(pending_settlement.is_none());
+    }
+
+    #[test]
+    fn failed_pending_settlement_allows_retry() {
+        let bank = create_processable_test_bank();
+        let payer = Keypair::new();
+        fund_test_payer(&bank, &payer);
+        let transaction = signed_test_transfer(&bank, &payer);
+        bank.status_cache.write().unwrap().insert(
+            &bank.last_blockhash(),
+            transaction.signatures[0],
+            bank.slot(),
+            Err(solana_transaction_error::TransactionError::AccountNotFound),
+        );
+        let mut pending_settlement = Some(PendingSettlementSubmission::new(
+            7,
+            [3; 32],
+            bank.last_blockhash(),
+            bank.slot(),
+            1,
+            &[transaction],
+        ));
+
+        assert!(pending_settlement_allows_submission(
+            &mut pending_settlement,
+            &bank,
+        ));
+        assert!(pending_settlement.is_none());
+    }
+
+    #[test]
+    fn stuck_in_progress_settlement_is_reported_and_throttled() {
+        let root_bank = create_processable_test_bank();
+        let bank = Bank::new_from_parent(root_bank, &Pubkey::default(), 20);
+        let program_id = Pubkey::new_unique();
+        let session_pda = Pubkey::new_unique();
+        let session = Session {
+            discriminator: Session::DISCRIMINATOR,
+            grid_id: 1,
+            ttl_slots: 100,
+            fee_cap: 1_000,
+            created_at: 0,
+            nonce: 0,
+            authority: [1; 32],
+            validator: [2; 32],
+            settlement_interval_slots: 10,
+            last_settled_l1_slot: 0,
+            last_settled_er_slot: 0,
+            settlement_status: SettlementStatus::InProgress,
+            settlement_er_slot: 9,
+            settlement_checksum: [4; 32],
+            settlement_started_l1_slot: 1,
+            bump: 255,
+        };
+        let data = borsh::to_vec(&session).unwrap();
+        let mut account = AccountSharedData::new(1_000_000, data.len(), &program_id);
+        account.data_as_mut_slice().copy_from_slice(&data);
+        bank.store_account(&session_pda, &account);
+
+        let stuck = stuck_settlement(&bank, &program_id, Some(session_pda))
+            .expect("in-progress settlement older than interval should be stuck");
+        assert_eq!(stuck.er_slot, 9);
+        assert_eq!(stuck.started_l1_slot, 1);
+        assert_eq!(stuck.current_l1_slot, 20);
+
+        let mut last_warned = None;
+        assert!(should_warn_stuck_settlement(&mut last_warned, stuck));
+        assert!(!should_warn_stuck_settlement(&mut last_warned, stuck));
+        assert!(should_warn_stuck_settlement(
+            &mut last_warned,
+            StuckSettlement {
+                current_l1_slot: 30,
+                ..stuck
+            },
+        ));
     }
 
     fn create_test_cluster_info() -> Arc<ClusterInfo> {
