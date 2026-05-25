@@ -1,7 +1,8 @@
 use {
     crate::{
         EphemeralRollupSettings, ephemeral_tpu::EphemeralTpu,
-        ephemeral_tx_client::EphemeralTransactionClient, slot_advancer::SlotAdvancer,
+        ephemeral_tx_client::EphemeralTransactionClient, settlement::ReceiptBalanceSettlement,
+        slot_advancer::SlotAdvancer,
     },
     crossbeam_channel::{Sender, unbounded},
     log::{debug, info, warn},
@@ -1335,6 +1336,48 @@ impl EphemeralRuntime {
         self.delegated_accounts.read().unwrap().clone()
     }
 
+    /// Build validator-settled DepositReceipt balance updates from ER-local
+    /// system account balances. Existing receipts become the L1 withdrawable
+    /// balance after the next settlement, so users must withdraw from settled
+    /// receipt state instead of stale deposit totals.
+    pub fn settlement_receipt_balances(
+        &self,
+        session_pda: Pubkey,
+    ) -> Vec<ReceiptBalanceSettlement> {
+        let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
+        let mut receipt_balances = self
+            .er_account_overlay
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(recipient, account)| {
+                !delegated_accounts.contains(recipient)
+                    && account.owner() == &solana_sdk_ids::system_program::id()
+                    && account.data().is_empty()
+            })
+            .filter_map(|(recipient, account)| {
+                let (receipt_pda, _) = northstar_portal::find_deposit_receipt_pda(
+                    &self.portal_program_id.to_bytes(),
+                    &session_pda.to_bytes(),
+                    &recipient.to_bytes(),
+                );
+                let receipt_pda = Pubkey::new_from_array(receipt_pda);
+                let receipt_account = self.l1_anchor_bank.get_account(&receipt_pda)?;
+                let Some(crate::portal_state::PortalAccount::DepositReceipt(receipt)) =
+                    crate::portal_state::try_parse_raw_portal_account(receipt_account.data())
+                else {
+                    return None;
+                };
+                (receipt.balance != account.lamports()).then_some(ReceiptBalanceSettlement {
+                    recipient: *recipient,
+                    balance: account.lamports(),
+                })
+            })
+            .collect::<Vec<_>>();
+        receipt_balances.sort_by_key(|receipt| receipt.recipient.to_bytes());
+        receipt_balances
+    }
+
     /// Returns the initial snapshot of a delegated account.
     pub fn initial_account_snapshot(&self, pubkey: &Pubkey) -> Option<&AccountSharedData> {
         self.initial_account_snapshots.get(pubkey)
@@ -1631,6 +1674,39 @@ impl EphemeralRuntime {
         info!(
             "Credited {} lamports to {} on ER (base: {}, new balance: {})",
             lamports, depositor, base_balance, new_balance
+        );
+    }
+
+    /// Debit a withdrawal on the ephemeral bank. Called by NorthStarService
+    /// when a FeeWithdrawn event is detected on L1.
+    pub fn debit_withdrawal(&self, recipient: &Pubkey, lamports: u64) {
+        let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
+        let bank = self.bank();
+        let mut account = bank.get_account(recipient).unwrap_or_default();
+        let base_balance = account.lamports();
+        if base_balance < lamports {
+            warn!(
+                "Withdrawal of {} lamports for {} exceeds ER balance {}; clamping to zero",
+                lamports, recipient, base_balance
+            );
+        }
+        let new_balance = base_balance.saturating_sub(lamports);
+        account.set_lamports(new_balance);
+        if account.owner() == &Pubkey::default() {
+            account.set_owner(solana_sdk_ids::system_program::id());
+        }
+        bank.store_account(recipient, &account);
+        self.er_account_overlay
+            .write()
+            .unwrap()
+            .insert(*recipient, account.clone());
+        self.touched_accounts.write().unwrap().insert(*recipient);
+
+        self.publish_bank_for_rpc();
+
+        info!(
+            "Debited {} lamports from {} on ER (base: {}, new balance: {})",
+            lamports, recipient, base_balance, new_balance
         );
     }
 }

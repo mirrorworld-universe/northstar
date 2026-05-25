@@ -2,7 +2,7 @@ use {
     crate::ErStateDiff,
     northstar_portal::{
         BeginSettlement, FinishSettlement, MAX_SETTLEMENT_CHUNK, PortalInstruction,
-        WriteSettlementChunk, find_delegation_record_pda,
+        SettleDepositReceipt, WriteSettlementChunk, find_delegation_record_pda,
     },
     solana_account::ReadableAccount,
     solana_clock::Slot,
@@ -22,15 +22,22 @@ pub struct SettlementChunk {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiptBalanceSettlement {
+    pub recipient: Pubkey,
+    pub balance: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettlementPlan {
     pub er_slot: Slot,
     pub checksum: [u8; 32],
     pub chunks: Vec<SettlementChunk>,
+    pub receipt_balances: Vec<ReceiptBalanceSettlement>,
 }
 
 impl SettlementPlan {
     pub fn is_empty(&self) -> bool {
-        self.chunks.is_empty()
+        self.chunks.is_empty() && self.receipt_balances.is_empty()
     }
 
     pub fn portal_instructions(
@@ -85,6 +92,35 @@ impl SettlementPlan {
             });
         }
 
+        for receipt in &self.receipt_balances {
+            let deposit_receipt = Pubkey::find_program_address(
+                &[
+                    b"deposit_receipt",
+                    session_pda.as_ref(),
+                    receipt.recipient.as_ref(),
+                ],
+                &portal_program_id,
+            )
+            .0;
+            instructions.push(Instruction {
+                program_id: portal_program_id,
+                accounts: vec![
+                    AccountMeta::new_readonly(validator, true),
+                    AccountMeta::new_readonly(session_pda, false),
+                    AccountMeta::new(deposit_receipt, false),
+                    AccountMeta::new_readonly(receipt.recipient, false),
+                ],
+                data: borsh::to_vec(&PortalInstruction::SettleDepositReceipt(
+                    SettleDepositReceipt {
+                        er_slot: self.er_slot,
+                        checksum: self.checksum,
+                        balance: receipt.balance,
+                    },
+                ))
+                .unwrap(),
+            });
+        }
+
         instructions.push(Instruction {
             program_id: portal_program_id,
             accounts: vec![
@@ -105,6 +141,7 @@ pub fn build_settlement_plan(
     diff: &ErStateDiff,
     delegated_accounts: &HashSet<Pubkey>,
     er_slot: Slot,
+    receipt_balances: Vec<ReceiptBalanceSettlement>,
 ) -> Option<SettlementPlan> {
     let mut chunks = vec![];
 
@@ -126,14 +163,15 @@ pub fn build_settlement_plan(
         ));
     }
 
-    if chunks.is_empty() {
+    if chunks.is_empty() && receipt_balances.is_empty() {
         return None;
     }
 
     Some(SettlementPlan {
         er_slot,
-        checksum: checksum_chunks(er_slot, &chunks),
+        checksum: checksum_settlement(er_slot, &chunks, &receipt_balances),
         chunks,
+        receipt_balances,
     })
 }
 
@@ -169,15 +207,25 @@ fn data_chunks_for_account(pubkey: Pubkey, l1_data: &[u8], er_data: &[u8]) -> Ve
     chunks
 }
 
-fn checksum_chunks(er_slot: Slot, chunks: &[SettlementChunk]) -> [u8; 32] {
+fn checksum_settlement(
+    er_slot: Slot,
+    chunks: &[SettlementChunk],
+    receipt_balances: &[ReceiptBalanceSettlement],
+) -> [u8; 32] {
     let mut hasher = Hasher::default();
     hasher.hash(SETTLEMENT_CHECKSUM_DOMAIN);
     hasher.hash(&er_slot.to_le_bytes());
     for chunk in chunks {
+        hasher.hash(b"data");
         hasher.hash(chunk.account.as_ref());
         hasher.hash(&chunk.account_data_offset.to_le_bytes());
         hasher.hash(&(chunk.data.len() as u32).to_le_bytes());
         hasher.hash(&chunk.data);
+    }
+    for receipt in receipt_balances {
+        hasher.hash(b"receipt");
+        hasher.hash(receipt.recipient.as_ref());
+        hasher.hash(&receipt.balance.to_le_bytes());
     }
     hasher.result().to_bytes()
 }
@@ -223,6 +271,7 @@ mod tests {
             er_slot: 1,
             checksum: [0; 32],
             chunks: vec![],
+            receipt_balances: vec![],
         };
         assert!(
             plan.portal_instructions(

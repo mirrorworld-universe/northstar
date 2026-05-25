@@ -68,6 +68,12 @@ fn process_instruction(
             instructions::process_finish_settlement(program_id, accounts, finish)
         }),
         Ok((8, _)) => instructions::process_abort_settlement(program_id, accounts),
+        Ok((9, payload)) => deserialize_args::<u64>(payload).and_then(|lamports| {
+            instructions::process_withdraw_fee(program_id, accounts, lamports)
+        }),
+        Ok((10, payload)) => deserialize_args(payload).and_then(|settle| {
+            instructions::process_settle_deposit_receipt(program_id, accounts, settle)
+        }),
         Ok((_, _)) | Err(_) => Err(ProgramError::InvalidInstructionData),
     }
 }

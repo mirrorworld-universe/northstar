@@ -61,6 +61,18 @@ pub enum PortalInstruction {
     #[cfg_attr(feature = "idl", account(0, name = "authority_or_validator", sig))]
     #[cfg_attr(feature = "idl", account(1, name = "session", mut))]
     AbortSettlement,
+
+    #[cfg_attr(feature = "idl", account(0, name = "recipient", sig, mut))]
+    #[cfg_attr(feature = "idl", account(1, name = "session"))]
+    #[cfg_attr(feature = "idl", account(2, name = "deposit_receipt", mut))]
+    #[cfg_attr(feature = "idl", account(3, name = "system_program"))]
+    WithdrawFee { lamports: u64 },
+
+    #[cfg_attr(feature = "idl", account(0, name = "validator", sig))]
+    #[cfg_attr(feature = "idl", account(1, name = "session"))]
+    #[cfg_attr(feature = "idl", account(2, name = "deposit_receipt", mut))]
+    #[cfg_attr(feature = "idl", account(3, name = "recipient"))]
+    SettleDepositReceipt(SettleDepositReceipt),
 }
 
 #[cfg_attr(feature = "idl", derive(shank::ShankType))]
@@ -95,4 +107,12 @@ pub struct WriteSettlementChunk {
 pub struct FinishSettlement {
     pub er_slot: u64,
     pub checksum: [u8; 32],
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+pub struct SettleDepositReceipt {
+    pub er_slot: u64,
+    pub checksum: [u8; 32],
+    pub balance: u64,
 }
