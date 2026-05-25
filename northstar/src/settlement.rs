@@ -6,9 +6,13 @@ use {
     },
     solana_account::ReadableAccount,
     solana_clock::Slot,
+    solana_hash::Hash,
     solana_instruction::{AccountMeta, Instruction},
+    solana_keypair::Keypair,
     solana_pubkey::Pubkey,
     solana_sha256_hasher::Hasher,
+    solana_signer::Signer,
+    solana_transaction::Transaction,
     std::collections::HashSet,
 };
 
@@ -38,6 +42,25 @@ pub struct SettlementPlan {
 impl SettlementPlan {
     pub fn is_empty(&self) -> bool {
         self.chunks.is_empty() && self.receipt_balances.is_empty()
+    }
+
+    pub fn portal_transaction(
+        &self,
+        portal_program_id: Pubkey,
+        session_pda: Pubkey,
+        validator: &Keypair,
+        recent_blockhash: Hash,
+    ) -> Option<Transaction> {
+        let instructions =
+            self.portal_instructions(portal_program_id, session_pda, validator.pubkey());
+        (!instructions.is_empty()).then(|| {
+            Transaction::new_signed_with_payer(
+                &instructions,
+                Some(&validator.pubkey()),
+                &[validator],
+                recent_blockhash,
+            )
+        })
     }
 
     pub fn portal_instructions(
@@ -281,5 +304,66 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn portal_transaction_keeps_settlement_instructions_atomic_and_ordered() {
+        use borsh::BorshDeserialize;
+
+        let portal_program_id = Pubkey::new_unique();
+        let session_pda = Pubkey::new_unique();
+        let validator = Keypair::new();
+        let plan = SettlementPlan {
+            er_slot: 42,
+            checksum: [7; 32],
+            chunks: vec![
+                SettlementChunk {
+                    account: Pubkey::new_unique(),
+                    account_data_offset: 0,
+                    data: vec![1, 2, 3],
+                },
+                SettlementChunk {
+                    account: Pubkey::new_unique(),
+                    account_data_offset: MAX_SETTLEMENT_CHUNK as u32,
+                    data: vec![4],
+                },
+            ],
+            receipt_balances: vec![ReceiptBalanceSettlement {
+                recipient: Pubkey::new_unique(),
+                balance: 9,
+            }],
+        };
+
+        let transaction = plan
+            .portal_transaction(
+                portal_program_id,
+                session_pda,
+                &validator,
+                Hash::new_unique(),
+            )
+            .expect("non-empty settlement plan should produce one transaction");
+
+        assert_eq!(transaction.signatures.len(), 1);
+        assert_eq!(transaction.message.instructions.len(), 5);
+        assert!(matches!(
+            PortalInstruction::try_from_slice(&transaction.message.instructions[0].data).unwrap(),
+            PortalInstruction::BeginSettlement(_)
+        ));
+        assert!(matches!(
+            PortalInstruction::try_from_slice(&transaction.message.instructions[1].data).unwrap(),
+            PortalInstruction::WriteSettlementChunk(_)
+        ));
+        assert!(matches!(
+            PortalInstruction::try_from_slice(&transaction.message.instructions[2].data).unwrap(),
+            PortalInstruction::WriteSettlementChunk(_)
+        ));
+        assert!(matches!(
+            PortalInstruction::try_from_slice(&transaction.message.instructions[3].data).unwrap(),
+            PortalInstruction::SettleDepositReceipt(_)
+        ));
+        assert!(matches!(
+            PortalInstruction::try_from_slice(&transaction.message.instructions[4].data).unwrap(),
+            PortalInstruction::FinishSettlement(_)
+        ));
     }
 }
