@@ -1,5 +1,6 @@
 use {
-    crate::ErStateDiff,
+    crate::{ErStateDiff, ErStateDiffAccount},
+    log::warn,
     northstar_portal::{
         BeginSettlement, FinishSettlement, MAX_SETTLEMENT_CHUNK, PortalInstruction,
         SettleDepositReceipt, WriteSettlementChunk, find_delegation_record_pda,
@@ -33,11 +34,44 @@ pub struct ReceiptBalanceSettlement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettlementUnsupportedChange {
+    MissingL1Account {
+        account: Pubkey,
+    },
+    DataLengthChanged {
+        account: Pubkey,
+        l1_len: usize,
+        er_len: usize,
+    },
+    LamportsChanged {
+        account: Pubkey,
+        l1_lamports: u64,
+        er_lamports: u64,
+    },
+    OwnerChanged {
+        account: Pubkey,
+        l1_owner: Pubkey,
+        er_owner: Pubkey,
+    },
+    ExecutableChanged {
+        account: Pubkey,
+        l1_executable: bool,
+        er_executable: bool,
+    },
+    RentEpochChanged {
+        account: Pubkey,
+        l1_rent_epoch: u64,
+        er_rent_epoch: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettlementPlan {
     pub er_slot: Slot,
     pub checksum: [u8; 32],
     pub chunks: Vec<SettlementChunk>,
     pub receipt_balances: Vec<ReceiptBalanceSettlement>,
+    pub unsupported_changes: Vec<SettlementUnsupportedChange>,
 }
 
 impl SettlementPlan {
@@ -273,18 +307,22 @@ pub fn build_settlement_plan(
     receipt_balances: Vec<ReceiptBalanceSettlement>,
 ) -> Option<SettlementPlan> {
     let mut chunks = vec![];
+    let mut unsupported_changes = vec![];
 
     for account_diff in &diff.accounts {
         if !delegated_accounts.contains(&account_diff.pubkey) {
             continue;
         }
-        let Some(l1_account) = account_diff.l1_account.as_ref() else {
-            continue;
-        };
-        if l1_account.data().len() != account_diff.er_account.data().len() {
+
+        let account_unsupported_changes = unsupported_changes_for_account(account_diff);
+        if !account_unsupported_changes.is_empty() {
+            unsupported_changes.extend(account_unsupported_changes);
             continue;
         }
 
+        let Some(l1_account) = account_diff.l1_account.as_ref() else {
+            continue;
+        };
         chunks.extend(data_chunks_for_account(
             account_diff.pubkey,
             l1_account.data(),
@@ -292,8 +330,11 @@ pub fn build_settlement_plan(
         ));
     }
 
-    if chunks.is_empty() && receipt_balances.is_empty() {
+    if chunks.is_empty() && receipt_balances.is_empty() && unsupported_changes.is_empty() {
         return None;
+    }
+    if !unsupported_changes.is_empty() {
+        warn!("Portal settlement skipped unsupported account changes: {unsupported_changes:?}",);
     }
 
     Some(SettlementPlan {
@@ -301,7 +342,59 @@ pub fn build_settlement_plan(
         checksum: checksum_settlement(er_slot, &chunks, &receipt_balances),
         chunks,
         receipt_balances,
+        unsupported_changes,
     })
+}
+
+fn unsupported_changes_for_account(
+    account_diff: &ErStateDiffAccount,
+) -> Vec<SettlementUnsupportedChange> {
+    let mut unsupported_changes = vec![];
+    let Some(l1_account) = account_diff.l1_account.as_ref() else {
+        unsupported_changes.push(SettlementUnsupportedChange::MissingL1Account {
+            account: account_diff.pubkey,
+        });
+        return unsupported_changes;
+    };
+    let er_account = &account_diff.er_account;
+
+    if l1_account.data().len() != er_account.data().len() {
+        unsupported_changes.push(SettlementUnsupportedChange::DataLengthChanged {
+            account: account_diff.pubkey,
+            l1_len: l1_account.data().len(),
+            er_len: er_account.data().len(),
+        });
+    }
+    if l1_account.lamports() != er_account.lamports() {
+        unsupported_changes.push(SettlementUnsupportedChange::LamportsChanged {
+            account: account_diff.pubkey,
+            l1_lamports: l1_account.lamports(),
+            er_lamports: er_account.lamports(),
+        });
+    }
+    if l1_account.owner() != er_account.owner() {
+        unsupported_changes.push(SettlementUnsupportedChange::OwnerChanged {
+            account: account_diff.pubkey,
+            l1_owner: *l1_account.owner(),
+            er_owner: *er_account.owner(),
+        });
+    }
+    if l1_account.executable() != er_account.executable() {
+        unsupported_changes.push(SettlementUnsupportedChange::ExecutableChanged {
+            account: account_diff.pubkey,
+            l1_executable: l1_account.executable(),
+            er_executable: er_account.executable(),
+        });
+    }
+    if l1_account.rent_epoch() != er_account.rent_epoch() {
+        unsupported_changes.push(SettlementUnsupportedChange::RentEpochChanged {
+            account: account_diff.pubkey,
+            l1_rent_epoch: l1_account.rent_epoch(),
+            er_rent_epoch: er_account.rent_epoch(),
+        });
+    }
+
+    unsupported_changes
 }
 
 fn data_chunks_for_account(pubkey: Pubkey, l1_data: &[u8], er_data: &[u8]) -> Vec<SettlementChunk> {
@@ -361,7 +454,35 @@ fn checksum_settlement(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use {
+        super::*,
+        solana_account::{AccountSharedData, WritableAccount},
+        solana_lattice_hash::lt_hash::LtHash,
+        std::collections::HashSet,
+    };
+
+    fn account(data: &[u8], lamports: u64, owner: &Pubkey) -> AccountSharedData {
+        let mut account = AccountSharedData::new(lamports, data.len(), owner);
+        account.data_as_mut_slice().copy_from_slice(data);
+        account
+    }
+
+    fn diff_for_account(
+        pubkey: Pubkey,
+        l1_account: Option<AccountSharedData>,
+        er_account: AccountSharedData,
+    ) -> ErStateDiff {
+        ErStateDiff {
+            accounts: vec![ErStateDiffAccount {
+                pubkey,
+                l1_account,
+                er_account,
+                l1_lt_hash: LtHash::identity(),
+                er_lt_hash: LtHash::identity(),
+            }],
+            lt_hash: LtHash::identity(),
+        }
+    }
 
     #[test]
     fn unchanged_data_produces_no_chunks() {
@@ -395,12 +516,104 @@ mod tests {
     }
 
     #[test]
+    fn data_only_diff_builds_chunks_without_unsupported_changes() {
+        let pubkey = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let diff = diff_for_account(
+            pubkey,
+            Some(account(&[0, 0, 0], 10, &owner)),
+            account(&[0, 7, 8], 10, &owner),
+        );
+        let delegated_accounts = HashSet::from([pubkey]);
+
+        let plan = build_settlement_plan(&diff, &delegated_accounts, 5, vec![]).unwrap();
+
+        assert_eq!(plan.chunks.len(), 1);
+        assert_eq!(plan.unsupported_changes, vec![]);
+    }
+
+    #[test]
+    fn unsupported_non_data_diff_is_reported_and_not_partially_settled() {
+        let pubkey = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let diff = diff_for_account(
+            pubkey,
+            Some(account(&[0], 10, &owner)),
+            account(&[9], 11, &owner),
+        );
+        let delegated_accounts = HashSet::from([pubkey]);
+
+        let plan = build_settlement_plan(&diff, &delegated_accounts, 5, vec![]).unwrap();
+
+        assert_eq!(plan.chunks, vec![]);
+        assert_eq!(
+            plan.unsupported_changes,
+            vec![SettlementUnsupportedChange::LamportsChanged {
+                account: pubkey,
+                l1_lamports: 10,
+                er_lamports: 11,
+            }]
+        );
+        assert!(
+            plan.portal_instructions(
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                Pubkey::new_unique()
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn unsupported_realloc_and_new_accounts_are_reported() {
+        let reallocated = Pubkey::new_unique();
+        let created = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let diff = ErStateDiff {
+            accounts: vec![
+                ErStateDiffAccount {
+                    pubkey: reallocated,
+                    l1_account: Some(account(&[0], 10, &owner)),
+                    er_account: account(&[0, 1], 10, &owner),
+                    l1_lt_hash: LtHash::identity(),
+                    er_lt_hash: LtHash::identity(),
+                },
+                ErStateDiffAccount {
+                    pubkey: created,
+                    l1_account: None,
+                    er_account: account(&[1], 10, &owner),
+                    l1_lt_hash: LtHash::identity(),
+                    er_lt_hash: LtHash::identity(),
+                },
+            ],
+            lt_hash: LtHash::identity(),
+        };
+        let delegated_accounts = HashSet::from([reallocated, created]);
+
+        let plan = build_settlement_plan(&diff, &delegated_accounts, 5, vec![]).unwrap();
+
+        assert_eq!(plan.chunks, vec![]);
+        assert_eq!(
+            plan.unsupported_changes,
+            vec![
+                SettlementUnsupportedChange::DataLengthChanged {
+                    account: reallocated,
+                    l1_len: 1,
+                    er_len: 2,
+                },
+                SettlementUnsupportedChange::MissingL1Account { account: created },
+            ]
+        );
+    }
+
+    #[test]
     fn empty_plan_emits_no_instructions() {
         let plan = SettlementPlan {
             er_slot: 1,
             checksum: [0; 32],
             chunks: vec![],
             receipt_balances: vec![],
+            unsupported_changes: vec![],
         };
         assert!(
             plan.portal_instructions(
@@ -474,6 +687,7 @@ mod tests {
                 recipient: Pubkey::new_unique(),
                 balance: 9,
             }],
+            unsupported_changes: vec![],
         };
 
         let transactions = plan.portal_transactions(
