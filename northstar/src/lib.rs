@@ -286,28 +286,13 @@ impl Manager {
         }
 
         let plan = self.settlement_plan()?;
-        let instructions = plan.portal_instructions(
+        let transaction = plan.portal_transaction(
             self.config.portal_program_id,
             session_pda,
-            self.config.manager_account.pubkey(),
-        );
-        if instructions.is_empty() {
-            return None;
-        }
-
-        let payer = self.config.manager_account.pubkey();
-        let transactions = instructions
-            .into_iter()
-            .map(|instruction| {
-                Transaction::new_signed_with_payer(
-                    &[instruction],
-                    Some(&payer),
-                    &[self.config.manager_account.as_ref()],
-                    recent_blockhash,
-                )
-            })
-            .collect();
-        Some((plan.er_slot, plan.checksum, transactions))
+            self.config.manager_account.as_ref(),
+            recent_blockhash,
+        )?;
+        Some((plan.er_slot, plan.checksum, vec![transaction]))
     }
 
     /// Sonic: Shutdown the always-on runtime (called at validator exit)
