@@ -273,26 +273,41 @@ impl Manager {
         else {
             return None;
         };
-        if !session_state.is_valid()
-            || session_state.settlement_status == SettlementStatus::InProgress
-        {
-            return None;
-        }
-        let next_settlement_slot = session_state
-            .last_settled_l1_slot
-            .saturating_add(session_state.settlement_interval_slots);
-        if l1_bank.slot() < next_settlement_slot {
+        if !session_state.is_valid() {
             return None;
         }
 
         let plan = self.settlement_plan()?;
-        let transaction = plan.portal_transaction(
-            self.config.portal_program_id,
-            session_pda,
-            self.config.manager_account.as_ref(),
-            recent_blockhash,
-        )?;
-        Some((plan.er_slot, plan.checksum, vec![transaction]))
+        let transactions = match session_state.settlement_status {
+            SettlementStatus::Idle => {
+                let next_settlement_slot = session_state
+                    .last_settled_l1_slot
+                    .saturating_add(session_state.settlement_interval_slots);
+                if l1_bank.slot() < next_settlement_slot {
+                    return None;
+                }
+                plan.portal_transactions(
+                    self.config.portal_program_id,
+                    session_pda,
+                    self.config.manager_account.as_ref(),
+                    recent_blockhash,
+                )
+            }
+            SettlementStatus::InProgress => {
+                if session_state.settlement_er_slot != plan.er_slot
+                    || session_state.settlement_checksum != plan.checksum
+                {
+                    return None;
+                }
+                plan.portal_retry_transactions_after_begin(
+                    self.config.portal_program_id,
+                    session_pda,
+                    self.config.manager_account.as_ref(),
+                    recent_blockhash,
+                )
+            }
+        };
+        (!transactions.is_empty()).then_some((plan.er_slot, plan.checksum, transactions))
     }
 
     /// Sonic: Shutdown the always-on runtime (called at validator exit)

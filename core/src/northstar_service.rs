@@ -94,6 +94,7 @@ struct PendingSettlementSubmission {
     recent_blockhash: Hash,
     submitted_l1_slot: u64,
     attempts: u64,
+    remaining_transactions: Vec<Transaction>,
 }
 
 impl PendingSettlementSubmission {
@@ -103,20 +104,28 @@ impl PendingSettlementSubmission {
         recent_blockhash: Hash,
         submitted_l1_slot: u64,
         attempts: u64,
-        transactions: &[Transaction],
-    ) -> Self {
-        let signatures = transactions
-            .iter()
-            .filter_map(|transaction| transaction.signatures.first().cloned())
+        mut transactions: Vec<Transaction>,
+    ) -> Option<(Self, Transaction)> {
+        transactions.reverse();
+        let current_transaction = transactions.pop()?;
+        let signatures = current_transaction
+            .signatures
+            .first()
+            .cloned()
+            .into_iter()
             .collect();
-        Self {
-            er_slot,
-            checksum,
-            signatures,
-            recent_blockhash,
-            submitted_l1_slot,
-            attempts,
-        }
+        Some((
+            Self {
+                er_slot,
+                checksum,
+                signatures,
+                recent_blockhash,
+                submitted_l1_slot,
+                attempts,
+                remaining_transactions: transactions,
+            },
+            current_transaction,
+        ))
     }
 
     fn status(&self, bank: &Bank) -> PendingSettlementStatus {
@@ -141,6 +150,19 @@ impl PendingSettlementSubmission {
         PendingSettlementStatus::Pending
     }
 
+    fn pop_next_transaction(&mut self, bank: &Bank) -> Option<Transaction> {
+        let transaction = self.remaining_transactions.pop()?;
+        self.signatures = transaction
+            .signatures
+            .first()
+            .cloned()
+            .into_iter()
+            .collect();
+        self.recent_blockhash = transaction.message.recent_blockhash;
+        self.submitted_l1_slot = bank.slot();
+        Some(transaction)
+    }
+
     fn failed_signature(&self, bank: &Bank) -> Option<(Signature, String)> {
         self.signatures.iter().find_map(|signature| {
             if let Some(Err(err)) = bank.get_signature_status(signature) {
@@ -152,6 +174,7 @@ impl PendingSettlementSubmission {
     }
 }
 
+#[cfg(test)]
 fn pending_settlement_allows_submission(
     pending_settlement: &mut Option<PendingSettlementSubmission>,
     bank: &Bank,
@@ -307,7 +330,10 @@ fn submit_settlement_if_due(
     pending_settlement: &mut Option<PendingSettlementSubmission>,
     settlement_attempts: &mut u64,
 ) {
-    if !pending_settlement_allows_submission(pending_settlement, bank) {
+    if submit_next_pending_settlement_if_ready(bank, sender, forward_sender, pending_settlement) {
+        return;
+    }
+    if pending_settlement.is_some() {
         return;
     }
 
@@ -318,26 +344,115 @@ fn submit_settlement_if_due(
         return;
     };
 
-    if let Err(err) = submit_settlement_transactions(sender, forward_sender, &transactions) {
-        warn!("Failed to enqueue Portal settlement transactions: {err}");
-        return;
-    }
-
     *settlement_attempts = settlement_attempts.saturating_add(1);
-    info!(
-        "Enqueued {} Portal settlement transactions for er_slot={} attempts={}",
-        transactions.len(),
-        er_slot,
-        *settlement_attempts,
-    );
-    *pending_settlement = Some(PendingSettlementSubmission::new(
+    let Some((pending, transaction)) = PendingSettlementSubmission::new(
         er_slot,
         checksum,
         recent_blockhash,
         bank.slot(),
         *settlement_attempts,
-        &transactions,
-    ));
+        transactions,
+    ) else {
+        return;
+    };
+
+    if let Err(err) =
+        submit_settlement_transactions(sender, forward_sender, std::slice::from_ref(&transaction))
+    {
+        warn!("Failed to enqueue Portal settlement transaction: {err}");
+        return;
+    }
+
+    info!(
+        "Enqueued Portal settlement transaction for er_slot={} attempts={} remaining_txs={}",
+        er_slot,
+        *settlement_attempts,
+        pending.remaining_transactions.len(),
+    );
+    *pending_settlement = Some(pending);
+}
+
+fn submit_next_pending_settlement_if_ready(
+    bank: &Bank,
+    sender: &BankingPacketSender,
+    forward_sender: Option<&Sender<(BankingPacketBatch, bool)>>,
+    pending_settlement: &mut Option<PendingSettlementSubmission>,
+) -> bool {
+    let Some(pending) = pending_settlement.as_mut() else {
+        return false;
+    };
+
+    match pending.status(bank) {
+        PendingSettlementStatus::Pending => {
+            debug!(
+                "Portal settlement still unconfirmed for er_slot={} checksum={:?} attempts={} \
+                 signatures={:?}",
+                pending.er_slot, pending.checksum, pending.attempts, pending.signatures,
+            );
+            true
+        }
+        PendingSettlementStatus::Confirmed => {
+            info!(
+                "Portal settlement transaction confirmed for er_slot={} checksum={:?} attempts={} \
+                 submitted_l1_slot={} confirmed_l1_slot={} signatures={:?}",
+                pending.er_slot,
+                pending.checksum,
+                pending.attempts,
+                pending.submitted_l1_slot,
+                bank.slot(),
+                pending.signatures,
+            );
+            let Some(transaction) = pending.pop_next_transaction(bank) else {
+                *pending_settlement = None;
+                return false;
+            };
+            if let Err(err) = submit_settlement_transactions(
+                sender,
+                forward_sender,
+                std::slice::from_ref(&transaction),
+            ) {
+                warn!("Failed to enqueue next Portal settlement transaction: {err}");
+                return true;
+            }
+            info!(
+                "Enqueued next Portal settlement transaction for er_slot={} remaining_txs={}",
+                pending.er_slot,
+                pending.remaining_transactions.len(),
+            );
+            true
+        }
+        PendingSettlementStatus::Expired => {
+            warn!(
+                "Portal settlement transaction expired before confirmation for er_slot={} \
+                 checksum={:?} attempts={} submitted_l1_slot={} current_l1_slot={} \
+                 signatures={:?}; retrying",
+                pending.er_slot,
+                pending.checksum,
+                pending.attempts,
+                pending.submitted_l1_slot,
+                bank.slot(),
+                pending.signatures,
+            );
+            *pending_settlement = None;
+            false
+        }
+        PendingSettlementStatus::Failed => {
+            let failed = pending.failed_signature(bank);
+            warn!(
+                "Portal settlement transaction failed for er_slot={} checksum={:?} attempts={} \
+                 submitted_l1_slot={} current_l1_slot={} failed={:?}; retrying if session state \
+                 permits",
+                pending.er_slot,
+                pending.checksum,
+                pending.attempts,
+                pending.submitted_l1_slot,
+                bank.slot(),
+                failed,
+            );
+            *pending_settlement = None;
+            false
+        }
+    }
 }
 
 impl NorthStarService {
@@ -566,19 +681,33 @@ mod tests {
         )
     }
 
+    fn pending_test_submission(
+        bank: &Bank,
+        recent_blockhash: Hash,
+        transaction: Transaction,
+    ) -> PendingSettlementSubmission {
+        PendingSettlementSubmission::new(
+            7,
+            [3; 32],
+            recent_blockhash,
+            bank.slot(),
+            1,
+            vec![transaction],
+        )
+        .unwrap()
+        .0
+    }
+
     #[test]
     fn pending_settlement_waits_for_confirmation_before_duplicate_submission() {
         let bank = create_processable_test_bank();
         let payer = Keypair::new();
         fund_test_payer(&bank, &payer);
         let transaction = signed_test_transfer(&bank, &payer);
-        let mut pending_settlement = Some(PendingSettlementSubmission::new(
-            7,
-            [3; 32],
+        let mut pending_settlement = Some(pending_test_submission(
+            &bank,
             bank.last_blockhash(),
-            bank.slot(),
-            1,
-            &[transaction],
+            transaction,
         ));
 
         assert!(!pending_settlement_allows_submission(
@@ -594,13 +723,10 @@ mod tests {
         let payer = Keypair::new();
         fund_test_payer(&bank, &payer);
         let transaction = signed_test_transfer(&bank, &payer);
-        let mut pending_settlement = Some(PendingSettlementSubmission::new(
-            7,
-            [3; 32],
+        let mut pending_settlement = Some(pending_test_submission(
+            &bank,
             Hash::new_unique(),
-            bank.slot(),
-            1,
-            &[transaction],
+            transaction,
         ));
 
         assert!(pending_settlement_allows_submission(
@@ -622,13 +748,10 @@ mod tests {
             bank.slot(),
             Ok(()),
         );
-        let mut pending_settlement = Some(PendingSettlementSubmission::new(
-            7,
-            [3; 32],
+        let mut pending_settlement = Some(pending_test_submission(
+            &bank,
             bank.last_blockhash(),
-            bank.slot(),
-            1,
-            &[transaction],
+            transaction,
         ));
 
         assert!(pending_settlement_allows_submission(
@@ -650,13 +773,10 @@ mod tests {
             bank.slot(),
             Err(solana_transaction_error::TransactionError::AccountNotFound),
         );
-        let mut pending_settlement = Some(PendingSettlementSubmission::new(
-            7,
-            [3; 32],
+        let mut pending_settlement = Some(pending_test_submission(
+            &bank,
             bank.last_blockhash(),
-            bank.slot(),
-            1,
-            &[transaction],
+            transaction,
         ));
 
         assert!(pending_settlement_allows_submission(

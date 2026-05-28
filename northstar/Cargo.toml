@@ -36,6 +36,7 @@ solana-time-utils.workspace = true
 solana-net-utils.workspace = true
 solana-streamer.workspace = true
 solana-perf.workspace = true
+solana-packet.workspace = true
 
 crossbeam-channel.workspace = true
 stream-cancel.workspace = true

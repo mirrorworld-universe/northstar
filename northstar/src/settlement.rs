@@ -9,6 +9,7 @@ use {
     solana_hash::Hash,
     solana_instruction::{AccountMeta, Instruction},
     solana_keypair::Keypair,
+    solana_packet::PACKET_DATA_SIZE,
     solana_pubkey::Pubkey,
     solana_sha256_hasher::Hasher,
     solana_signer::Signer,
@@ -44,23 +45,70 @@ impl SettlementPlan {
         self.chunks.is_empty() && self.receipt_balances.is_empty()
     }
 
-    pub fn portal_transaction(
+    pub fn portal_transactions(
         &self,
         portal_program_id: Pubkey,
         session_pda: Pubkey,
         validator: &Keypair,
         recent_blockhash: Hash,
-    ) -> Option<Transaction> {
-        let instructions =
-            self.portal_instructions(portal_program_id, session_pda, validator.pubkey());
-        (!instructions.is_empty()).then(|| {
-            Transaction::new_signed_with_payer(
-                &instructions,
-                Some(&validator.pubkey()),
-                &[validator],
-                recent_blockhash,
-            )
-        })
+    ) -> Vec<Transaction> {
+        self.portal_transactions_inner(
+            portal_program_id,
+            session_pda,
+            validator,
+            recent_blockhash,
+            true,
+        )
+    }
+
+    pub fn portal_retry_transactions_after_begin(
+        &self,
+        portal_program_id: Pubkey,
+        session_pda: Pubkey,
+        validator: &Keypair,
+        recent_blockhash: Hash,
+    ) -> Vec<Transaction> {
+        self.portal_transactions_inner(
+            portal_program_id,
+            session_pda,
+            validator,
+            recent_blockhash,
+            false,
+        )
+    }
+
+    fn portal_transactions_inner(
+        &self,
+        portal_program_id: Pubkey,
+        session_pda: Pubkey,
+        validator: &Keypair,
+        recent_blockhash: Hash,
+        include_begin: bool,
+    ) -> Vec<Transaction> {
+        self.portal_instruction_batches(portal_program_id, session_pda, validator, include_begin)
+            .into_iter()
+            .map(|instructions| {
+                sign_settlement_transaction(&instructions, validator, recent_blockhash)
+            })
+            .collect()
+    }
+
+    pub fn portal_instruction_batches(
+        &self,
+        portal_program_id: Pubkey,
+        session_pda: Pubkey,
+        validator: &Keypair,
+        include_begin: bool,
+    ) -> Vec<Vec<Instruction>> {
+        split_settlement_instruction_batches(
+            self.portal_instructions_inner(
+                portal_program_id,
+                session_pda,
+                validator.pubkey(),
+                include_begin,
+            ),
+            validator,
+        )
     }
 
     pub fn portal_instructions(
@@ -69,23 +117,35 @@ impl SettlementPlan {
         session_pda: Pubkey,
         validator: Pubkey,
     ) -> Vec<Instruction> {
+        self.portal_instructions_inner(portal_program_id, session_pda, validator, true)
+    }
+
+    fn portal_instructions_inner(
+        &self,
+        portal_program_id: Pubkey,
+        session_pda: Pubkey,
+        validator: Pubkey,
+        include_begin: bool,
+    ) -> Vec<Instruction> {
         if self.is_empty() {
             return vec![];
         }
 
         let mut instructions = Vec::with_capacity(self.chunks.len() + 2);
-        instructions.push(Instruction {
-            program_id: portal_program_id,
-            accounts: vec![
-                AccountMeta::new_readonly(validator, true),
-                AccountMeta::new(session_pda, false),
-            ],
-            data: borsh::to_vec(&PortalInstruction::BeginSettlement(BeginSettlement {
-                er_slot: self.er_slot,
-                checksum: self.checksum,
-            }))
-            .unwrap(),
-        });
+        if include_begin {
+            instructions.push(Instruction {
+                program_id: portal_program_id,
+                accounts: vec![
+                    AccountMeta::new_readonly(validator, true),
+                    AccountMeta::new(session_pda, false),
+                ],
+                data: borsh::to_vec(&PortalInstruction::BeginSettlement(BeginSettlement {
+                    er_slot: self.er_slot,
+                    checksum: self.checksum,
+                }))
+                .unwrap(),
+            });
+        }
 
         for chunk in &self.chunks {
             let mut chunk_data = [0; MAX_SETTLEMENT_CHUNK];
@@ -98,7 +158,7 @@ impl SettlementPlan {
                 program_id: portal_program_id,
                 accounts: vec![
                     AccountMeta::new_readonly(validator, true),
-                    AccountMeta::new_readonly(session_pda, false),
+                    AccountMeta::new(session_pda, false),
                     AccountMeta::new(chunk.account, false),
                     AccountMeta::new_readonly(Pubkey::new_from_array(delegation_record), false),
                 ],
@@ -129,7 +189,7 @@ impl SettlementPlan {
                 program_id: portal_program_id,
                 accounts: vec![
                     AccountMeta::new_readonly(validator, true),
-                    AccountMeta::new_readonly(session_pda, false),
+                    AccountMeta::new(session_pda, false),
                     AccountMeta::new(deposit_receipt, false),
                     AccountMeta::new_readonly(receipt.recipient, false),
                 ],
@@ -158,6 +218,52 @@ impl SettlementPlan {
         });
         instructions
     }
+}
+
+fn sign_settlement_transaction(
+    instructions: &[Instruction],
+    validator: &Keypair,
+    recent_blockhash: Hash,
+) -> Transaction {
+    Transaction::new_signed_with_payer(
+        instructions,
+        Some(&validator.pubkey()),
+        &[validator],
+        recent_blockhash,
+    )
+}
+
+fn settlement_transaction_size(instructions: &[Instruction], validator: &Keypair) -> usize {
+    let transaction = sign_settlement_transaction(instructions, validator, Hash::default());
+    bincode::serialized_size(&transaction).unwrap_or(u64::MAX) as usize
+}
+
+fn split_settlement_instruction_batches(
+    instructions: Vec<Instruction>,
+    validator: &Keypair,
+) -> Vec<Vec<Instruction>> {
+    let mut batches = vec![];
+    let mut current = vec![];
+
+    for instruction in instructions {
+        let mut candidate = current.clone();
+        candidate.push(instruction.clone());
+        if settlement_transaction_size(&candidate, validator) <= PACKET_DATA_SIZE {
+            current = candidate;
+            continue;
+        }
+
+        if !current.is_empty() {
+            batches.push(current);
+        }
+        current = vec![instruction];
+    }
+
+    if !current.is_empty() {
+        batches.push(current);
+    }
+
+    batches
 }
 
 pub fn build_settlement_plan(
@@ -307,6 +413,42 @@ mod tests {
     }
 
     #[test]
+    fn large_settlement_plan_must_not_build_oversized_transaction() {
+        let portal_program_id = Pubkey::new_unique();
+        let session_pda = Pubkey::new_unique();
+        let validator = Keypair::new();
+        let plan = SettlementPlan {
+            er_slot: 42,
+            checksum: [7; 32],
+            chunks: (0..3)
+                .map(|index| SettlementChunk {
+                    account: Pubkey::new_unique(),
+                    account_data_offset: (index * MAX_SETTLEMENT_CHUNK) as u32,
+                    data: vec![index as u8; MAX_SETTLEMENT_CHUNK],
+                })
+                .collect(),
+            receipt_balances: vec![],
+        };
+
+        let transactions = plan.portal_transactions(
+            portal_program_id,
+            session_pda,
+            &validator,
+            Hash::new_unique(),
+        );
+
+        assert!(transactions.len() > 1, "large settlement should be split");
+        for transaction in transactions {
+            let transaction_size = bincode::serialized_size(&transaction).unwrap() as usize;
+            assert!(
+                transaction_size <= PACKET_DATA_SIZE,
+                "settlement transaction size {transaction_size} exceeds packet limit \
+                 {PACKET_DATA_SIZE}"
+            );
+        }
+    }
+
+    #[test]
     fn portal_transaction_keeps_settlement_instructions_atomic_and_ordered() {
         use borsh::BorshDeserialize;
 
@@ -334,35 +476,41 @@ mod tests {
             }],
         };
 
-        let transaction = plan
-            .portal_transaction(
-                portal_program_id,
-                session_pda,
-                &validator,
-                Hash::new_unique(),
-            )
-            .expect("non-empty settlement plan should produce one transaction");
+        let transactions = plan.portal_transactions(
+            portal_program_id,
+            session_pda,
+            &validator,
+            Hash::new_unique(),
+        );
+        assert!(
+            transactions
+                .iter()
+                .all(|transaction| transaction.signatures.len() == 1)
+        );
+        let instructions = transactions
+            .iter()
+            .flat_map(|transaction| transaction.message.instructions.iter())
+            .collect::<Vec<_>>();
 
-        assert_eq!(transaction.signatures.len(), 1);
-        assert_eq!(transaction.message.instructions.len(), 5);
+        assert_eq!(instructions.len(), 5);
         assert!(matches!(
-            PortalInstruction::try_from_slice(&transaction.message.instructions[0].data).unwrap(),
+            PortalInstruction::try_from_slice(&instructions[0].data).unwrap(),
             PortalInstruction::BeginSettlement(_)
         ));
         assert!(matches!(
-            PortalInstruction::try_from_slice(&transaction.message.instructions[1].data).unwrap(),
+            PortalInstruction::try_from_slice(&instructions[1].data).unwrap(),
             PortalInstruction::WriteSettlementChunk(_)
         ));
         assert!(matches!(
-            PortalInstruction::try_from_slice(&transaction.message.instructions[2].data).unwrap(),
+            PortalInstruction::try_from_slice(&instructions[2].data).unwrap(),
             PortalInstruction::WriteSettlementChunk(_)
         ));
         assert!(matches!(
-            PortalInstruction::try_from_slice(&transaction.message.instructions[3].data).unwrap(),
+            PortalInstruction::try_from_slice(&instructions[3].data).unwrap(),
             PortalInstruction::SettleDepositReceipt(_)
         ));
         assert!(matches!(
-            PortalInstruction::try_from_slice(&transaction.message.instructions[4].data).unwrap(),
+            PortalInstruction::try_from_slice(&instructions[4].data).unwrap(),
             PortalInstruction::FinishSettlement(_)
         ));
     }
