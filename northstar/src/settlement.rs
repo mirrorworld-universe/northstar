@@ -12,7 +12,7 @@ use {
     solana_keypair::Keypair,
     solana_packet::PACKET_DATA_SIZE,
     solana_pubkey::Pubkey,
-    solana_sha256_hasher::Hasher,
+    solana_sha256_hasher::hashv,
     solana_signer::Signer,
     solana_transaction::Transaction,
     std::collections::HashSet,
@@ -434,22 +434,54 @@ fn checksum_settlement(
     chunks: &[SettlementChunk],
     receipt_balances: &[ReceiptBalanceSettlement],
 ) -> [u8; 32] {
-    let mut hasher = Hasher::default();
-    hasher.hash(SETTLEMENT_CHECKSUM_DOMAIN);
-    hasher.hash(&er_slot.to_le_bytes());
+    let mut checksum = initial_settlement_checksum(er_slot);
     for chunk in chunks {
-        hasher.hash(b"data");
-        hasher.hash(chunk.account.as_ref());
-        hasher.hash(&chunk.account_data_offset.to_le_bytes());
-        hasher.hash(&(chunk.data.len() as u32).to_le_bytes());
-        hasher.hash(&chunk.data);
+        checksum = accumulate_data_chunk_checksum(
+            checksum,
+            &chunk.account,
+            chunk.account_data_offset,
+            &chunk.data,
+        );
     }
     for receipt in receipt_balances {
-        hasher.hash(b"receipt");
-        hasher.hash(receipt.recipient.as_ref());
-        hasher.hash(&receipt.balance.to_le_bytes());
+        checksum = accumulate_receipt_checksum(checksum, &receipt.recipient, receipt.balance);
     }
-    hasher.result().to_bytes()
+    checksum
+}
+
+fn initial_settlement_checksum(er_slot: Slot) -> [u8; 32] {
+    hashv(&[SETTLEMENT_CHECKSUM_DOMAIN, &er_slot.to_le_bytes()]).to_bytes()
+}
+
+fn accumulate_data_chunk_checksum(
+    accumulator: [u8; 32],
+    account: &Pubkey,
+    account_data_offset: u32,
+    data: &[u8],
+) -> [u8; 32] {
+    hashv(&[
+        &accumulator,
+        b"data",
+        account.as_ref(),
+        &account_data_offset.to_le_bytes(),
+        &(data.len() as u32).to_le_bytes(),
+        data,
+    ])
+    .to_bytes()
+}
+
+fn accumulate_receipt_checksum(
+    accumulator: [u8; 32],
+    recipient: &Pubkey,
+    balance: u64,
+) -> [u8; 32] {
+    hashv(&[
+        &accumulator,
+        b"receipt",
+        recipient.as_ref(),
+        &balance.to_le_bytes(),
+    ])
+    .to_bytes()
 }
 
 #[cfg(test)]

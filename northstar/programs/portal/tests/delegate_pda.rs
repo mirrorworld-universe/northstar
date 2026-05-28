@@ -158,6 +158,7 @@ impl StagedScenario {
             settlement_status: SettlementStatus::Idle,
             settlement_er_slot: 0,
             settlement_checksum: [0; 32],
+            settlement_accumulator: [0; 32],
             settlement_started_l1_slot: 0,
             bump: session_bump,
         };
@@ -371,6 +372,7 @@ async fn delegate_creates_multiple_records_and_restores_data() {
         settlement_status: SettlementStatus::Idle,
         settlement_er_slot: 0,
         settlement_checksum: [0; 32],
+        settlement_accumulator: [0; 32],
         settlement_started_l1_slot: 0,
         bump: session_bump,
     };

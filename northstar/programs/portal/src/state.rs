@@ -20,6 +20,7 @@ pub struct Session {
     pub settlement_status: SettlementStatus,
     pub settlement_er_slot: u64,
     pub settlement_checksum: [u8; 32],
+    pub settlement_accumulator: [u8; 32],
     pub settlement_started_l1_slot: u64,
     pub bump: u8,
 }
@@ -34,7 +35,7 @@ pub enum SettlementStatus {
 }
 
 impl Session {
-    pub const LEN: usize = 187;
+    pub const LEN: usize = 219;
     pub const SEED_PREFIX: &[u8] = b"session";
     pub const DISCRIMINATOR: u8 = 1;
 
@@ -130,6 +131,7 @@ mod tests {
             settlement_status: SettlementStatus::Idle,
             settlement_er_slot: 0,
             settlement_checksum: [0; 32],
+            settlement_accumulator: [0; 32],
             settlement_started_l1_slot: 0,
             bump: 255,
         };
@@ -190,6 +192,7 @@ mod tests {
             settlement_status: SettlementStatus::Idle,
             settlement_er_slot: 0,
             settlement_checksum: [0; 32],
+            settlement_accumulator: [0; 32],
             settlement_started_l1_slot: 0,
             bump: 1,
         };

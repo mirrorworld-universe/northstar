@@ -4854,6 +4854,7 @@ dependencies = [
  "solana-program-test",
  "solana-pubkey 4.1.0",
  "solana-sdk-ids",
+ "solana-sha256-hasher",
  "solana-signature",
  "solana-signer",
  "solana-system-interface 3.0.0",

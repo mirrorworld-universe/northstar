@@ -12,7 +12,39 @@ use {
         pubkey::Pubkey,
         sysvars::{Sysvar, clock::Clock},
     },
+    solana_sha256_hasher::hashv,
 };
+
+const SETTLEMENT_CHECKSUM_DOMAIN: &[u8] = b"northstar-settlement-v0";
+
+pub(crate) fn initial_settlement_checksum(er_slot: u64) -> [u8; 32] {
+    hashv(&[SETTLEMENT_CHECKSUM_DOMAIN, &er_slot.to_le_bytes()]).to_bytes()
+}
+
+pub(crate) fn accumulate_data_chunk_checksum(
+    accumulator: [u8; 32],
+    account: &Pubkey,
+    account_data_offset: u32,
+    data: &[u8],
+) -> [u8; 32] {
+    hashv(&[
+        &accumulator,
+        b"data",
+        account,
+        &account_data_offset.to_le_bytes(),
+        &(data.len() as u32).to_le_bytes(),
+        data,
+    ])
+    .to_bytes()
+}
+
+pub(crate) fn accumulate_receipt_checksum(
+    accumulator: [u8; 32],
+    recipient: &Pubkey,
+    balance: u64,
+) -> [u8; 32] {
+    hashv(&[&accumulator, b"receipt", recipient, &balance.to_le_bytes()]).to_bytes()
+}
 
 fn load_session(program_id: &Pubkey, session: &AccountInfo) -> Result<Session, ProgramError> {
     let (expected_session_key, _) = find_session_pda(program_id);
@@ -78,6 +110,7 @@ pub fn process_begin_settlement(
     session_state.settlement_status = SettlementStatus::InProgress;
     session_state.settlement_er_slot = er_slot;
     session_state.settlement_checksum = checksum;
+    session_state.settlement_accumulator = initial_settlement_checksum(er_slot);
     session_state.settlement_started_l1_slot = current_slot;
     store_session(session, &session_state)?;
 
@@ -104,7 +137,7 @@ pub fn process_write_settlement_chunk(
     let delegated_account = &accounts[2];
     let delegation_record = &accounts[3];
 
-    let session_state = load_session(program_id, session)?;
+    let mut session_state = load_session(program_id, session)?;
     require_validator(validator, &session_state)?;
 
     if session_state.settlement_status != SettlementStatus::InProgress {
@@ -150,6 +183,15 @@ pub fn process_write_settlement_chunk(
 
     let mut delegated_data = delegated_account.try_borrow_mut_data()?;
     delegated_data[start..end].copy_from_slice(&chunk[..chunk_len]);
+    drop(delegated_data);
+
+    session_state.settlement_accumulator = accumulate_data_chunk_checksum(
+        session_state.settlement_accumulator,
+        delegated_account.key(),
+        account_data_offset,
+        &chunk[..chunk_len],
+    );
+    store_session(session, &session_state)?;
 
     Ok(())
 }
@@ -176,7 +218,9 @@ pub fn process_finish_settlement(
     if er_slot != session_state.settlement_er_slot {
         return Err(PortalError::SettlementErSlotMismatch.into());
     }
-    if checksum != session_state.settlement_checksum {
+    if checksum != session_state.settlement_checksum
+        || checksum != session_state.settlement_accumulator
+    {
         return Err(PortalError::SettlementChecksumMismatch.into());
     }
 
@@ -185,6 +229,7 @@ pub fn process_finish_settlement(
     session_state.settlement_status = SettlementStatus::Idle;
     session_state.settlement_er_slot = 0;
     session_state.settlement_checksum = [0; 32];
+    session_state.settlement_accumulator = [0; 32];
     session_state.settlement_started_l1_slot = 0;
     store_session(session, &session_state)?;
 
@@ -222,6 +267,7 @@ pub fn process_abort_settlement(program_id: &Pubkey, accounts: &[AccountInfo]) -
     session_state.settlement_status = SettlementStatus::Idle;
     session_state.settlement_er_slot = 0;
     session_state.settlement_checksum = [0; 32];
+    session_state.settlement_accumulator = [0; 32];
     session_state.settlement_started_l1_slot = 0;
     store_session(session, &session_state)?;
 

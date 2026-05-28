@@ -807,6 +807,7 @@ mod tests {
             settlement_status: SettlementStatus::InProgress,
             settlement_er_slot: 9,
             settlement_checksum: [4; 32],
+            settlement_accumulator: [0; 32],
             settlement_started_l1_slot: 1,
             bump: 255,
         };

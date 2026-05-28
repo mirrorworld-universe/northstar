@@ -49,7 +49,7 @@ pub enum PortalInstruction {
     BeginSettlement(BeginSettlement),
 
     #[cfg_attr(feature = "idl", account(0, name = "validator", sig))]
-    #[cfg_attr(feature = "idl", account(1, name = "session"))]
+    #[cfg_attr(feature = "idl", account(1, name = "session", mut))]
     #[cfg_attr(feature = "idl", account(2, name = "delegated_account", mut))]
     #[cfg_attr(feature = "idl", account(3, name = "delegation_record"))]
     WriteSettlementChunk(WriteSettlementChunk),
@@ -69,7 +69,7 @@ pub enum PortalInstruction {
     WithdrawFee { lamports: u64 },
 
     #[cfg_attr(feature = "idl", account(0, name = "validator", sig))]
-    #[cfg_attr(feature = "idl", account(1, name = "session"))]
+    #[cfg_attr(feature = "idl", account(1, name = "session", mut))]
     #[cfg_attr(feature = "idl", account(2, name = "deposit_receipt", mut))]
     #[cfg_attr(feature = "idl", account(3, name = "recipient"))]
     SettleDepositReceipt(SettleDepositReceipt),

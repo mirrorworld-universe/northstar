@@ -121,6 +121,7 @@ pub fn process_open_session(
         settlement_status: SettlementStatus::Idle,
         settlement_er_slot: 0,
         settlement_checksum: [0; 32],
+        settlement_accumulator: [0; 32],
         settlement_started_l1_slot: 0,
         bump: session_bump,
     };

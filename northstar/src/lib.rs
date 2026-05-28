@@ -744,6 +744,7 @@ mod portal_e2e_tests {
         solana_gossip::contact_info::ContactInfo,
         solana_instruction::{AccountMeta, Instruction},
         solana_keypair::{Keypair, Signer},
+        solana_lattice_hash::lt_hash::LtHash,
         solana_net_utils::SocketAddrSpace,
         solana_rent::Rent,
         solana_rpc_client::rpc_client::RpcClient,
@@ -754,7 +755,7 @@ mod portal_e2e_tests {
         solana_sdk_ids::system_program,
         solana_system_interface::instruction::transfer,
         solana_transaction::Transaction,
-        std::{net::TcpListener, sync::RwLock, time::Duration},
+        std::{collections::HashSet, net::TcpListener, sync::RwLock, time::Duration},
     };
 
     /// Set up a test bank with portal program in genesis.
@@ -1717,6 +1718,91 @@ mod portal_e2e_tests {
         );
 
         manager.shutdown_runtime();
+    }
+
+    #[test]
+    fn test_portal_rejects_settlement_chunk_not_matching_checksum() {
+        setup();
+
+        let (bank, _bank_forks, program_id, mint_keypair) = setup_bank_with_portal();
+        let owner_keypair = Keypair::new();
+        let owner_pubkey = owner_keypair.pubkey();
+        bank.transfer(100_000_000_000, &mint_keypair, &owner_pubkey)
+            .unwrap();
+
+        let grid_id = 1u64;
+        let (session_pda, _) = find_session_pda(&program_id);
+        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id);
+        let open_session_ix = build_open_session_ix(
+            program_id,
+            owner_pubkey,
+            session_pda,
+            fee_vault_pda,
+            grid_id,
+            1000,
+            5_000_000_000,
+        );
+        let tx = Transaction::new_signed_with_payer(
+            &[open_session_ix],
+            Some(&owner_pubkey),
+            &[&owner_keypair],
+            bank.last_blockhash(),
+        );
+        bank.process_transaction(&tx).unwrap();
+
+        let delegated_account = Pubkey::new_unique();
+        let owner_program = Pubkey::new_unique();
+        let l1_data = vec![0, 0, 0, 0];
+        let er_data = vec![1, 2, 3, 4];
+        let mut l1_account = AccountSharedData::new(1_000_000, l1_data.len(), &program_id);
+        l1_account.data_as_mut_slice().copy_from_slice(&l1_data);
+        bank.store_account(&delegated_account, &l1_account);
+        store_delegation_record(
+            &bank,
+            &program_id,
+            &delegated_account,
+            &owner_program,
+            grid_id,
+        );
+
+        bank.freeze();
+        let settlement_bank = Bank::new_from_parent(
+            bank.clone(),
+            &Pubkey::default(),
+            bank.slot().saturating_add(11),
+        );
+        let mut er_account = AccountSharedData::new(1_000_000, er_data.len(), &program_id);
+        er_account.data_as_mut_slice().copy_from_slice(&er_data);
+        let diff = ErStateDiff {
+            accounts: vec![ErStateDiffAccount {
+                pubkey: delegated_account,
+                l1_account: Some(l1_account.clone()),
+                er_account,
+                l1_lt_hash: LtHash::identity(),
+                er_lt_hash: LtHash::identity(),
+            }],
+            lt_hash: LtHash::identity(),
+        };
+        let delegated_accounts = HashSet::from([delegated_account]);
+        let mut plan = build_settlement_plan(&diff, &delegated_accounts, 7, vec![]).unwrap();
+        plan.chunks[0].data[0] ^= 0xff;
+
+        let tx = plan
+            .portal_transaction(
+                program_id,
+                session_pda,
+                &owner_keypair,
+                settlement_bank.last_blockhash(),
+            )
+            .unwrap();
+        let result = settlement_bank.process_transaction(&tx);
+        assert!(
+            result.is_err(),
+            "tampered settlement data must fail checksum verification"
+        );
+
+        let delegated_after = settlement_bank.get_account(&delegated_account).unwrap();
+        assert_eq!(delegated_after.data(), l1_data.as_slice());
     }
 
     /// Test: No portal events when there's no portal activity
