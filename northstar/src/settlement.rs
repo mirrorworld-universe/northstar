@@ -673,6 +673,7 @@ mod tests {
                 })
                 .collect(),
             receipt_balances: vec![],
+            unsupported_changes: vec![],
         };
 
         let transactions = plan.portal_transactions(

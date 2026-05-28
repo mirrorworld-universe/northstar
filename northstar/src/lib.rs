@@ -1787,15 +1787,14 @@ mod portal_e2e_tests {
         let mut plan = build_settlement_plan(&diff, &delegated_accounts, 7, vec![]).unwrap();
         plan.chunks[0].data[0] ^= 0xff;
 
-        let tx = plan
-            .portal_transaction(
-                program_id,
-                session_pda,
-                &owner_keypair,
-                settlement_bank.last_blockhash(),
-            )
-            .unwrap();
-        let result = settlement_bank.process_transaction(&tx);
+        let transactions = plan.portal_transactions(
+            program_id,
+            session_pda,
+            &owner_keypair,
+            settlement_bank.last_blockhash(),
+        );
+        assert_eq!(transactions.len(), 1);
+        let result = settlement_bank.process_transaction(&transactions[0]);
         assert!(
             result.is_err(),
             "tampered settlement data must fail checksum verification"
