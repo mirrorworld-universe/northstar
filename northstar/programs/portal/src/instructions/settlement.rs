@@ -181,15 +181,19 @@ pub fn process_write_settlement_chunk(
         return Err(PortalError::SettlementChunkOutOfBounds.into());
     }
 
+    let chunk_data = &chunk[..chunk_len];
     let mut delegated_data = delegated_account.try_borrow_mut_data()?;
-    delegated_data[start..end].copy_from_slice(&chunk[..chunk_len]);
+    if delegated_data[start..end] == *chunk_data {
+        return Ok(());
+    }
+    delegated_data[start..end].copy_from_slice(chunk_data);
     drop(delegated_data);
 
     session_state.settlement_accumulator = accumulate_data_chunk_checksum(
         session_state.settlement_accumulator,
         delegated_account.key(),
         account_data_offset,
-        &chunk[..chunk_len],
+        chunk_data,
     );
     store_session(session, &session_state)?;
 

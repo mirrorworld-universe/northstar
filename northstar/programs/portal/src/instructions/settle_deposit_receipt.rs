@@ -109,6 +109,11 @@ pub fn process_settle_deposit_receipt(
         return Err(PortalError::InsufficientFees.into());
     }
 
+    if receipt_state.balance == settle.balance {
+        pinocchio_log::log!("SettleDepositReceipt duplicate; already settled");
+        return Ok(());
+    }
+
     receipt_state.balance = settle.balance;
     let mut receipt_data = deposit_receipt.try_borrow_mut_data()?;
     BorshSerialize::serialize(
