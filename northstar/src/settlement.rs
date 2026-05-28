@@ -79,6 +79,10 @@ impl SettlementPlan {
         self.chunks.is_empty() && self.receipt_balances.is_empty()
     }
 
+    pub fn has_unsupported_changes(&self) -> bool {
+        !self.unsupported_changes.is_empty()
+    }
+
     pub fn portal_transactions(
         &self,
         portal_program_id: Pubkey,
@@ -162,6 +166,13 @@ impl SettlementPlan {
         include_begin: bool,
     ) -> Vec<Instruction> {
         if self.is_empty() {
+            return vec![];
+        }
+        if self.has_unsupported_changes() {
+            warn!(
+                "Portal settlement blocked by unsupported account changes: {:?}",
+                self.unsupported_changes
+            );
             return vec![];
         }
 
@@ -334,7 +345,7 @@ pub fn build_settlement_plan(
         return None;
     }
     if !unsupported_changes.is_empty() {
-        warn!("Portal settlement skipped unsupported account changes: {unsupported_changes:?}",);
+        warn!("Portal settlement blocked by unsupported account changes: {unsupported_changes:?}",);
     }
 
     Some(SettlementPlan {
@@ -652,6 +663,43 @@ mod tests {
                 Pubkey::new_unique(),
                 Pubkey::new_unique(),
                 Pubkey::new_unique()
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn unsupported_changes_block_portal_submission() {
+        let account = Pubkey::new_unique();
+        let plan = SettlementPlan {
+            er_slot: 42,
+            checksum: [7; 32],
+            chunks: vec![SettlementChunk {
+                account,
+                account_data_offset: 0,
+                data: vec![1],
+            }],
+            receipt_balances: vec![],
+            unsupported_changes: vec![SettlementUnsupportedChange::LamportsChanged {
+                account,
+                l1_lamports: 1,
+                er_lamports: 2,
+            }],
+        };
+        let portal_program_id = Pubkey::new_unique();
+        let session_pda = Pubkey::new_unique();
+        let validator = Keypair::new();
+
+        assert!(
+            plan.portal_instructions(portal_program_id, session_pda, validator.pubkey())
+                .is_empty()
+        );
+        assert!(
+            plan.portal_transactions(
+                portal_program_id,
+                session_pda,
+                &validator,
+                Hash::new_unique()
             )
             .is_empty()
         );
