@@ -1,7 +1,8 @@
 use {
     log::*,
     northstar_portal::{
-        SettlementStatus, find_delegation_record_pda as find_portal_delegation_record_pda,
+        DepositReceipt, SettlementStatus,
+        find_delegation_record_pda as find_portal_delegation_record_pda,
     },
     portal_state::{PortalAccount, try_parse_raw_portal_account},
     solana_account::{AccountSharedData, ReadableAccount},
@@ -11,6 +12,7 @@ use {
     solana_instruction::Instruction,
     solana_keypair::Keypair,
     solana_pubkey::Pubkey,
+    solana_rent::Rent,
     solana_runtime::bank::Bank,
     solana_signer::Signer,
     solana_transaction::Transaction,
@@ -48,6 +50,10 @@ fn scale_l1_slot_age_for_er(l1_slot_age: usize, slot_duration: Duration) -> usiz
         .unwrap_or(usize::MAX)
         .max(1);
     (l1_slot_age * solana_clock::DEFAULT_MS_PER_SLOT as usize).div_ceil(er_slot_ms)
+}
+
+fn deposit_receipt_escrow_lamports(lamports: u64) -> u64 {
+    lamports.saturating_sub(Rent::default().minimum_balance(DepositReceipt::LEN))
 }
 
 #[derive(Error, Debug)]
@@ -118,9 +124,9 @@ pub enum L1Event {
     /// A fee deposit was made
     FeeDeposited {
         session_pda: Pubkey,
-        /// Total receipt balance after the deposit
+        /// Total escrowed lamports after the deposit
         amount: u64,
-        /// Deposit amount this slot (current - parent balance)
+        /// Deposit amount this slot (current escrow - parent escrow)
         delta: u64,
         /// Who gets credited on L2
         depositor: Pubkey,
@@ -128,9 +134,9 @@ pub enum L1Event {
     /// A fee withdrawal was made
     FeeWithdrawn {
         session_pda: Pubkey,
-        /// Total receipt balance after the withdrawal
+        /// Total escrowed lamports after the withdrawal
         amount: u64,
-        /// Withdrawal amount this slot (parent balance - current)
+        /// Withdrawal amount this slot (parent escrow - current escrow)
         delta: u64,
         /// Who gets debited on L2
         recipient: Pubkey,
@@ -355,31 +361,27 @@ impl Manager {
                 None
             }
             Some(PortalAccount::DepositReceipt(receipt)) => {
-                let prev_balance = bank
+                let prev_escrow = bank
                     .parent()
                     .and_then(|parent| parent.get_account(&pubkey))
                     .and_then(|account| {
-                        portal_state::try_parse_raw_portal_account(account.data()).and_then(|p| {
-                            if let portal_state::PortalAccount::DepositReceipt(r) = p {
-                                Some(r.balance)
-                            } else {
-                                None
-                            }
-                        })
+                        portal_state::try_parse_raw_portal_account(account.data())?;
+                        Some(deposit_receipt_escrow_lamports(account.lamports()))
                     })
                     .unwrap_or(0);
+                let escrow = deposit_receipt_escrow_lamports(account.lamports());
 
-                match receipt.balance.cmp(&prev_balance) {
+                match escrow.cmp(&prev_escrow) {
                     std::cmp::Ordering::Greater => Some(L1Event::FeeDeposited {
                         session_pda: receipt.session.into(),
-                        amount: receipt.balance,
-                        delta: receipt.balance - prev_balance,
+                        amount: escrow,
+                        delta: escrow - prev_escrow,
                         depositor: receipt.recipient.into(),
                     }),
                     std::cmp::Ordering::Less => Some(L1Event::FeeWithdrawn {
                         session_pda: receipt.session.into(),
-                        amount: receipt.balance,
-                        delta: prev_balance - receipt.balance,
+                        amount: escrow,
+                        delta: prev_escrow - escrow,
                         recipient: receipt.recipient.into(),
                     }),
                     std::cmp::Ordering::Equal => None,
@@ -1625,10 +1627,8 @@ mod portal_e2e_tests {
         }
     }
 
-    /// Repro: pre-settlement L1 withdraw can overdraw stale DepositReceipt
-    /// after the same recipient spends deposited funds on ER.
+    /// Pre-settlement L1 withdraw cannot overdraw unsettled ER balance.
     #[test]
-    #[ignore = "documents known gap: withdrawals must be settlement-gated"]
     fn test_pre_settlement_withdraw_after_er_spend_is_rejected() {
         setup();
 
