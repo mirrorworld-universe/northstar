@@ -12,10 +12,10 @@ use {
 
 /// Undelegate an account, returning ownership to `owner_program`.
 ///
-/// Portal zero-fills `delegated_account.data` before reassigning ownership — Solana's
-/// runtime allows owner reassign only when the existing data bytes are all zero. For
-/// the keypair-wallet flow this is a no-op (data already empty). For PDA flow, the
-/// owner program is responsible for re-installing post-ER state in a follow-up ix.
+/// Solana's runtime allows owner reassign only when existing data bytes are all zero.
+/// Portal therefore rejects non-empty delegated account data instead of silently
+/// clearing settled bytes. PDA owners must restore/close their state through an
+/// owner-program handoff before plain undelegation can succeed.
 ///
 /// Accounts:
 /// 0. `[signer, writable]` authority (receives the delegation_record's lamport refund)
@@ -80,7 +80,13 @@ pub fn process_undelegate(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
         return Err(PortalError::DelegatedAccountOwnerMismatch.into());
     }
 
-    delegated_account.try_borrow_mut_data()?.fill(0);
+    if delegated_account
+        .try_borrow_data()?
+        .iter()
+        .any(|byte| *byte != 0)
+    {
+        return Err(PortalError::DelegatedAccountDataNotEmpty.into());
+    }
 
     unsafe { delegated_account.assign(owner_program.key()) };
 

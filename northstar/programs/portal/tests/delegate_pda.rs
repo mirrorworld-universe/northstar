@@ -598,7 +598,7 @@ async fn undelegate_keypair_wallet_round_trip() {
 }
 
 #[tokio::test]
-async fn undelegate_pda_with_data_round_trip() {
+async fn undelegate_pda_with_data_rejects_without_erasing_data() {
     let real_data: Vec<u8> = (0..188).map(|i| i as u8 ^ 0x42).collect();
     let mut scenario = StagedScenario::new(DelegateScenario::new())
         .with_delegated(vec![0u8; 188], PORTAL_PROGRAM_ID);
@@ -618,10 +618,11 @@ async fn undelegate_pda_with_data_round_trip() {
     assert_eq!(pre.data, real_data);
     assert_eq!(pre.owner, PORTAL_PROGRAM_ID);
 
-    running
-        .undelegate()
-        .await
-        .expect("undelegate should succeed");
+    let result = running.undelegate().await;
+    assert!(
+        result.is_err(),
+        "non-empty data requires owner-program handoff"
+    );
 
     let post = running
         .context
@@ -630,9 +631,8 @@ async fn undelegate_pda_with_data_round_trip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(post.owner, running.inner.owner_program);
-    assert!(post.data.iter().all(|&b| b == 0));
-    assert_eq!(post.data.len(), 188);
+    assert_eq!(post.owner, PORTAL_PROGRAM_ID);
+    assert_eq!(post.data, real_data);
 }
 
 #[tokio::test]
