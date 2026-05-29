@@ -819,6 +819,13 @@ impl EphemeralRuntime {
         *self.session_pda.write().unwrap() = Some(pda);
     }
 
+    /// Sonic: Apply settings from the active L1 session before resetting ER state.
+    pub fn set_session_settings(&mut self, grid_id: u64, ttl_slots: u64, fee_cap: u64) {
+        self.settings.grid_id = grid_id;
+        self.settings.ttl_slots = ttl_slots;
+        self.settings.fee_cap = fee_cap;
+    }
+
     /// Sonic: Get a clone of the session PDA Arc for sharing with RPC.
     pub fn session_pda(&self) -> Arc<RwLock<Option<Pubkey>>> {
         self.session_pda.clone()
@@ -1224,6 +1231,17 @@ impl EphemeralRuntime {
         if overlaid > 0 {
             info!("Rehydrated {overlaid} ER overlay account(s) after L1 reanchor");
         }
+        let refreshed_owner_programs = self.hydrate_delegated_owner_programs_from_l1(
+            &self.l1_anchor_bank,
+            &er_bank,
+            "reanchor hydration",
+        );
+        if refreshed_owner_programs > 0 {
+            info!(
+                "Rehydrated {refreshed_owner_programs} delegated owner program(s) after L1 \
+                 reanchor"
+            );
+        }
 
         let initial_bank = Self::freeze_and_rotate_bank_for_rpc(
             &self.bank_forks,
@@ -1429,10 +1447,13 @@ impl EphemeralRuntime {
         );
     }
 
-    pub(crate) fn refresh_delegated_owner_programs_from_l1(&self, l1_bank: &Bank) {
-        let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
+    fn hydrate_delegated_owner_programs_from_l1(
+        &self,
+        l1_bank: &Bank,
+        er_bank: &Bank,
+        cache_context: &str,
+    ) -> usize {
         let delegated_accounts = self.delegated_accounts.read().unwrap();
-        let er_bank = self.bank();
 
         let updates = delegated_accounts
             .iter()
@@ -1524,15 +1545,21 @@ impl EphemeralRuntime {
             .collect::<Vec<_>>();
         er_bank.store_accounts((er_bank.slot(), updated_accounts.as_slice()));
         Self::remove_reloadable_programs_from_cache(
-            &er_bank,
-            "owner refresh",
+            er_bank,
+            cache_context,
             updates
                 .iter()
                 .map(|(owner_program, program_account, _)| (*owner_program, program_account)),
         );
 
-        let refreshed = updates.len();
-        drop(delegated_accounts);
+        updates.len()
+    }
+
+    pub(crate) fn refresh_delegated_owner_programs_from_l1(&self, l1_bank: &Bank) {
+        let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
+        let er_bank = self.bank();
+        let refreshed =
+            self.hydrate_delegated_owner_programs_from_l1(l1_bank, &er_bank, "owner refresh");
         if refreshed > 0 {
             self.publish_bank_for_rpc();
             info!("Refreshed {refreshed} delegated owner program(s) from L1");
@@ -3507,6 +3534,72 @@ mod tests {
                 .is_some()
         );
         assert!(runtime.bank().get_account(&programdata_address).is_some());
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_reanchor_to_l1_parent_keeps_delegated_owner_program_executable() {
+        agave_logger::setup();
+
+        let (parent_bank, mut runtime) = create_runtime();
+        runtime.activate();
+
+        let program_bytes = std::fs::read("../programs/bpf_loader/test_elfs/out/noop_aligned.so")
+            .expect("noop ELF should exist");
+        let l1_bank = Arc::new(Bank::new_from_parent(
+            parent_bank.clone(),
+            &Pubkey::default(),
+            parent_bank.slot().saturating_add(1),
+        ));
+        let portal_program_id = runtime.portal_program_id;
+        let owner_program = Pubkey::new_unique();
+        let programdata_address = Pubkey::new_unique();
+        let delegated_pubkey = Pubkey::new_unique();
+        let delegated_l1_snapshot = AccountSharedData::new(1_000_000, 4, &portal_program_id);
+        l1_bank.store_account(&delegated_pubkey, &delegated_l1_snapshot);
+        store_delegation_record(
+            &l1_bank,
+            &portal_program_id,
+            &delegated_pubkey,
+            &owner_program,
+            0,
+        );
+        store_upgradeable_owner_program(
+            &l1_bank,
+            &owner_program,
+            &programdata_address,
+            l1_bank.slot(),
+            &program_bytes,
+        );
+        runtime.handle_delegation_inner(
+            &delegated_pubkey,
+            delegated_l1_snapshot,
+            Some(owner_program),
+            Some(&l1_bank),
+        );
+
+        let next_l1_bank = Arc::new(Bank::new_from_parent(
+            l1_bank.clone(),
+            &Pubkey::default(),
+            l1_bank.slot().saturating_add(1),
+        ));
+        runtime.reanchor_to_l1_parent(next_l1_bank);
+
+        let fee_payer = Keypair::new();
+        fund_account(&runtime.bank(), &fee_payer.pubkey(), 1_000_000_000);
+        let instruction =
+            solana_instruction::Instruction::new_with_bytes(owner_program, &[], vec![]);
+        let transaction = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&fee_payer.pubkey()),
+            &[&fee_payer],
+            runtime.bank().last_blockhash(),
+        );
+        runtime
+            .bank()
+            .process_transaction(&transaction)
+            .expect("delegated owner program should stay executable after reanchor");
 
         runtime.shutdown();
     }
