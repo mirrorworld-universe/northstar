@@ -39,7 +39,8 @@ use {
         invoke_context::{EnvironmentConfig, InvokeContext},
         loaded_programs::{
             EpochBoundaryPreparation, ForkGraph, ProgramCache, ProgramCacheEntry,
-            ProgramCacheForTxBatch, ProgramCacheMatchCriteria, ProgramRuntimeEnvironments,
+            ProgramCacheEntryOwner, ProgramCacheEntryType, ProgramCacheForTxBatch,
+            ProgramCacheMatchCriteria, ProgramRuntimeEnvironments,
         },
         sysvar_cache::SysvarCache,
     },
@@ -907,7 +908,18 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                     self.slot,
                     execute_timings,
                 )
-                .expect("called load_program_with_pubkey() with nonexistent account");
+                .unwrap_or_else(|| {
+                    // Sonic: ER banks can be sparse while L1 program hydration catches up.
+                    // Cache a tombstone instead of panicking so the tx fails retryably.
+                    (
+                        Arc::new(ProgramCacheEntry::new_tombstone(
+                            self.slot,
+                            ProgramCacheEntryOwner::default(),
+                            ProgramCacheEntryType::Closed,
+                        )),
+                        self.slot,
+                    )
+                });
                 (key, program, last_modification_slot)
             });
 
@@ -1682,8 +1694,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic = "called load_program_with_pubkey() with nonexistent account"]
-    fn test_replenish_program_cache_with_nonexistent_accounts() {
+    fn test_replenish_program_cache_with_nonexistent_accounts_does_not_panic() {
         let mock_bank = MockBankCallback::default();
         let account_loader = (&mock_bank).into();
         let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
@@ -1706,6 +1717,9 @@ mod tests {
             true,
             true,
         );
+
+        let program = program_cache_for_tx_batch.find(&key).unwrap();
+        assert!(matches!(program.program, ProgramCacheEntryType::Closed));
     }
 
     #[test]
