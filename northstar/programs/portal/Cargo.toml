@@ -17,6 +17,7 @@ pinocchio = "0.9"
 pinocchio-system = "0.4"
 pinocchio-log = "0.5"
 borsh = { version = "1", default-features = false, features = ["derive"] }
+solana-sha256-hasher = { workspace = true, features = ["sha2"] }
 shank = { version = "0.4.8", optional = true }
 
 [target.'cfg(not(target_os = "solana"))'.dependencies]

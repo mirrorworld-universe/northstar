@@ -74,6 +74,7 @@ fn process_instruction(
         Ok((10, payload)) => deserialize_args(payload).and_then(|settle| {
             instructions::process_settle_deposit_receipt(program_id, accounts, settle)
         }),
+        Ok((11, _)) => instructions::process_undelegate_handoff(program_id, accounts),
         Ok((_, _)) | Err(_) => Err(ProgramError::InvalidInstructionData),
     }
 }

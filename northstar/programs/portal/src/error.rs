@@ -31,6 +31,7 @@ pub enum PortalError {
     SettlementChunkOutOfBounds = 26,
     SettlementUnauthorizedAbort = 27,
     DelegationRecordAccountMismatch = 28,
+    DelegatedAccountDataNotEmpty = 29,
 }
 
 impl From<PortalError> for ProgramError {

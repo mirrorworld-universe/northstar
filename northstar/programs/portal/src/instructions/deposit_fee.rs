@@ -107,7 +107,7 @@ pub fn process_deposit_fee(
             discriminator: DepositReceipt::DISCRIMINATOR,
             session: *session_key,
             recipient: *recipient_key,
-            balance: lamports,
+            balance: 0,
             bump: receipt_bump,
         };
         let mut receipt_data = deposit_receipt.try_borrow_mut_data()?;
@@ -118,7 +118,7 @@ pub fn process_deposit_fee(
         .unwrap();
     } else {
         // Subsequent deposit — update existing receipt
-        let mut receipt_state = DepositReceipt::try_from_slice(&deposit_receipt.try_borrow_data()?)
+        let receipt_state = DepositReceipt::try_from_slice(&deposit_receipt.try_borrow_data()?)
             .map_err(|_| {
                 pinocchio_log::log!("ERROR: DepositFee failed: receipt deserialize failed");
                 PortalError::DepositReceiptDeserializeFailed
@@ -129,17 +129,10 @@ pub fn process_deposit_fee(
             return Err(PortalError::DepositReceiptStateInvalid.into());
         }
 
-        receipt_state.balance = receipt_state.balance.checked_add(lamports).ok_or_else(|| {
-            pinocchio_log::log!("ERROR: DepositFee failed: arithmetic overflow");
-            PortalError::ArithmeticOverflow
-        })?;
-
-        let mut receipt_data = deposit_receipt.try_borrow_mut_data()?;
-        BorshSerialize::serialize(
-            &receipt_state,
-            &mut &mut receipt_data[..DepositReceipt::LEN],
-        )
-        .unwrap();
+        if receipt_state.session != *session_key || receipt_state.recipient != *recipient_key {
+            pinocchio_log::log!("ERROR: DepositFee failed: receipt state seeds mismatch");
+            return Err(PortalError::InvalidPdaSeeds.into());
+        }
     }
 
     // Transfer lamports from depositor to the deposit_receipt PDA

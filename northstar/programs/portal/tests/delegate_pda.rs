@@ -158,6 +158,7 @@ impl StagedScenario {
             settlement_status: SettlementStatus::Idle,
             settlement_er_slot: 0,
             settlement_checksum: [0; 32],
+            settlement_accumulator: [0; 32],
             settlement_started_l1_slot: 0,
             bump: session_bump,
         };
@@ -249,8 +250,19 @@ impl RunningScenario {
     }
 
     fn build_undelegate_ix(&self, owner_program: Pubkey) -> Instruction {
+        self.build_undelegate_ix_with_variant(owner_program, PortalInstruction::Undelegate)
+    }
+
+    fn build_undelegate_handoff_ix(&self, owner_program: Pubkey) -> Instruction {
+        self.build_undelegate_ix_with_variant(owner_program, PortalInstruction::UndelegateHandoff)
+    }
+
+    fn build_undelegate_ix_with_variant(
+        &self,
+        owner_program: Pubkey,
+        ix: PortalInstruction,
+    ) -> Instruction {
         let (delegation_record, _) = find_delegation_record_pda(&self.inner.delegated.pubkey());
-        let ix = PortalInstruction::Undelegate;
         let data = borsh::to_vec(&ix).unwrap();
         Instruction {
             program_id: PORTAL_PROGRAM_ID,
@@ -271,6 +283,19 @@ impl RunningScenario {
         owner_program: Pubkey,
     ) -> Result<(), solana_program_test::BanksClientError> {
         let ix = self.build_undelegate_ix(owner_program);
+        let banks: &mut BanksClient = &mut self.context.banks_client;
+        let blockhash = banks.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(
+            &[ix],
+            Some(&self.inner.payer.pubkey()),
+            &[&self.inner.payer],
+            blockhash,
+        );
+        banks.process_transaction(tx).await
+    }
+
+    async fn undelegate_handoff(&mut self) -> Result<(), solana_program_test::BanksClientError> {
+        let ix = self.build_undelegate_handoff_ix(self.inner.owner_program);
         let banks: &mut BanksClient = &mut self.context.banks_client;
         let blockhash = banks.get_latest_blockhash().await.unwrap();
         let tx = Transaction::new_signed_with_payer(
@@ -371,6 +396,7 @@ async fn delegate_creates_multiple_records_and_restores_data() {
         settlement_status: SettlementStatus::Idle,
         settlement_er_slot: 0,
         settlement_checksum: [0; 32],
+        settlement_accumulator: [0; 32],
         settlement_started_l1_slot: 0,
         bump: session_bump,
     };
@@ -596,7 +622,7 @@ async fn undelegate_keypair_wallet_round_trip() {
 }
 
 #[tokio::test]
-async fn undelegate_pda_with_data_round_trip() {
+async fn undelegate_pda_with_data_rejects_without_erasing_data() {
     let real_data: Vec<u8> = (0..188).map(|i| i as u8 ^ 0x42).collect();
     let mut scenario = StagedScenario::new(DelegateScenario::new())
         .with_delegated(vec![0u8; 188], PORTAL_PROGRAM_ID);
@@ -616,10 +642,11 @@ async fn undelegate_pda_with_data_round_trip() {
     assert_eq!(pre.data, real_data);
     assert_eq!(pre.owner, PORTAL_PROGRAM_ID);
 
-    running
-        .undelegate()
-        .await
-        .expect("undelegate should succeed");
+    let result = running.undelegate().await;
+    assert!(
+        result.is_err(),
+        "non-empty data requires owner-program handoff"
+    );
 
     let post = running
         .context
@@ -628,9 +655,34 @@ async fn undelegate_pda_with_data_round_trip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(post.owner, running.inner.owner_program);
-    assert!(post.data.iter().all(|&b| b == 0));
-    assert_eq!(post.data.len(), 188);
+    assert_eq!(post.owner, PORTAL_PROGRAM_ID);
+    assert_eq!(post.data, real_data);
+}
+
+#[tokio::test]
+async fn undelegate_handoff_returns_non_empty_account_to_owner_program() {
+    let real_data: Vec<u8> = (0..188).map(|i| i as u8 ^ 0x24).collect();
+    let mut scenario = StagedScenario::new(DelegateScenario::new())
+        .with_delegated(vec![0u8; 188], PORTAL_PROGRAM_ID);
+    let owner_program = scenario.inner.owner_program;
+    scenario = scenario.with_buffer(real_data, owner_program);
+
+    let mut running = scenario.start().await;
+    running.delegate().await.expect("delegate should succeed");
+    running
+        .undelegate_handoff()
+        .await
+        .expect("handoff primitive should assign back to owner program");
+
+    let post = running
+        .context
+        .banks_client
+        .get_account(running.inner.delegated.pubkey())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(post.owner, owner_program);
+    assert!(post.data.iter().all(|byte| *byte == 0));
 }
 
 #[tokio::test]

@@ -2,6 +2,7 @@ use {
     crate::{
         error::PortalError,
         instruction::SettleDepositReceipt,
+        instructions::settlement::accumulate_receipt_checksum,
         pda::{find_deposit_receipt_pda, find_session_pda},
         state::{DepositReceipt, Session, SettlementStatus},
     },
@@ -46,7 +47,7 @@ pub fn process_settle_deposit_receipt(
         return Err(PortalError::SessionAccountOwnerMismatch.into());
     }
 
-    let session_state = Session::try_from_slice(&session.try_borrow_data()?).map_err(|_| {
+    let mut session_state = Session::try_from_slice(&session.try_borrow_data()?).map_err(|_| {
         pinocchio_log::log!("ERROR: SettleDepositReceipt failed: session deserialize failed");
         PortalError::SessionDeserializeFailed
     })?;
@@ -108,6 +109,11 @@ pub fn process_settle_deposit_receipt(
         return Err(PortalError::InsufficientFees.into());
     }
 
+    if receipt_state.balance == settle.balance {
+        pinocchio_log::log!("SettleDepositReceipt duplicate; already settled");
+        return Ok(());
+    }
+
     receipt_state.balance = settle.balance;
     let mut receipt_data = deposit_receipt.try_borrow_mut_data()?;
     BorshSerialize::serialize(
@@ -115,6 +121,15 @@ pub fn process_settle_deposit_receipt(
         &mut &mut receipt_data[..DepositReceipt::LEN],
     )
     .unwrap();
+    drop(receipt_data);
+
+    session_state.settlement_accumulator = accumulate_receipt_checksum(
+        session_state.settlement_accumulator,
+        recipient.key(),
+        settle.balance,
+    );
+    let mut session_data = session.try_borrow_mut_data()?;
+    BorshSerialize::serialize(&session_state, &mut &mut session_data[..Session::LEN]).unwrap();
 
     pinocchio_log::log!("SettleDepositReceipt success");
 

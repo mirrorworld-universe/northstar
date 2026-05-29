@@ -36,6 +36,7 @@ solana-time-utils.workspace = true
 solana-net-utils.workspace = true
 solana-streamer.workspace = true
 solana-perf.workspace = true
+solana-packet.workspace = true
 
 crossbeam-channel.workspace = true
 stream-cancel.workspace = true
@@ -53,12 +54,12 @@ tokio.workspace = true
 northstar-portal.workspace = true
 
 borsh = { workspace = true }
+solana-rent.workspace = true
 
 [dev-dependencies]
 agave-snapshots.workspace = true
 solana-address-lookup-table-interface.workspace = true
 solana-compute-budget-interface.workspace = true
-solana-rent.workspace = true
 solana-rpc-client.workspace = true
 serde_json = { workspace = true }
 solana-ledger = { workspace = true, features = ["agave-unstable-api"] }
