@@ -17,6 +17,6 @@ pub use {
         process_abort_settlement, process_begin_settlement, process_finish_settlement,
         process_write_settlement_chunk,
     },
-    undelegate::process_undelegate,
+    undelegate::{process_undelegate, process_undelegate_handoff},
     withdraw_fee::process_withdraw_fee,
 };

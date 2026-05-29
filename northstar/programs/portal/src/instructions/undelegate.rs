@@ -13,9 +13,13 @@ use {
 /// Undelegate an account, returning ownership to `owner_program`.
 ///
 /// Solana's runtime allows owner reassign only when existing data bytes are all zero.
-/// Portal therefore rejects non-empty delegated account data instead of silently
-/// clearing settled bytes. PDA owners must restore/close their state through an
-/// owner-program handoff before plain undelegation can succeed.
+/// Plain undelegation therefore rejects non-empty delegated account data instead of
+/// silently clearing settled bytes.
+///
+/// `UndelegateHandoff` is an explicit primitive for owner-program CPI wrappers:
+/// the owner program must copy the Portal-owned data before CPI, invoke this
+/// instruction to zero data and assign ownership back, then restore the copied
+/// bytes after CPI returns and it owns the account again.
 ///
 /// Accounts:
 /// 0. `[signer, writable]` authority (receives the delegation_record's lamport refund)
@@ -26,7 +30,19 @@ use {
 /// 5. `[]` session
 pub fn process_undelegate(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     pinocchio_log::log!("Instruction: Undelegate");
+    process_undelegate_inner(program_id, accounts, false)
+}
 
+pub fn process_undelegate_handoff(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    pinocchio_log::log!("Instruction: UndelegateHandoff");
+    process_undelegate_inner(program_id, accounts, true)
+}
+
+fn process_undelegate_inner(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    allow_non_empty_handoff: bool,
+) -> ProgramResult {
     if accounts.len() < 6 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
@@ -80,13 +96,15 @@ pub fn process_undelegate(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
         return Err(PortalError::DelegatedAccountOwnerMismatch.into());
     }
 
-    if delegated_account
-        .try_borrow_data()?
-        .iter()
-        .any(|byte| *byte != 0)
-    {
+    let mut delegated_data = delegated_account.try_borrow_mut_data()?;
+    let has_non_empty_data = delegated_data.iter().any(|byte| *byte != 0);
+    if has_non_empty_data && !allow_non_empty_handoff {
         return Err(PortalError::DelegatedAccountDataNotEmpty.into());
     }
+    if has_non_empty_data {
+        delegated_data.fill(0);
+    }
+    drop(delegated_data);
 
     unsafe { delegated_account.assign(owner_program.key()) };
 
