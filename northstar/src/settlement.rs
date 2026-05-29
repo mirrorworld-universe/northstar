@@ -291,17 +291,29 @@ fn split_settlement_instruction_batches(
     let mut current = vec![];
 
     for instruction in instructions {
-        let mut candidate = current.clone();
-        candidate.push(instruction.clone());
-        if settlement_transaction_size(&candidate, validator) <= PACKET_DATA_SIZE {
-            current = candidate;
+        let single_instruction_size =
+            settlement_transaction_size(std::slice::from_ref(&instruction), validator);
+        if single_instruction_size > PACKET_DATA_SIZE {
+            warn!(
+                "Portal settlement instruction exceeds packet size: instruction_size={} \
+                 packet_size={}",
+                single_instruction_size, PACKET_DATA_SIZE
+            );
+            return vec![];
+        }
+
+        current.push(instruction);
+        if settlement_transaction_size(&current, validator) <= PACKET_DATA_SIZE {
             continue;
         }
 
+        let next = current
+            .pop()
+            .expect("current batch contains just-pushed instruction");
         if !current.is_empty() {
             batches.push(current);
         }
-        current = vec![instruction];
+        current = vec![next];
     }
 
     if !current.is_empty() {
@@ -702,6 +714,21 @@ mod tests {
                 Hash::new_unique()
             )
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn oversized_single_settlement_instruction_blocks_batches() {
+        let validator = Keypair::new();
+        let oversized_instruction = Instruction {
+            program_id: Pubkey::new_unique(),
+            accounts: vec![AccountMeta::new_readonly(validator.pubkey(), true)],
+            data: vec![0; PACKET_DATA_SIZE],
+        };
+
+        assert!(
+            split_settlement_instruction_batches(vec![oversized_instruction], &validator)
+                .is_empty()
         );
     }
 
