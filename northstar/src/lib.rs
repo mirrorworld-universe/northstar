@@ -593,17 +593,25 @@ impl Manager {
 
     /// Sonic: Activate the ephemeral session — resets bank to current L1 root
     /// and starts accepting transactions.
-    pub fn activate_session(&mut self, root_bank: Arc<Bank>, session_pda: Pubkey) {
+    pub fn activate_session(
+        &mut self,
+        root_bank: Arc<Bank>,
+        session_pda: Pubkey,
+        grid_id: u64,
+        ttl_slots: u64,
+        fee_cap: u64,
+    ) {
         if let Some(runtime) = &mut self.runtime {
             trace!(
                 "activate_session: resetting to L1 root slot={}, epoch={}",
                 root_bank.slot(),
                 root_bank.epoch(),
             );
+            runtime.set_session_settings(grid_id, ttl_slots, fee_cap);
             runtime.reset_to_new_parent(root_bank);
             runtime.set_session_pda(session_pda);
             runtime.activate();
-            info!("Ephemeral session activated, PDA={session_pda}");
+            info!("Ephemeral session activated, PDA={session_pda}, grid_id={grid_id}");
         } else {
             warn!("Cannot activate session: runtime not initialized");
         }

@@ -538,9 +538,9 @@ impl NorthStarService {
                         match event {
                             L1Event::SessionOpened {
                                 session_pda,
-                                grid_id: _,
-                                ttl_slots: _,
-                                fee_cap: _,
+                                grid_id,
+                                ttl_slots,
+                                fee_cap,
                             } if !manager.has_active_runtime() => {
                                 info!(
                                     "SessionOpened detected at slot {}, activating ephemeral \
@@ -552,7 +552,13 @@ impl NorthStarService {
                                     bank.slot(),
                                     bank.epoch(),
                                 );
-                                manager.activate_session(bank.clone(), session_pda);
+                                manager.activate_session(
+                                    bank.clone(),
+                                    session_pda,
+                                    grid_id,
+                                    ttl_slots,
+                                    fee_cap,
+                                );
                                 reanchored_this_bank = true;
                             }
                             L1Event::SessionClosed { session_pda, .. } => {
