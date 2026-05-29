@@ -261,6 +261,18 @@ impl Manager {
         (!instructions.is_empty()).then_some(instructions)
     }
 
+    /// Re-sign a queued settlement transaction with a fresh L1 blockhash before
+    /// submitting it. Split settlements are submitted one transaction at a time,
+    /// so later transactions must not keep the stale blockhash used when the
+    /// original plan was built.
+    pub fn resign_settlement_transaction(
+        &self,
+        transaction: &mut Transaction,
+        recent_blockhash: Hash,
+    ) {
+        transaction.sign(&[self.config.manager_account.as_ref()], recent_blockhash);
+    }
+
     /// Build signed Portal settlement transactions if the L1 Session interval
     /// has elapsed and a non-empty data diff exists.
     pub fn settlement_transactions_if_due(

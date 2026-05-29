@@ -150,8 +150,11 @@ impl PendingSettlementSubmission {
         PendingSettlementStatus::Pending
     }
 
-    fn pop_next_transaction(&mut self, bank: &Bank) -> Option<Transaction> {
-        let transaction = self.remaining_transactions.pop()?;
+    fn pop_next_transaction(&mut self) -> Option<Transaction> {
+        self.remaining_transactions.pop()
+    }
+
+    fn track_transaction(&mut self, transaction: &Transaction, bank: &Bank) {
         self.signatures = transaction
             .signatures
             .first()
@@ -160,7 +163,6 @@ impl PendingSettlementSubmission {
             .collect();
         self.recent_blockhash = transaction.message.recent_blockhash;
         self.submitted_l1_slot = bank.slot();
-        Some(transaction)
     }
 
     fn failed_signature(&self, bank: &Bank) -> Option<(Signature, String)> {
@@ -330,7 +332,13 @@ fn submit_settlement_if_due(
     pending_settlement: &mut Option<PendingSettlementSubmission>,
     settlement_attempts: &mut u64,
 ) {
-    if submit_next_pending_settlement_if_ready(bank, sender, forward_sender, pending_settlement) {
+    if submit_next_pending_settlement_if_ready(
+        manager,
+        bank,
+        sender,
+        forward_sender,
+        pending_settlement,
+    ) {
         return;
     }
     if pending_settlement.is_some() {
@@ -373,6 +381,7 @@ fn submit_settlement_if_due(
 }
 
 fn submit_next_pending_settlement_if_ready(
+    manager: &northstar::Manager,
     bank: &Bank,
     sender: &BankingPacketSender,
     forward_sender: Option<&Sender<(BankingPacketBatch, bool)>>,
@@ -402,10 +411,12 @@ fn submit_next_pending_settlement_if_ready(
                 bank.slot(),
                 pending.signatures,
             );
-            let Some(transaction) = pending.pop_next_transaction(bank) else {
+            let Some(mut transaction) = pending.pop_next_transaction() else {
                 *pending_settlement = None;
                 return false;
             };
+            manager.resign_settlement_transaction(&mut transaction, bank.last_blockhash());
+            pending.track_transaction(&transaction, bank);
             if let Err(err) = submit_settlement_transactions(
                 sender,
                 forward_sender,
@@ -759,6 +770,40 @@ mod tests {
             &bank,
         ));
         assert!(pending_settlement.is_none());
+    }
+
+    #[test]
+    fn next_split_settlement_transaction_is_resigned_with_fresh_blockhash() {
+        let bank = create_processable_test_bank();
+        let payer = Arc::new(Keypair::new());
+        fund_test_payer(&bank, &payer);
+        let first_transaction = signed_test_transfer(&bank, &payer);
+        let next_transaction = signed_test_transfer(&bank, &payer);
+        let old_next_signature = next_transaction.signatures[0];
+        let mut pending = PendingSettlementSubmission::new(
+            7,
+            [3; 32],
+            bank.last_blockhash(),
+            bank.slot(),
+            1,
+            vec![first_transaction, next_transaction],
+        )
+        .unwrap()
+        .0;
+        let manager = northstar::Manager::new(northstar::ManagerConfig {
+            portal_program_id: Pubkey::new_unique(),
+            manager_account: Arc::clone(&payer),
+        });
+
+        let mut transaction = pending.pop_next_transaction().unwrap();
+        let fresh_blockhash = Hash::new_unique();
+        manager.resign_settlement_transaction(&mut transaction, fresh_blockhash);
+        pending.track_transaction(&transaction, &bank);
+
+        assert_eq!(transaction.message.recent_blockhash, fresh_blockhash);
+        assert_eq!(pending.recent_blockhash, fresh_blockhash);
+        assert_ne!(transaction.signatures[0], old_next_signature);
+        assert_eq!(pending.signatures, vec![transaction.signatures[0]]);
     }
 
     #[test]
