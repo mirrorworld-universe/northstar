@@ -891,7 +891,8 @@ impl EphemeralRuntime {
             let _bank_operation_guard = bank_operation_lock.lock().unwrap();
 
             // 2. Create new ephemeral bank from current L1 root
-            let current_er_tip = self.bank_forks.read().unwrap().working_bank().slot();
+            let old_er_bank = self.bank_forks.read().unwrap().working_bank();
+            let current_er_tip = old_er_bank.slot();
             let ephemeral_slot =
                 Self::er_slot_for(&parent_bank).max(current_er_tip.saturating_add(1));
             info!(
@@ -908,6 +909,10 @@ impl EphemeralRuntime {
                 ephemeral_slot,
             );
             bank.configure_er(&self.settings.er_fee_structure, recent_blockhash_max_age);
+            let carried_blockhashes = bank.carry_forward_blockhashes_from(&old_er_bank);
+            if carried_blockhashes > 0 {
+                debug!("Carried {carried_blockhashes} ER recent blockhash(es) across reset");
+            }
             bank.set_callback(Some(Box::new(NoopDropCallback)));
             info!(
                 "reset_to_new_parent: ER fees configured at {} lamports/signature",
@@ -1186,7 +1191,8 @@ impl EphemeralRuntime {
         // reanchor slot from L1 slot duration; just keep the ER clock
         // moving forward and far above L1 slots.
         const ER_SLOT_OFFSET: Slot = 1u64 << 40;
-        let current_er_tip = self.bank_forks.read().unwrap().working_bank().slot();
+        let old_er_bank = self.bank_forks.read().unwrap().working_bank();
+        let current_er_tip = old_er_bank.slot();
         let ephemeral_slot = if current_er_tip >= ER_SLOT_OFFSET {
             current_er_tip.saturating_add(1)
         } else {
@@ -1207,6 +1213,10 @@ impl EphemeralRuntime {
             ephemeral_slot,
         );
         bank.configure_er(&self.settings.er_fee_structure, recent_blockhash_max_age);
+        let carried_blockhashes = bank.carry_forward_blockhashes_from(&old_er_bank);
+        if carried_blockhashes > 0 {
+            debug!("Carried {carried_blockhashes} ER recent blockhash(es) across reanchor");
+        }
         bank.set_callback(Some(Box::new(NoopDropCallback)));
         Self::prepare_initial_working_bank(&bank);
 
@@ -2716,6 +2726,105 @@ mod tests {
         runtime.reanchor_to_l1_parent(Arc::new(new_parent));
 
         assert_eq!(runtime.bank().get_balance(&readonly_account), 2_000_000);
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_reanchor_preserves_er_recent_blockhashes() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        parent_bank.freeze();
+        let parent_bank = Arc::new(parent_bank);
+
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            parent_bank.clone(),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        // Exercise the active reanchor path without starting SlotAdvancer; this keeps
+        // the regression deterministic and avoids waiting for an advancer sleep.
+        runtime.active.store(true, Ordering::Relaxed);
+
+        let er_bank_before = runtime.bank();
+        er_bank_before.register_unique_recent_blockhash_for_test();
+        let er_blockhash = er_bank_before.last_blockhash();
+        assert!(
+            er_bank_before.is_hash_valid_for_age(&er_blockhash, solana_clock::MAX_PROCESSING_AGE)
+        );
+
+        let new_parent = Bank::new_from_parent(parent_bank, &Pubkey::default(), 1);
+        new_parent.freeze();
+        runtime.reanchor_to_l1_parent(Arc::new(new_parent));
+
+        assert!(
+            runtime
+                .bank()
+                .is_hash_valid_for_age(&er_blockhash, solana_clock::MAX_PROCESSING_AGE),
+            "ER blockhash minted before L1 reanchor must remain usable after reanchor"
+        );
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_reset_to_new_parent_preserves_er_recent_blockhashes() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        parent_bank.freeze();
+        let parent_bank = Arc::new(parent_bank);
+
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            parent_bank.clone(),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+
+        let er_bank_before = runtime.bank();
+        er_bank_before.register_unique_recent_blockhash_for_test();
+        let er_blockhash = er_bank_before.last_blockhash();
+        assert!(
+            er_bank_before.is_hash_valid_for_age(&er_blockhash, solana_clock::MAX_PROCESSING_AGE)
+        );
+
+        let new_parent = Bank::new_from_parent(parent_bank, &Pubkey::default(), 1);
+        new_parent.freeze();
+        runtime.reset_to_new_parent(Arc::new(new_parent));
+
+        assert!(
+            runtime
+                .bank()
+                .is_hash_valid_for_age(&er_blockhash, solana_clock::MAX_PROCESSING_AGE),
+            "ER blockhash minted before L1 reset must remain usable after reset"
+        );
         runtime.shutdown();
     }
 
