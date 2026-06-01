@@ -21,6 +21,17 @@ pub enum PortalError {
     DelegationRecordStateInvalid = 16,
     DelegateBufferOwnerMismatch = 17,
     DelegateBufferSizeMismatch = 18,
+    SettlementInProgress = 19,
+    SettlementNotInProgress = 20,
+    SettlementTooEarly = 21,
+    SettlementErSlotNotAdvanced = 22,
+    SettlementErSlotMismatch = 23,
+    SettlementChecksumMismatch = 24,
+    SettlementChunkTooLarge = 25,
+    SettlementChunkOutOfBounds = 26,
+    SettlementUnauthorizedAbort = 27,
+    DelegationRecordAccountMismatch = 28,
+    DelegatedAccountDataNotEmpty = 29,
 }
 
 impl From<PortalError> for ProgramError {

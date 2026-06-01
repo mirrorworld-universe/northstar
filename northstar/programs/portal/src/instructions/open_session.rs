@@ -1,5 +1,8 @@
 use {
-    crate::{FeeVault, OpenSession, PortalError, Session, find_fee_vault_pda, find_session_pda},
+    crate::{
+        FeeVault, OpenSession, PortalError, Session, SettlementStatus, find_fee_vault_pda,
+        find_session_pda,
+    },
     borsh::BorshSerialize,
     pinocchio::{
         ProgramResult,
@@ -19,13 +22,17 @@ pub fn process_open_session(
         grid_id,
         ttl_slots,
         fee_cap,
+        validator,
+        settlement_interval_slots,
     }: OpenSession,
 ) -> ProgramResult {
     pinocchio_log::log!(
-        "Instruction: OpenSession, grid_id={}, ttl_slots={}, fee_cap={}",
+        "Instruction: OpenSession, grid_id={}, ttl_slots={}, fee_cap={}, \
+         settlement_interval_slots={}",
         grid_id,
         ttl_slots,
-        fee_cap
+        fee_cap,
+        settlement_interval_slots
     );
 
     if accounts.len() < 4 {
@@ -106,6 +113,16 @@ pub fn process_open_session(
         fee_cap,
         created_at: current_slot,
         nonce: 0,
+        authority: *payer_key,
+        validator,
+        settlement_interval_slots,
+        last_settled_l1_slot: current_slot,
+        last_settled_er_slot: 0,
+        settlement_status: SettlementStatus::Idle,
+        settlement_er_slot: 0,
+        settlement_checksum: [0; 32],
+        settlement_accumulator: [0; 32],
+        settlement_started_l1_slot: 0,
         bump: session_bump,
     };
     let mut session_data = session.try_borrow_mut_data()?;

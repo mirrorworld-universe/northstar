@@ -1,13 +1,21 @@
 use {
     log::*,
-    northstar_portal::find_delegation_record_pda as find_portal_delegation_record_pda,
+    northstar_portal::{
+        DepositReceipt, SettlementStatus,
+        find_delegation_record_pda as find_portal_delegation_record_pda,
+    },
     portal_state::{PortalAccount, try_parse_raw_portal_account},
     solana_account::{AccountSharedData, ReadableAccount},
     solana_fee_structure::FeeStructure,
     solana_gossip::cluster_info::ClusterInfo,
+    solana_hash::Hash,
+    solana_instruction::Instruction,
     solana_keypair::Keypair,
     solana_pubkey::Pubkey,
+    solana_rent::Rent,
     solana_runtime::bank::Bank,
+    solana_signer::Signer,
+    solana_transaction::Transaction,
     std::{net::SocketAddr, sync::Arc, time::Duration},
     thiserror::Error,
 };
@@ -16,9 +24,13 @@ pub mod ephemeral_runtime;
 pub mod ephemeral_tpu;
 pub mod ephemeral_tx_client;
 pub mod portal_state;
+pub mod settlement;
 pub mod slot_advancer;
 
-pub use crate::ephemeral_runtime::EphemeralRuntime;
+pub use crate::{
+    ephemeral_runtime::{EphemeralRuntime, ErStateDiff, ErStateDiffAccount},
+    settlement::{SettlementPlan, build_settlement_plan},
+};
 
 const DEFAULT_ER_SLOT_DURATION_MS: u64 = 50;
 pub const DEFAULT_ER_SLOT_DURATION: Duration = Duration::from_millis(DEFAULT_ER_SLOT_DURATION_MS);
@@ -38,6 +50,10 @@ fn scale_l1_slot_age_for_er(l1_slot_age: usize, slot_duration: Duration) -> usiz
         .unwrap_or(usize::MAX)
         .max(1);
     (l1_slot_age * solana_clock::DEFAULT_MS_PER_SLOT as usize).div_ceil(er_slot_ms)
+}
+
+fn deposit_receipt_escrow_lamports(lamports: u64) -> u64 {
+    lamports.saturating_sub(Rent::default().minimum_balance(DepositReceipt::LEN))
 }
 
 #[derive(Error, Debug)]
@@ -108,12 +124,22 @@ pub enum L1Event {
     /// A fee deposit was made
     FeeDeposited {
         session_pda: Pubkey,
-        /// Total vault balance after the deposit
+        /// Total escrowed lamports after the deposit
         amount: u64,
-        /// Deposit amount this slot (current - parent balance)
+        /// Deposit amount this slot (current escrow - parent escrow)
         delta: u64,
         /// Who gets credited on L2
         depositor: Pubkey,
+    },
+    /// A fee withdrawal was made
+    FeeWithdrawn {
+        session_pda: Pubkey,
+        /// Total escrowed lamports after the withdrawal
+        amount: u64,
+        /// Withdrawal amount this slot (parent escrow - current escrow)
+        delta: u64,
+        /// Who gets debited on L2
+        recipient: Pubkey,
     },
 }
 
@@ -195,6 +221,113 @@ impl Manager {
         self.runtime.as_ref().map(|r| r.session_pda())
     }
 
+    /// Compute current ER-vs-L1 state diff/hash, if runtime exists.
+    pub fn state_diff_from_l1(&self) -> Option<ErStateDiff> {
+        self.runtime
+            .as_ref()
+            .map(|runtime| runtime.state_diff_from_l1())
+    }
+
+    /// Build data-only delegated account settlement chunks.
+    ///
+    /// Returns `None` when there are no data changes to settle, so devnet
+    /// testing does not burn SOL on empty Begin/Finish transactions.
+    pub fn settlement_plan(&self) -> Option<SettlementPlan> {
+        let runtime = self.runtime.as_ref()?;
+        let session_pda = (*runtime.session_pda().read().unwrap())?;
+        let diff = runtime.state_diff_from_l1();
+        let receipt_balances = runtime.settlement_receipt_balances(session_pda);
+        build_settlement_plan(
+            &diff,
+            &runtime.delegated_accounts(),
+            runtime.bank().slot(),
+            receipt_balances,
+        )
+    }
+
+    /// Build Portal settlement instructions for current data-only diff.
+    ///
+    /// Returns `None` when there is no diff to submit. Callers should treat
+    /// that as a hard no-op and must not send empty Begin/Finish transactions.
+    pub fn settlement_instructions(&self) -> Option<Vec<Instruction>> {
+        let runtime = self.runtime.as_ref()?;
+        let session_pda = (*runtime.session_pda().read().unwrap())?;
+        let plan = self.settlement_plan()?;
+        let instructions = plan.portal_instructions(
+            self.config.portal_program_id,
+            session_pda,
+            self.config.manager_account.pubkey(),
+        );
+        (!instructions.is_empty()).then_some(instructions)
+    }
+
+    /// Re-sign a queued settlement transaction with a fresh L1 blockhash before
+    /// submitting it. Split settlements are submitted one transaction at a time,
+    /// so later transactions must not keep the stale blockhash used when the
+    /// original plan was built.
+    pub fn resign_settlement_transaction(
+        &self,
+        transaction: &mut Transaction,
+        recent_blockhash: Hash,
+    ) {
+        transaction.sign(&[self.config.manager_account.as_ref()], recent_blockhash);
+    }
+
+    /// Build signed Portal settlement transactions if the L1 Session interval
+    /// has elapsed and a non-empty data diff exists.
+    pub fn settlement_transactions_if_due(
+        &self,
+        l1_bank: &Bank,
+        recent_blockhash: Hash,
+    ) -> Option<(u64, [u8; 32], Vec<Transaction>)> {
+        let runtime = self.runtime.as_ref()?;
+        let session_pda = (*runtime.session_pda().read().unwrap())?;
+        let session_account = l1_bank.get_account(&session_pda)?;
+        if session_account.owner() != &self.config.portal_program_id {
+            return None;
+        }
+        let PortalAccount::Session(session_state) =
+            try_parse_raw_portal_account(session_account.data())?
+        else {
+            return None;
+        };
+        if !session_state.is_valid() {
+            return None;
+        }
+
+        let plan = self.settlement_plan()?;
+        let transactions = match session_state.settlement_status {
+            SettlementStatus::Idle => {
+                let next_settlement_slot = session_state
+                    .last_settled_l1_slot
+                    .saturating_add(session_state.settlement_interval_slots);
+                if l1_bank.slot() < next_settlement_slot {
+                    return None;
+                }
+                plan.portal_transactions(
+                    self.config.portal_program_id,
+                    session_pda,
+                    self.config.manager_account.as_ref(),
+                    recent_blockhash,
+                )
+            }
+            SettlementStatus::InProgress => {
+                if session_state.settlement_er_slot != plan.er_slot
+                    || session_state.settlement_checksum != plan.checksum
+                {
+                    return None;
+                }
+                plan.portal_retry_transactions_after_begin(
+                    self.config.portal_program_id,
+                    session_pda,
+                    self.config.manager_account.as_ref(),
+                    recent_blockhash,
+                )
+            }
+        };
+        (!transactions.is_empty()).then_some((plan.er_slot, plan.checksum, transactions))
+    }
+
     /// Sonic: Shutdown the always-on runtime (called at validator exit)
     pub fn shutdown_runtime(&mut self) {
         if let Some(mut runtime) = self.runtime.take() {
@@ -240,31 +373,31 @@ impl Manager {
                 None
             }
             Some(PortalAccount::DepositReceipt(receipt)) => {
-                let prev_balance = bank
+                let prev_escrow = bank
                     .parent()
                     .and_then(|parent| parent.get_account(&pubkey))
                     .and_then(|account| {
-                        portal_state::try_parse_raw_portal_account(account.data()).and_then(|p| {
-                            if let portal_state::PortalAccount::DepositReceipt(r) = p {
-                                Some(r.balance)
-                            } else {
-                                None
-                            }
-                        })
+                        portal_state::try_parse_raw_portal_account(account.data())?;
+                        Some(deposit_receipt_escrow_lamports(account.lamports()))
                     })
                     .unwrap_or(0);
+                let escrow = deposit_receipt_escrow_lamports(account.lamports());
 
-                let delta = receipt.balance.saturating_sub(prev_balance);
-                if delta == 0 {
-                    return None;
+                match escrow.cmp(&prev_escrow) {
+                    std::cmp::Ordering::Greater => Some(L1Event::FeeDeposited {
+                        session_pda: receipt.session.into(),
+                        amount: escrow,
+                        delta: escrow - prev_escrow,
+                        depositor: receipt.recipient.into(),
+                    }),
+                    std::cmp::Ordering::Less => Some(L1Event::FeeWithdrawn {
+                        session_pda: receipt.session.into(),
+                        amount: escrow,
+                        delta: prev_escrow - escrow,
+                        recipient: receipt.recipient.into(),
+                    }),
+                    std::cmp::Ordering::Equal => None,
                 }
-
-                Some(L1Event::FeeDeposited {
-                    session_pda: receipt.session.into(),
-                    amount: receipt.balance,
-                    delta,
-                    depositor: receipt.recipient.into(),
-                })
             }
             None => {
                 // Unrecognized — log and skip
@@ -460,17 +593,25 @@ impl Manager {
 
     /// Sonic: Activate the ephemeral session — resets bank to current L1 root
     /// and starts accepting transactions.
-    pub fn activate_session(&mut self, root_bank: Arc<Bank>, session_pda: Pubkey) {
+    pub fn activate_session(
+        &mut self,
+        root_bank: Arc<Bank>,
+        session_pda: Pubkey,
+        grid_id: u64,
+        ttl_slots: u64,
+        fee_cap: u64,
+    ) {
         if let Some(runtime) = &mut self.runtime {
             trace!(
                 "activate_session: resetting to L1 root slot={}, epoch={}",
                 root_bank.slot(),
                 root_bank.epoch(),
             );
+            runtime.set_session_settings(grid_id, ttl_slots, fee_cap);
             runtime.reset_to_new_parent(root_bank);
             runtime.set_session_pda(session_pda);
             runtime.activate();
-            info!("Ephemeral session activated, PDA={session_pda}");
+            info!("Ephemeral session activated, PDA={session_pda}, grid_id={grid_id}");
         } else {
             warn!("Cannot activate session: runtime not initialized");
         }
@@ -539,6 +680,30 @@ impl Manager {
         }
     }
 
+    /// Debit a withdrawal from a recipient's account on the ephemeral bank.
+    /// Called by NorthStarService when a FeeWithdrawn event is detected on L1.
+    /// Only processes when a session is active.
+    pub fn debit_withdrawal(&self, recipient: &Pubkey, lamports: u64) {
+        if let Some(runtime) = &self.runtime {
+            if !runtime.is_active() {
+                warn!("Ignoring withdrawal for {recipient}: no active session");
+                return;
+            }
+            runtime.debit_withdrawal(recipient, lamports);
+        }
+    }
+
+    /// Re-anchor the active ER onto the latest L1 block while preserving the
+    /// in-memory ER account overlay.
+    pub fn reanchor_to_l1_parent(&mut self, bank: Arc<Bank>) {
+        if let Some(runtime) = &mut self.runtime {
+            if !runtime.is_active() {
+                return;
+            }
+            runtime.reanchor_to_l1_parent(bank);
+        }
+    }
+
     /// Refresh delegated owner programs from L1 when their deployment accounts
     /// changed. This catches L1 `solana program deploy` updates that do not
     /// emit Portal events but must still invalidate the isolated ER ProgramCache.
@@ -601,6 +766,7 @@ mod portal_e2e_tests {
         solana_gossip::contact_info::ContactInfo,
         solana_instruction::{AccountMeta, Instruction},
         solana_keypair::{Keypair, Signer},
+        solana_lattice_hash::lt_hash::LtHash,
         solana_net_utils::SocketAddrSpace,
         solana_rent::Rent,
         solana_rpc_client::rpc_client::RpcClient,
@@ -611,7 +777,7 @@ mod portal_e2e_tests {
         solana_sdk_ids::system_program,
         solana_system_interface::instruction::transfer,
         solana_transaction::Transaction,
-        std::{net::TcpListener, sync::RwLock, time::Duration},
+        std::{collections::HashSet, net::TcpListener, sync::RwLock, time::Duration},
     };
 
     /// Set up a test bank with portal program in genesis.
@@ -708,6 +874,8 @@ mod portal_e2e_tests {
             grid_id,
             ttl_slots,
             fee_cap,
+            validator: owner.to_bytes(),
+            settlement_interval_slots: 10,
         });
         let data = borsh::to_vec(&ix).unwrap();
         Instruction {
@@ -747,6 +915,29 @@ mod portal_e2e_tests {
         }
     }
 
+    fn build_withdraw_fee_ix(
+        program_id: Pubkey,
+        session_pda: Pubkey,
+        recipient: Pubkey,
+        lamports: u64,
+    ) -> Instruction {
+        let (deposit_receipt_pda, _) =
+            find_deposit_receipt_pda(&program_id, &session_pda, &recipient);
+
+        let ix = PortalInstruction::WithdrawFee { lamports };
+        let data = borsh::to_vec(&ix).unwrap();
+        Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new(recipient, true),
+                AccountMeta::new_readonly(session_pda, false),
+                AccountMeta::new(deposit_receipt_pda, false),
+                AccountMeta::new_readonly(system_program::id(), false),
+            ],
+            data,
+        }
+    }
+
     fn build_delegate_ix(
         program_id: Pubkey,
         payer: Pubkey,
@@ -754,6 +945,7 @@ mod portal_e2e_tests {
         owner_program: Pubkey,
         delegation_record_pda: Pubkey,
         buffer: Pubkey,
+        session_pda: Pubkey,
         grid_id: u64,
     ) -> Instruction {
         let ix = PortalInstruction::Delegate { grid_id };
@@ -762,10 +954,11 @@ mod portal_e2e_tests {
             program_id,
             accounts: vec![
                 AccountMeta::new(payer, true),
+                AccountMeta::new_readonly(system_program::id(), false),
+                AccountMeta::new_readonly(session_pda, false),
                 AccountMeta::new(delegated_account, true),
                 AccountMeta::new_readonly(owner_program, false),
                 AccountMeta::new(delegation_record_pda, false),
-                AccountMeta::new_readonly(system_program::id(), false),
                 AccountMeta::new_readonly(buffer, false),
             ],
             data,
@@ -915,6 +1108,7 @@ mod portal_e2e_tests {
             owner_program,
             delegation_record_pda,
             buffer,
+            session_pda,
             grid_id,
         );
         let blockhash = bank.last_blockhash();
@@ -1042,6 +1236,7 @@ mod portal_e2e_tests {
             owner_program,
             delegation_record_pda,
             buffer,
+            session_pda,
             grid_id,
         );
         let blockhash = bank.last_blockhash();
@@ -1450,6 +1645,308 @@ mod portal_e2e_tests {
                 "Amount should be total vault balance"
             );
         }
+    }
+
+    /// Pre-settlement L1 withdraw cannot overdraw unsettled ER balance.
+    #[test]
+    fn test_pre_settlement_withdraw_after_er_spend_is_rejected() {
+        setup();
+
+        let (bank, _bank_forks, program_id, mint_keypair) = setup_bank_with_portal();
+
+        let owner_keypair = Keypair::new();
+        let owner_pubkey = owner_keypair.pubkey();
+        bank.transfer(100_000_000_000, &mint_keypair, &owner_pubkey)
+            .unwrap();
+
+        let grid_id = 1u64;
+        let (session_pda, _) = find_session_pda(&program_id);
+        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id);
+
+        let open_session_ix = build_open_session_ix(
+            program_id,
+            owner_pubkey,
+            session_pda,
+            fee_vault_pda,
+            grid_id,
+            1000,
+            5_000_000_000,
+        );
+        let blockhash = bank.last_blockhash();
+        let tx = Transaction::new_signed_with_payer(
+            &[open_session_ix],
+            Some(&owner_pubkey),
+            &[&owner_keypair],
+            blockhash,
+        );
+        bank.process_transaction(&tx).unwrap();
+
+        let deposit_amount = 1_000_000_000u64;
+        let deposit_fee_ix = build_deposit_fee_ix(
+            program_id,
+            owner_pubkey,
+            session_pda,
+            owner_pubkey,
+            deposit_amount,
+        );
+        let blockhash = bank.last_blockhash();
+        let tx = Transaction::new_signed_with_payer(
+            &[deposit_fee_ix],
+            Some(&owner_pubkey),
+            &[&owner_keypair],
+            blockhash,
+        );
+        bank.process_transaction(&tx).unwrap();
+
+        let manager_config = ManagerConfig {
+            portal_program_id: program_id,
+            manager_account: Arc::new(Keypair::new()),
+        };
+        let mut manager = Manager::new(manager_config);
+        manager
+            .create_ephemeral_runtime(
+                bank.clone(),
+                create_test_cluster_info(),
+                EphemeralRollupSettings {
+                    session_pda,
+                    grid_id,
+                    ttl_slots: 1000,
+                    fee_cap: 5_000_000_000,
+                    er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+                    delegated_accounts: vec![],
+                },
+                find_free_addr(),
+            )
+            .expect("runtime should start");
+        manager.credit_deposit(&owner_pubkey, deposit_amount);
+        manager.debit_withdrawal(&owner_pubkey, 100_000_000);
+
+        let withdraw_bank = Bank::new_from_parent(bank.clone(), bank.leader_id(), bank.slot() + 1);
+        let withdraw_ix = build_withdraw_fee_ix(program_id, session_pda, owner_pubkey, 950_000_000);
+        let blockhash = withdraw_bank.last_blockhash();
+        let tx = Transaction::new_signed_with_payer(
+            &[withdraw_ix],
+            Some(&owner_pubkey),
+            &[&owner_keypair],
+            blockhash,
+        );
+
+        let result = withdraw_bank.process_transaction(&tx);
+        assert!(
+            result.is_err(),
+            "withdraw should wait for settlement-updated receipt balance"
+        );
+
+        manager.shutdown_runtime();
+    }
+
+    #[test]
+    fn test_portal_rejects_settlement_chunk_not_matching_checksum() {
+        setup();
+
+        let (bank, _bank_forks, program_id, mint_keypair) = setup_bank_with_portal();
+        let owner_keypair = Keypair::new();
+        let owner_pubkey = owner_keypair.pubkey();
+        bank.transfer(100_000_000_000, &mint_keypair, &owner_pubkey)
+            .unwrap();
+
+        let grid_id = 1u64;
+        let (session_pda, _) = find_session_pda(&program_id);
+        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id);
+        let open_session_ix = build_open_session_ix(
+            program_id,
+            owner_pubkey,
+            session_pda,
+            fee_vault_pda,
+            grid_id,
+            1000,
+            5_000_000_000,
+        );
+        let tx = Transaction::new_signed_with_payer(
+            &[open_session_ix],
+            Some(&owner_pubkey),
+            &[&owner_keypair],
+            bank.last_blockhash(),
+        );
+        bank.process_transaction(&tx).unwrap();
+
+        let delegated_account = Pubkey::new_unique();
+        let owner_program = Pubkey::new_unique();
+        let l1_data = vec![0, 0, 0, 0];
+        let er_data = vec![1, 2, 3, 4];
+        let mut l1_account = AccountSharedData::new(1_000_000, l1_data.len(), &program_id);
+        l1_account.data_as_mut_slice().copy_from_slice(&l1_data);
+        bank.store_account(&delegated_account, &l1_account);
+        store_delegation_record(
+            &bank,
+            &program_id,
+            &delegated_account,
+            &owner_program,
+            grid_id,
+        );
+
+        bank.freeze();
+        let settlement_bank = Bank::new_from_parent(
+            bank.clone(),
+            &Pubkey::default(),
+            bank.slot().saturating_add(11),
+        );
+        let mut er_account = AccountSharedData::new(1_000_000, er_data.len(), &program_id);
+        er_account.data_as_mut_slice().copy_from_slice(&er_data);
+        let diff = ErStateDiff {
+            accounts: vec![ErStateDiffAccount {
+                pubkey: delegated_account,
+                l1_account: Some(l1_account.clone()),
+                er_account,
+                l1_lt_hash: LtHash::identity(),
+                er_lt_hash: LtHash::identity(),
+            }],
+            lt_hash: LtHash::identity(),
+        };
+        let delegated_accounts = HashSet::from([delegated_account]);
+        let mut plan = build_settlement_plan(&diff, &delegated_accounts, 7, vec![]).unwrap();
+        plan.chunks[0].data[0] ^= 0xff;
+
+        let transactions = plan.portal_transactions(
+            program_id,
+            session_pda,
+            &owner_keypair,
+            settlement_bank.last_blockhash(),
+        );
+        assert_eq!(transactions.len(), 1);
+        let result = settlement_bank.process_transaction(&transactions[0]);
+        assert!(
+            result.is_err(),
+            "tampered settlement data must fail checksum verification"
+        );
+
+        let delegated_after = settlement_bank.get_account(&delegated_account).unwrap();
+        assert_eq!(delegated_after.data(), l1_data.as_slice());
+    }
+
+    #[test]
+    fn test_portal_settlement_retry_after_applied_ops_is_idempotent() {
+        setup();
+
+        let (bank, _bank_forks, program_id, mint_keypair) = setup_bank_with_portal();
+        let owner_keypair = Keypair::new();
+        let owner_pubkey = owner_keypair.pubkey();
+        bank.transfer(100_000_000_000, &mint_keypair, &owner_pubkey)
+            .unwrap();
+
+        let grid_id = 1u64;
+        let (session_pda, _) = find_session_pda(&program_id);
+        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id);
+        let open_session_ix = build_open_session_ix(
+            program_id,
+            owner_pubkey,
+            session_pda,
+            fee_vault_pda,
+            grid_id,
+            1000,
+            5_000_000_000,
+        );
+        let open_tx = Transaction::new_signed_with_payer(
+            &[open_session_ix],
+            Some(&owner_pubkey),
+            &[&owner_keypair],
+            bank.last_blockhash(),
+        );
+        bank.process_transaction(&open_tx).unwrap();
+
+        let deposit_amount = 1_000_000_000u64;
+        let settled_receipt_balance = 900_000_000u64;
+        let deposit_fee_ix = build_deposit_fee_ix(
+            program_id,
+            owner_pubkey,
+            session_pda,
+            owner_pubkey,
+            deposit_amount,
+        );
+        let deposit_tx = Transaction::new_signed_with_payer(
+            &[deposit_fee_ix],
+            Some(&owner_pubkey),
+            &[&owner_keypair],
+            bank.last_blockhash(),
+        );
+        bank.process_transaction(&deposit_tx).unwrap();
+
+        let delegated_account = Pubkey::new_unique();
+        let owner_program = Pubkey::new_unique();
+        let l1_data = vec![0, 0, 0];
+        let er_data = vec![1, 0, 2];
+        let mut l1_account = AccountSharedData::new(1_000_000, l1_data.len(), &program_id);
+        l1_account.data_as_mut_slice().copy_from_slice(&l1_data);
+        bank.store_account(&delegated_account, &l1_account);
+        store_delegation_record(
+            &bank,
+            &program_id,
+            &delegated_account,
+            &owner_program,
+            grid_id,
+        );
+
+        bank.freeze();
+        let settlement_bank = Bank::new_from_parent(
+            bank.clone(),
+            &Pubkey::default(),
+            bank.slot().saturating_add(11),
+        );
+        let mut er_account = AccountSharedData::new(1_000_000, er_data.len(), &program_id);
+        er_account.data_as_mut_slice().copy_from_slice(&er_data);
+        let diff = ErStateDiff {
+            accounts: vec![ErStateDiffAccount {
+                pubkey: delegated_account,
+                l1_account: Some(l1_account),
+                er_account,
+                l1_lt_hash: LtHash::identity(),
+                er_lt_hash: LtHash::identity(),
+            }],
+            lt_hash: LtHash::identity(),
+        };
+        let delegated_accounts = HashSet::from([delegated_account]);
+        let plan = build_settlement_plan(
+            &diff,
+            &delegated_accounts,
+            7,
+            vec![crate::settlement::ReceiptBalanceSettlement {
+                recipient: owner_pubkey,
+                balance: settled_receipt_balance,
+            }],
+        )
+        .unwrap();
+        assert_eq!(plan.chunks.len(), 2);
+        assert_eq!(plan.receipt_balances.len(), 1);
+        let instructions = plan.portal_instructions(program_id, session_pda, owner_pubkey);
+        assert_eq!(instructions.len(), 5);
+
+        let first_tx = Transaction::new_signed_with_payer(
+            &instructions[..instructions.len() - 1],
+            Some(&owner_pubkey),
+            &[&owner_keypair],
+            settlement_bank.last_blockhash(),
+        );
+        settlement_bank.process_transaction(&first_tx).unwrap();
+
+        let retry_tx = Transaction::new_signed_with_payer(
+            &instructions[1..],
+            Some(&owner_pubkey),
+            &[&owner_keypair],
+            settlement_bank.last_blockhash(),
+        );
+        settlement_bank.process_transaction(&retry_tx).unwrap();
+
+        let delegated_after = settlement_bank.get_account(&delegated_account).unwrap();
+        assert_eq!(delegated_after.data(), er_data.as_slice());
+
+        let (receipt_pda, _) = find_deposit_receipt_pda(&program_id, &session_pda, &owner_pubkey);
+        let receipt_account = settlement_bank.get_account(&receipt_pda).unwrap();
+        let Some(PortalAccount::DepositReceipt(receipt)) =
+            try_parse_raw_portal_account(receipt_account.data())
+        else {
+            panic!("deposit receipt should deserialize");
+        };
+        assert_eq!(receipt.balance, settled_receipt_balance);
     }
 
     /// Test: No portal events when there's no portal activity

@@ -7,7 +7,7 @@
 
 use {
     borsh::BorshDeserialize,
-    northstar_portal::{DelegationRecord, PortalInstruction},
+    northstar_portal::{DelegationRecord, PortalInstruction, Session, SettlementStatus},
     solana_account::Account,
     solana_instruction::{AccountMeta, Instruction},
     solana_keypair::Keypair,
@@ -20,6 +20,10 @@ use {
 
 const PORTAL_PROGRAM_ID: Pubkey =
     Pubkey::from_str_const("GikCSCpYUq7QR7esoK6GM4UbJzKgdKNvS5bR1rBYH5E4");
+
+fn find_session_pda() -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[b"session"], &PORTAL_PROGRAM_ID)
+}
 
 fn find_delegation_record_pda(delegated_account: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(
@@ -35,20 +39,40 @@ fn build_delegate_ix(
     delegation_record: &Pubkey,
     grid_id: u64,
     buffer: &Pubkey,
+    session: &Pubkey,
+) -> Instruction {
+    build_delegate_ix_for_accounts(
+        payer,
+        grid_id,
+        session,
+        &[(delegated_account, owner_program, delegation_record, buffer)],
+    )
+}
+
+fn build_delegate_ix_for_accounts(
+    payer: &Pubkey,
+    grid_id: u64,
+    session: &Pubkey,
+    delegations: &[(&Pubkey, &Pubkey, &Pubkey, &Pubkey)],
 ) -> Instruction {
     let ix = PortalInstruction::Delegate { grid_id };
     let data = borsh::to_vec(&ix).unwrap();
 
+    let mut accounts = vec![
+        AccountMeta::new(*payer, true),
+        AccountMeta::new_readonly(system_program::id(), false),
+        AccountMeta::new_readonly(*session, false),
+    ];
+    for (delegated_account, owner_program, delegation_record, buffer) in delegations {
+        accounts.push(AccountMeta::new(**delegated_account, true));
+        accounts.push(AccountMeta::new_readonly(**owner_program, false));
+        accounts.push(AccountMeta::new(**delegation_record, false));
+        accounts.push(AccountMeta::new_readonly(**buffer, false));
+    }
+
     Instruction {
         program_id: PORTAL_PROGRAM_ID,
-        accounts: vec![
-            AccountMeta::new(*payer, true),
-            AccountMeta::new(*delegated_account, true),
-            AccountMeta::new_readonly(*owner_program, false),
-            AccountMeta::new(*delegation_record, false),
-            AccountMeta::new_readonly(system_program::id(), false),
-            AccountMeta::new_readonly(*buffer, false),
-        ],
+        accounts,
         data,
     }
 }
@@ -118,6 +142,37 @@ impl StagedScenario {
     }
 
     async fn start(mut self) -> RunningScenario {
+        let (session_pda, session_bump) = find_session_pda();
+        let session = Session {
+            discriminator: Session::DISCRIMINATOR,
+            grid_id: self.inner.grid_id,
+            ttl_slots: 100,
+            fee_cap: 0,
+            created_at: 0,
+            nonce: 0,
+            authority: self.inner.payer.pubkey().to_bytes(),
+            validator: self.inner.payer.pubkey().to_bytes(),
+            settlement_interval_slots: 10,
+            last_settled_l1_slot: 0,
+            last_settled_er_slot: 0,
+            settlement_status: SettlementStatus::Idle,
+            settlement_er_slot: 0,
+            settlement_checksum: [0; 32],
+            settlement_accumulator: [0; 32],
+            settlement_started_l1_slot: 0,
+            bump: session_bump,
+        };
+        self.program_test.add_account(
+            session_pda,
+            Account {
+                lamports: 10_000_000,
+                data: borsh::to_vec(&session).unwrap(),
+                owner: PORTAL_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        );
+
         self.program_test.add_account(
             self.inner.payer.pubkey(),
             Account {
@@ -154,6 +209,7 @@ impl RunningScenario {
             &delegation_record,
             self.inner.grid_id,
             &self.inner.buffer.pubkey(),
+            &find_session_pda().0,
         );
 
         let tx = Transaction::new_signed_with_payer(
@@ -179,8 +235,10 @@ impl RunningScenario {
             &delegation_record,
             self.inner.grid_id,
             &self.inner.buffer.pubkey(),
+            &find_session_pda().0,
         );
-        ix.accounts[1].is_signer = false;
+        // Layout: payer, system_program, session, then delegated_account.
+        ix.accounts[3].is_signer = false;
 
         let tx = Transaction::new_signed_with_payer(
             &[ix],
@@ -192,8 +250,19 @@ impl RunningScenario {
     }
 
     fn build_undelegate_ix(&self, owner_program: Pubkey) -> Instruction {
+        self.build_undelegate_ix_with_variant(owner_program, PortalInstruction::Undelegate)
+    }
+
+    fn build_undelegate_handoff_ix(&self, owner_program: Pubkey) -> Instruction {
+        self.build_undelegate_ix_with_variant(owner_program, PortalInstruction::UndelegateHandoff)
+    }
+
+    fn build_undelegate_ix_with_variant(
+        &self,
+        owner_program: Pubkey,
+        ix: PortalInstruction,
+    ) -> Instruction {
         let (delegation_record, _) = find_delegation_record_pda(&self.inner.delegated.pubkey());
-        let ix = PortalInstruction::Undelegate;
         let data = borsh::to_vec(&ix).unwrap();
         Instruction {
             program_id: PORTAL_PROGRAM_ID,
@@ -203,6 +272,7 @@ impl RunningScenario {
                 AccountMeta::new_readonly(owner_program, false),
                 AccountMeta::new(delegation_record, false),
                 AccountMeta::new_readonly(system_program::id(), false),
+                AccountMeta::new_readonly(find_session_pda().0, false),
             ],
             data,
         }
@@ -213,6 +283,19 @@ impl RunningScenario {
         owner_program: Pubkey,
     ) -> Result<(), solana_program_test::BanksClientError> {
         let ix = self.build_undelegate_ix(owner_program);
+        let banks: &mut BanksClient = &mut self.context.banks_client;
+        let blockhash = banks.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(
+            &[ix],
+            Some(&self.inner.payer.pubkey()),
+            &[&self.inner.payer],
+            blockhash,
+        );
+        banks.process_transaction(tx).await
+    }
+
+    async fn undelegate_handoff(&mut self) -> Result<(), solana_program_test::BanksClientError> {
+        let ix = self.build_undelegate_handoff_ix(self.inner.owner_program);
         let banks: &mut BanksClient = &mut self.context.banks_client;
         let blockhash = banks.get_latest_blockhash().await.unwrap();
         let tx = Transaction::new_signed_with_payer(
@@ -267,6 +350,174 @@ async fn delegate_requires_delegated_signer() {
     let mut running = scenario.start().await;
     let result = running.delegate_without_delegated_signer().await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn delegate_creates_multiple_records_and_restores_data() {
+    let payer = Keypair::new();
+    let delegated_a = Keypair::new();
+    let delegated_b = Keypair::new();
+    let buffer_a = Keypair::new();
+    let buffer_b = Keypair::new();
+    let owner_a = Pubkey::new_unique();
+    let owner_b = Pubkey::new_unique();
+    let grid_id = 7;
+    let data_a: Vec<u8> = (0..64).map(|i| i as u8 ^ 0x11).collect();
+    let data_b: Vec<u8> = (0..96).map(|i| i as u8 ^ 0x22).collect();
+    let (record_a, _) = find_delegation_record_pda(&delegated_a.pubkey());
+    let (record_b, _) = find_delegation_record_pda(&delegated_b.pubkey());
+    let (session_pda, session_bump) = find_session_pda();
+
+    let mut program_test = ProgramTest::default();
+    program_test.prefer_bpf(true);
+    program_test.add_program("northstar_portal", PORTAL_PROGRAM_ID, None);
+    program_test.add_account(
+        payer.pubkey(),
+        Account {
+            lamports: 1_000_000_000,
+            data: vec![],
+            owner: system_program::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    let session = Session {
+        discriminator: Session::DISCRIMINATOR,
+        grid_id,
+        ttl_slots: 100,
+        fee_cap: 0,
+        created_at: 0,
+        nonce: 0,
+        authority: payer.pubkey().to_bytes(),
+        validator: payer.pubkey().to_bytes(),
+        settlement_interval_slots: 10,
+        last_settled_l1_slot: 0,
+        last_settled_er_slot: 0,
+        settlement_status: SettlementStatus::Idle,
+        settlement_er_slot: 0,
+        settlement_checksum: [0; 32],
+        settlement_accumulator: [0; 32],
+        settlement_started_l1_slot: 0,
+        bump: session_bump,
+    };
+    program_test.add_account(
+        session_pda,
+        Account {
+            lamports: 10_000_000,
+            data: borsh::to_vec(&session).unwrap(),
+            owner: PORTAL_PROGRAM_ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        delegated_a.pubkey(),
+        Account {
+            lamports: 10_000_000,
+            data: vec![0; data_a.len()],
+            owner: PORTAL_PROGRAM_ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        delegated_b.pubkey(),
+        Account {
+            lamports: 10_000_000,
+            data: vec![0; data_b.len()],
+            owner: PORTAL_PROGRAM_ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        buffer_a.pubkey(),
+        Account {
+            lamports: 10_000_000,
+            data: data_a.clone(),
+            owner: owner_a,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+    program_test.add_account(
+        buffer_b.pubkey(),
+        Account {
+            lamports: 10_000_000,
+            data: data_b.clone(),
+            owner: owner_b,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    let context = program_test.start_with_context().await;
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let ix = build_delegate_ix_for_accounts(
+        &payer.pubkey(),
+        grid_id,
+        &session_pda,
+        &[
+            (
+                &delegated_a.pubkey(),
+                &owner_a,
+                &record_a,
+                &buffer_a.pubkey(),
+            ),
+            (
+                &delegated_b.pubkey(),
+                &owner_b,
+                &record_b,
+                &buffer_b.pubkey(),
+            ),
+        ],
+    );
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&payer.pubkey()),
+        &[&payer, &delegated_a, &delegated_b],
+        blockhash,
+    );
+
+    context
+        .banks_client
+        .process_transaction(tx)
+        .await
+        .expect("delegate many should succeed");
+
+    let record_a_account = context
+        .banks_client
+        .get_account(record_a)
+        .await
+        .unwrap()
+        .expect("record A should exist");
+    let record_b_account = context
+        .banks_client
+        .get_account(record_b)
+        .await
+        .unwrap()
+        .expect("record B should exist");
+    let parsed_a = DelegationRecord::try_from_slice(&record_a_account.data).unwrap();
+    let parsed_b = DelegationRecord::try_from_slice(&record_b_account.data).unwrap();
+    assert_eq!(parsed_a.owner_program, owner_a.to_bytes());
+    assert_eq!(parsed_a.grid_id, grid_id);
+    assert_eq!(parsed_b.owner_program, owner_b.to_bytes());
+    assert_eq!(parsed_b.grid_id, grid_id);
+
+    let delegated_a_account = context
+        .banks_client
+        .get_account(delegated_a.pubkey())
+        .await
+        .unwrap()
+        .unwrap();
+    let delegated_b_account = context
+        .banks_client
+        .get_account(delegated_b.pubkey())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(delegated_a_account.data, data_a);
+    assert_eq!(delegated_b_account.data, data_b);
 }
 
 #[tokio::test]
@@ -371,7 +622,7 @@ async fn undelegate_keypair_wallet_round_trip() {
 }
 
 #[tokio::test]
-async fn undelegate_pda_with_data_round_trip() {
+async fn undelegate_pda_with_data_rejects_without_erasing_data() {
     let real_data: Vec<u8> = (0..188).map(|i| i as u8 ^ 0x42).collect();
     let mut scenario = StagedScenario::new(DelegateScenario::new())
         .with_delegated(vec![0u8; 188], PORTAL_PROGRAM_ID);
@@ -391,10 +642,11 @@ async fn undelegate_pda_with_data_round_trip() {
     assert_eq!(pre.data, real_data);
     assert_eq!(pre.owner, PORTAL_PROGRAM_ID);
 
-    running
-        .undelegate()
-        .await
-        .expect("undelegate should succeed");
+    let result = running.undelegate().await;
+    assert!(
+        result.is_err(),
+        "non-empty data requires owner-program handoff"
+    );
 
     let post = running
         .context
@@ -403,9 +655,34 @@ async fn undelegate_pda_with_data_round_trip() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(post.owner, running.inner.owner_program);
-    assert!(post.data.iter().all(|&b| b == 0));
-    assert_eq!(post.data.len(), 188);
+    assert_eq!(post.owner, PORTAL_PROGRAM_ID);
+    assert_eq!(post.data, real_data);
+}
+
+#[tokio::test]
+async fn undelegate_handoff_returns_non_empty_account_to_owner_program() {
+    let real_data: Vec<u8> = (0..188).map(|i| i as u8 ^ 0x24).collect();
+    let mut scenario = StagedScenario::new(DelegateScenario::new())
+        .with_delegated(vec![0u8; 188], PORTAL_PROGRAM_ID);
+    let owner_program = scenario.inner.owner_program;
+    scenario = scenario.with_buffer(real_data, owner_program);
+
+    let mut running = scenario.start().await;
+    running.delegate().await.expect("delegate should succeed");
+    running
+        .undelegate_handoff()
+        .await
+        .expect("handoff primitive should assign back to owner program");
+
+    let post = running
+        .context
+        .banks_client
+        .get_account(running.inner.delegated.pubkey())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(post.owner, owner_program);
+    assert!(post.data.iter().all(|byte| *byte == 0));
 }
 
 #[tokio::test]

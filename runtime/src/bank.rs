@@ -3314,6 +3314,21 @@ impl Bank {
         )
     }
 
+    /// Sonic: carry ER-minted blockhashes into a newly reanchored ER bank.
+    pub fn carry_forward_blockhashes_from(&self, source: &Bank) -> usize {
+        if std::ptr::eq(self, source) {
+            return 0;
+        }
+
+        let source_blockhash_queue = source.blockhash_queue.read().unwrap();
+        let mut blockhash_queue = self.blockhash_queue.write().unwrap();
+        let carried = blockhash_queue.carry_forward_from(&source_blockhash_queue);
+        if carried > 0 {
+            self.update_recent_blockhashes_locked(&blockhash_queue);
+        }
+        carried
+    }
+
     #[cfg(feature = "dev-context-only-utils")]
     pub fn register_recent_blockhash_for_test(
         &self,

@@ -35,6 +35,7 @@ const LOCALNET_DEFAULT_PORTAL_PROGRAM_ID: &str = "5TeWSsjg2gbxCyWVniXeCmwM7UtHTC
 const DEVNET_DEFAULT_PORTAL_PROGRAM_ID: &str = "74iiMCqFw1afWyp3tdh9pUqfRfCRq7gfdC2YZoNGpovt";
 const DEFAULT_GRID_ID: &str = "0";
 const DEFAULT_SESSION_TTL_SLOTS: &str = "78840000";
+const DEFAULT_SETTLEMENT_INTERVAL_SLOTS: &str = "150";
 const DEFAULT_FEE_CAP_SOL: &str = "1000000";
 
 #[derive(Debug, PartialEq)]
@@ -45,6 +46,8 @@ pub enum PortalCliCommand {
         grid_id: u64,
         ttl_slots: u64,
         fee_cap: u64,
+        validator: Pubkey,
+        settlement_interval_slots: u64,
         sign_only: bool,
         dump_transaction_message: bool,
         blockhash_query: BlockhashQuery,
@@ -68,6 +71,18 @@ pub enum PortalCliCommand {
         portal_program_id: Option<Pubkey>,
         depositor: SignerIndex,
         recipient: Pubkey,
+        lamports: u64,
+        sign_only: bool,
+        dump_transaction_message: bool,
+        blockhash_query: BlockhashQuery,
+        nonce_account: Option<Pubkey>,
+        nonce_authority: SignerIndex,
+        fee_payer: SignerIndex,
+        compute_unit_price: Option<u64>,
+    },
+    WithdrawFee {
+        portal_program_id: Option<Pubkey>,
+        recipient: SignerIndex,
         lamports: u64,
         sign_only: bool,
         dump_transaction_message: bool,
@@ -124,7 +139,9 @@ impl PortalSubCommands for App<'_, '_> {
                         .arg(portal_program_id_arg())
                         .arg(grid_id_arg())
                         .arg(ttl_slots_arg())
-                        .arg(fee_cap_arg()),
+                        .arg(fee_cap_arg())
+                        .arg(validator_arg())
+                        .arg(settlement_interval_slots_arg()),
                 ))
                 .subcommand(portal_tx_subcommand(
                     SubCommand::with_name("close-session")
@@ -145,6 +162,13 @@ impl PortalSubCommands for App<'_, '_> {
                                 .takes_value(true)
                                 .help("Deposit receipt recipient pubkey [default: depositor]"),
                         ),
+                ))
+                .subcommand(portal_tx_subcommand(
+                    SubCommand::with_name("withdraw-fee")
+                        .alias("wf")
+                        .about("Withdraw SOL from Portal session deposit receipt")
+                        .arg(portal_program_id_arg())
+                        .arg(lamports_arg().index(1)),
                 ))
                 .subcommand(portal_tx_subcommand(
                     SubCommand::with_name("delegate")
@@ -204,6 +228,25 @@ fn ttl_slots_arg<'a, 'b>() -> Arg<'a, 'b> {
         .help("Session TTL in slots [default: ~1 year]")
 }
 
+fn settlement_interval_slots_arg<'a, 'b>() -> Arg<'a, 'b> {
+    Arg::with_name("settlement_interval_slots")
+        .long("settlement-interval-slots")
+        .value_name("SLOTS")
+        .takes_value(true)
+        .default_value(DEFAULT_SETTLEMENT_INTERVAL_SLOTS)
+        .validator(is_parsable::<u64>)
+        .help("L1 slot interval between permissioned settlements [default: 150]")
+}
+
+fn validator_arg<'a, 'b>() -> Arg<'a, 'b> {
+    Arg::with_name("validator")
+        .long("validator")
+        .value_name("VALIDATOR_PUBKEY")
+        .takes_value(true)
+        .validator(is_valid_pubkey)
+        .help("Permissioned settlement validator pubkey [default: session owner]")
+}
+
 fn fee_cap_arg<'a, 'b>() -> Arg<'a, 'b> {
     Arg::with_name("fee_cap")
         .long("fee-cap")
@@ -257,6 +300,9 @@ pub fn parse_portal_subcommand(
         ("deposit-fee", Some(matches)) => {
             parse_deposit_fee(matches, default_signer, wallet_manager)
         }
+        ("withdraw-fee", Some(matches)) => {
+            parse_withdraw_fee(matches, default_signer, wallet_manager)
+        }
         ("delegate", Some(matches)) => parse_delegate(matches, default_signer, wallet_manager),
         ("undelegate", Some(matches)) => parse_undelegate(matches, default_signer, wallet_manager),
         _ => unreachable!(),
@@ -296,6 +342,8 @@ fn parse_open_session(
             grid_id: value_of(matches, "grid_id").unwrap(),
             ttl_slots: value_of(matches, "ttl_slots").unwrap(),
             fee_cap,
+            validator: pubkey_of(matches, "validator").unwrap_or(owner_pubkey),
+            settlement_interval_slots: value_of(matches, "settlement_interval_slots").unwrap(),
             sign_only,
             dump_transaction_message,
             blockhash_query,
@@ -381,6 +429,49 @@ fn parse_deposit_fee(
             portal_program_id,
             depositor: signer_info.index_of(Some(depositor_pubkey)).unwrap(),
             recipient,
+            lamports,
+            sign_only,
+            dump_transaction_message,
+            blockhash_query,
+            nonce_account,
+            nonce_authority: signer_info.index_of(nonce_authority_pubkey).unwrap(),
+            fee_payer: signer_info.index_of(fee_payer_pubkey).unwrap(),
+            compute_unit_price,
+        }),
+        signers: signer_info.signers,
+    })
+}
+
+fn parse_withdraw_fee(
+    matches: &ArgMatches<'_>,
+    default_signer: &DefaultSigner,
+    wallet_manager: &mut Option<Rc<RemoteWalletManager>>,
+) -> Result<CliCommandInfo, CliError> {
+    let portal_program_id = pubkey_of(matches, "portal_program_id");
+    let recipient = default_signer.signer_from_path(matches, wallet_manager)?;
+    let recipient_pubkey = recipient.pubkey();
+    let lamports = lamports_of_sol(matches, "lamports")
+        .ok_or_else(|| CliError::BadParameter("Invalid amount".to_string()))?;
+    let sign_only = matches.is_present(SIGN_ONLY_ARG.name);
+    let dump_transaction_message = matches.is_present(DUMP_TRANSACTION_MESSAGE.name);
+    let blockhash_query = BlockhashQuery::new_from_matches(matches);
+    let nonce_account = pubkey_of_signer(matches, NONCE_ARG.name, wallet_manager)?;
+    let (nonce_authority, nonce_authority_pubkey) =
+        signer_of(matches, NONCE_AUTHORITY_ARG.name, wallet_manager)?;
+    let (fee_payer, fee_payer_pubkey) = signer_of(matches, FEE_PAYER_ARG.name, wallet_manager)?;
+    let compute_unit_price = value_of(matches, COMPUTE_UNIT_PRICE_ARG.name);
+
+    let mut bulk_signers = vec![Some(recipient), fee_payer];
+    if nonce_account.is_some() {
+        bulk_signers.push(nonce_authority);
+    }
+    let signer_info =
+        default_signer.generate_unique_signers(bulk_signers, matches, wallet_manager)?;
+
+    Ok(CliCommandInfo {
+        command: CliCommand::Portal(PortalCliCommand::WithdrawFee {
+            portal_program_id,
+            recipient: signer_info.index_of(Some(recipient_pubkey)).unwrap(),
             lamports,
             sign_only,
             dump_transaction_message,
@@ -721,6 +812,8 @@ pub async fn process_portal_subcommand(
             grid_id,
             ttl_slots,
             fee_cap,
+            validator,
+            settlement_interval_slots,
             sign_only,
             dump_transaction_message,
             blockhash_query,
@@ -745,6 +838,8 @@ pub async fn process_portal_subcommand(
                     grid_id: *grid_id,
                     ttl_slots: *ttl_slots,
                     fee_cap: *fee_cap,
+                    validator: validator.to_bytes(),
+                    settlement_interval_slots: *settlement_interval_slots,
                 }))
                 .unwrap(),
             };
@@ -847,6 +942,50 @@ pub async fn process_portal_subcommand(
             )
             .await
         }
+        PortalCliCommand::WithdrawFee {
+            portal_program_id,
+            recipient,
+            lamports,
+            sign_only,
+            dump_transaction_message,
+            blockhash_query,
+            nonce_account,
+            nonce_authority,
+            fee_payer,
+            compute_unit_price,
+        } => {
+            let portal_program_id = resolve_portal_program_id(config, *portal_program_id)?;
+            let recipient = config.signers[*recipient];
+            let session_pda = find_session_pda(&portal_program_id);
+            let deposit_receipt_pda =
+                find_deposit_receipt_pda(&portal_program_id, &session_pda, &recipient.pubkey());
+            let instruction = Instruction {
+                program_id: portal_program_id,
+                accounts: vec![
+                    AccountMeta::new(recipient.pubkey(), true),
+                    AccountMeta::new_readonly(session_pda, false),
+                    AccountMeta::new(deposit_receipt_pda, false),
+                    AccountMeta::new_readonly(system_program::id(), false),
+                ],
+                data: borsh::to_vec(&PortalInstruction::WithdrawFee {
+                    lamports: *lamports,
+                })
+                .unwrap(),
+            };
+            process_portal_instruction(
+                rpc_client,
+                config,
+                instruction,
+                *sign_only,
+                *dump_transaction_message,
+                blockhash_query,
+                nonce_account.as_ref(),
+                *nonce_authority,
+                *fee_payer,
+                *compute_unit_price,
+            )
+            .await
+        }
         PortalCliCommand::Delegate {
             portal_program_id,
             authority,
@@ -866,6 +1005,7 @@ pub async fn process_portal_subcommand(
             let delegated_account_pubkey = config.signers[*delegated_account].pubkey();
             let delegation_record_pda =
                 find_delegation_record_pda(&portal_program_id, &delegated_account_pubkey);
+            let session_pda = find_session_pda(&portal_program_id);
 
             // Sonic: Stage keypair-wallet delegation in one transaction. Portal::Delegate
             // requires the delegated account to already be Portal-owned, so create
@@ -909,10 +1049,11 @@ pub async fn process_portal_subcommand(
                 program_id: portal_program_id,
                 accounts: vec![
                     AccountMeta::new(authority.pubkey(), true),
+                    AccountMeta::new_readonly(system_program::id(), false),
+                    AccountMeta::new_readonly(session_pda, false),
                     AccountMeta::new(delegated_account_pubkey, true),
                     AccountMeta::new_readonly(owner_program, false),
                     AccountMeta::new(delegation_record_pda, false),
-                    AccountMeta::new_readonly(system_program::id(), false),
                     AccountMeta::new_readonly(buffer_keypair.pubkey(), false),
                 ],
                 data: borsh::to_vec(&PortalInstruction::Delegate { grid_id: *grid_id }).unwrap(),
@@ -950,6 +1091,7 @@ pub async fn process_portal_subcommand(
             let authority = config.signers[*authority];
             let delegation_record_pda =
                 find_delegation_record_pda(&portal_program_id, delegated_account);
+            let session_pda = find_session_pda(&portal_program_id);
             let owner_program = if let Some(owner_program) = *owner_program {
                 owner_program
             } else {
@@ -973,6 +1115,7 @@ pub async fn process_portal_subcommand(
                     AccountMeta::new_readonly(owner_program, false),
                     AccountMeta::new(delegation_record_pda, false),
                     AccountMeta::new_readonly(system_program::id(), false),
+                    AccountMeta::new_readonly(session_pda, false),
                 ],
                 data: borsh::to_vec(&PortalInstruction::Undelegate).unwrap(),
             };
@@ -1070,6 +1213,32 @@ mod tests {
                 lamports: 42,
                 ..
             }) if recipient == keypair.pubkey()
+        ));
+    }
+
+    #[test]
+    fn test_parse_portal_withdraw_fee() {
+        let (default_signer, _keypair, _tmp) = make_default_signer();
+        let matches = get_clap_app("test", "desc", "version").get_matches_from(vec![
+            "test",
+            "portal",
+            "withdraw-fee",
+            "0.000000042",
+            "--sign-only",
+            "--blockhash",
+            "11111111111111111111111111111111",
+        ]);
+
+        let command = parse_command(&matches, &default_signer, &mut None)
+            .unwrap()
+            .command;
+        assert!(matches!(
+            command,
+            CliCommand::Portal(PortalCliCommand::WithdrawFee {
+                lamports: 42,
+                sign_only: true,
+                ..
+            })
         ));
     }
 

@@ -12,11 +12,30 @@ pub struct Session {
     pub fee_cap: u64,
     pub created_at: u64,
     pub nonce: u128,
+    pub authority: Pubkey,
+    pub validator: Pubkey,
+    pub settlement_interval_slots: u64,
+    pub last_settled_l1_slot: u64,
+    pub last_settled_er_slot: u64,
+    pub settlement_status: SettlementStatus,
+    pub settlement_er_slot: u64,
+    pub settlement_checksum: [u8; 32],
+    pub settlement_accumulator: [u8; 32],
+    pub settlement_started_l1_slot: u64,
     pub bump: u8,
 }
 
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[borsh(use_discriminant = true)]
+#[repr(u8)]
+pub enum SettlementStatus {
+    Idle = 0,
+    InProgress = 1,
+}
+
 impl Session {
-    pub const LEN: usize = 50;
+    pub const LEN: usize = 219;
     pub const SEED_PREFIX: &[u8] = b"session";
     pub const DISCRIMINATOR: u8 = 1;
 
@@ -104,6 +123,16 @@ mod tests {
             fee_cap: 5000,
             nonce: 999,
             created_at: 100,
+            authority: [1; 32],
+            validator: [2; 32],
+            settlement_interval_slots: 42,
+            last_settled_l1_slot: 100,
+            last_settled_er_slot: 0,
+            settlement_status: SettlementStatus::Idle,
+            settlement_er_slot: 0,
+            settlement_checksum: [0; 32],
+            settlement_accumulator: [0; 32],
+            settlement_started_l1_slot: 0,
             bump: 255,
         };
         let serialized = borsh::to_vec(&session).unwrap();
@@ -155,6 +184,16 @@ mod tests {
             fee_cap: 1000,
             nonce: 0,
             created_at: 50,
+            authority: [1; 32],
+            validator: [2; 32],
+            settlement_interval_slots: 10,
+            last_settled_l1_slot: 50,
+            last_settled_er_slot: 0,
+            settlement_status: SettlementStatus::Idle,
+            settlement_er_slot: 0,
+            settlement_checksum: [0; 32],
+            settlement_accumulator: [0; 32],
+            settlement_started_l1_slot: 0,
             bump: 1,
         };
 

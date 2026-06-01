@@ -184,6 +184,8 @@ tokio-util = { workspace = true }
 trees = { workspace = true }
 
 northstar = { workspace = true }
+# Northstar: Portal state decoding for settlement retry/confirmation tracking.
+northstar-portal = { workspace = true }
 
 [target.'cfg(not(any(target_env = "msvc", target_os = "freebsd")))'.dependencies]
 jemallocator = { workspace = true }
@@ -202,7 +204,6 @@ fs_extra = { workspace = true }
 serde_json = { workspace = true }
 serial_test = { workspace = true }
 borsh = { workspace = true }
-northstar-portal = { workspace = true }
 solana-account = { workspace = true, features = ["dev-context-only-utils"] }
 solana-bpf-loader-program = { workspace = true }
 solana-client = { workspace = true, features = ["dev-context-only-utils"] }
