@@ -22,9 +22,10 @@ pub fn process_settle_deposit_receipt(
     settle: SettleDepositReceipt,
 ) -> ProgramResult {
     pinocchio_log::log!(
-        "Instruction: SettleDepositReceipt, er_slot={}, balance={}",
+        "Instruction: SettleDepositReceipt, er_slot={}, balance={}, withdrawn={}",
         settle.er_slot,
-        settle.balance
+        settle.balance,
+        settle.withdrawn
     );
 
     if accounts.len() < 4 {
@@ -99,22 +100,47 @@ pub fn process_settle_deposit_receipt(
         return Err(PortalError::InvalidPdaSeeds.into());
     }
 
+    if receipt_state.balance == settle.balance && receipt_state.withdrawn == settle.withdrawn {
+        pinocchio_log::log!("SettleDepositReceipt duplicate; already settled");
+        return Ok(());
+    }
+    if settle.withdrawn < receipt_state.withdrawn {
+        pinocchio_log::log!("ERROR: SettleDepositReceipt failed: withdrawn counter regressed");
+        return Err(PortalError::InvalidAccountData.into());
+    }
+
+    let payout_lamports = settle
+        .withdrawn
+        .checked_sub(receipt_state.withdrawn)
+        .ok_or(PortalError::ArithmeticOverflow)?;
     let rent_exempt = Rent::get()?.minimum_balance(DepositReceipt::LEN);
     let escrow_lamports = deposit_receipt
         .lamports()
         .checked_sub(rent_exempt)
         .ok_or(PortalError::InsufficientFees)?;
-    if settle.balance > escrow_lamports {
+    let escrow_after_payout = escrow_lamports
+        .checked_sub(payout_lamports)
+        .ok_or(PortalError::InsufficientFees)?;
+    if settle.balance > escrow_after_payout {
         pinocchio_log::log!("ERROR: SettleDepositReceipt failed: balance exceeds escrow");
         return Err(PortalError::InsufficientFees.into());
     }
 
-    if receipt_state.balance == settle.balance {
-        pinocchio_log::log!("SettleDepositReceipt duplicate; already settled");
-        return Ok(());
+    if payout_lamports > 0 {
+        {
+            let mut recipient_lamports = recipient.try_borrow_mut_lamports()?;
+            *recipient_lamports = recipient_lamports
+                .checked_add(payout_lamports)
+                .ok_or(PortalError::ArithmeticOverflow)?;
+        }
+        *deposit_receipt.try_borrow_mut_lamports()? = deposit_receipt
+            .lamports()
+            .checked_sub(payout_lamports)
+            .ok_or(PortalError::ArithmeticOverflow)?;
     }
 
     receipt_state.balance = settle.balance;
+    receipt_state.withdrawn = settle.withdrawn;
     let mut receipt_data = deposit_receipt.try_borrow_mut_data()?;
     BorshSerialize::serialize(
         &receipt_state,
@@ -127,6 +153,7 @@ pub fn process_settle_deposit_receipt(
         session_state.settlement_accumulator,
         recipient.key(),
         settle.balance,
+        settle.withdrawn,
     );
     let mut session_data = session.try_borrow_mut_data()?;
     BorshSerialize::serialize(&session_state, &mut &mut session_data[..Session::LEN]).unwrap();

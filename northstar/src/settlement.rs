@@ -31,6 +31,9 @@ pub struct SettlementChunk {
 pub struct ReceiptBalanceSettlement {
     pub recipient: Pubkey,
     pub balance: u64,
+    /// Cumulative lamports moved by ER withdrawal transactions into the
+    /// recipient's withdrawal sink PDA.
+    pub withdrawn: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,13 +239,14 @@ impl SettlementPlan {
                     AccountMeta::new_readonly(validator, true),
                     AccountMeta::new(session_pda, false),
                     AccountMeta::new(deposit_receipt, false),
-                    AccountMeta::new_readonly(receipt.recipient, false),
+                    AccountMeta::new(receipt.recipient, false),
                 ],
                 data: borsh::to_vec(&PortalInstruction::SettleDepositReceipt(
                     SettleDepositReceipt {
                         er_slot: self.er_slot,
                         checksum: self.checksum,
                         balance: receipt.balance,
+                        withdrawn: receipt.withdrawn,
                     },
                 ))
                 .unwrap(),
@@ -467,7 +471,12 @@ fn checksum_settlement(
         );
     }
     for receipt in receipt_balances {
-        checksum = accumulate_receipt_checksum(checksum, &receipt.recipient, receipt.balance);
+        checksum = accumulate_receipt_checksum(
+            checksum,
+            &receipt.recipient,
+            receipt.balance,
+            receipt.withdrawn,
+        );
     }
     checksum
 }
@@ -497,12 +506,14 @@ fn accumulate_receipt_checksum(
     accumulator: [u8; 32],
     recipient: &Pubkey,
     balance: u64,
+    withdrawn: u64,
 ) -> [u8; 32] {
     hashv(&[
         &accumulator,
         b"receipt",
         recipient.as_ref(),
         &balance.to_le_bytes(),
+        &withdrawn.to_le_bytes(),
     ])
     .to_bytes()
 }
@@ -794,6 +805,7 @@ mod tests {
             receipt_balances: vec![ReceiptBalanceSettlement {
                 recipient: Pubkey::new_unique(),
                 balance: 9,
+                withdrawn: 0,
             }],
             unsupported_changes: vec![],
         };

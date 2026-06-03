@@ -259,6 +259,7 @@ impl EphemeralTransactionClient {
         bank: &Bank,
         tx: &VersionedTransaction,
         delegated_accounts: &HashSet<Pubkey>,
+        touched_accounts: &HashSet<Pubkey>,
     ) -> bool {
         // If delegation set is empty, allow everything (unrestricted mode)
         if delegated_accounts.is_empty() {
@@ -279,17 +280,20 @@ impl EphemeralTransactionClient {
                 continue;
             }
             if message.is_maybe_writable(i, None)
-                && !Self::is_allowed_writable_on_bank(bank, key, delegated_accounts)
+                && !Self::is_allowed_writable_on_bank(
+                    bank,
+                    key,
+                    delegated_accounts,
+                    touched_accounts,
+                )
             {
                 return false;
             }
         }
 
-        if !loaded_addresses
-            .writable
-            .iter()
-            .all(|key| Self::is_allowed_writable_on_bank(bank, key, delegated_accounts))
-        {
+        if !loaded_addresses.writable.iter().all(|key| {
+            Self::is_allowed_writable_on_bank(bank, key, delegated_accounts, touched_accounts)
+        }) {
             return false;
         }
 
@@ -300,6 +304,7 @@ impl EphemeralTransactionClient {
         bank: &Bank,
         key: &Pubkey,
         delegated_accounts: &HashSet<Pubkey>,
+        touched_accounts: &HashSet<Pubkey>,
     ) -> bool {
         // Always allow native programs and sysvars
         if system_program::check_id(key)
@@ -310,8 +315,9 @@ impl EphemeralTransactionClient {
             return true;
         }
 
-        // Allow delegated accounts
-        if delegated_accounts.contains(key) {
+        // Allow delegated accounts and ER bridge accounts materialized by
+        // deposit/withdrawal setup.
+        if delegated_accounts.contains(key) || touched_accounts.contains(key) {
             return true;
         }
 
@@ -358,10 +364,16 @@ impl TransactionClient for EphemeralTransactionClient {
         let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
         let bank = self.bank();
         let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
+        let touched_accounts = self.touched_accounts.read().unwrap().clone();
         let txs: Vec<_> = txs
             .into_iter()
             .filter(|tx| {
-                let allowed = Self::is_transaction_allowed_on_bank(&bank, tx, &delegated_accounts);
+                let allowed = Self::is_transaction_allowed_on_bank(
+                    &bank,
+                    tx,
+                    &delegated_accounts,
+                    &touched_accounts,
+                );
                 if !allowed {
                     warn!(
                         "Transaction rejected: writes to non-delegated accounts. sig={}",
@@ -1477,7 +1489,8 @@ mod tests {
         assert!(EphemeralTransactionClient::is_transaction_allowed_on_bank(
             &bank,
             &tx,
-            &client.delegated_accounts.read().unwrap()
+            &client.delegated_accounts.read().unwrap(),
+            &HashSet::new()
         ));
     }
 
@@ -1509,7 +1522,8 @@ mod tests {
         assert!(!EphemeralTransactionClient::is_transaction_allowed_on_bank(
             &bank,
             &tx,
-            &client.delegated_accounts.read().unwrap()
+            &client.delegated_accounts.read().unwrap(),
+            &HashSet::new()
         ));
     }
 
@@ -1536,7 +1550,8 @@ mod tests {
         assert!(EphemeralTransactionClient::is_transaction_allowed_on_bank(
             &bank,
             &tx,
-            &client.delegated_accounts.read().unwrap()
+            &client.delegated_accounts.read().unwrap(),
+            &HashSet::new()
         ));
     }
 
@@ -1562,7 +1577,8 @@ mod tests {
         assert!(EphemeralTransactionClient::is_transaction_allowed_on_bank(
             &bank,
             &tx,
-            &client.delegated_accounts.read().unwrap()
+            &client.delegated_accounts.read().unwrap(),
+            &HashSet::new()
         ));
     }
 
@@ -1595,7 +1611,8 @@ mod tests {
         assert!(EphemeralTransactionClient::is_transaction_allowed_on_bank(
             &bank,
             &tx,
-            &client.delegated_accounts.read().unwrap()
+            &client.delegated_accounts.read().unwrap(),
+            &HashSet::new()
         ));
     }
 
@@ -1622,7 +1639,8 @@ mod tests {
         assert!(EphemeralTransactionClient::is_transaction_allowed_on_bank(
             &bank,
             &tx,
-            &client.delegated_accounts.read().unwrap()
+            &client.delegated_accounts.read().unwrap(),
+            &HashSet::new()
         ));
     }
 
@@ -1654,7 +1672,8 @@ mod tests {
         assert!(EphemeralTransactionClient::is_transaction_allowed_on_bank(
             &bank,
             &tx,
-            &client.delegated_accounts.read().unwrap()
+            &client.delegated_accounts.read().unwrap(),
+            &HashSet::new()
         ));
     }
 
@@ -1691,7 +1710,8 @@ mod tests {
         assert!(!EphemeralTransactionClient::is_transaction_allowed_on_bank(
             &bank,
             &tx,
-            &client.delegated_accounts.read().unwrap()
+            &client.delegated_accounts.read().unwrap(),
+            &HashSet::new()
         ));
     }
 
@@ -1754,7 +1774,8 @@ mod tests {
         assert!(!EphemeralTransactionClient::is_transaction_allowed_on_bank(
             &bank,
             &tx,
-            &client.delegated_accounts.read().unwrap()
+            &client.delegated_accounts.read().unwrap(),
+            &HashSet::new()
         ));
     }
 
@@ -1787,7 +1808,8 @@ mod tests {
         assert!(!EphemeralTransactionClient::is_transaction_allowed_on_bank(
             &bank,
             &tx,
-            &client.delegated_accounts.read().unwrap()
+            &client.delegated_accounts.read().unwrap(),
+            &HashSet::new()
         ));
     }
 

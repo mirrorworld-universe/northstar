@@ -62,16 +62,10 @@ pub enum PortalInstruction {
     #[cfg_attr(feature = "idl", account(1, name = "session", mut))]
     AbortSettlement,
 
-    #[cfg_attr(feature = "idl", account(0, name = "recipient", sig, mut))]
-    #[cfg_attr(feature = "idl", account(1, name = "session"))]
-    #[cfg_attr(feature = "idl", account(2, name = "deposit_receipt", mut))]
-    #[cfg_attr(feature = "idl", account(3, name = "system_program"))]
-    WithdrawFee { lamports: u64 },
-
     #[cfg_attr(feature = "idl", account(0, name = "validator", sig))]
     #[cfg_attr(feature = "idl", account(1, name = "session", mut))]
     #[cfg_attr(feature = "idl", account(2, name = "deposit_receipt", mut))]
-    #[cfg_attr(feature = "idl", account(3, name = "recipient"))]
+    #[cfg_attr(feature = "idl", account(3, name = "recipient", mut))]
     SettleDepositReceipt(SettleDepositReceipt),
 
     #[cfg_attr(feature = "idl", account(0, name = "authority", sig, mut))]
@@ -123,4 +117,5 @@ pub struct SettleDepositReceipt {
     pub er_slot: u64,
     pub checksum: [u8; 32],
     pub balance: u64,
+    pub withdrawn: u64,
 }

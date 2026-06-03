@@ -1365,18 +1365,18 @@ impl EphemeralRuntime {
     }
 
     /// Build validator-settled DepositReceipt balance updates from ER-local
-    /// system account balances. Existing receipts become the L1 withdrawable
-    /// balance after the next settlement, so users must withdraw from settled
-    /// receipt state instead of stale deposit totals.
+    /// system account balances and explicit ER withdrawal transactions.
+    ///
+    /// Withdraw on ER by sending a normal system transfer from the recipient to
+    /// `withdrawal_sink(session, recipient)`. The sink balance is cumulative;
+    /// Portal settlement pays only the delta over `DepositReceipt.withdrawn`.
     pub fn settlement_receipt_balances(
         &self,
         session_pda: Pubkey,
     ) -> Vec<ReceiptBalanceSettlement> {
         let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
-        let mut receipt_balances = self
-            .er_account_overlay
-            .read()
-            .unwrap()
+        let overlay = self.er_account_overlay.read().unwrap();
+        let mut receipt_balances = overlay
             .iter()
             .filter(|(recipient, account)| {
                 !delegated_accounts.contains(recipient)
@@ -1396,10 +1396,30 @@ impl EphemeralRuntime {
                 else {
                     return None;
                 };
-                (receipt.balance != account.lamports()).then_some(ReceiptBalanceSettlement {
-                    recipient: *recipient,
-                    balance: account.lamports(),
-                })
+                let (withdrawal_sink, _) = northstar_portal::find_withdrawal_sink_pda(
+                    &self.portal_program_id.to_bytes(),
+                    &session_pda.to_bytes(),
+                    &recipient.to_bytes(),
+                );
+                let withdrawal_sink = Pubkey::new_from_array(withdrawal_sink);
+                let withdrawn = overlay
+                    .get(&withdrawal_sink)
+                    .map(|sink| {
+                        let l1_sink_lamports = self
+                            .l1_anchor_bank
+                            .get_account(&withdrawal_sink)
+                            .map(|account| account.lamports())
+                            .unwrap_or_else(|| solana_rent::Rent::default().minimum_balance(0));
+                        sink.lamports().saturating_sub(l1_sink_lamports)
+                    })
+                    .unwrap_or(receipt.withdrawn);
+                (receipt.balance != account.lamports() || receipt.withdrawn != withdrawn).then_some(
+                    ReceiptBalanceSettlement {
+                        recipient: *recipient,
+                        balance: account.lamports(),
+                        withdrawn,
+                    },
+                )
             })
             .collect::<Vec<_>>();
         receipt_balances.sort_by_key(|receipt| receipt.recipient.to_bytes());
@@ -1698,52 +1718,39 @@ impl EphemeralRuntime {
             account.set_owner(solana_sdk_ids::system_program::id());
         }
         bank.store_account(depositor, &account);
-        self.er_account_overlay
-            .write()
-            .unwrap()
-            .insert(*depositor, account.clone());
+        let withdrawal_sink = self.session_pda.read().unwrap().map(|session_pda| {
+            crate::withdrawal_sink_pda(&self.portal_program_id, &session_pda, depositor)
+        });
+        {
+            let mut overlay = self.er_account_overlay.write().unwrap();
+            overlay.insert(*depositor, account.clone());
 
-        // Mark as touched so the balance isn't zeroed later
-        self.touched_accounts.write().unwrap().insert(*depositor);
+            if let Some(withdrawal_sink) = withdrawal_sink {
+                if bank.get_account(&withdrawal_sink).is_none() {
+                    let sink_account = AccountSharedData::new(
+                        solana_rent::Rent::default().minimum_balance(0),
+                        0,
+                        &solana_sdk_ids::system_program::id(),
+                    );
+                    bank.store_account(&withdrawal_sink, &sink_account);
+                    overlay.insert(withdrawal_sink, sink_account);
+                }
+            }
+        }
+        {
+            // Mark as touched so the balance isn't zeroed later.
+            let mut touched = self.touched_accounts.write().unwrap();
+            if let Some(withdrawal_sink) = withdrawal_sink {
+                touched.insert(withdrawal_sink);
+            }
+            touched.insert(*depositor);
+        }
 
         self.publish_bank_for_rpc();
 
         info!(
             "Credited {} lamports to {} on ER (base: {}, new balance: {})",
             lamports, depositor, base_balance, new_balance
-        );
-    }
-
-    /// Debit a withdrawal on the ephemeral bank. Called by NorthStarService
-    /// when a FeeWithdrawn event is detected on L1.
-    pub fn debit_withdrawal(&self, recipient: &Pubkey, lamports: u64) {
-        let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
-        let bank = self.bank();
-        let mut account = bank.get_account(recipient).unwrap_or_default();
-        let base_balance = account.lamports();
-        if base_balance < lamports {
-            warn!(
-                "Withdrawal of {} lamports for {} exceeds ER balance {}; clamping to zero",
-                lamports, recipient, base_balance
-            );
-        }
-        let new_balance = base_balance.saturating_sub(lamports);
-        account.set_lamports(new_balance);
-        if account.owner() == &Pubkey::default() {
-            account.set_owner(solana_sdk_ids::system_program::id());
-        }
-        bank.store_account(recipient, &account);
-        self.er_account_overlay
-            .write()
-            .unwrap()
-            .insert(*recipient, account.clone());
-        self.touched_accounts.write().unwrap().insert(*recipient);
-
-        self.publish_bank_for_rpc();
-
-        info!(
-            "Debited {} lamports from {} on ER (base: {}, new balance: {})",
-            lamports, recipient, base_balance, new_balance
         );
     }
 }
@@ -1763,7 +1770,7 @@ impl Drop for EphemeralRuntime {
 mod tests {
     use {
         super::*,
-        northstar_portal::DelegationRecord,
+        northstar_portal::{DelegationRecord, DepositReceipt},
         solana_account::{
             AccountSharedData, ReadableAccount, WritableAccount, state_traits::StateMut,
         },
@@ -1826,6 +1833,54 @@ mod tests {
     fn fund_account(bank: &Bank, pubkey: &Pubkey, lamports: u64) {
         let account = AccountSharedData::new(lamports, 0, &system_program::id());
         bank.store_account(pubkey, &account);
+    }
+
+    fn store_withdrawal_sink(
+        bank: &Bank,
+        portal_program_id: &Pubkey,
+        session_pda: &Pubkey,
+        recipient: &Pubkey,
+    ) {
+        let sink = crate::withdrawal_sink_pda(portal_program_id, session_pda, recipient);
+        let account = AccountSharedData::new(
+            solana_rent::Rent::default().minimum_balance(0),
+            0,
+            &system_program::id(),
+        );
+        bank.store_account(&sink, &account);
+    }
+
+    fn store_deposit_receipt(
+        bank: &Bank,
+        portal_program_id: &Pubkey,
+        session_pda: &Pubkey,
+        recipient: &Pubkey,
+        balance: u64,
+        withdrawn: u64,
+    ) {
+        let (receipt_pda, bump) = Pubkey::find_program_address(
+            &[b"deposit_receipt", session_pda.as_ref(), recipient.as_ref()],
+            portal_program_id,
+        );
+        let receipt = DepositReceipt {
+            discriminator: DepositReceipt::DISCRIMINATOR,
+            session: session_pda.to_bytes(),
+            recipient: recipient.to_bytes(),
+            balance,
+            withdrawn,
+            bump,
+        };
+        let mut account = AccountSharedData::new(
+            solana_rent::Rent::default()
+                .minimum_balance(DepositReceipt::LEN)
+                .saturating_add(balance),
+            DepositReceipt::LEN,
+            portal_program_id,
+        );
+        account
+            .data_as_mut_slice()
+            .copy_from_slice(&borsh::to_vec(&receipt).unwrap());
+        bank.store_account(&receipt_pda, &account);
     }
 
     fn store_delegation_record(
@@ -2041,6 +2096,91 @@ mod tests {
         assert!(account_diff.l1_account.is_none());
         assert_eq!(account_diff.l1_lt_hash, LtHash::identity());
         assert_eq!(account_diff.er_account.lamports(), 7);
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_er_withdrawal_transaction_settles_via_withdrawal_sink() {
+        let parent_bank = create_test_bank();
+        let portal_program_id = Pubkey::new_unique();
+        let session_pda = Pubkey::new_unique();
+        let recipient_keypair = Keypair::new();
+        let recipient = recipient_keypair.pubkey();
+        let deposit_amount = 1_000u64;
+        let withdraw_amount = 250u64;
+        store_deposit_receipt(
+            &parent_bank,
+            &portal_program_id,
+            &session_pda,
+            &recipient,
+            deposit_amount,
+            0,
+        );
+        store_withdrawal_sink(&parent_bank, &portal_program_id, &session_pda, &recipient);
+        parent_bank.freeze();
+
+        let settings = EphemeralRollupSettings {
+            session_pda,
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            portal_program_id,
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.activate();
+        runtime.credit_deposit(&recipient, deposit_amount);
+
+        let withdrawal_ix = crate::er_withdrawal_instruction(
+            &portal_program_id,
+            &session_pda,
+            &recipient,
+            withdraw_amount,
+        );
+        let tx = Transaction::new_signed_with_payer(
+            &[withdrawal_ix],
+            Some(&recipient),
+            &[&recipient_keypair],
+            runtime.bank().last_blockhash(),
+        );
+        let wire_tx = bincode::serialize(&VersionedTransaction::from(tx)).unwrap();
+        TransactionClient::send_transactions_in_batch(
+            &runtime._tx_client,
+            vec![wire_tx],
+            &SendTransactionServiceStats::default(),
+        );
+
+        let withdrawal_sink =
+            crate::withdrawal_sink_pda(&portal_program_id, &session_pda, &recipient);
+        assert_eq!(
+            runtime.bank().get_balance(&recipient),
+            deposit_amount - withdraw_amount
+        );
+        assert_eq!(
+            runtime.bank().get_balance(&withdrawal_sink)
+                - solana_rent::Rent::default().minimum_balance(0),
+            withdraw_amount
+        );
+
+        let receipt_balances = runtime.settlement_receipt_balances(session_pda);
+        assert_eq!(receipt_balances.len(), 1);
+        assert_eq!(receipt_balances[0].recipient, recipient);
+        assert_eq!(
+            receipt_balances[0].balance,
+            deposit_amount - withdraw_amount
+        );
+        assert_eq!(receipt_balances[0].withdrawn, withdraw_amount);
 
         runtime.shutdown();
     }
