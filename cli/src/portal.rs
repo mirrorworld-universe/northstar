@@ -166,7 +166,10 @@ impl PortalSubCommands for App<'_, '_> {
                 .subcommand(portal_tx_subcommand(
                     SubCommand::with_name("withdraw-fee")
                         .alias("wf")
-                        .about("Withdraw SOL from Portal session deposit receipt")
+                        .about(
+                            "Request SOL withdrawal on ER; sends system transfer to withdrawal \
+                             sink",
+                        )
                         .arg(portal_program_id_arg())
                         .arg(lamports_arg().index(1)),
                 ))
@@ -625,6 +628,14 @@ fn find_deposit_receipt_pda(program_id: &Pubkey, session: &Pubkey, recipient: &P
     .0
 }
 
+fn find_withdrawal_sink_pda(program_id: &Pubkey, session: &Pubkey, recipient: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[b"withdrawal_sink", session.as_ref(), recipient.as_ref()],
+        program_id,
+    )
+    .0
+}
+
 fn delegation_record_owner_program(account: &Account) -> Result<Pubkey, CliError> {
     if account.data.len() != DelegationRecord::LEN {
         return Err(CliError::BadParameter(format!(
@@ -914,6 +925,8 @@ pub async fn process_portal_subcommand(
             let session_pda = find_session_pda(&portal_program_id);
             let deposit_receipt_pda =
                 find_deposit_receipt_pda(&portal_program_id, &session_pda, recipient);
+            let withdrawal_sink_pda =
+                find_withdrawal_sink_pda(&portal_program_id, &session_pda, recipient);
             let instruction = Instruction {
                 program_id: portal_program_id,
                 accounts: vec![
@@ -922,6 +935,7 @@ pub async fn process_portal_subcommand(
                     AccountMeta::new(deposit_receipt_pda, false),
                     AccountMeta::new_readonly(*recipient, false),
                     AccountMeta::new_readonly(system_program::id(), false),
+                    AccountMeta::new(withdrawal_sink_pda, false),
                 ],
                 data: borsh::to_vec(&PortalInstruction::DepositFee {
                     lamports: *lamports,
@@ -957,21 +971,10 @@ pub async fn process_portal_subcommand(
             let portal_program_id = resolve_portal_program_id(config, *portal_program_id)?;
             let recipient = config.signers[*recipient];
             let session_pda = find_session_pda(&portal_program_id);
-            let deposit_receipt_pda =
-                find_deposit_receipt_pda(&portal_program_id, &session_pda, &recipient.pubkey());
-            let instruction = Instruction {
-                program_id: portal_program_id,
-                accounts: vec![
-                    AccountMeta::new(recipient.pubkey(), true),
-                    AccountMeta::new_readonly(session_pda, false),
-                    AccountMeta::new(deposit_receipt_pda, false),
-                    AccountMeta::new_readonly(system_program::id(), false),
-                ],
-                data: borsh::to_vec(&PortalInstruction::WithdrawFee {
-                    lamports: *lamports,
-                })
-                .unwrap(),
-            };
+            let withdrawal_sink_pda =
+                find_withdrawal_sink_pda(&portal_program_id, &session_pda, &recipient.pubkey());
+            let instruction =
+                system_instruction::transfer(&recipient.pubkey(), &withdrawal_sink_pda, *lamports);
             process_portal_instruction(
                 rpc_client,
                 config,
@@ -1217,7 +1220,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_portal_withdraw_fee() {
+    fn test_parse_portal_withdraw_fee_builds_er_request() {
         let (default_signer, _keypair, _tmp) = make_default_signer();
         let matches = get_clap_app("test", "desc", "version").get_matches_from(vec![
             "test",
