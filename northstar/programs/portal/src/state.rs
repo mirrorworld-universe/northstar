@@ -96,11 +96,14 @@ pub struct DepositReceipt {
     pub session: Pubkey,
     pub recipient: Pubkey,
     pub balance: u64,
+    /// Cumulative lamports requested for L1 payout via ER withdrawal
+    /// transactions. Settlement pays only the delta above this value.
+    pub withdrawn: u64,
     pub bump: u8,
 }
 
 impl DepositReceipt {
-    pub const LEN: usize = 74; // 1 + 32 + 32 + 8 + 1
+    pub const LEN: usize = 82; // 1 + 32 + 32 + 8 + 8 + 1
     pub const SEED_PREFIX: &[u8] = b"deposit_receipt";
     pub const DISCRIMINATOR: u8 = 4;
 
@@ -108,6 +111,12 @@ impl DepositReceipt {
     pub fn is_valid(&self) -> bool {
         self.discriminator == Self::DISCRIMINATOR
     }
+}
+
+pub struct WithdrawalSink;
+
+impl WithdrawalSink {
+    pub const SEED_PREFIX: &[u8] = b"withdrawal_sink";
 }
 
 #[cfg(test)]
@@ -157,6 +166,7 @@ mod tests {
             session: [0x11; 32],
             recipient: [0x22; 32],
             balance: 1_000_000_000,
+            withdrawn: 0,
             bump: 77,
         };
         let serialized = borsh::to_vec(&receipt).unwrap();

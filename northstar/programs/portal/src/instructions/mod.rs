@@ -5,7 +5,6 @@ pub mod open_session;
 pub mod settle_deposit_receipt;
 pub mod settlement;
 pub mod undelegate;
-pub mod withdraw_fee;
 
 pub use {
     close_session::process_close_session,
@@ -18,5 +17,4 @@ pub use {
         process_write_settlement_chunk,
     },
     undelegate::{process_undelegate, process_undelegate_handoff},
-    withdraw_fee::process_withdraw_fee,
 };

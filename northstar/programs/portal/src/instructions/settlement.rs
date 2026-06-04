@@ -42,8 +42,16 @@ pub(crate) fn accumulate_receipt_checksum(
     accumulator: [u8; 32],
     recipient: &Pubkey,
     balance: u64,
+    withdrawn: u64,
 ) -> [u8; 32] {
-    hashv(&[&accumulator, b"receipt", recipient, &balance.to_le_bytes()]).to_bytes()
+    hashv(&[
+        &accumulator,
+        b"receipt",
+        recipient,
+        &balance.to_le_bytes(),
+        &withdrawn.to_le_bytes(),
+    ])
+    .to_bytes()
 }
 
 fn load_session(program_id: &Pubkey, session: &AccountInfo) -> Result<Session, ProgramError> {

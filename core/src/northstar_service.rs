@@ -579,11 +579,6 @@ impl NorthStarService {
                             } => {
                                 manager.credit_deposit(&depositor, delta);
                             }
-                            L1Event::FeeWithdrawn {
-                                delta, recipient, ..
-                            } => {
-                                manager.debit_withdrawal(&recipient, delta);
-                            }
                             other => {
                                 debug!("Unhandled L1 event: {other:?}");
                             }

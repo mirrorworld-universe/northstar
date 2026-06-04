@@ -1,5 +1,5 @@
 use {
-    crate::{DelegationRecord, DepositReceipt, FeeVault, Session},
+    crate::{DelegationRecord, DepositReceipt, FeeVault, Session, WithdrawalSink},
     pinocchio::pubkey::Pubkey,
 };
 
@@ -37,6 +37,19 @@ pub fn find_deposit_receipt_pda(
 ) -> (Pubkey, u8) {
     let seeds = &[
         DepositReceipt::SEED_PREFIX,
+        session.as_ref(),
+        recipient.as_ref(),
+    ];
+    find_program_address(seeds, program_id)
+}
+
+pub fn find_withdrawal_sink_pda(
+    program_id: &Pubkey,
+    session: &Pubkey,
+    recipient: &Pubkey,
+) -> (Pubkey, u8) {
+    let seeds = &[
+        WithdrawalSink::SEED_PREFIX,
         session.as_ref(),
         recipient.as_ref(),
     ];
