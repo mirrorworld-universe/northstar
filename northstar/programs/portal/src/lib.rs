@@ -95,7 +95,7 @@ pub unsafe extern "C" fn entrypoint(input: *mut u8) -> u64 {
     let accounts: &[AccountInfo] =
         core::slice::from_raw_parts(accounts_arr.as_ptr() as *const AccountInfo, count);
 
-    match process_instruction(&program_id, accounts, instruction_data) {
+    match process_instruction(program_id, accounts, instruction_data) {
         Ok(()) => SUCCESS,
         Err(e) => e.into(),
     }
