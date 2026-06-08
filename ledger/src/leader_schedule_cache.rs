@@ -244,12 +244,12 @@ mod tests {
             staking_utils::tests::setup_vote_and_stake_accounts,
         },
         crossbeam_channel::unbounded,
-        solana_clock::{DEFAULT_SLOTS_PER_EPOCH, NUM_CONSECUTIVE_LEADER_SLOTS},
+        solana_clock::DEFAULT_SLOTS_PER_EPOCH,
         solana_epoch_schedule::{
             DEFAULT_LEADER_SCHEDULE_SLOT_OFFSET, EpochSchedule, MINIMUM_SLOTS_PER_EPOCH,
         },
         solana_keypair::Keypair,
-        solana_leader_schedule::{LeaderSchedule, SlotLeader},
+        solana_leader_schedule::{LeaderSchedule, NUM_CONSECUTIVE_LEADER_SLOTS, SlotLeader},
         solana_runtime::stake_utils,
         solana_signer::Signer,
         std::{sync::Arc, thread::Builder},
@@ -525,8 +525,7 @@ mod tests {
             &validator_identity,
             bootstrap_validator_stake_lamports()
                 + stake_utils::get_minimum_delegation(
-                    bank.feature_set
-                        .is_active(&agave_feature_set::upgrade_bpf_stake_program_to_v5::id()),
+                    bank.feature_set.snapshot().upgrade_bpf_stake_program_to_v5,
                 ),
         );
         let node_pubkey = validator_identity.pubkey();
@@ -539,10 +538,11 @@ mod tests {
             target_slot += 1;
         }
 
+        let child_bank = Bank::new_from_parent(bank.clone(), SlotLeader::default(), target_slot);
         let bank = bank_forks
             .write()
             .unwrap()
-            .insert(Bank::new_from_parent(bank, &Pubkey::default(), target_slot))
+            .insert(child_bank)
             .clone_without_scheduler();
         let mut expected_slot = 0;
         let epoch = bank.get_leader_schedule_epoch(target_slot);
@@ -571,7 +571,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(res.0, expected_slot);
-        assert!(res.1 >= expected_slot + NUM_CONSECUTIVE_LEADER_SLOTS - 1);
+        assert!(res.1 >= expected_slot + NUM_CONSECUTIVE_LEADER_SLOTS.get() as Slot - 1);
 
         let res = cache
             .next_leader_slot(
@@ -579,18 +579,21 @@ mod tests {
                 0,
                 &bank,
                 None,
-                NUM_CONSECUTIVE_LEADER_SLOTS - 1,
+                NUM_CONSECUTIVE_LEADER_SLOTS.get() as Slot - 1,
             )
             .unwrap();
 
         assert_eq!(res.0, expected_slot);
-        assert_eq!(res.1, expected_slot + NUM_CONSECUTIVE_LEADER_SLOTS - 2);
+        assert_eq!(
+            res.1,
+            expected_slot + NUM_CONSECUTIVE_LEADER_SLOTS.get() as Slot - 2
+        );
     }
 
     #[test]
     fn test_schedule_for_unconfirmed_epoch() {
         let GenesisConfigInfo { genesis_config, .. } = create_genesis_config(2);
-        let bank = Arc::new(Bank::new_for_tests(&genesis_config));
+        let (bank, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
         let cache = LeaderScheduleCache::new_from_bank(&bank);
 
         assert_eq!(cache.max_epoch.load(Ordering::Acquire), 1);
@@ -605,16 +608,21 @@ mod tests {
         assert_eq!(bank.get_epoch_and_slot_index(96).0, 2);
         assert!(cache.slot_leader_at(96, Some(&bank)).is_none());
 
-        let bank2 = Bank::new_from_parent(bank, &solana_pubkey::new_rand(), 95);
+        let bank2 = Bank::new_from_parent_with_bank_forks(
+            bank_forks.as_ref(),
+            bank,
+            SlotLeader::new_unique(),
+            95,
+        );
         assert!(bank2.epoch_vote_accounts(2).is_some());
 
         // Set root for a slot in epoch 1, so that epoch 2 is now confirmed
-        cache.set_root(&bank2);
+        cache.set_root(bank2.as_ref());
         assert_eq!(cache.max_epoch.load(Ordering::Acquire), 2);
-        assert!(cache.slot_leader_at(96, Some(&bank2)).is_some());
+        assert!(cache.slot_leader_at(96, Some(bank2.as_ref())).is_some());
         assert_eq!(bank2.get_epoch_and_slot_index(223).0, 2);
-        assert!(cache.slot_leader_at(223, Some(&bank2)).is_some());
+        assert!(cache.slot_leader_at(223, Some(bank2.as_ref())).is_some());
         assert_eq!(bank2.get_epoch_and_slot_index(224).0, 3);
-        assert!(cache.slot_leader_at(224, Some(&bank2)).is_none());
+        assert!(cache.slot_leader_at(224, Some(bank2.as_ref())).is_none());
     }
 }

@@ -18,7 +18,7 @@ struct BenchSetup {
 fn setup(num_transactions: usize, contentious_transactions: bool) -> BenchSetup {
     let mut cost_tracker = CostTracker::default();
     // set cost_tracker with max limits to stretch testing
-    cost_tracker.set_limits(u64::MAX, u64::MAX, u64::MAX);
+    cost_tracker.set_limits_max();
 
     let max_accounts_per_tx = 128;
     let pubkey = Pubkey::new_unique();
@@ -49,7 +49,7 @@ fn get_costs(
     transactions
         .iter()
         .map(|transaction| {
-            TransactionCost::Transaction(UsageCostDetails {
+            TransactionCost::new(UsageCostDetails {
                 transaction,
                 signature_cost: 0,
                 write_lock_cost: 0,

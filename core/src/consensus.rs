@@ -680,37 +680,18 @@ impl Tower {
             // here that this is our leader bank.
             Hash::default()
         });
-        self.record_bank_vote_and_update_lockouts(
-            bank.slot(),
-            bank.hash(),
-            bank.feature_set
-                .is_active(&agave_feature_set::enable_tower_sync_ix::id()),
-            block_id,
-        )
+        self.record_bank_vote_and_update_lockouts(bank.slot(), bank.hash(), block_id)
     }
 
     /// If we've recently updated the vote state by applying a new vote
     /// or syncing from a bank, generate the proper last_vote.
-    pub(crate) fn update_last_vote_from_vote_state(
-        &mut self,
-        vote_hash: Hash,
-        enable_tower_sync_ix: bool,
-        block_id: Hash,
-    ) {
-        let mut new_vote = if enable_tower_sync_ix {
-            VoteTransaction::from(TowerSync::new(
-                self.vote_state.votes.clone(),
-                self.vote_state.root_slot,
-                vote_hash,
-                block_id,
-            ))
-        } else {
-            VoteTransaction::from(VoteStateUpdate::new(
-                self.vote_state.votes.clone(),
-                self.vote_state.root_slot,
-                vote_hash,
-            ))
-        };
+    pub(crate) fn update_last_vote_from_vote_state(&mut self, vote_hash: Hash, block_id: Hash) {
+        let mut new_vote = VoteTransaction::from(TowerSync::new(
+            self.vote_state.votes.clone(),
+            self.vote_state.root_slot,
+            vote_hash,
+            block_id,
+        ));
 
         new_vote.set_timestamp(self.maybe_timestamp(self.last_voted_slot().unwrap_or_default()));
         self.last_vote = new_vote;
@@ -720,7 +701,6 @@ impl Tower {
         &mut self,
         vote_slot: Slot,
         vote_hash: Hash,
-        enable_tower_sync_ix: bool,
         block_id: Hash,
     ) -> Option<Slot> {
         if let Some(last_voted_slot) = self.vote_state.last_voted_slot() {
@@ -738,7 +718,7 @@ impl Tower {
         let old_root = self.root();
 
         self.vote_state.process_next_vote_slot(vote_slot);
-        self.update_last_vote_from_vote_state(vote_hash, enable_tower_sync_ix, block_id);
+        self.update_last_vote_from_vote_state(vote_hash, block_id);
 
         let new_root = self.root();
 
@@ -756,7 +736,7 @@ impl Tower {
 
     #[cfg(feature = "dev-context-only-utils")]
     pub fn record_vote(&mut self, slot: Slot, hash: Hash) -> Option<Slot> {
-        self.record_bank_vote_and_update_lockouts(slot, hash, true, Hash::default())
+        self.record_bank_vote_and_update_lockouts(slot, hash, Hash::default())
     }
 
     #[cfg(feature = "dev-context-only-utils")]
@@ -1753,6 +1733,7 @@ impl TowerError {
 #[derive(Debug)]
 pub enum ExternalRootSource {
     Tower(Slot),
+    VoteHistory(Slot),
     HardFork(Slot),
 }
 
@@ -1760,6 +1741,7 @@ impl ExternalRootSource {
     fn root(&self) -> Slot {
         match self {
             ExternalRootSource::Tower(slot) => *slot,
+            ExternalRootSource::VoteHistory(slot) => *slot,
             ExternalRootSource::HardFork(slot) => *slot,
         }
     }
@@ -1849,7 +1831,8 @@ pub mod test {
         solana_slot_history::SlotHistory,
         solana_vote::vote_account::VoteAccount,
         solana_vote_program::vote_state::{
-            MAX_LOCKOUT_HISTORY, Vote, VoteStateV4, VoteStateVersions, process_slot_vote_unchecked,
+            MAX_LOCKOUT_HISTORY, Vote, VoteStateV4, VoteStateVersions, handler::VoteStateHandler,
+            process_slot_vote_unchecked,
         },
         std::{
             collections::{HashMap, VecDeque},
@@ -1872,12 +1855,12 @@ pub mod test {
                     owner: solana_vote_program::id(),
                     ..Account::default()
                 });
-                let mut vote_state = VoteStateV4::default();
+                let mut vote_state = VoteStateHandler::new_v4(VoteStateV4::default());
                 for slot in *votes {
                     process_slot_vote_unchecked(&mut vote_state, *slot);
                 }
                 VoteStateV4::serialize(
-                    &VoteStateVersions::new_v4(vote_state),
+                    &VoteStateVersions::new_v4(vote_state.unwrap_v4()),
                     account.data_as_mut_slice(),
                 )
                 .expect("serialize state");

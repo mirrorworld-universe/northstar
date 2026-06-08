@@ -158,7 +158,7 @@ pub const MAX_RETRY_SLEEP_MS: u64 = 1000;
 
 impl SendTransactionService {
     pub fn new<Client: TransactionClient + Clone + std::marker::Send + 'static>(
-        bank_forks: &Arc<RwLock<BankForks>>,
+        bank_forks: Arc<RwLock<BankForks>>,
         receiver: Receiver<TransactionInfo>,
         client: Client,
         config: Config,
@@ -178,7 +178,7 @@ impl SendTransactionService {
         );
 
         let retry_thread = Self::retry_thread(
-            bank_forks.clone(),
+            bank_forks,
             client,
             retry_transactions,
             config,
@@ -541,7 +541,7 @@ mod test {
         solana_account::AccountSharedData,
         solana_genesis_config::create_genesis_config,
         solana_nonce::{self as nonce, state::DurableNonce},
-        solana_pubkey::Pubkey,
+        solana_runtime::bank::SlotLeader,
         solana_signer::Signer,
         solana_system_interface::program as system_program,
         solana_system_transaction as system_transaction,
@@ -561,7 +561,7 @@ mod test {
             create_client_for_tests(Handle::current(), "127.0.0.1:0".parse().unwrap(), None, 1);
 
         let send_transaction_service = SendTransactionService::new(
-            &bank_forks,
+            bank_forks,
             receiver,
             client.clone(),
             Config {
@@ -598,7 +598,7 @@ mod test {
         let client =
             create_client_for_tests(Handle::current(), "127.0.0.1:0".parse().unwrap(), None, 1);
         let _send_transaction_service = SendTransactionService::new(
-            &bank_forks,
+            bank_forks,
             receiver,
             client.clone(),
             Config {
@@ -634,7 +634,7 @@ mod test {
 
         let root_bank = Bank::new_from_parent(
             bank_forks.read().unwrap().working_bank(),
-            &Pubkey::default(),
+            SlotLeader::default(),
             1,
         );
         let root_bank = bank_forks
@@ -655,14 +655,11 @@ mod test {
             (transaction, signature)
         };
 
+        let working_child = Bank::new_from_parent(root_bank.clone(), SlotLeader::default(), 2);
         let working_bank = bank_forks
             .write()
             .unwrap()
-            .insert(Bank::new_from_parent(
-                root_bank.clone(),
-                &Pubkey::default(),
-                2,
-            ))
+            .insert(working_child)
             .clone_without_scheduler();
 
         let (non_rooted_transaction, non_rooted_signature) = {
@@ -916,7 +913,7 @@ mod test {
 
         let root_bank = Bank::new_from_parent(
             bank_forks.read().unwrap().working_bank(),
-            &Pubkey::default(),
+            SlotLeader::default(),
             1,
         );
         let root_bank = bank_forks
@@ -946,14 +943,11 @@ mod test {
             AccountSharedData::new_data(43, &nonce_state, &system_program::id()).unwrap();
         root_bank.store_account(&nonce_address, &nonce_account);
 
+        let working_child = Bank::new_from_parent(root_bank.clone(), SlotLeader::default(), 2);
         let working_bank = bank_forks
             .write()
             .unwrap()
-            .insert(Bank::new_from_parent(
-                root_bank.clone(),
-                &Pubkey::default(),
-                2,
-            ))
+            .insert(working_child)
             .clone_without_scheduler();
 
         let (non_rooted_transaction, non_rooted_signature) = {

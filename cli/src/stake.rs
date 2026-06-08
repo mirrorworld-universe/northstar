@@ -817,7 +817,7 @@ pub fn parse_create_stake_account(
         )
     };
 
-    let amount = SpendAmount::new_from_matches(matches, "amount");
+    let amount = SpendAmount::new_from_matches(matches, "amount")?;
     let sign_only = matches.is_present(SIGN_ONLY_ARG.name);
     let dump_transaction_message = matches.is_present(DUMP_TRANSACTION_MESSAGE.name);
     let blockhash_query = BlockhashQuery::new_from_matches(matches);
@@ -1206,7 +1206,7 @@ pub fn parse_stake_withdraw_stake(
         pubkey_of_signer(matches, "stake_account_pubkey", wallet_manager)?.unwrap();
     let destination_account_pubkey =
         pubkey_of_signer(matches, "destination_account_pubkey", wallet_manager)?.unwrap();
-    let amount = SpendAmount::new_from_matches(matches, "amount");
+    let amount = SpendAmount::new_from_matches(matches, "amount")?;
     let sign_only = matches.is_present(SIGN_ONLY_ARG.name);
     let dump_transaction_message = matches.is_present(DUMP_TRANSACTION_MESSAGE.name);
     let blockhash_query = BlockhashQuery::new_from_matches(matches);
@@ -1499,15 +1499,24 @@ pub async fn process_create_stake_account(
             return Err(CliError::BadParameter(err_msg).into());
         }
 
-        let minimum_balance = rpc_client
+        let rent_exempt_balance = rpc_client
             .get_minimum_balance_for_rent_exemption(StakeStateV2::size_of())
             .await?;
-        if lamports < minimum_balance {
+        if lamports < rent_exempt_balance {
             return Err(CliError::BadParameter(format!(
-                "need at least {minimum_balance} lamports for stake account to be rent exempt, \
-                 provided lamports: {lamports}"
+                "need at least {rent_exempt_balance} lamports for stake account to be rent \
+                 exempt, provided lamports: {lamports}"
             ))
             .into());
+        }
+
+        let minimum_delegation = rpc_client.get_stake_minimum_delegation().await?;
+        let minimum_total_lamports = rent_exempt_balance.saturating_add(minimum_delegation);
+        if lamports < minimum_total_lamports {
+            eprintln!(
+                "Warning: need at least {minimum_total_lamports} lamports to delegate this stake \
+                 account, provided lamports: {lamports}"
+            );
         }
 
         if let Some(nonce_account) = &nonce_account {
@@ -2432,12 +2441,14 @@ pub fn build_stake_state(
     stake_history: &StakeHistory,
     clock: &Clock,
     new_rate_activation_epoch: Option<Epoch>,
+    rent_exempt_reserve: u64,
     use_csv: bool,
 ) -> CliStakeState {
     match stake_state {
         StakeStateV2::Stake(
             Meta {
-                rent_exempt_reserve,
+                #[expect(deprecated)]
+                    rent_exempt_reserve: _,
                 authorized,
                 lockup,
             },
@@ -2445,6 +2456,7 @@ pub fn build_stake_state(
             _,
         ) => {
             let current_epoch = clock.epoch;
+            #[allow(deprecated)]
             let StakeActivationStatus {
                 effective,
                 activating,
@@ -2485,7 +2497,7 @@ pub fn build_stake_state(
                 lockup,
                 use_lamports_unit,
                 current_epoch,
-                rent_exempt_reserve: Some(*rent_exempt_reserve),
+                rent_exempt_reserve: Some(rent_exempt_reserve),
                 active_stake: u64_some_if_not_zero(effective),
                 activating_stake: u64_some_if_not_zero(activating),
                 deactivating_stake: u64_some_if_not_zero(deactivating),
@@ -2503,7 +2515,8 @@ pub fn build_stake_state(
             ..CliStakeState::default()
         },
         StakeStateV2::Initialized(Meta {
-            rent_exempt_reserve,
+            #[expect(deprecated)]
+                rent_exempt_reserve: _,
             authorized,
             lockup,
         }) => {
@@ -2519,7 +2532,7 @@ pub fn build_stake_state(
                 authorized: Some(authorized.into()),
                 lockup,
                 use_lamports_unit,
-                rent_exempt_reserve: Some(*rent_exempt_reserve),
+                rent_exempt_reserve: Some(rent_exempt_reserve),
                 ..CliStakeState::default()
             }
         }
@@ -2707,9 +2720,10 @@ pub async fn get_account_stake_state(
     match stake_account.state() {
         Ok(stake_state) => {
             let stake_history_account = rpc_client.get_account(&stake_history::id()).await?;
-            let stake_history = from_account(&stake_history_account).ok_or_else(|| {
-                CliError::RpcRequestError("Failed to deserialize stake history".to_string())
-            })?;
+            let stake_history: StakeHistory = bincode::deserialize(&stake_history_account.data)
+                .map_err(|_| {
+                    CliError::RpcRequestError("Failed to deserialize stake history".to_string())
+                })?;
             let clock_account = rpc_client.get_account(&clock::id()).await?;
             let clock: Clock = from_account(&clock_account).ok_or_else(|| {
                 CliError::RpcRequestError("Failed to deserialize clock sysvar".to_string())
@@ -2719,7 +2733,9 @@ pub async fn get_account_stake_state(
                 &agave_feature_set::reduce_stake_warmup_cooldown::id(),
             )
             .await?;
-
+            let rent_exempt_balance = rpc_client
+                .get_minimum_balance_for_rent_exemption(stake_account.data.len())
+                .await?;
             let mut state = build_stake_state(
                 stake_account.lamports,
                 &stake_state,
@@ -2727,6 +2743,7 @@ pub async fn get_account_stake_state(
                 &stake_history,
                 &clock,
                 new_rate_activation_epoch,
+                rent_exempt_balance,
                 use_csv,
             );
 
@@ -2764,7 +2781,7 @@ pub async fn process_show_stake_history(
 ) -> ProcessResult {
     let stake_history_account = rpc_client.get_account(&stake_history::id()).await?;
     let stake_history =
-        from_account::<StakeHistory, _>(&stake_history_account).ok_or_else(|| {
+        bincode::deserialize::<StakeHistory>(&stake_history_account.data).map_err(|_| {
             CliError::RpcRequestError("Failed to deserialize stake history".to_string())
         })?;
 
@@ -2860,6 +2877,31 @@ pub async fn process_delegate_stake(
                 sanity_check_result?;
             } else {
                 println!("--force supplied, ignoring: {err}");
+            }
+        }
+
+        if !force {
+            let stake_account = rpc_client.get_account(stake_account_pubkey).await?;
+            if stake_account.owner != stake::program::id() {
+                return Err(CliError::BadParameter(format!(
+                    "{stake_account_pubkey} is not a stake account",
+                ))
+                .into());
+            }
+
+            let rent_exempt_balance = rpc_client
+                .get_minimum_balance_for_rent_exemption(stake_account.data.len())
+                .await?;
+            let minimum_delegation = rpc_client.get_stake_minimum_delegation().await?;
+            let minimum_total_lamports = rent_exempt_balance.saturating_add(minimum_delegation);
+            let stake_account_lamports = stake_account.lamports;
+
+            if stake_account_lamports < minimum_total_lamports {
+                return Err(CliError::BadParameter(format!(
+                    "need at least {minimum_total_lamports} lamports to delegate this stake \
+                     account, available lamports: {stake_account_lamports}"
+                ))
+                .into());
             }
         }
     }

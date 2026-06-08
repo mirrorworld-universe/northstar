@@ -7,7 +7,6 @@ use {
     crate::{
         bank::{Bank, BankFieldsToDeserialize, BankFieldsToSerialize, BankHashStats, BankRc},
         epoch_stakes::{DeserializableVersionedEpochStakes, VersionedEpochStakes},
-        rent_collector::RentCollector,
         runtime_config::RuntimeConfig,
         snapshot_utils::StorageAndNextAccountsFileId,
         stake_account::StakeAccount,
@@ -26,7 +25,7 @@ use {
         accounts_db::{
             AccountsDb, AccountsDbConfig, AccountsFileId, AtomicAccountsFileId, IndexGenerationInfo,
         },
-        accounts_file::{AccountsFile, StorageAccess},
+        accounts_file::AccountsFile,
         accounts_hash::AccountsLtHash,
         accounts_update_notifier_interface::AccountsUpdateNotifier,
         blockhash_queue::BlockhashQueue,
@@ -39,6 +38,7 @@ use {
     solana_hash::Hash,
     solana_inflation::Inflation,
     solana_lattice_hash::lt_hash::LtHash,
+    solana_leader_schedule::SlotLeader,
     solana_measure::measure::Measure,
     solana_pubkey::Pubkey,
     solana_serde::default_on_eof,
@@ -50,29 +50,36 @@ use {
         result::Result,
         sync::{
             Arc,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
+            atomic::{AtomicBool, Ordering},
         },
         thread,
         time::Instant,
     },
     storage::SerializableStorage,
-    types::SerdeAccountsLtHash,
+    types::{SerdeAccountsLtHash, UnusedRentCollector},
+    wincode::{
+        SchemaReadOwned, SchemaWrite,
+        io::{Reader, std_write::WriteAdapter},
+    },
 };
 
 mod obsolete_accounts;
 mod status_cache;
 mod storage;
+mod storages_list;
 mod tests;
 mod types;
 mod utils;
 
 pub(crate) use {
-    obsolete_accounts::SerdeObsoleteAccountsMap,
+    obsolete_accounts::{SerdeObsoleteAccounts, SerdeObsoleteAccountsMap},
     status_cache::{deserialize_status_cache, serialize_status_cache},
     storage::{SerializableAccountStorageEntry, SerializedAccountsFileId},
+    storages_list::{StorageListItem, StoragesList},
 };
 
-const MAX_STREAM_SIZE: u64 = 32 * 1024 * 1024 * 1024;
+const MAX_STREAM_SIZE: usize = 32 * 1024 * 1024 * 1024;
+type MaxStreamSizeConfig = wincode::config::Configuration<true, MAX_STREAM_SIZE>;
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Debug, Deserialize)]
@@ -178,7 +185,7 @@ struct DeserializableVersionedBank {
     _unused_fee_calculator: u64,
     fee_rate_governor: FeeRateGovernor,
     _unused_collected_rent: u64,
-    _unused_rent_collector: RentCollector,
+    _unused_rent_collector: UnusedRentCollector,
     epoch_schedule: EpochSchedule,
     inflation: Inflation,
     stakes: DeserializableStakes<Delegation>,
@@ -220,6 +227,7 @@ impl From<DeserializableVersionedBank> for BankFieldsToDeserialize {
             versioned_epoch_stakes: vec![], // populated from ExtraFieldsToDeserialize
             accounts_lt_hash: AccountsLtHash(LT_HASH_CANARY), // populated from ExtraFieldsToDeserialize
             bank_hash_stats: BankHashStats::default(),        // populated from AccountsDbFields
+            block_id: None, // populated from ExtraFieldsToDeserialize
         }
     }
 }
@@ -246,14 +254,14 @@ struct SerializableVersionedBank {
     slots_per_year: f64,
     accounts_data_len: u64,
     slot: Slot,
-    epoch: Epoch,
+    unused_epoch: Epoch,
     block_height: u64,
     leader_id: Pubkey,
     unused_collector_fees: u64,
     unused_fee_calculator: u64,
     fee_rate_governor: FeeRateGovernor,
     unused_collected_rent: u64,
-    rent_collector: RentCollector,
+    unused_rent_collector: UnusedRentCollector,
     epoch_schedule: EpochSchedule,
     inflation: Inflation,
     #[serde(serialize_with = "serialize_stake_accounts_to_delegation_format")]
@@ -284,14 +292,14 @@ impl From<BankFieldsToSerialize> for SerializableVersionedBank {
             slots_per_year: rhs.slots_per_year,
             accounts_data_len: rhs.accounts_data_len,
             slot: rhs.slot,
-            epoch: rhs.epoch,
+            unused_epoch: 0,
             block_height: rhs.block_height,
             leader_id: rhs.leader_id,
             unused_collector_fees: 0,
             unused_fee_calculator: 0,
             fee_rate_governor: rhs.fee_rate_governor,
             unused_collected_rent: u64::default(),
-            rent_collector: rhs.rent_collector,
+            unused_rent_collector: UnusedRentCollector::zeroed(),
             epoch_schedule: rhs.epoch_schedule,
             inflation: rhs.inflation,
             stakes: rhs.stakes,
@@ -372,15 +380,20 @@ impl<T> SnapshotAccountsDbFields<T> {
     }
 }
 
-pub(crate) fn serialize_into<W, T>(writer: W, value: &T) -> bincode::Result<()>
+pub(crate) fn serialize_into<W, T>(writer: W, value: &T) -> wincode::WriteResult<()>
 where
     W: Write,
-    T: Serialize,
+    T: SchemaWrite<MaxStreamSizeConfig, Src = T>,
 {
-    bincode::options()
-        .with_fixint_encoding()
-        .with_limit(MAX_STREAM_SIZE)
-        .serialize_into(writer, value)
+    wincode::config::serialize_into(WriteAdapter::new(writer), value, MaxStreamSizeConfig::new())
+}
+
+pub(crate) fn deserialize_wincode_from<'a, R, T>(reader: R) -> wincode::ReadResult<T>
+where
+    R: Reader<'a>,
+    T: SchemaReadOwned<MaxStreamSizeConfig, Dst = T>,
+{
+    wincode::config::deserialize_from(reader, MaxStreamSizeConfig::new())
 }
 
 pub(crate) fn deserialize_from<R, T>(reader: R) -> bincode::Result<T>
@@ -389,7 +402,7 @@ where
     T: DeserializeOwned,
 {
     bincode::options()
-        .with_limit(MAX_STREAM_SIZE)
+        .with_limit(MAX_STREAM_SIZE as u64)
         .with_fixint_encoding()
         .allow_trailing_bytes()
         .deserialize_from::<R, T>(reader)
@@ -423,14 +436,6 @@ struct ExtraFieldsToDeserialize {
     versioned_epoch_stakes: Vec<(u64, DeserializableVersionedEpochStakes)>,
     #[serde(deserialize_with = "default_on_eof")]
     accounts_lt_hash: Option<SerdeAccountsLtHash>,
-    /// In order to maintain snapshot compatibility between adjacent versions
-    /// (edge <-> beta, and beta <-> stable), we must be able to deserialize
-    /// (and ignore) this new field (block id) in adjacent versions *before*
-    /// we serialize the new field into snapshots.
-    /// Hence the annotation to allow dead code.
-    /// This code is not truly dead though, as it enables newer versions to
-    /// populate this field and have older versions still load the snapshot.
-    #[allow(dead_code)]
     #[serde(deserialize_with = "default_on_eof")]
     block_id: Option<Hash>,
 }
@@ -450,6 +455,7 @@ pub struct ExtraFieldsToSerialize {
     pub unused_epoch_accounts_hash: Option<Hash>,
     pub versioned_epoch_stakes: HashMap<u64, VersionedEpochStakes>,
     pub accounts_lt_hash: Option<SerdeAccountsLtHash>,
+    pub block_id: Option<Hash>,
 }
 
 fn deserialize_bank_fields<R>(
@@ -481,7 +487,7 @@ where
         _unused_epoch_accounts_hash,
         versioned_epoch_stakes,
         accounts_lt_hash,
-        block_id: _,
+        block_id,
     } = extra_fields;
 
     bank_fields.fee_rate_governor = bank_fields
@@ -491,6 +497,7 @@ where
     bank_fields.accounts_lt_hash = accounts_lt_hash
         .expect("snapshot must have accounts_lt_hash")
         .into();
+    bank_fields.block_id = block_id;
 
     Ok((bank_fields, accounts_db_fields))
 }
@@ -573,6 +580,7 @@ where
         account_paths,
         storage_and_next_append_vec_id,
         debug_keys,
+        None, // leader_for_tests
         limit_load_slot_count_from_snapshot,
         verify_index,
         accounts_db_config,
@@ -665,6 +673,7 @@ impl Serialize for SerializableBankAndStorage<'_> {
         let lamports_per_signature = bank_fields.fee_rate_governor.lamports_per_signature;
         let versioned_epoch_stakes = std::mem::take(&mut bank_fields.versioned_epoch_stakes);
         let accounts_lt_hash = Some(bank_fields.accounts_lt_hash.clone().into());
+        let block_id = Some(bank_fields.block_id);
         let bank_fields_to_serialize = (
             SerializableVersionedBank::from(bank_fields),
             SerializableAccountsDb::<'_> {
@@ -678,6 +687,7 @@ impl Serialize for SerializableBankAndStorage<'_> {
                 unused_epoch_accounts_hash: None,
                 versioned_epoch_stakes,
                 accounts_lt_hash,
+                block_id,
             },
         );
         bank_fields_to_serialize.serialize(serializer)
@@ -788,7 +798,7 @@ pub(crate) struct ReconstructedBankInfo {
     pub(crate) calculated_capitalization: u64,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn reconstruct_bank_from_fields<E>(
     bank_fields: SnapshotBankFields,
     snapshot_accounts_db_fields: SnapshotAccountsDbFields<E>,
@@ -797,6 +807,7 @@ pub(crate) fn reconstruct_bank_from_fields<E>(
     account_paths: &[PathBuf],
     storage_and_next_append_vec_id: StorageAndNextAccountsFileId,
     debug_keys: Option<Arc<HashSet<Pubkey>>>,
+    leader_for_tests: Option<SlotLeader>,
     limit_load_slot_count_from_snapshot: Option<usize>,
     verify_index: bool,
     accounts_db_config: AccountsDbConfig,
@@ -838,12 +849,12 @@ where
         genesis_config,
         runtime_config,
         bank_fields,
+        leader_for_tests,
         debug_keys,
         reconstructed_accounts_db_info.accounts_data_len,
         epoch_stakes,
     );
 
-    info!("rent_collector: {:?}", bank.rent_collector());
     Ok((
         bank,
         ReconstructedBankInfo {
@@ -858,7 +869,6 @@ pub(crate) fn reconstruct_single_storage(
     append_vec_file_info: FileInfo,
     current_len: usize,
     id: AccountsFileId,
-    storage_access: StorageAccess,
     obsolete_accounts: Option<(ObsoleteAccounts, AccountsFileId, usize)>,
 ) -> Result<Arc<AccountStorageEntry>, SnapshotError> {
     // When restoring from an archive, obsolete accounts will always be `None`
@@ -878,8 +888,7 @@ pub(crate) fn reconstruct_single_storage(
         (current_len, ObsoleteAccounts::default())
     };
 
-    let accounts_file =
-        AccountsFile::new_for_startup(append_vec_file_info, current_len, storage_access)?;
+    let accounts_file = AccountsFile::new_for_startup(append_vec_file_info, current_len)?;
     Ok(Arc::new(AccountStorageEntry::new_existing(
         *slot,
         id,
@@ -896,7 +905,7 @@ pub(crate) fn remap_append_vec_file(
     old_append_vec_id: SerializedAccountsFileId,
     append_vec_file_info: FileInfo,
     next_append_vec_id: &AtomicAccountsFileId,
-    num_collisions: &AtomicUsize,
+    num_collisions: &mut usize,
 ) -> io::Result<(AccountsFileId, FileInfo)> {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     let append_vec_path_cstr = cstring_from_path(&append_vec_file_info.path)?;
@@ -948,7 +957,7 @@ pub(crate) fn remap_append_vec_file(
 
         // If we made it this far, a file exists at the new path.  Record the collision
         // and try again.
-        num_collisions.fetch_add(1, Ordering::Relaxed);
+        *num_collisions += 1;
     };
 
     // Only rename the file if the new ID is actually different from the original. In the target_os
@@ -976,8 +985,7 @@ pub(crate) fn remap_and_reconstruct_single_storage(
     current_len: usize,
     append_vec_file_info: FileInfo,
     next_append_vec_id: &AtomicAccountsFileId,
-    num_collisions: &AtomicUsize,
-    storage_access: StorageAccess,
+    num_collisions: &mut usize,
 ) -> Result<Arc<AccountStorageEntry>, SnapshotError> {
     let (remapped_append_vec_id, remapped_append_vec_file_info) = remap_append_vec_file(
         slot,
@@ -991,7 +999,6 @@ pub(crate) fn remap_and_reconstruct_single_storage(
         remapped_append_vec_file_info,
         current_len,
         remapped_append_vec_id,
-        storage_access,
         None,
     )?;
     Ok(storage)
@@ -1009,7 +1016,6 @@ pub struct ReconstructedAccountsDbInfo {
     pub bank_hash_stats: BankHashStats,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reconstruct_accountsdb_from_fields<E>(
     snapshot_accounts_db_fields: SnapshotAccountsDbFields<E>,
     account_paths: &[PathBuf],

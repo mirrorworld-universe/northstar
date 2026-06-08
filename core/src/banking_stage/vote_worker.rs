@@ -26,7 +26,7 @@ use {
     solana_poh::poh_recorder::PohRecorderError,
     solana_runtime::{bank::Bank, bank_forks::BankForks},
     solana_runtime_transaction::{
-        runtime_transaction::RuntimeTransaction, transaction_meta::StaticMeta,
+        runtime_transaction::RuntimeTransaction, transaction_meta::TransactionMeta,
         transaction_with_meta::TransactionWithMeta,
     },
     solana_svm::{
@@ -574,7 +574,6 @@ mod tests {
         super::*,
         crate::banking_stage::{
             committer::Committer,
-            qos_service::QosService,
             tests::{create_slow_genesis_config, sanitize_transactions},
             vote_storage::tests::packet_from_slots,
         },
@@ -583,19 +582,16 @@ mod tests {
         solana_perf::packet::BytesPacket,
         solana_poh::record_channels::record_channels,
         solana_runtime::genesis_utils::ValidatorVoteKeypairs,
-        solana_runtime_transaction::transaction_meta::StaticMeta,
+        solana_runtime_transaction::transaction_meta::TransactionMeta,
         solana_svm::account_loader::CheckedTransactionDetails,
         solana_system_transaction as system_transaction,
         std::collections::HashSet,
     };
 
     fn to_runtime_transaction_view(packet: BytesPacket) -> RuntimeTransactionView {
-        let tx = SanitizedTransactionView::try_new_sanitized(
-            Arc::new(packet.buffer().to_vec()),
-            false,
-            true,
-        )
-        .unwrap();
+        let tx =
+            SanitizedTransactionView::try_new_sanitized(Arc::new(packet.buffer().to_vec()), true)
+                .unwrap();
         let tx = RuntimeTransaction::<SanitizedTransactionView<_>>::try_new(
             tx,
             MessageHash::Compute,
@@ -770,7 +766,7 @@ mod tests {
 
         let (replay_vote_sender, _replay_vote_receiver) = unbounded();
         let committer = Committer::new(None, replay_vote_sender, None);
-        let consumer = Consumer::new(committer, recorder, QosService::new(1), None);
+        let consumer = Consumer::new(committer, recorder, None);
 
         // Create and process a simple transfer transaction
         let pubkey = solana_pubkey::new_rand();

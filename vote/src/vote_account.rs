@@ -19,6 +19,18 @@ use {
     },
     thiserror::Error,
 };
+#[cfg(feature = "dev-context-only-utils")]
+use {
+    qualifier_attr::field_qualifiers,
+    rand::Rng,
+    solana_bls_signatures::Keypair as BLSKeypair,
+    solana_clock::Clock,
+    solana_keypair::Keypair,
+    solana_signer::Signer,
+    solana_vote_interface::state::{
+        BLS_PROOF_OF_POSSESSION_COMPRESSED_SIZE, VoteInitV2, VoteStateV4, VoteStateVersions,
+    },
+};
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Clone, Debug, PartialEq)]
@@ -42,6 +54,10 @@ struct VoteAccountInner {
 pub type VoteAccountsHashMap = HashMap<Pubkey, (/*stake:*/ u64, VoteAccount)>;
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "dev-context-only-utils",
+    field_qualifiers(vote_accounts(pub))
+)]
 pub struct VoteAccounts {
     #[serde(deserialize_with = "deserialize_accounts_hash_map")]
     vote_accounts: Arc<VoteAccountsHashMap>,
@@ -94,20 +110,21 @@ impl VoteAccount {
 
     #[cfg(feature = "dev-context-only-utils")]
     pub fn new_random() -> VoteAccount {
-        use {
-            rand::Rng as _,
-            solana_clock::Clock,
-            solana_vote_interface::state::{VoteInit, VoteStateV4, VoteStateVersions},
-        };
+        const BLS_KEYPAIR_DERIVE_SEED: &[u8; 9] = b"alpenglow";
 
         let mut rng = rand::rng();
-        let vote_pubkey = Pubkey::new_unique();
-
-        let vote_init = VoteInit {
+        let authorized_voter_bls_proof_of_possession = [0; BLS_PROOF_OF_POSSESSION_COMPRESSED_SIZE];
+        let keypair = Keypair::new();
+        let bls_keypair =
+            BLSKeypair::derive_from_signer(&keypair, BLS_KEYPAIR_DERIVE_SEED).unwrap();
+        let vote_init = VoteInitV2 {
             node_pubkey: Pubkey::new_unique(),
-            authorized_voter: Pubkey::new_unique(),
+            authorized_voter: keypair.pubkey(),
+            authorized_voter_bls_pubkey: bls_keypair.public.to_bytes_compressed(),
+            authorized_voter_bls_proof_of_possession,
             authorized_withdrawer: Pubkey::new_unique(),
-            commission: rng.random(),
+            inflation_rewards_commission_bps: rng.random_range(0..10_000),
+            block_revenue_commission_bps: rng.random_range(0..10_000),
         };
         let clock = Clock {
             slot: rng.random(),
@@ -116,14 +133,18 @@ impl VoteAccount {
             leader_schedule_epoch: rng.random(),
             unix_timestamp: rng.random(),
         };
-        let vote_state = VoteStateV4::new_with_defaults(&vote_pubkey, &vote_init, &clock);
+        let vote_state = VoteStateV4::new(
+            &vote_init,
+            &Pubkey::new_unique(),
+            &Pubkey::new_unique(),
+            &clock,
+        );
         let account = AccountSharedData::new_data(
             rng.random(), // lamports
             &VoteStateVersions::new_v4(vote_state),
             &solana_sdk_ids::vote::id(), // owner
         )
         .unwrap();
-
         VoteAccount::try_from(account).unwrap()
     }
 }
@@ -215,7 +236,11 @@ impl VoteAccounts {
                 .map(|(pubkey, vote_account, stake)| (*pubkey, (stake, vote_account.clone()))),
         );
         if top_entries.is_empty() {
-            error!("no valid vote accounts found");
+            if cfg!(test) {
+                info!("No valid vote accounts found");
+            } else {
+                error!("No valid vote accounts found");
+            }
         }
         info!(
             "Out of {} vote accounts, {} are valid vote accounts after filtering, {} remain after \
@@ -254,10 +279,10 @@ impl VoteAccounts {
             .map(|(vote_pubkey, (stake, _vote_account))| (vote_pubkey, *stake))
     }
 
-    pub fn find_max_by_delegated_stake(&self) -> Option<&VoteAccount> {
-        let key = |(_pubkey, (stake, _vote_account)): &(_, &(u64, _))| *stake;
-        let (_pubkey, (_stake, vote_account)) = self.vote_accounts.iter().max_by_key(key)?;
-        Some(vote_account)
+    pub fn find_max_by_delegated_stake(&self) -> Option<(&Pubkey, &VoteAccount)> {
+        let key = |(pubkey, (stake, _vote_account)): &(_, &(u64, _))| (*stake, *pubkey);
+        let (vote_address, (_stake, vote_account)) = self.vote_accounts.iter().max_by_key(key)?;
+        Some((vote_address, vote_account))
     }
 
     pub fn insert(

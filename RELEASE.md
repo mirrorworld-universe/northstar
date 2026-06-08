@@ -1,88 +1,165 @@
-# Release Process
+# Agave Release process
 
-This document describes how NorthStar releases are cut and deployed.
-
-## Branches
+## Branches and Tags
 
 ```
-master ───────────────────────────────────►   active development
-   │
-   └──► release ────────────────────────────►  promoted for deployment
+========================= master branch (edge channel) =======================>
+         \                      \                     \
+          \___v0.7.0 tag         \                     \
+           \                      \         v0.9.0 tag__\
+            \          v0.8.0 tag__\                     \
+ v0.7.1 tag__\                      \                 v0.9 branch (beta channel)
+              \___v0.7.2 tag         \___v0.8.1 tag
+               \                      \
+                \                      \
+           v0.7 branch         v0.8 branch (stable channel)
+
 ```
 
-- **`master`** — the integration branch. All feature work, fixes, and
-  refactors land here first via pull request. CI runs on every push and PR.
-- **`release`** — promotion branch. Pushing to `release` triggers an automated
-  build-and-deploy to the NorthStar devnet validator (see
-  [`.github/workflows/deploy-release.yml`](.github/workflows/deploy-release.yml)).
+### master branch
+All new development occurs on the `master` branch.
 
-## Versioning
+Bug fixes that affect a `vX.Y` branch are first made on `master`.  This is to
+allow a fix some soak time on `master` before it is applied to one or more
+stabilization branches.
 
-NorthStar follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-Release-worthy changes should be recorded in [`CHANGELOG.md`](CHANGELOG.md) in
-the same pull request that introduces them. See the *Adding to this
-Changelog* section at the bottom of that file for the conventions we follow.
+Merging to `master` first also helps ensure that fixes applied to one release
+are present for future releases.  (Sometimes the joy of landing a critical
+release blocker in a branch causes you to forget to propagate back to
+`master`!)"
 
-## Cutting a Release
+Once the bug fix lands on `master` it is cherry-picked into the `vX.Y` branch
+and potentially the `vX.Y-1` branch.  The exception to this rule is when a bug
+fix for `vX.Y` doesn't apply to `master` or `vX.Y-1`.
 
-1. **Confirm `master` is green.** All required checks on the CI workflow must
-   pass on the commit you intend to release.
-2. **Update the changelog.** Make sure every noteworthy change since the
-   previous release has a `CHANGELOG.md` entry.
-3. **Promote to `release`.** Fast-forward `release` to the chosen `master`
-   commit and push:
-   ```bash
-   git fetch origin
-   git checkout release
-   git merge --ff-only origin/master
-   git push origin release
-   ```
-   Pushing to `release` triggers
-   [`.github/workflows/deploy-release.yml`](.github/workflows/deploy-release.yml),
-   which:
-   - runs `cargo +nightly fmt --check` and `cargo clippy --all --tests -- -D warnings`,
-   - builds the portal SBF program (`./cargo-build-sbf --manifest-path northstar/programs/portal/Cargo.toml`),
-   - builds the validator binary (`cargo build --release --bin agave-validator`),
-   - and restarts the `northstar-validator` systemd service on the devnet host.
-4. **Tag the release.** Once the deployment completes successfully, tag the
-   same commit with the new version and push the tag:
-   ```bash
-   git tag vX.Y.Z <commit-sha>
-   git push origin vX.Y.Z
-   ```
-5. **Publish the GitHub release.** Create a new release on the
-   [GitHub releases page](https://github.com/mirrorworld-universe/northstar/releases)
-   pointing at the tag. Use the relevant section of `CHANGELOG.md` as the
-   release notes.
+Immediately after a new stabilization branch is forged, the `Cargo.toml` minor
+version (*Y*) in the `master` branch is incremented by the release engineer.
+Incrementing the major version of the `master` branch is outside the scope of
+this document.
 
-## Hotfixes
+### v*X.Y* stabilization branches
+These are stabilization branches. They are created from the `master` branch approximately
+every 13 weeks.
 
-For urgent fixes that must ship outside the normal flow:
+### v*X.Y.Z* release tag
+The release tags are created as desired by the owner of the given stabilization
+branch, and cause that *X.Y.Z* release to be shipped to https://crates.io
 
-1. Open a PR against `master` with the fix.
-2. Once merged and CI is green, follow steps 3–5 above to promote `master`
-   onto `release` and tag the resulting commit.
+Immediately after a new v*X.Y.Z* branch tag has been created, the `Cargo.toml`
+patch version number (*Z*) of the stabilization branch is incremented by the
+release engineer.
 
-If `master` contains other unreleased changes that are not yet ready to ship,
-land the fix on `master` first, then cherry-pick the fix commit onto
-`release` and push:
+## Channels
+Channels are used by end-users (humans and bots) to consume the branches
+described in the previous section, so they may automatically update to the most
+recent version matching their desired stability.
 
-```bash
-git checkout release
-git cherry-pick <fix-commit-sha>
-git push origin release
+There are three release channels that map to branches as follows:
+* edge - tracks the `master` branch, least stable.
+* beta - tracks the largest (and latest) `vX.Y` stabilization branch, more stable.
+* stable - tracks the second largest `vX.Y` stabilization branch, most stable.
+
+## Steps to Create a Branch
+
+### Major release branch
+1. If the new branch will be the first branch of a new major release check that
+all eligible deprecated symbols have been removed. Our policy is to deprecate
+for at least one full minor version before removal.
+
+### Create the new branch
+
+#### Cutting a branch without promoting channels
+
+By default, pushing a new `vX.Y` head auto-promotes it to `BETA_CHANNEL` and
+demotes the prior beta to stable, because `ci/channel-info.sh` picks the top-2
+`vX.Y` heads. To cut a branch without that promotion (e.g. to begin backports
+while keeping the current beta in place), set the pins in
+`ci/channel-overrides` on master *before* pushing the new branch:
+
+```
+# current beta, to be held
+PINNED_BETA_CHANNEL=vX.Y
+# current stable, to be held
+PINNED_STABLE_CHANNEL=vX.Y-1
 ```
 
-## Rolling Back
+Only the file that lives on master is used; every branch's CI fetches it from there, so no
+backport is needed.
 
-If a release introduces a regression, roll `release` back to the previous
-known-good commit and push:
+When ready to promote, open a PR on master that clears or updates the pins.
+Then proceed with the usual "Miscellaneous Clean up" steps below.
 
-```bash
-git checkout release
-git reset --hard <previous-good-sha>
-git push --force-with-lease origin release
-```
+#### Steps
 
-The deploy workflow will rebuild and redeploy the previous binary. Open a PR
-against `master` for the actual fix once the cause is understood.
+1. Update master branch to the next release minor version: dispatch [Bump Version](https://github.com/anza-xyz/agave/actions/workflows/bump-version.yml) pipeline against `master` branch to create the version bump PR. `Version bump level` should be either `minor` or `major`.
+1. Review version bump PR, get all required approvals and merge it.
+1. Determine the last commit **right before the version bump commit**.
+1. Determine the new branch name.  The name should be "v" + the first 2 version fields
+   from Cargo.toml **at the commit right before the version bump commit**. For example, a Cargo.toml with version = "0.9.0" implies
+   the next branch name is "v0.9".
+1. Create the new branch and push this branch to the `agave` repository:
+    ```
+    git checkout -b <branchname> <the last commit right before the version bump commit>
+    git push -u upstream <branchname>
+    ```
+1. Confirm that your freshly cut release branch is shown as `BETA_CHANNEL` and the previous release branch as `STABLE_CHANNEL`:
+    ```
+    ci/channel-info.sh
+    ```
+   Note: if `ci/channel-overrides` on master has `PINNED_BETA_CHANNEL` /
+   `PINNED_STABLE_CHANNEL` set, those values override auto-detect everywhere.
+
+### Update the Changelog
+
+Create a PR that makes the following updates to [CHANGELOG.md](https://github.com/anza-xyz/agave/blob/master/CHANGELOG.md) in master:
+* Advance the channel links with the newly created branch becoming beta.
+* Add a new section `X.Y.0-Unreleased` for the new master version.
+* Remove the `Unreleased` annotation for the section that has now become beta.
+
+### Miscellaneous Clean up
+
+#### Newly Promoted Stable (Former Beta) Branch
+
+1. Pin the spl-token-cli version in the newly promoted stable branch by setting `splTokenCliVersion` in scripts/spl-token-cli-version.sh to the latest release that depends on the stable branch (usually this will be the latest spl-token-cli release).
+1. Pin the cargo-build-sbf and cargo-test-sbf versions in the newly promoted stable branch by setting `cargoBuildSbfVersion` and `cargoTestSbfVersion` in scripts/cargo-build-sbf-version.sh to the latest release that depends on the stable branch (usually this will be the latest releases).
+
+#### Newly Created Beta Branch
+
+1. Update [CHANGELOG.md](https://github.com/anza-xyz/agave/blob/master/CHANGELOG.md) to remove the channel links on the new branch. Additionally, remove any wording about the new branch being unreleased.
+1. Update [CODEOWNERS](https://github.com/anza-xyz/agave/blob/master/.github/CODEOWNERS) to `* @anza-xyz/backport-reviewers` on the new branch.
+1. Update [mergify.yml](https://github.com/anza-xyz/agave/blob/master/.mergify.yml) to add backport actions for the new branch and remove actions for the obsolete branch.
+1. Adjust the [Github backport labels](https://github.com/anza-xyz/agave/labels) to add the new branch label and remove the label for the obsolete branch.
+1. Announce on Discord #development that the release branch exists so people know to use the new backport labels.
+
+## Steps to Create a Release
+
+### Create the Release Tag on GitHub
+
+1. Dispatch [Bump Version](https://github.com/anza-xyz/agave/actions/workflows/bump-version.yml) pipeline to create the version bump PR.
+1. Verify CI checks pass. Verify that the change is correct: it only contains version bump changes and only expected version is changed. Approve it.
+1. Wait for approvals required to merge and merge it.
+1. Check out relevant branch, create release tag pointing to the version bump merge commit from the previous step. The release tag must exactly match the `version` field in `/Cargo.toml` prefixed by `v` from the version bump.
+    ```
+    git checkout v4.0
+    git tag v4.0.1 123abc...
+    git push upstream v4.0.1
+    ```
+1. [The automation](https://github.com/anza-xyz/agave/blob/master/.github/workflows/release.yml) will create the new draft release and start `agave-secondary` Buildkite pipeline.
+1. Go to [GitHub Releases](https://github.com/anza-xyz/agave/releases) and edit the draft release just made by the automation.
+1. Fill the release notes.
+   1.  If this is the first release on the branch (e.g. v0.13.**0**), paste in [this
+   template](https://raw.githubusercontent.com/anza-xyz/agave/master/.github/RELEASE_TEMPLATE.md).  Engineering Lead can provide summary contents for release notes if needed.
+   1. If this is a patch release, review all the commits since the previous release on this branch and add details as needed.
+1. Ensure the release is marked **"This is a pre-release"**.  This flag will need to be removed manually after confirming the Linux binary artifacts appear at a later step.
+
+### Verify release automation success
+Go to [Agave Releases](https://github.com/anza-xyz/agave/releases) and click on the latest release that you just published.
+Verify that all of the build artifacts are present (15 assets), then uncheck **"This is a pre-release"** for the release.
+
+Build artifacts can take up to 60 minutes after creating the tag before
+appearing.  To check for progress:
+* The `agave-secondary` Buildkite pipeline handles creating the Linux and macOS release artifacts and updated crates.  Look for a job under the tag name of the release: https://buildkite.com/anza-xyz/agave-secondary.
+* The Windows release artifacts are produced by GitHub Actions.  Look for a job under the tag name of the release: https://github.com/anza-xyz/agave/actions.
+
+[Crates.io agave-validator](https://crates.io/crates/agave-validator) should have an updated agave-validator version.  This can take 2-3 hours, and sometimes fails in the `agave-secondary` job.
+If this happens and the error is non-fatal, click "Retry" on the "publish crate" job

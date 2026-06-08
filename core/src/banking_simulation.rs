@@ -4,7 +4,6 @@ use {
         banking_stage::{
             BankingStage, BankingStageHandle, LikeClusterInfo,
             transaction_scheduler::scheduler_controller::SchedulerConfig,
-            unified_scheduler::ensure_banking_stage_setup,
             update_bank_forks_and_poh_recorder_for_new_tpu_bank,
         },
         banking_trace::{
@@ -13,7 +12,7 @@ use {
         },
         validator::BlockProductionMethod,
     },
-    agave_banking_stage_ingress_types::BankingPacketBatch,
+    agave_banking_stage_ingress_types::{BankingPacketBatch, SchedulerPriorityFloor},
     agave_votor_messages::migration::MigrationStatus,
     assert_matches::assert_matches,
     bincode::deserialize_from,
@@ -48,7 +47,6 @@ use {
     solana_shred_version::compute_shred_version,
     solana_signer::Signer,
     solana_turbine::broadcast_stage::{BroadcastStage, BroadcastStageType},
-    solana_unified_scheduler_pool::DefaultSchedulerPool,
     std::{
         collections::BTreeMap,
         fmt::Display,
@@ -88,7 +86,7 @@ use {
 /// simulated block's hashes would differ than the recorded ones as block composition difference is
 /// inevitable.
 ///
-/// As in the real environment, for PoH time we use the `PohRecorder`. This is simply a 400ms
+/// As in the real environment, for PoH time we use the `PohRecorder`. This is simply a slot
 /// timer, external to `BankingStage` and thus mostly irrelevant to `BankingStage` performance. For
 /// wall time, we use the first `BankStatus::BlockAndBankHash` and `SystemTime::now()` to define
 /// T=0 for simulation. Then, simulation progress is timed accordingly. For context, this syncing
@@ -266,18 +264,16 @@ struct SimulatorLoopLogger {
 }
 
 impl SimulatorLoopLogger {
-    fn bank_costs(bank: &Bank) -> (u64, u64) {
-        bank.read_cost_tracker()
-            .map(|t| (t.block_cost(), t.vote_cost()))
-            .unwrap()
+    fn bank_cost(bank: &Bank) -> u64 {
+        bank.read_cost_tracker().map(|t| t.block_cost()).unwrap()
     }
 
     fn log_frozen_bank_cost(&self, bank: &Bank, bank_elapsed: Duration) {
         info!(
-            "simulated bank slot+delta: {}+{}ms costs: {:?} fees: {:?} txs: {} (frozen)",
+            "simulated bank slot+delta: {}+{}ms cost: {} fees: {:?} txs: {} (frozen)",
             bank.slot(),
             bank_elapsed.as_millis(),
-            Self::bank_costs(bank),
+            Self::bank_cost(bank),
             bank.get_collector_fee_details(),
             bank.executed_transaction_count(),
         );
@@ -285,10 +281,10 @@ impl SimulatorLoopLogger {
 
     fn log_ongoing_bank_cost(&self, bank: &Bank, bank_elapsed: Duration) {
         info!(
-            "simulated bank slot+delta: {}+{}ms costs: {:?} fees: {:?} txs: {} (ongoing)",
+            "simulated bank slot+delta: {}+{}ms cost: {} fees: {:?} txs: {} (ongoing)",
             bank.slot(),
             bank_elapsed.as_millis(),
-            Self::bank_costs(bank),
+            Self::bank_cost(bank),
             bank.get_collector_fee_details(),
             bank.executed_transaction_count(),
         );
@@ -481,10 +477,9 @@ impl SimulatorLoop {
                 let new_leader = self
                     .leader_schedule_cache
                     .slot_leader_at(new_slot, None)
-                    .unwrap()
-                    .id;
-                if new_leader != self.simulated_leader {
-                    logger.on_new_leader(&bank, bank_created.elapsed(), new_slot, new_leader);
+                    .unwrap();
+                if new_leader.id != self.simulated_leader {
+                    logger.on_new_leader(&bank, bank_created.elapsed(), new_slot, new_leader.id);
                     break;
                 } else if sender_thread.is_finished() {
                     warn!("sender thread existed maybe due to completion of sending traced events");
@@ -492,11 +487,8 @@ impl SimulatorLoop {
                 } else {
                     info!("new leader bank slot: {new_slot}");
                 }
-                let new_bank = Bank::new_from_parent(
-                    bank.clone_without_scheduler(),
-                    &self.simulated_leader,
-                    new_slot,
-                );
+                let new_bank =
+                    Bank::new_from_parent(bank.clone_without_scheduler(), new_leader, new_slot);
                 // make sure parent is frozen for finalized hashes via the above
                 // new()-ing of its child bank
                 self.retracer
@@ -706,7 +698,6 @@ impl BankingSimulator {
         bank_forks: Arc<RwLock<BankForks>>,
         blockstore: Arc<Blockstore>,
         block_production_method: BlockProductionMethod,
-        unified_scheduler_pool: Option<Arc<DefaultSchedulerPool>>,
     ) -> (SenderLoop, SimulatorLoop, SimulatorThreads) {
         let parent_slot = self.parent_slot().unwrap();
         let mut packet_batches_by_time = self.banking_trace_events.packet_batches_by_time;
@@ -797,16 +788,6 @@ impl BankingSimulator {
 
         let num_workers = BankingStage::default_num_workers();
         let banking_tracer_channels = retracer.create_channels();
-        if let Some(pool) = unified_scheduler_pool {
-            ensure_banking_stage_setup(
-                &pool,
-                &bank_forks,
-                &banking_tracer_channels,
-                &poh_recorder,
-                transaction_recorder.clone(),
-                num_workers,
-            );
-        };
         let Channels {
             non_vote_sender,
             non_vote_receiver,
@@ -849,6 +830,7 @@ impl BankingSimulator {
             exit.clone(),
             blockstore.clone(),
             bank_forks.clone(),
+            leader_schedule_cache.clone(),
             shred_version,
             None,
             completed_block_sender,
@@ -870,6 +852,8 @@ impl BankingSimulator {
             None,
             bank_forks.clone(),
             None,
+            Arc::default(),
+            Arc::new(SchedulerPriorityFloor::default()),
         );
 
         let (&_slot, &raw_base_event_time) = freeze_time_by_slot
@@ -944,14 +928,12 @@ impl BankingSimulator {
         bank_forks: Arc<RwLock<BankForks>>,
         blockstore: Arc<Blockstore>,
         block_production_method: BlockProductionMethod,
-        unified_scheduler_pool: Option<Arc<DefaultSchedulerPool>>,
     ) -> Result<(), SimulateError> {
         let (sender_loop, simulator_loop, simulator_threads) = self.prepare_simulation(
             genesis_config,
             bank_forks,
             blockstore,
             block_production_method,
-            unified_scheduler_pool,
         );
 
         sender_loop.log_starting();

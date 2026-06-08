@@ -7,20 +7,22 @@
 use {
     crate::bank::Bank,
     agave_votor_messages::{
-        consensus_message::{Certificate, CertificateType},
+        certificate::{Certificate, CertificateType},
+        consensus_message::Block,
         fraction::Fraction,
     },
     log::warn,
     solana_bls_signatures::BlsError,
     solana_clock::Slot,
-    solana_entry::block_component::{FinalCertificate, VotesAggregate},
-    solana_hash::Hash,
-    std::num::NonZeroU64,
+    solana_entry::block_component::{BlockFinalizationCert, VotesAggregate},
+    solana_pubkey::Pubkey,
+    solana_signer_store::{DecodeError, Decoded, decode},
+    std::{collections::HashSet, num::NonZeroU64},
     thiserror::Error,
 };
 
 /// Error type for block finalization certificate validation.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum BlockFinalizationCertError {
     /// BLS signature conversion failed
     #[error("BLS signature conversion for {0:?} failed: {1}")]
@@ -37,6 +39,18 @@ pub enum BlockFinalizationCertError {
         got: Fraction,
         required: Fraction,
     },
+
+    /// Missing epoch stakes for slot
+    #[error("Missing epoch stakes for {0:?}")]
+    MissingEpochStakes(CertificateType),
+
+    /// Base 3 finalization certificate
+    #[error("Finalization certificate was base 3 for {0:?}")]
+    Base3Finalization(CertificateType),
+
+    /// Decoding error
+    #[error("Unable to decode certificate {0:?}: {1:?}")]
+    DecodeError(CertificateType, DecodeError),
 }
 
 /// There are two ways a block can be finalized:
@@ -61,7 +75,10 @@ enum ValidatedBlockFinalizationCertKind {
 /// This type can only be constructed through validation methods, providing
 /// compile-time guarantees that the contained certificates are valid.
 #[derive(Clone, Debug)]
-pub struct ValidatedBlockFinalizationCert(ValidatedBlockFinalizationCertKind);
+pub struct ValidatedBlockFinalizationCert {
+    kind: ValidatedBlockFinalizationCertKind,
+    signers: HashSet<Pubkey>,
+}
 
 impl ValidatedBlockFinalizationCert {
     /// Creates a validated block finalization certificate from a footer's final certificate.
@@ -75,117 +92,123 @@ impl ValidatedBlockFinalizationCert {
     /// - Certificate signature verification fails
     /// - The certificates don't meet the required stake thresholds
     pub fn try_from_footer(
-        final_cert: FinalCertificate,
+        block_final_cert: BlockFinalizationCert,
         bank: &Bank,
     ) -> Result<Self, BlockFinalizationCertError> {
-        let (slot, block_id) = (final_cert.slot, final_cert.block_id);
+        let block = Block {
+            slot: block_final_cert.slot,
+            block_id: block_final_cert.block_id,
+        };
 
-        // Convert the serialized form to certificates
-        let validated =
-            if let Some(notar_aggregate) = final_cert.notar_aggregate {
-                // Slow finalization
-                let notarize_cert_type = CertificateType::Notarize(slot, block_id);
-                let finalize_cert_type = CertificateType::Finalize(slot);
+        if let Some(notar_aggregate) = block_final_cert.notar_aggregate {
+            // Slow finalization
+            let notarize_cert_type = CertificateType::Notarize(block);
+            let finalize_cert_type = CertificateType::Finalize(block.slot);
 
-                let notarize_cert = Certificate {
-                    cert_type: notarize_cert_type,
-                    signature: notar_aggregate
-                        .uncompress_signature()
-                        .map_err(|e| BlockFinalizationCertError::BlsError(notarize_cert_type, e))?,
-                    bitmap: notar_aggregate.into_bitmap(),
-                };
-                let finalize_cert = Certificate {
-                    cert_type: finalize_cert_type,
-                    signature: final_cert
-                        .final_aggregate
-                        .uncompress_signature()
-                        .map_err(|e| BlockFinalizationCertError::BlsError(finalize_cert_type, e))?,
-                    bitmap: final_cert.final_aggregate.into_bitmap(),
-                };
-
-                // Verify both certificates
-                let (notarize_stake, total_stake) = Self::verify_certificate(bank, &notarize_cert)?;
-                let (finalize_stake, _) = Self::verify_certificate(bank, &finalize_cert)?;
-
-                let notarize_percent =
-                    Fraction::new(notarize_stake, NonZeroU64::new(total_stake).unwrap());
-                let finalize_percent =
-                    Fraction::new(finalize_stake, NonZeroU64::new(total_stake).unwrap());
-                let notarize_threshold = notarize_cert.cert_type.limits_and_vote_types().0;
-                let finalize_threshold = finalize_cert.cert_type.limits_and_vote_types().0;
-
-                if notarize_percent < notarize_threshold {
-                    warn!(
-                        "Received a slow finalization in the footer for slot {slot} block_id \
-                         {block_id:?} in bank slot {} with notarize {notarize_percent} stake \
-                         expecting at least {notarize_threshold}",
-                        bank.slot()
-                    );
-                    return Err(BlockFinalizationCertError::InsufficientStake {
-                        cert: notarize_cert_type,
-                        got: notarize_percent,
-                        required: notarize_threshold,
-                    });
-                }
-
-                if finalize_percent < finalize_threshold {
-                    warn!(
-                        "Received a slow finalization in the footer for slot {slot} block_id \
-                         {block_id:?} in bank slot {} with finalize {finalize_percent} stake \
-                         expecting at least {finalize_threshold}",
-                        bank.slot()
-                    );
-                    return Err(BlockFinalizationCertError::InsufficientStake {
-                        cert: finalize_cert_type,
-                        got: finalize_percent,
-                        required: finalize_threshold,
-                    });
-                }
-
-                Self(ValidatedBlockFinalizationCertKind::Finalize {
-                    finalize_cert,
-                    notarize_cert,
-                })
-            } else {
-                // Fast finalization
-                let fast_finalize_cert_type = CertificateType::FinalizeFast(slot, block_id);
-
-                let fast_finalize_cert =
-                    Certificate {
-                        cert_type: fast_finalize_cert_type,
-                        signature: final_cert.final_aggregate.uncompress_signature().map_err(
-                            |e| BlockFinalizationCertError::BlsError(fast_finalize_cert_type, e),
-                        )?,
-                        bitmap: final_cert.final_aggregate.into_bitmap(),
-                    };
-
-                let (finalize_stake, total_stake) =
-                    Self::verify_certificate(bank, &fast_finalize_cert)?;
-
-                let finalize_percent =
-                    Fraction::new(finalize_stake, NonZeroU64::new(total_stake).unwrap());
-                let finalize_threshold = fast_finalize_cert.cert_type.limits_and_vote_types().0;
-
-                if finalize_percent < finalize_threshold {
-                    warn!(
-                        "Received a fast finalization in the footer for slot {slot} block_id \
-                         {block_id:?} in bank slot {} with {finalize_percent} stake expecting at \
-                         least {finalize_threshold}",
-                        bank.slot()
-                    );
-                    return Err(BlockFinalizationCertError::InsufficientStake {
-                        cert: fast_finalize_cert_type,
-                        got: finalize_percent,
-                        required: finalize_threshold,
-                    });
-                }
-
-                Self(ValidatedBlockFinalizationCertKind::FastFinalize(
-                    fast_finalize_cert,
-                ))
+            let notarize_cert = Certificate {
+                cert_type: notarize_cert_type,
+                signature: notar_aggregate
+                    .uncompress_signature()
+                    .map_err(|e| BlockFinalizationCertError::BlsError(notarize_cert_type, e))?,
+                bitmap: notar_aggregate.into_bitmap(),
+            };
+            let finalize_cert = Certificate {
+                cert_type: finalize_cert_type,
+                signature: block_final_cert
+                    .final_aggregate
+                    .uncompress_signature()
+                    .map_err(|e| BlockFinalizationCertError::BlsError(finalize_cert_type, e))?,
+                bitmap: block_final_cert.final_aggregate.into_bitmap(),
             };
 
-        Ok(validated)
+            // Verify both certificates
+            let (notarize_stake, total_stake) = Self::verify_certificate(bank, &notarize_cert)?;
+            let (finalize_stake, _) = Self::verify_certificate(bank, &finalize_cert)?;
+
+            let notarize_percent =
+                Fraction::new(notarize_stake, NonZeroU64::new(total_stake).unwrap());
+            let finalize_percent =
+                Fraction::new(finalize_stake, NonZeroU64::new(total_stake).unwrap());
+            let notarize_threshold = notarize_cert.cert_type.limits_and_vote_types().0;
+            let finalize_threshold = finalize_cert.cert_type.limits_and_vote_types().0;
+
+            if notarize_percent < notarize_threshold {
+                warn!(
+                    "Received a slow finalization in the footer for block {block:?} in bank slot \
+                     {} with notarize {notarize_percent} stake expecting at least \
+                     {notarize_threshold}",
+                    bank.slot()
+                );
+                return Err(BlockFinalizationCertError::InsufficientStake {
+                    cert: notarize_cert_type,
+                    got: notarize_percent,
+                    required: notarize_threshold,
+                });
+            }
+
+            if finalize_percent < finalize_threshold {
+                warn!(
+                    "Received a slow finalization in the footer for block {block:?} in bank slot \
+                     {} with finalize {finalize_percent} stake expecting at least \
+                     {finalize_threshold}",
+                    bank.slot()
+                );
+                return Err(BlockFinalizationCertError::InsufficientStake {
+                    cert: finalize_cert_type,
+                    got: finalize_percent,
+                    required: finalize_threshold,
+                });
+            }
+
+            let signers = Self::extract_signers(bank, &finalize_cert)?;
+            Ok(Self {
+                kind: ValidatedBlockFinalizationCertKind::Finalize {
+                    finalize_cert,
+                    notarize_cert,
+                },
+                signers,
+            })
+        } else {
+            // Fast finalization
+            let fast_finalize_cert_type = CertificateType::FinalizeFast(block);
+
+            let fast_finalize_cert = Certificate {
+                cert_type: fast_finalize_cert_type,
+                signature: block_final_cert
+                    .final_aggregate
+                    .uncompress_signature()
+                    .map_err(|e| {
+                        BlockFinalizationCertError::BlsError(fast_finalize_cert_type, e)
+                    })?,
+                bitmap: block_final_cert.final_aggregate.into_bitmap(),
+            };
+
+            let (finalize_stake, total_stake) =
+                Self::verify_certificate(bank, &fast_finalize_cert)?;
+
+            let finalize_percent =
+                Fraction::new(finalize_stake, NonZeroU64::new(total_stake).unwrap());
+            let finalize_threshold = fast_finalize_cert.cert_type.limits_and_vote_types().0;
+
+            if finalize_percent < finalize_threshold {
+                warn!(
+                    "Received a fast finalization in the footer for block {block:?} in bank slot \
+                     {} with {finalize_percent} stake expecting at least {finalize_threshold}",
+                    bank.slot()
+                );
+                return Err(BlockFinalizationCertError::InsufficientStake {
+                    cert: fast_finalize_cert_type,
+                    got: finalize_percent,
+                    required: finalize_threshold,
+                });
+            }
+
+            let signers = Self::extract_signers(bank, &fast_finalize_cert)?;
+            Ok(Self {
+                kind: ValidatedBlockFinalizationCertKind::FastFinalize(fast_finalize_cert),
+                signers,
+            })
+        }
     }
 
     /// Creates a validated block finalization certificate from already-validated certificates.
@@ -196,17 +219,27 @@ impl ValidatedBlockFinalizationCert {
     /// # Safety
     /// The caller must ensure that the provided certificates have been properly validated.
     /// Using unvalidated certificates will compromise the type's safety guarantees.
-    pub fn from_validated_slow(finalize_cert: Certificate, notarize_cert: Certificate) -> Self {
+    pub fn from_validated_slow(
+        finalize_cert: Certificate,
+        notarize_cert: Certificate,
+        bank: &Bank,
+    ) -> Self {
         debug_assert!(finalize_cert.cert_type.is_slow_finalization());
         debug_assert!(notarize_cert.cert_type.is_notarize());
         debug_assert_eq!(
             notarize_cert.cert_type.slot(),
             finalize_cert.cert_type.slot()
         );
-        Self(ValidatedBlockFinalizationCertKind::Finalize {
-            finalize_cert,
-            notarize_cert,
-        })
+
+        let signers = Self::extract_signers(bank, &finalize_cert)
+            .expect("Certificate should have been validated");
+        Self {
+            kind: ValidatedBlockFinalizationCertKind::Finalize {
+                finalize_cert,
+                notarize_cert,
+            },
+            signers,
+        }
     }
 
     /// Creates a validated fast finalization certificate from an already-validated certificate.
@@ -217,14 +250,20 @@ impl ValidatedBlockFinalizationCert {
     /// # Safety
     /// The caller must ensure that the provided certificate has been properly validated.
     /// Using an unvalidated certificate will compromise the type's safety guarantees.
-    pub fn from_validated_fast(cert: Certificate) -> Self {
+    pub fn from_validated_fast(cert: Certificate, bank: &Bank) -> Self {
         debug_assert!(cert.cert_type.is_fast_finalization());
-        Self(ValidatedBlockFinalizationCertKind::FastFinalize(cert))
+
+        let signers =
+            Self::extract_signers(bank, &cert).expect("Certificate should have been validated");
+        Self {
+            kind: ValidatedBlockFinalizationCertKind::FastFinalize(cert),
+            signers,
+        }
     }
 
     /// Returns the slot that is finalized.
     pub fn slot(&self) -> Slot {
-        match &self.0 {
+        match &self.kind {
             ValidatedBlockFinalizationCertKind::Finalize {
                 finalize_cert,
                 notarize_cert,
@@ -242,8 +281,8 @@ impl ValidatedBlockFinalizationCert {
     }
 
     /// Returns the block that is finalized (slot, block_id).
-    pub fn block(&self) -> (Slot, Hash) {
-        match &self.0 {
+    pub fn block(&self) -> Block {
+        match &self.kind {
             ValidatedBlockFinalizationCertKind::Finalize { notarize_cert, .. } => notarize_cert
                 .cert_type
                 .to_block()
@@ -257,26 +296,36 @@ impl ValidatedBlockFinalizationCert {
 
     /// Returns true if this is a fast finalization.
     pub fn is_fast(&self) -> bool {
-        matches!(self.0, ValidatedBlockFinalizationCertKind::FastFinalize(_))
+        matches!(
+            self.kind,
+            ValidatedBlockFinalizationCertKind::FastFinalize(_)
+        )
     }
 
-    /// Consumes self and returns the contained certificates.
+    /// Returns the data needed to calculating and paying vote rewards.
+    pub fn vote_rewards_input(&self) -> (&HashSet<Pubkey>, Slot) {
+        (&self.signers, self.slot())
+    }
+
+    /// Consumes self and returns the contained certificates and the signers.
     ///
-    /// For slow finalization, returns (finalize_cert, Some(notarize_cert)).
-    /// For fast finalization, returns (fast_finalize_cert, None).
-    pub fn into_certificates(self) -> (Certificate, Option<Certificate>) {
-        match self.0 {
+    /// For slow finalization, returns (signers, finalize_cert, Some(notarize_cert)).
+    /// For fast finalization, returns (signers, fast_finalize_cert, None).
+    pub(crate) fn into_parts(self) -> (HashSet<Pubkey>, Certificate, Option<Certificate>) {
+        let signers = self.signers;
+        let (final_cert, notar_cert) = match self.kind {
             ValidatedBlockFinalizationCertKind::Finalize {
                 finalize_cert,
                 notarize_cert,
             } => (finalize_cert, Some(notarize_cert)),
             ValidatedBlockFinalizationCertKind::FastFinalize(cert) => (cert, None),
-        }
+        };
+        (signers, final_cert, notar_cert)
     }
 
-    /// Converts this validated certificate into a [`FinalCertificate`] for inclusion in a block footer.
-    pub fn to_final_certificate(&self) -> FinalCertificate {
-        match &self.0 {
+    /// Converts this validated certificate into a [`BlockFinalizationCert`] for inclusion in a block footer.
+    pub fn to_block_final_cert(&self) -> BlockFinalizationCert {
+        match &self.kind {
             ValidatedBlockFinalizationCertKind::Finalize {
                 finalize_cert,
                 notarize_cert,
@@ -286,8 +335,8 @@ impl ValidatedBlockFinalizationCert {
                     .cert_type
                     .to_block()
                     .expect("notarize certificates correspond to blocks")
-                    .1;
-                FinalCertificate {
+                    .block_id;
+                BlockFinalizationCert {
                     slot,
                     block_id,
                     final_aggregate: VotesAggregate::from_certificate(finalize_cert),
@@ -295,13 +344,13 @@ impl ValidatedBlockFinalizationCert {
                 }
             }
             ValidatedBlockFinalizationCertKind::FastFinalize(cert) => {
-                let (slot, block_id) = cert
+                let block = cert
                     .cert_type
                     .to_block()
                     .expect("fast finalizations correspond to blocks");
-                FinalCertificate {
-                    slot,
-                    block_id,
+                BlockFinalizationCert {
+                    slot: block.slot,
+                    block_id: block.block_id,
                     final_aggregate: VotesAggregate::from_certificate(cert),
                     notar_aggregate: None,
                 }
@@ -317,6 +366,37 @@ impl ValidatedBlockFinalizationCert {
         bank.verify_certificate(cert)
             .map_err(|_| BlockFinalizationCertError::SignatureVerificationFailed(cert.cert_type))
     }
+
+    fn extract_signers(
+        bank: &Bank,
+        cert: &Certificate,
+    ) -> Result<HashSet<Pubkey>, BlockFinalizationCertError> {
+        let Some(epoch_stakes) = bank.epoch_stakes_from_slot(cert.cert_type.slot()) else {
+            return Err(BlockFinalizationCertError::MissingEpochStakes(
+                cert.cert_type,
+            ));
+        };
+        let rank_map = epoch_stakes.bls_pubkey_to_rank_map();
+        let decoded = decode(&cert.bitmap, rank_map.len());
+        let ranks = match decoded {
+            Ok(Decoded::Base2(ranks)) => ranks,
+            Ok(Decoded::Base3(_, _)) => {
+                return Err(BlockFinalizationCertError::Base3Finalization(
+                    cert.cert_type,
+                ));
+            }
+            Err(err) => return Err(BlockFinalizationCertError::DecodeError(cert.cert_type, err)),
+        };
+
+        Ok(ranks
+            .iter_ones()
+            .filter_map(|rank| {
+                rank_map
+                    .get_pubkey_stake_entry(rank)
+                    .map(|entry| entry.vote_account_pubkey)
+            })
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -330,6 +410,7 @@ mod tests {
         bitvec::prelude::*,
         solana_bls_signatures::SignatureProjective,
         solana_entry::block_component::VotesAggregate,
+        solana_hash::Hash,
         solana_signer_store::encode_base2,
         std::sync::Arc,
     };
@@ -397,26 +478,28 @@ mod tests {
             .collect();
         let (bank, validator_keypairs) = create_bank_with_bls_validators(num_validators, stakes);
 
-        let slot = bank.slot();
-        let block_id = Hash::new_unique();
+        let block = Block {
+            slot: bank.slot(),
+            block_id: Hash::new_unique(),
+        };
 
         // Test 1: Fast finalize (requires 80% stake = 4400)
         // Top 6 validators = 1000+900+800+700+600+500 = 4500 (>= 80%)
         {
-            let cert_type = CertificateType::FinalizeFast(slot, block_id);
-            let vote = Vote::new_notarization_vote(slot, block_id);
+            let cert_type = CertificateType::FinalizeFast(block);
+            let vote = Vote::new_notarization_vote(block);
             let signing_ranks: Vec<usize> = (0..6).collect();
             let fast_finalize_cert =
                 build_certificate_manual(cert_type, vote, &signing_ranks, &validator_keypairs);
 
-            let final_cert = FinalCertificate {
-                slot,
-                block_id,
+            let block_final_cert = BlockFinalizationCert {
+                slot: block.slot,
+                block_id: block.block_id,
                 final_aggregate: VotesAggregate::from_certificate(&fast_finalize_cert),
                 notar_aggregate: None,
             };
 
-            let result = ValidatedBlockFinalizationCert::try_from_footer(final_cert, &bank);
+            let result = ValidatedBlockFinalizationCert::try_from_footer(block_final_cert, &bank);
             assert!(
                 result.is_ok(),
                 "Valid fast finalize certificate should pass verification: {result:?}"
@@ -426,8 +509,8 @@ mod tests {
         // Test 2: Slow finalize (requires 60% stake = 3300 for both certs)
         // Top 4 validators = 1000+900+800+700 = 3400 (>= 60%)
         {
-            let notarize_cert_type = CertificateType::Notarize(slot, block_id);
-            let notarize_vote = Vote::new_notarization_vote(slot, block_id);
+            let notarize_cert_type = CertificateType::Notarize(block);
+            let notarize_vote = Vote::new_notarization_vote(block);
             let notarize_signing_ranks: Vec<usize> = (0..4).collect();
             let notarize_cert = build_certificate_manual(
                 notarize_cert_type,
@@ -436,8 +519,8 @@ mod tests {
                 &validator_keypairs,
             );
 
-            let finalize_cert_type = CertificateType::Finalize(slot);
-            let finalize_vote = Vote::new_finalization_vote(slot);
+            let finalize_cert_type = CertificateType::Finalize(block.slot);
+            let finalize_vote = Vote::new_finalization_vote(block.slot);
             let finalize_signing_ranks: Vec<usize> = (0..4).collect();
             let finalize_cert = build_certificate_manual(
                 finalize_cert_type,
@@ -446,14 +529,14 @@ mod tests {
                 &validator_keypairs,
             );
 
-            let final_cert = FinalCertificate {
-                slot,
-                block_id,
+            let block_final_cert = BlockFinalizationCert {
+                slot: block.slot,
+                block_id: block.block_id,
                 final_aggregate: VotesAggregate::from_certificate(&finalize_cert),
                 notar_aggregate: Some(VotesAggregate::from_certificate(&notarize_cert)),
             };
 
-            let result = ValidatedBlockFinalizationCert::try_from_footer(final_cert, &bank);
+            let result = ValidatedBlockFinalizationCert::try_from_footer(block_final_cert, &bank);
             assert!(
                 result.is_ok(),
                 "Valid slow finalize certificate should pass verification: {result:?}"
@@ -471,26 +554,28 @@ mod tests {
             .collect();
         let (bank, validator_keypairs) = create_bank_with_bls_validators(num_validators, stakes);
 
-        let slot = bank.slot();
-        let block_id = Hash::new_unique();
+        let block = Block {
+            slot: bank.slot(),
+            block_id: Hash::new_unique(),
+        };
 
         // Fast finalize with insufficient stake (requires 80% = 4400)
         // Top 5 validators = 1000+900+800+700+600 = 4000 (< 80%)
         {
-            let cert_type = CertificateType::FinalizeFast(slot, block_id);
-            let vote = Vote::new_notarization_vote(slot, block_id);
+            let cert_type = CertificateType::FinalizeFast(block);
+            let vote = Vote::new_notarization_vote(block);
             let signing_ranks: Vec<usize> = (0..5).collect();
             let fast_finalize_cert =
                 build_certificate_manual(cert_type, vote, &signing_ranks, &validator_keypairs);
 
-            let final_cert = FinalCertificate {
-                slot,
-                block_id,
+            let block_final_cert = BlockFinalizationCert {
+                slot: block.slot,
+                block_id: block.block_id,
                 final_aggregate: VotesAggregate::from_certificate(&fast_finalize_cert),
                 notar_aggregate: None,
             };
 
-            let result = ValidatedBlockFinalizationCert::try_from_footer(final_cert, &bank);
+            let result = ValidatedBlockFinalizationCert::try_from_footer(block_final_cert, &bank);
             assert!(
                 matches!(
                     result,
@@ -503,8 +588,8 @@ mod tests {
         // Slow finalize with insufficient notarize stake (requires 60% = 3300)
         // Top 3 validators = 1000+900+800 = 2700 (< 60%)
         {
-            let notarize_cert_type = CertificateType::Notarize(slot, block_id);
-            let notarize_vote = Vote::new_notarization_vote(slot, block_id);
+            let notarize_cert_type = CertificateType::Notarize(block);
+            let notarize_vote = Vote::new_notarization_vote(block);
             let notarize_signing_ranks: Vec<usize> = (0..3).collect();
             let notarize_cert = build_certificate_manual(
                 notarize_cert_type,
@@ -514,8 +599,8 @@ mod tests {
             );
 
             // Finalize cert has enough stake
-            let finalize_cert_type = CertificateType::Finalize(slot);
-            let finalize_vote = Vote::new_finalization_vote(slot);
+            let finalize_cert_type = CertificateType::Finalize(block.slot);
+            let finalize_vote = Vote::new_finalization_vote(block.slot);
             let finalize_signing_ranks: Vec<usize> = (0..4).collect();
             let finalize_cert = build_certificate_manual(
                 finalize_cert_type,
@@ -524,14 +609,14 @@ mod tests {
                 &validator_keypairs,
             );
 
-            let final_cert = FinalCertificate {
-                slot,
-                block_id,
+            let block_final_cert = BlockFinalizationCert {
+                slot: block.slot,
+                block_id: block.block_id,
                 final_aggregate: VotesAggregate::from_certificate(&finalize_cert),
                 notar_aggregate: Some(VotesAggregate::from_certificate(&notarize_cert)),
             };
 
-            let result = ValidatedBlockFinalizationCert::try_from_footer(final_cert, &bank);
+            let result = ValidatedBlockFinalizationCert::try_from_footer(block_final_cert, &bank);
             assert!(
                 matches!(
                     result,
@@ -545,8 +630,8 @@ mod tests {
         // Notarize has enough stake, but finalize doesn't
         {
             // Notarize cert has enough stake
-            let notarize_cert_type = CertificateType::Notarize(slot, block_id);
-            let notarize_vote = Vote::new_notarization_vote(slot, block_id);
+            let notarize_cert_type = CertificateType::Notarize(block);
+            let notarize_vote = Vote::new_notarization_vote(block);
             let notarize_signing_ranks: Vec<usize> = (0..4).collect();
             let notarize_cert = build_certificate_manual(
                 notarize_cert_type,
@@ -557,8 +642,8 @@ mod tests {
 
             // Finalize cert has insufficient stake
             // Top 3 validators = 1000+900+800 = 2700 (< 60%)
-            let finalize_cert_type = CertificateType::Finalize(slot);
-            let finalize_vote = Vote::new_finalization_vote(slot);
+            let finalize_cert_type = CertificateType::Finalize(block.slot);
+            let finalize_vote = Vote::new_finalization_vote(block.slot);
             let finalize_signing_ranks: Vec<usize> = (0..3).collect();
             let finalize_cert = build_certificate_manual(
                 finalize_cert_type,
@@ -567,14 +652,14 @@ mod tests {
                 &validator_keypairs,
             );
 
-            let final_cert = FinalCertificate {
-                slot,
-                block_id,
+            let block_final_cert = BlockFinalizationCert {
+                slot: block.slot,
+                block_id: block.block_id,
                 final_aggregate: VotesAggregate::from_certificate(&finalize_cert),
                 notar_aggregate: Some(VotesAggregate::from_certificate(&notarize_cert)),
             };
 
-            let result = ValidatedBlockFinalizationCert::try_from_footer(final_cert, &bank);
+            let result = ValidatedBlockFinalizationCert::try_from_footer(block_final_cert, &bank);
             assert!(
                 matches!(
                     result,

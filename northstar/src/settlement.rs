@@ -2,8 +2,8 @@ use {
     crate::{ErStateDiff, ErStateDiffAccount},
     log::warn,
     northstar_portal::{
-        BeginSettlement, FinishSettlement, MAX_SETTLEMENT_CHUNK, PortalInstruction,
-        SettleDepositReceipt, WriteSettlementChunk, find_delegation_record_pda,
+        find_delegation_record_pda, BeginSettlement, FinishSettlement, PortalInstruction,
+        SettleDepositReceipt, WriteSettlementChunk, MAX_SETTLEMENT_CHUNK,
     },
     solana_account::ReadableAccount,
     solana_clock::Slot,
@@ -620,14 +620,13 @@ mod tests {
                 er_lamports: 11,
             }]
         );
-        assert!(
-            plan.portal_instructions(
+        assert!(plan
+            .portal_instructions(
                 Pubkey::new_unique(),
                 Pubkey::new_unique(),
                 Pubkey::new_unique()
             )
-            .is_empty()
-        );
+            .is_empty());
     }
 
     #[test]
@@ -681,14 +680,13 @@ mod tests {
             receipt_balances: vec![],
             unsupported_changes: vec![],
         };
-        assert!(
-            plan.portal_instructions(
+        assert!(plan
+            .portal_instructions(
                 Pubkey::new_unique(),
                 Pubkey::new_unique(),
                 Pubkey::new_unique()
             )
-            .is_empty()
-        );
+            .is_empty());
     }
 
     #[test]
@@ -713,19 +711,17 @@ mod tests {
         let session_pda = Pubkey::new_unique();
         let validator = Keypair::new();
 
-        assert!(
-            plan.portal_instructions(portal_program_id, session_pda, validator.pubkey())
-                .is_empty()
-        );
-        assert!(
-            plan.portal_transactions(
+        assert!(plan
+            .portal_instructions(portal_program_id, session_pda, validator.pubkey())
+            .is_empty());
+        assert!(plan
+            .portal_transactions(
                 portal_program_id,
                 session_pda,
                 &validator,
                 Hash::new_unique()
             )
-            .is_empty()
-        );
+            .is_empty());
     }
 
     #[test]
@@ -816,11 +812,9 @@ mod tests {
             &validator,
             Hash::new_unique(),
         );
-        assert!(
-            transactions
-                .iter()
-                .all(|transaction| transaction.signatures.len() == 1)
-        );
+        assert!(transactions
+            .iter()
+            .all(|transaction| transaction.signatures.len() == 1));
         let instructions = transactions
             .iter()
             .flat_map(|transaction| transaction.message.instructions.iter())

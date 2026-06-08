@@ -4,6 +4,7 @@ use {
     solana_clock::Slot,
     solana_fee_structure::FeeStructure,
     solana_hash::Hash,
+    solana_leader_schedule::SlotLeader,
     solana_pubkey::Pubkey,
     solana_rpc::{
         er_history::ErHistoryStore,
@@ -18,8 +19,8 @@ use {
     },
     std::{
         sync::{
-            Arc, Mutex, RwLock,
             atomic::{AtomicBool, Ordering},
+            Arc, Mutex, RwLock,
         },
         thread::{self, JoinHandle},
         time::Duration,
@@ -170,7 +171,10 @@ impl SlotAdvancer {
                 let next_bank_slot = current_bank_slot.saturating_add(1);
                 let mut next_bank = Bank::new_from_parent_ephemeral(
                     current_bank,
-                    &config.manager_account,
+                    SlotLeader {
+                        id: config.manager_account,
+                        vote_address: Pubkey::default(),
+                    },
                     next_bank_slot,
                 );
                 next_bank.configure_er(
@@ -201,7 +205,7 @@ impl SlotAdvancer {
                 // not mutate the L1 anchor bank.
                 if let Some(parent) = frozen_bank.parent() {
                     if parent.slot() >= ER_SLOT_OFFSET {
-                        parent.clear_parent();
+                        parent.disconnect_from_parent();
                     }
                 }
 
@@ -529,9 +533,10 @@ mod tests {
         let parent_bank = Arc::new(parent_bank);
 
         let ephemeral_slot = 40u64;
-        let ephemeral_bank = Bank::new_from_parent(parent_bank, &Pubkey::default(), ephemeral_slot);
+        let ephemeral_bank =
+            Bank::new_from_parent(parent_bank, SlotLeader::default(), ephemeral_slot);
 
-        let bank_forks = BankForks::new_rw_arc(ephemeral_bank);
+        let bank_forks = BankForks::new_rw_arc_ephemeral(ephemeral_bank);
         let initial_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
 
         let exit = Arc::new(AtomicBool::new(false));
@@ -577,8 +582,11 @@ mod tests {
         let parent_bank = Arc::new(parent_bank);
 
         let initial_slot = 1u64 << 40;
-        let initial_bank =
-            Bank::new_from_parent_ephemeral_isolated(parent_bank, &Pubkey::default(), initial_slot);
+        let initial_bank = Bank::new_from_parent_ephemeral_isolated(
+            parent_bank,
+            SlotLeader::default(),
+            initial_slot,
+        );
         let ticks_per_slot = initial_bank.ticks_per_slot();
         initial_bank.set_tick_height(initial_bank.max_tick_height() - ticks_per_slot);
 
