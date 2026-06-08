@@ -5,9 +5,7 @@ use {
     },
     crossbeam_channel::{unbounded, Sender},
     log::{debug, info, warn},
-    solana_account::{
-        state_traits::StateMut, AccountSharedData, ReadableAccount, WritableAccount, PROGRAM_OWNERS,
-    },
+    solana_account::{state_traits::StateMut, AccountSharedData, ReadableAccount, WritableAccount},
     solana_accounts_db::accounts_db::AccountsDb,
     solana_clock::{BankId, Slot},
     solana_gossip::cluster_info::ClusterInfo,
@@ -35,6 +33,7 @@ use {
     solana_sdk_ids::bpf_loader_upgradeable,
     solana_send_transaction_service::send_transaction_service,
     solana_signer::Signer,
+    solana_svm::account_loader::PROGRAM_OWNERS,
     std::{
         collections::{HashMap, HashSet},
         net::{IpAddr, Ipv4Addr, SocketAddr},
