@@ -488,20 +488,25 @@ impl EphemeralTransactionClient {
             );
         }
 
-        for tx in &txs {
+        let (valid_txs, expired_txs): (Vec<_>, Vec<_>) = txs.into_iter().partition(|tx| {
             let recent_blockhash = tx.message.recent_blockhash();
-            if bank
-                .get_hash_age(recent_blockhash)
-                .is_none_or(|age| age > self.transaction_max_age as u64)
-            {
-                self.record_failed_transaction(
-                    bank,
-                    tx.clone(),
-                    solana_transaction::TransactionError::BlockhashNotFound,
-                );
-                return Err(solana_transaction::TransactionError::BlockhashNotFound.into());
-            }
+            bank.get_hash_age(recent_blockhash)
+                .is_some_and(|age| age <= self.transaction_max_age as u64)
+        });
+
+        for tx in expired_txs {
+            self.record_failed_transaction(
+                bank,
+                tx,
+                solana_transaction::TransactionError::BlockhashNotFound,
+            );
         }
+
+        if valid_txs.is_empty() {
+            return Err(solana_transaction::TransactionError::BlockhashNotFound.into());
+        }
+
+        let txs = valid_txs;
 
         let batch = match bank.prepare_entry_batch(txs.clone()) {
             Ok(batch) => batch,
@@ -1299,6 +1304,75 @@ mod tests {
             status.err,
             Some(solana_transaction::TransactionError::BlockhashNotFound),
         );
+    }
+
+    #[test]
+    fn test_send_transactions_in_batch_records_expired_blockhash_and_executes_valid_siblings() {
+        let expired_fee_payer = Keypair::new();
+        let valid_fee_payer = Keypair::new();
+        let expired_recipient = Pubkey::new_unique();
+        let valid_recipient = Pubkey::new_unique();
+        let mut bank = create_test_bank();
+        fund_account(&bank, &expired_fee_payer.pubkey(), 10_000_000);
+        fund_account(&bank, &valid_fee_payer.pubkey(), 10_000_000);
+
+        let old_blockhash = bank.last_blockhash();
+        let expired_tx = create_transfer_tx(
+            &expired_fee_payer,
+            expired_fee_payer.pubkey(),
+            expired_recipient,
+            old_blockhash,
+        );
+        let expired_signature = expired_tx.signatures[0];
+
+        let recent_blockhash_max_age =
+            crate::er_recent_blockhash_max_age_for_slot_duration(crate::DEFAULT_ER_SLOT_DURATION);
+        bank.configure_er(
+            &crate::EphemeralRollupSettings::zero_fee_structure(),
+            recent_blockhash_max_age,
+        );
+        for _ in 0..=crate::DEFAULT_ER_TRANSACTION_MAX_AGE {
+            bank.register_unique_recent_blockhash_for_test();
+        }
+        assert!(!bank.is_hash_valid_for_age(&old_blockhash, crate::DEFAULT_ER_TRANSACTION_MAX_AGE,));
+
+        let valid_tx = create_transfer_tx(
+            &valid_fee_payer,
+            valid_fee_payer.pubkey(),
+            valid_recipient,
+            bank.last_blockhash(),
+        );
+        let valid_signature = valid_tx.signatures[0];
+
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let bank = bank_forks.read().unwrap().root_bank();
+        let er_history_store = Arc::new(ErHistoryStore::default());
+        let client = create_client_with_history(bank_forks, vec![], er_history_store.clone());
+
+        <EphemeralTransactionClient as TransactionClient>::send_transactions_in_batch(
+            &client,
+            vec![
+                bincode::serialize(&expired_tx).unwrap(),
+                bincode::serialize(&valid_tx).unwrap(),
+            ],
+            &SendTransactionServiceStats::default(),
+        );
+
+        assert_eq!(bank.get_balance(&expired_recipient), 0);
+        assert_eq!(bank.get_balance(&valid_recipient), 1_000_000);
+        er_history_store.finalize_slot(&bank);
+
+        let expired_status = er_history_store
+            .get_signature_status(&expired_signature)
+            .expect("expired tx should be recorded in ER history");
+        assert_eq!(
+            expired_status.err,
+            Some(solana_transaction::TransactionError::BlockhashNotFound),
+        );
+        let valid_status = er_history_store
+            .get_signature_status(&valid_signature)
+            .expect("valid sibling tx should be recorded in ER history");
+        assert_eq!(valid_status.err, None);
     }
 
     #[test]
