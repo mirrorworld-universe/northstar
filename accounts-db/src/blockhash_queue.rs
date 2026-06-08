@@ -72,6 +72,14 @@ impl BlockhashQueue {
             .map(|hash_age| hash_age.fee_calculator.lamports_per_signature)
     }
 
+    // Sonic: update fee metadata for already-registered ER blockhashes without
+    // advancing blockhash age. Used when configuring/reconfiguring ER fees.
+    pub fn set_lamports_per_signature(&mut self, lamports_per_signature: u64) {
+        for info in self.hashes.values_mut() {
+            info.fee_calculator = FeeCalculator::new(lamports_per_signature);
+        }
+    }
+
     /// Check if the age of the hash is within the specified age
     pub fn is_hash_valid_for_age(&self, hash: &Hash, max_age: usize) -> bool {
         self.get_hash_info_if_valid(hash, max_age).is_some()
@@ -131,10 +139,28 @@ impl BlockhashQueue {
         }
     }
 
+    // Sonic: allow ER banks to keep recent blockhashes for Solana-equivalent wall-clock time.
     pub fn set_max_age(&mut self, max_age: usize) {
         assert!(max_age > 0, "max blockhash age must be >0");
         self.max_age = max_age;
         self.purge();
+    }
+
+    // Sonic: carry ER-minted blockhashes across L1 reanchors/resets. Re-registering
+    // preserves source order while making the carried hashes recent in this queue.
+    pub fn carry_forward_from(&mut self, source: &Self) -> usize {
+        let mut source_hashes: Vec<_> = source.hashes.iter().collect();
+        source_hashes.sort_by_key(|(_, info)| info.hash_index);
+
+        let mut carried = 0;
+        for (hash, info) in source_hashes {
+            if self.hashes.contains_key(hash) {
+                continue;
+            }
+            self.register_hash(hash, info.fee_calculator.lamports_per_signature);
+            carried += 1;
+        }
+        carried
     }
 
     #[deprecated(
@@ -278,6 +304,45 @@ mod tests {
         // Ensure that no additional entries beyond `MAX_AGE + 1` are added
         hash_queue.register_hash(&Hash::new_unique(), 0);
         assert_eq!(hash_queue.hashes.len(), MAX_AGE + 1);
+    }
+
+    #[test]
+    fn test_carry_forward_from_preserves_source_order_and_skips_duplicates() {
+        let duplicate_hash = Hash::new_unique();
+        let old_hash = Hash::new_unique();
+        let new_hash = Hash::new_unique();
+
+        let mut source = BlockhashQueue::new(10);
+        source.register_hash(&old_hash, 5);
+        source.register_hash(&duplicate_hash, 6);
+        source.register_hash(&new_hash, 7);
+
+        let mut target = BlockhashQueue::new(10);
+        target.register_hash(&duplicate_hash, 6);
+
+        assert_eq!(target.carry_forward_from(&source), 2);
+        assert_eq!(target.last_hash(), new_hash);
+        assert_eq!(target.get_lamports_per_signature(&old_hash), Some(5));
+        assert_eq!(target.get_lamports_per_signature(&new_hash), Some(7));
+        assert_eq!(target.get_hash_age(&new_hash), Some(0));
+        assert!(target.get_hash_age(&old_hash).unwrap() > target.get_hash_age(&new_hash).unwrap());
+    }
+
+    #[test]
+    fn test_carry_forward_from_respects_target_max_age() {
+        let max_age = 2;
+        let mut source = BlockhashQueue::new(10);
+        let source_hashes: Vec<_> = (0..5).map(|_| Hash::new_unique()).collect();
+        for hash in &source_hashes {
+            source.register_hash(hash, 0);
+        }
+
+        let mut target = BlockhashQueue::new(max_age);
+        assert_eq!(target.carry_forward_from(&source), source_hashes.len());
+
+        assert!(!target.is_hash_valid_for_age(&source_hashes[0], max_age));
+        assert!(target.is_hash_valid_for_age(source_hashes.last().unwrap(), max_age));
+        assert_eq!(target.last_hash(), *source_hashes.last().unwrap());
     }
 
     #[test]

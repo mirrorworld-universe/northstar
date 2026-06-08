@@ -359,25 +359,31 @@ impl AccountsCache {
         // Exit early if the pubkey isn't in the cache
         let index_max_slot = self.index.max_slot_for_pubkey(pubkey)?;
 
-        if let Some(ancestors_min_slot) = ancestors.min_slot() {
-            // Iterate every slot in the range in descending order
+        if ancestors.min_slot().is_some() {
+            // Sonic: Northstar ER banks can have sparse ancestry (for example,
+            // L1 slot 0 plus ER slot 1 << 40). Iterating every slot in
+            // `min_slot..=index_max_slot` can spin forever. Iterate actual
+            // ancestor slots instead, highest first.
+            let mut ancestor_slots = ancestors.keys();
+            ancestor_slots.sort_unstable_by(|a, b| b.cmp(a));
             // Grab a read lock on flushing roots once before the loop to avoid locking/unlocking
             // on every iteration. This lock ensures that the load call in the loop correctly
             // identifies slots with status AncestorBeingFlushed.
             let r_roots_being_flushed = self.roots_being_flushed.read().unwrap();
-            for slot in (ancestors_min_slot..=index_max_slot).rev() {
-                if ancestors.contains_key(&slot) {
-                    if let Some(account) = self.load(slot, pubkey) {
-                        // Need to check flush status of the slot even for ancestors, because
-                        // there could be newer version of the account that has already been
-                        // flushed
-                        let slot_status = if r_roots_being_flushed.contains(&slot) {
-                            SlotStatus::AncestorBeingFlushed
-                        } else {
-                            SlotStatus::Ancestor
-                        };
-                        return Some((account, slot, slot_status));
-                    }
+            for slot in ancestor_slots {
+                if slot > index_max_slot {
+                    continue;
+                }
+                if let Some(account) = self.load(slot, pubkey) {
+                    // Need to check flush status of the slot even for ancestors, because
+                    // there could be newer version of the account that has already been
+                    // flushed
+                    let slot_status = if r_roots_being_flushed.contains(&slot) {
+                        SlotStatus::AncestorBeingFlushed
+                    } else {
+                        SlotStatus::Ancestor
+                    };
+                    return Some((account, slot, slot_status));
                 }
             }
             drop(r_roots_being_flushed);
@@ -753,6 +759,27 @@ mod tests {
                 (slot, status)
             });
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_load_latest_sparse_ancestors_does_not_scan_slot_gap() {
+        let cache = AccountsCache::default();
+        let pk = Pubkey::new_unique();
+        let er_slot = 1u64 << 40;
+
+        cache.store(
+            er_slot,
+            &pk,
+            AccountSharedData::new(42, 0, &Pubkey::default()),
+        );
+        let ancestors = Ancestors::from(vec![0, er_slot]);
+
+        let (account, slot, status) = cache
+            .load_latest(&pk, &ancestors)
+            .expect("sparse ancestor lookup should find ER slot quickly");
+        assert_eq!(slot, er_slot);
+        assert_eq!(status, SlotStatus::Ancestor);
+        assert_eq!(account.account.lamports(), 42);
     }
 
     #[test]

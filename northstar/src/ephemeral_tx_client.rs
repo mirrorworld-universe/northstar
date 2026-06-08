@@ -3,7 +3,7 @@ use {
     solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
     solana_keypair::Keypair,
     solana_ledger::transaction_balances::compile_collected_balances,
-    solana_message::{AddressLoader, VersionedMessage, v0::LoadedAddresses},
+    solana_message::{v0::LoadedAddresses, AddressLoader, VersionedMessage},
     solana_pubkey::Pubkey,
     solana_rpc::{er_history::ErHistoryStore, rpc_subscriptions::RpcSubscriptions},
     solana_runtime::{
@@ -24,14 +24,14 @@ use {
     solana_tls_utils::NotifyKeyUpdate,
     solana_transaction::versioned::VersionedTransaction,
     solana_transaction_status::{
-        TransactionStatusMeta, VersionedTransactionWithStatusMeta, map_inner_instructions,
+        map_inner_instructions, TransactionStatusMeta, VersionedTransactionWithStatusMeta,
     },
     std::{
         collections::{HashMap, HashSet},
         error::Error,
         sync::{
-            Arc, Mutex, RwLock,
             atomic::{AtomicBool, Ordering},
+            Arc, Mutex, RwLock,
         },
     },
 };
@@ -488,6 +488,21 @@ impl EphemeralTransactionClient {
             );
         }
 
+        for tx in &txs {
+            let recent_blockhash = tx.message.recent_blockhash();
+            if bank
+                .get_hash_age(recent_blockhash)
+                .is_none_or(|age| age > self.transaction_max_age as u64)
+            {
+                self.record_failed_transaction(
+                    bank,
+                    tx.clone(),
+                    solana_transaction::TransactionError::BlockhashNotFound,
+                );
+                return Err(solana_transaction::TransactionError::BlockhashNotFound.into());
+            }
+        }
+
         let batch = match bank.prepare_entry_batch(txs.clone()) {
             Ok(batch) => batch,
             Err(e) => {
@@ -502,7 +517,6 @@ impl EphemeralTransactionClient {
         };
         let (commit_results, balance_collector) = bank.load_execute_and_commit_transactions(
             &batch,
-            self.transaction_max_age,
             Self::history_recording_config(),
             &mut ExecuteTimings::default(),
             None,
@@ -610,6 +624,7 @@ impl EphemeralTransactionClient {
                     }
                 }
             }
+            VersionedMessage::V1(_) => Some(LoadedAddresses::default()),
         }
     }
 
@@ -857,13 +872,14 @@ mod tests {
         },
         solana_fee_structure::FeeDetails,
         solana_keypair::{Keypair, Signer},
+        solana_leader_schedule::SlotLeader,
         solana_message::{
-            Message, MessageHeader,
             v0::{self, MessageAddressTableLookup},
+            Message, MessageHeader,
         },
         solana_sdk_ids::system_program,
         solana_svm::transaction_execution_result::TransactionLoadedAccountsStats,
-        solana_transaction::{Transaction, versioned::VersionedTransaction},
+        solana_transaction::{versioned::VersionedTransaction, Transaction},
         solana_transaction_context::transaction::TransactionReturnData,
         std::{borrow::Cow, sync::Arc},
     };
@@ -1261,9 +1277,7 @@ mod tests {
             bank.register_unique_recent_blockhash_for_test();
         }
         assert!(bank.is_hash_valid_for_age(&old_blockhash, usize::MAX));
-        assert!(
-            !bank.is_hash_valid_for_age(&old_blockhash, crate::DEFAULT_ER_TRANSACTION_MAX_AGE,)
-        );
+        assert!(!bank.is_hash_valid_for_age(&old_blockhash, crate::DEFAULT_ER_TRANSACTION_MAX_AGE,));
 
         let bank_forks = BankForks::new_rw_arc(bank);
         let bank = bank_forks.read().unwrap().root_bank();
@@ -1405,7 +1419,7 @@ mod tests {
         );
         root_bank.store_account(&address_table_key, &address_table_account);
         root_bank.freeze();
-        let bank = Bank::new_from_parent(Arc::new(root_bank), &Pubkey::new_unique(), 1);
+        let bank = Bank::new_from_parent(Arc::new(root_bank), SlotLeader::new_unique(), 1);
         let bank_forks = BankForks::new_rw_arc(bank);
         let bank = bank_forks.read().unwrap().root_bank();
 
@@ -1746,7 +1760,7 @@ mod tests {
         );
         root_bank.store_account(&address_table_key, &address_table_account);
         root_bank.freeze();
-        let bank = Bank::new_from_parent(Arc::new(root_bank), &Pubkey::new_unique(), 1);
+        let bank = Bank::new_from_parent(Arc::new(root_bank), SlotLeader::new_unique(), 1);
         let bank_forks = BankForks::new_rw_arc(bank);
         let bank = bank_forks.read().unwrap().root_bank();
         let client = create_client_with_delegated(bank_forks, vec![delegated_a]);

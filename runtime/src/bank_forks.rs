@@ -146,6 +146,44 @@ impl BankForks {
         bank_forks
     }
 
+    /// Create BankForks for a Northstar ephemeral rollup root.
+    ///
+    /// Sonic: ER roots retain L1 ancestry in `Bank::ancestors` for account lookup,
+    /// but BankForks must not track/root the L1 parent chain. Keeping only the ER
+    /// root avoids shared-AccountsDb root/cache cleanup paths treating L1 slots as
+    /// part of the ER fork.
+    pub fn new_rw_arc_ephemeral(root_bank: Bank) -> Arc<RwLock<Self>> {
+        let root_bank = Arc::new(root_bank);
+        let root_slot = root_bank.slot();
+
+        let mut banks = HashMap::new();
+        banks.insert(
+            root_slot,
+            BankWithScheduler::new_without_scheduler(root_bank.clone()),
+        );
+
+        let mut descendants = HashMap::<_, HashSet<_>>::new();
+        descendants.entry(root_slot).or_default();
+        let migration_status = Arc::new(Self::initialize_migration_status(&root_bank));
+
+        let bank_forks = Arc::new(RwLock::new(Self {
+            root: root_slot,
+            working_slot: root_slot,
+            sharable_banks: SharableBanks {
+                root_bank: Arc::new(ArcSwap::from(root_bank.clone())),
+                working_bank: Arc::new(ArcSwap::from(root_bank.clone())),
+            },
+            banks,
+            descendants,
+            highest_slot_at_startup: 0,
+            scheduler_pool: None,
+            migration_status,
+        }));
+
+        root_bank.set_fork_graph_in_program_cache(Arc::downgrade(&bank_forks));
+        bank_forks
+    }
+
     /// Based on the current feature flag activation and genesis certificate account in the root bank,
     /// determine which phase of the migration we are in and initialize accordingly.
     fn initialize_migration_status(root_bank: &Bank) -> MigrationStatus {

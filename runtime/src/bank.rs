@@ -1020,6 +1020,20 @@ pub struct Bank {
 #[derive(Debug, Default)]
 pub struct NewBankOptions {
     pub vote_only_bank: bool,
+    // Northstar: when set, the new bank is treated as an **ephemeral** fork of
+    // its parent: epoch-boundary side effects (`process_new_epoch`,
+    // `begin_partitioned_rewards`, `update_epoch_stakes`,
+    // `distribute_partitioned_epoch_rewards`) are all skipped. Those paths
+    // mutate shared L1 `AccountsDb` epoch/reward/stake sysvars/state
+    // (stake history, vote accounts, `EpochRewards` sysvar), which an ER fork
+    // has no business touching.
+    pub ephemeral: bool,
+    // Northstar: when set, the new bank gets a freshly-allocated
+    // `ProgramCache` instead of inheriting the parent's. Used **only** for
+    // the ER root bank so cooperative loading inside the cache is isolated
+    // from L1's banking stage. Subsequent ER child banks must inherit the
+    // ER root cache so deployments made inside the ER remain visible.
+    pub isolate_program_cache: bool,
 }
 
 #[cfg(feature = "dev-context-only-utils")]
@@ -1318,6 +1332,52 @@ impl Bank {
         )
     }
 
+    // Northstar: create a bank as an ephemeral fork of `parent`.
+    //
+    // The resulting bank can live at an arbitrary future slot (even across
+    // epoch boundaries) without poisoning the shared `AccountsDb`: the
+    // epoch-transition side effects (`process_new_epoch`,
+    // `begin_partitioned_rewards`, `update_epoch_stakes`,
+    // `distribute_partitioned_epoch_rewards`) are all suppressed. Intended
+    // exclusively for the Northstar ephemeral rollup fork.
+    pub fn new_from_parent_ephemeral(parent: Arc<Bank>, leader: SlotLeader, slot: Slot) -> Self {
+        Self::_new_from_parent(
+            parent,
+            leader,
+            slot,
+            null_tracer(),
+            NewBankOptions {
+                vote_only_bank: false,
+                ephemeral: true,
+                // Inherit the parent's (already isolated) ER ProgramCache so
+                // child ER banks can resolve programs deployed within the ER.
+                isolate_program_cache: false,
+            },
+        )
+    }
+
+    /// Northstar: like `new_from_parent_ephemeral`, but additionally allocates
+    /// a fresh `ProgramCache` for this bank. Use **only** when constructing
+    /// the ER root bank; child ER banks must inherit the ER root's cache via
+    /// `new_from_parent_ephemeral`.
+    pub fn new_from_parent_ephemeral_isolated(
+        parent: Arc<Bank>,
+        leader: SlotLeader,
+        slot: Slot,
+    ) -> Self {
+        Self::_new_from_parent(
+            parent,
+            leader,
+            slot,
+            null_tracer(),
+            NewBankOptions {
+                vote_only_bank: false,
+                ephemeral: true,
+                isolate_program_cache: true,
+            },
+        )
+    }
+
     pub fn new_from_parent_with_options(
         parent: Arc<Bank>,
         leader: SlotLeader,
@@ -1354,7 +1414,13 @@ impl Bank {
         new_bank_options: NewBankOptions,
     ) -> Self {
         let mut time = Measure::start("bank::new_from_parent");
-        let NewBankOptions { vote_only_bank } = new_bank_options;
+        let NewBankOptions {
+            vote_only_bank,
+            // Northstar: ephemeral-fork flag; see usage below.
+            ephemeral,
+            // Northstar: only set on the ER root bank.
+            isolate_program_cache,
+        } = new_bank_options;
 
         parent.freeze();
         assert_ne!(slot, parent.slot());
@@ -1387,7 +1453,20 @@ impl Bank {
         let (epoch_stakes, epoch_stakes_time_us) = measure_us!(parent.epoch_stakes.clone());
 
         let (transaction_processor, builtin_program_ids_time_us) = measure_us!(
-            TransactionBatchProcessor::new_from(&parent.transaction_processor, slot, epoch)
+            // Northstar: ER root banks must NOT share the L1 `ProgramCache`.
+            // The cache's cooperative-loading waiter deadlocks deploy-style
+            // transactions on the ER side when L1 banking concurrently
+            // touches the same cache. Use an isolated cache for the ER root
+            // bank only — child ER banks reuse the parent's isolated cache
+            // so the cooperative loader's fork graph still resolves
+            // correctly within the ER fork.
+            if isolate_program_cache {
+                parent
+                    .transaction_processor
+                    .new_from_isolated_cache(slot, epoch)
+            } else {
+                TransactionBatchProcessor::new_from(&parent.transaction_processor, slot, epoch)
+            }
         );
 
         let (transaction_debug_keys, transaction_debug_keys_time_us) =
@@ -1492,12 +1571,21 @@ impl Bank {
         };
 
         let (_, ancestors_time_us) = measure_us!({
-            let mut ancestors = Vec::with_capacity(1 + new.parents().len());
-            ancestors.push(new.slot());
-            new.parents().iter().for_each(|p| {
-                ancestors.push(p.slot());
-            });
-            new.ancestors = Ancestors::from(ancestors);
+            if ephemeral {
+                // Sonic: ER banks sever parent links to avoid recursive drop overflow,
+                // but account lookup still needs full slot ancestry.
+                let mut ancestors = parent.ancestors.keys();
+                ancestors.push(parent.slot());
+                ancestors.push(new.slot());
+                new.ancestors = Ancestors::from(ancestors);
+            } else {
+                let mut ancestors = Vec::with_capacity(1 + new.parents().len());
+                ancestors.push(new.slot());
+                new.parents().iter().for_each(|p| {
+                    ancestors.push(p.slot());
+                });
+                new.ancestors = Ancestors::from(ancestors);
+            }
         });
 
         let prepare_timings = new.prepare_for_block_execution(
@@ -1506,6 +1594,8 @@ impl Bank {
             parent.capitalization(),
             parent.block_height(),
             reward_calc_tracer,
+            ephemeral,
+            isolate_program_cache,
         );
 
         time.stop();
@@ -1673,6 +1763,17 @@ impl Bank {
             .write()
             .unwrap()
             .prune_by_deployment_slot(deployment_slot);
+    }
+
+    /// Northstar: drop one program from this bank's program cache so an ER bank
+    /// can reload freshly hydrated L1 deployment accounts under its own runtime
+    /// environments.
+    pub fn remove_programs_from_cache(&self, program_ids: impl IntoIterator<Item = Pubkey>) {
+        self.transaction_processor
+            .global_program_cache
+            .write()
+            .unwrap()
+            .remove_programs(program_ids.into_iter());
     }
 
     /// Epoch in which the new cooldown warmup rate for stake was activated
@@ -1925,12 +2026,37 @@ impl Bank {
         parent_capitalization: u64,
         parent_block_height: u64,
         reward_calc_tracer: Option<impl RewardCalcTracer>,
+        ephemeral: bool,
+        isolate_program_cache: bool,
     ) -> PrepareBlockExecutionStats {
         let slot = self.slot;
 
-        // Following code may touch AccountsDb, requiring proper ancestors
+        // Following code may touch AccountsDb, requiring proper ancestors.
         let (_, update_epoch_time_us) = measure_us!({
-            if parent_epoch < self.epoch() {
+            if ephemeral {
+                // Northstar: ephemeral forks (rollup banks) must not mutate any
+                // shared epoch / rewards / stake state in the L1 AccountsDb.
+                // Skip `process_new_epoch` and `update_epoch_stakes` outright.
+                //
+                // We still need to populate `epoch_stakes` for the ER bank's
+                // own leader-schedule epoch, because callers (e.g. transaction
+                // processing via `current_epoch_stakes()`) expect it to be
+                // present. Clone the parent's most recent entry into the ER's
+                // epoch — no AccountsDb writes.
+                let leader_schedule_epoch = self.epoch_schedule().get_leader_schedule_epoch(slot);
+                if !self.epoch_stakes.contains_key(&leader_schedule_epoch) {
+                    let parent_leader_schedule_epoch =
+                        self.epoch_schedule().get_leader_schedule_epoch(parent_slot);
+                    if let Some(parent_stakes) = self
+                        .epoch_stakes
+                        .get(&parent_leader_schedule_epoch)
+                        .cloned()
+                    {
+                        self.epoch_stakes
+                            .insert(leader_schedule_epoch, parent_stakes);
+                    }
+                }
+            } else if parent_epoch < self.epoch() {
                 self.process_new_epoch(
                     parent_epoch,
                     parent_slot,
@@ -1945,11 +2071,26 @@ impl Bank {
             }
         });
 
-        let (_, distribute_rewards_time_us) =
-            measure_us!(self.distribute_partitioned_epoch_rewards());
+        // Northstar: ER banks never enter `EpochRewardStatus::Active`, but
+        // skip defensively to keep the no-AccountsDb-writes invariant explicit.
+        let (_, distribute_rewards_time_us) = if ephemeral {
+            ((), 0)
+        } else {
+            measure_us!(self.distribute_partitioned_epoch_rewards())
+        };
 
         let (_, cache_preparation_time_us) =
             measure_us!(self.prepare_program_cache_for_upcoming_feature_set());
+
+        // Northstar: ER banks use an isolated `ProgramCache` (see
+        // `new_from_isolated_cache` above) so the cooperative-loading waiter
+        // can't deadlock against L1. The fresh cache starts empty, so we
+        // must repopulate the active builtin programs that the SVM relies on
+        // (system, bpf_loader, bpf_loader_upgradeable, vote, etc.) before
+        // any tx is executed against this bank.
+        if isolate_program_cache {
+            self.add_active_builtin_programs();
+        }
 
         // Update sysvars before processing transactions
         let (_, update_sysvars_time_us) = measure_us!({
@@ -3091,6 +3232,14 @@ impl Bank {
         self.rc.parent.read().unwrap().clone()
     }
 
+    /// Sonic: For Northstar ephemeral forks, descendants copy full slot ancestry
+    /// into `ancestors`, so older in-memory parent `Arc`s are no longer needed.
+    /// Severing this link keeps ER chains shallow and avoids recursive drop stack
+    /// overflow on long-lived sessions.
+    pub fn disconnect_from_parent(&self) {
+        *self.rc.parent.write().unwrap() = None;
+    }
+
     pub fn parent_slot(&self) -> Slot {
         self.parent_slot
     }
@@ -3239,6 +3388,21 @@ impl Bank {
         self.blockhash_queue.read().unwrap().last_hash()
     }
 
+    /// Sonic: carry ER-minted blockhashes into a newly reanchored ER bank.
+    pub fn carry_forward_blockhashes_from(&self, source: &Bank) -> usize {
+        if std::ptr::eq(self, source) {
+            return 0;
+        }
+
+        let source_queue = source.blockhash_queue.read().unwrap();
+        let mut target_queue = self.blockhash_queue.write().unwrap();
+        let carried = target_queue.carry_forward_from(&source_queue);
+        if carried > 0 {
+            self.update_recent_blockhashes_locked(&target_queue);
+        }
+        carried
+    }
+
     pub fn last_blockhash_and_lamports_per_signature(&self) -> (Hash, u64) {
         let blockhash_queue = self.blockhash_queue.read().unwrap();
         let last_hash = blockhash_queue.last_hash();
@@ -3282,12 +3446,19 @@ impl Bank {
         &self,
         message: &impl SVMMessage,
     ) -> u64 {
-        let prioritization_fee = process_compute_budget_instructions(
-            message.program_instructions_iter(),
-            &self.feature_set,
-        )
-        .unwrap_or_default()
-        .get_prioritization_fee();
+        let prioritization_fee = if self.fee_structure().lamports_per_signature == 0 {
+            // Sonic: Northstar uses zero-lamports-per-signature ER banks for
+            // gasless execution. Keep total fees zero even when clients include
+            // compute-budget priority-fee instructions.
+            0
+        } else {
+            process_compute_budget_instructions(
+                message.program_instructions_iter(),
+                &self.feature_set,
+            )
+            .unwrap_or_default()
+            .get_prioritization_fee()
+        };
         solana_fee::calculate_fee(
             message,
             self.fee_structure().lamports_per_signature,
@@ -6405,6 +6576,16 @@ impl Bank {
         &self.fee_structure
     }
 
+    /// Sonic: Configure Northstar Ephemeral Rollup bank parameters.
+    pub fn configure_er(&mut self, fee_structure: &FeeStructure, blockhash_queue_max_age: usize) {
+        self.fee_rate_governor = FeeRateGovernor::new(fee_structure.lamports_per_signature, 0);
+        self.fee_structure = fee_structure.clone();
+        self.max_processing_age = blockhash_queue_max_age;
+        let mut blockhash_queue = self.blockhash_queue.write().unwrap();
+        blockhash_queue.set_max_age(blockhash_queue_max_age);
+        blockhash_queue.set_lamports_per_signature(fee_structure.lamports_per_signature);
+    }
+
     pub fn parent_block_id(&self) -> Option<Hash> {
         self.parent().and_then(|p| p.block_id())
     }
@@ -6821,6 +7002,8 @@ impl Bank {
             parent_capitalization,
             bank.block_height.saturating_sub(1),
             null_tracer(),
+            false,
+            false,
         );
 
         bank
