@@ -1,4 +1,5 @@
 use {
+    crate::settlement::WithdrawalPayoutEvent,
     log::{debug, trace, warn},
     solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
     solana_keypair::Keypair,
@@ -62,6 +63,9 @@ pub struct EphemeralTransactionClient {
     /// continue to advance through the slot advancer's frozen-bank path.
     block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
     transaction_max_age: usize,
+    portal_program_id: Pubkey,
+    session_pda: Arc<RwLock<Option<Pubkey>>>,
+    withdrawal_payout_events: Arc<RwLock<Vec<WithdrawalPayoutEvent>>>,
 }
 
 impl Clone for EphemeralTransactionClient {
@@ -77,7 +81,55 @@ impl Clone for EphemeralTransactionClient {
             rpc_subscriptions: Arc::clone(&self.rpc_subscriptions),
             block_commitment_cache: Arc::clone(&self.block_commitment_cache),
             transaction_max_age: self.transaction_max_age,
+            portal_program_id: self.portal_program_id,
+            session_pda: Arc::clone(&self.session_pda),
+            withdrawal_payout_events: Arc::clone(&self.withdrawal_payout_events),
         }
+    }
+}
+
+pub(crate) struct EphemeralTransactionClientOptions {
+    er_account_overlay: Arc<RwLock<HashMap<Pubkey, AccountSharedData>>>,
+    er_history_store: Arc<ErHistoryStore>,
+    block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
+    transaction_max_age: usize,
+    portal_program_id: Pubkey,
+    session_pda: Arc<RwLock<Option<Pubkey>>>,
+    withdrawal_payout_events: Arc<RwLock<Vec<WithdrawalPayoutEvent>>>,
+}
+
+impl EphemeralTransactionClientOptions {
+    pub(crate) fn new(
+        er_account_overlay: Arc<RwLock<HashMap<Pubkey, AccountSharedData>>>,
+        er_history_store: Arc<ErHistoryStore>,
+        block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
+    ) -> Self {
+        Self {
+            er_account_overlay,
+            er_history_store,
+            block_commitment_cache,
+            transaction_max_age: crate::DEFAULT_ER_TRANSACTION_MAX_AGE,
+            portal_program_id: Pubkey::default(),
+            session_pda: Arc::new(RwLock::new(None)),
+            withdrawal_payout_events: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    pub(crate) fn with_transaction_max_age(mut self, transaction_max_age: usize) -> Self {
+        self.transaction_max_age = transaction_max_age;
+        self
+    }
+
+    pub(crate) fn with_withdrawal_payout_events(
+        mut self,
+        portal_program_id: Pubkey,
+        session_pda: Arc<RwLock<Option<Pubkey>>>,
+        withdrawal_payout_events: Arc<RwLock<Vec<WithdrawalPayoutEvent>>>,
+    ) -> Self {
+        self.portal_program_id = portal_program_id;
+        self.session_pda = session_pda;
+        self.withdrawal_payout_events = withdrawal_payout_events;
+        self
     }
 }
 
@@ -190,41 +242,42 @@ impl EphemeralTransactionClient {
         er_history_store: Arc<ErHistoryStore>,
         block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
     ) -> Self {
-        Self::new_with_history_overlay_commitment_cache_and_transaction_max_age(
+        Self::new_with_options(
             bank_forks,
             bank_operation_lock,
             delegated_accounts,
             touched_accounts,
             active,
-            er_account_overlay,
-            er_history_store,
-            block_commitment_cache,
-            crate::DEFAULT_ER_TRANSACTION_MAX_AGE,
+            EphemeralTransactionClientOptions::new(
+                er_account_overlay,
+                er_history_store,
+                block_commitment_cache,
+            ),
         )
     }
 
-    pub(crate) fn new_with_history_overlay_commitment_cache_and_transaction_max_age(
+    pub(crate) fn new_with_options(
         bank_forks: Arc<RwLock<BankForks>>,
         bank_operation_lock: Arc<Mutex<()>>,
         delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
         touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
         active: Arc<AtomicBool>,
-        er_account_overlay: Arc<RwLock<HashMap<Pubkey, AccountSharedData>>>,
-        er_history_store: Arc<ErHistoryStore>,
-        block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
-        transaction_max_age: usize,
+        options: EphemeralTransactionClientOptions,
     ) -> Self {
         Self {
             bank_forks,
             bank_operation_lock,
             delegated_accounts,
             touched_accounts,
-            er_account_overlay,
+            er_account_overlay: options.er_account_overlay,
             active,
-            er_history_store,
+            er_history_store: options.er_history_store,
             rpc_subscriptions: Arc::new(RwLock::new(None)),
-            block_commitment_cache,
-            transaction_max_age,
+            block_commitment_cache: options.block_commitment_cache,
+            transaction_max_age: options.transaction_max_age,
+            portal_program_id: options.portal_program_id,
+            session_pda: options.session_pda,
+            withdrawal_payout_events: options.withdrawal_payout_events,
         }
     }
 
@@ -509,6 +562,7 @@ impl EphemeralTransactionClient {
         );
 
         self.record_transaction_history_for_batch(bank, &txs, &commit_results, balance_collector);
+        self.record_withdrawal_payout_events_for_batch(bank, &txs, &commit_results);
         self.notify_transaction_subscribers(bank, &txs);
 
         for (tx_idx, result) in commit_results.iter().enumerate() {
@@ -521,6 +575,148 @@ impl EphemeralTransactionClient {
         }
 
         Ok(())
+    }
+
+    fn record_withdrawal_payout_events_for_batch(
+        &self,
+        bank: &Bank,
+        txs: &[VersionedTransaction],
+        commit_results: &[TransactionCommitResult],
+    ) {
+        let Some(session_pda) = *self.session_pda.read().unwrap() else {
+            return;
+        };
+        let mut events = Vec::new();
+
+        for (tx, commit_result) in txs.iter().zip(commit_results) {
+            let Ok(committed_tx) = commit_result else {
+                continue;
+            };
+            if committed_tx.status.is_err() {
+                continue;
+            }
+            let Some(l1_recipient) = self.memo_l1_recipient(bank, tx) else {
+                continue;
+            };
+            let loaded_addresses = Self::load_transaction_addresses(bank, tx).unwrap_or_default();
+            let account_keys = Self::full_account_keys(tx, &loaded_addresses);
+            let Some(signature) = tx.signatures.first().copied() else {
+                continue;
+            };
+
+            for ix in tx.message.instructions() {
+                let Some(program_id) = account_keys.get(ix.program_id_index as usize) else {
+                    continue;
+                };
+                if !system_program::check_id(program_id) {
+                    continue;
+                }
+                let Some(lamports) = Self::system_transfer_lamports(&ix.data) else {
+                    continue;
+                };
+                if lamports == 0 || ix.accounts.len() < 2 {
+                    continue;
+                }
+                let from_index = ix.accounts[0] as usize;
+                let to_index = ix.accounts[1] as usize;
+                let Some(er_source) = account_keys.get(from_index).copied() else {
+                    continue;
+                };
+                let Some(destination) = account_keys.get(to_index) else {
+                    continue;
+                };
+                if from_index >= tx.message.static_account_keys().len()
+                    || !tx.message.is_signer(from_index)
+                {
+                    continue;
+                }
+                let expected_sink =
+                    crate::withdrawal_sink_pda(&self.portal_program_id, &session_pda, &er_source);
+                if destination != &expected_sink {
+                    continue;
+                }
+
+                debug!(
+                    "recorded ER SOL withdrawal payout event: sig={}, er_source={}, \
+                     l1_recipient={}, lamports={}, er_slot={}",
+                    signature,
+                    er_source,
+                    l1_recipient,
+                    lamports,
+                    bank.slot()
+                );
+                events.push(WithdrawalPayoutEvent {
+                    er_source,
+                    l1_recipient,
+                    lamports,
+                    signature,
+                    er_slot: bank.slot(),
+                });
+            }
+        }
+
+        if !events.is_empty() {
+            self.withdrawal_payout_events
+                .write()
+                .unwrap()
+                .extend(events);
+        }
+    }
+
+    fn memo_l1_recipient(&self, bank: &Bank, tx: &VersionedTransaction) -> Option<Pubkey> {
+        let loaded_addresses = Self::load_transaction_addresses(bank, tx).unwrap_or_default();
+        let account_keys = Self::full_account_keys(tx, &loaded_addresses);
+        let mut memo_recipient = None;
+
+        for ix in tx.message.instructions() {
+            let Some(program_id) = account_keys.get(ix.program_id_index as usize) else {
+                continue;
+            };
+            if program_id != &spl_memo_interface::v3::id() {
+                continue;
+            }
+            let Some(recipient) = Self::decode_l1_recipient_memo(&ix.data) else {
+                warn!(
+                    "ignoring ER SOL withdrawal intent with invalid L1 recipient memo: sig={}",
+                    tx.signatures
+                        .first()
+                        .map(|signature| signature.to_string())
+                        .unwrap_or_default()
+                );
+                return None;
+            };
+            if memo_recipient.replace(recipient).is_some() {
+                warn!(
+                    "ignoring ER SOL withdrawal intent with multiple recipient memos: sig={}",
+                    tx.signatures
+                        .first()
+                        .map(|signature| signature.to_string())
+                        .unwrap_or_default()
+                );
+                return None;
+            }
+        }
+
+        memo_recipient
+    }
+
+    fn system_transfer_lamports(data: &[u8]) -> Option<u64> {
+        if data.len() != 12 || u32::from_le_bytes(data[0..4].try_into().ok()?) != 2 {
+            return None;
+        }
+        Some(u64::from_le_bytes(data[4..12].try_into().ok()?))
+    }
+
+    fn decode_l1_recipient_memo(data: &[u8]) -> Option<Pubkey> {
+        let memo = std::str::from_utf8(data).ok()?.trim();
+        memo.parse::<Pubkey>().ok()
+    }
+
+    fn full_account_keys(tx: &VersionedTransaction, loaded: &LoadedAddresses) -> Vec<Pubkey> {
+        let mut account_keys = tx.message.static_account_keys().to_vec();
+        account_keys.extend(loaded.writable.iter().copied());
+        account_keys.extend(loaded.readonly.iter().copied());
+        account_keys
     }
 
     /// Record a transaction that failed before it could even be prepared

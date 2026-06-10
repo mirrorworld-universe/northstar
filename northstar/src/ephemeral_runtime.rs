@@ -1,7 +1,9 @@
 use {
     crate::{
-        EphemeralRollupSettings, ephemeral_tpu::EphemeralTpu,
-        ephemeral_tx_client::EphemeralTransactionClient, settlement::ReceiptBalanceSettlement,
+        EphemeralRollupSettings,
+        ephemeral_tpu::EphemeralTpu,
+        ephemeral_tx_client::{EphemeralTransactionClient, EphemeralTransactionClientOptions},
+        settlement::{ReceiptBalanceSettlement, WithdrawalPayoutEvent},
         slot_advancer::SlotAdvancer,
     },
     crossbeam_channel::{Sender, unbounded},
@@ -148,6 +150,8 @@ pub struct EphemeralRuntime {
     sync_status: Arc<NorthStarSyncStatus>,
     /// Sonic: In-memory ER transaction history for Phase 1 history APIs.
     er_history_store: Arc<ErHistoryStore>,
+    /// Successful ER SOL withdrawal transfers paired with payout recipient memos.
+    withdrawal_payout_events: Arc<RwLock<Vec<WithdrawalPayoutEvent>>>,
     portal_program_id: Pubkey,
 
     _tx_client: EphemeralTransactionClient,
@@ -534,6 +538,7 @@ impl EphemeralRuntime {
         let session_pda: Arc<RwLock<Option<Pubkey>>> = Arc::new(RwLock::new(None));
         let sync_status = Arc::new(NorthStarSyncStatus::new(parent_bank.slot()));
         let er_history_store = Arc::new(ErHistoryStore::default());
+        let withdrawal_payout_events = Arc::new(RwLock::new(Vec::new()));
 
         let ledger_dir = TempDir::new().map_err(|e| e.to_string())?;
         let blockstore = Arc::new(Blockstore::open(ledger_dir.path()).map_err(|e| e.to_string())?);
@@ -549,18 +554,24 @@ impl EphemeralRuntime {
                 highest_super_majority_root: slot,
             },
         )));
-        let tx_client =
-            EphemeralTransactionClient::new_with_history_overlay_commitment_cache_and_transaction_max_age(
-                bank_forks.clone(),
-                bank_operation_lock.clone(),
-                delegated_set.clone(),
-                touched_accounts.clone(),
-                active.clone(),
+        let tx_client = EphemeralTransactionClient::new_with_options(
+            bank_forks.clone(),
+            bank_operation_lock.clone(),
+            delegated_set.clone(),
+            touched_accounts.clone(),
+            active.clone(),
+            EphemeralTransactionClientOptions::new(
                 er_account_overlay.clone(),
                 er_history_store.clone(),
                 block_commitment_cache.clone(),
-                transaction_max_age,
-            );
+            )
+            .with_transaction_max_age(transaction_max_age)
+            .with_withdrawal_payout_events(
+                portal_program_id,
+                session_pda.clone(),
+                withdrawal_payout_events.clone(),
+            ),
+        );
 
         let optimistically_confirmed_bank = Arc::new(RwLock::new(OptimisticallyConfirmedBank {
             bank: Arc::clone(&initial_bank),
@@ -740,6 +751,7 @@ impl EphemeralRuntime {
             session_pda,
             sync_status,
             er_history_store,
+            withdrawal_payout_events,
             portal_program_id,
 
             settings,
@@ -1365,29 +1377,29 @@ impl EphemeralRuntime {
     }
 
     /// Build validator-settled DepositReceipt balance updates from ER-local
-    /// system account balances and explicit ER withdrawal transactions.
+    /// system account balances and successful ER withdrawal intents.
     ///
-    /// Withdraw on ER by sending a normal system transfer from the recipient to
-    /// `withdrawal_sink(session, recipient)`. The sink balance is cumulative;
-    /// Portal settlement pays only the delta over `DepositReceipt.withdrawn`.
+    /// Arbitrary L1 recipients come from a Memo in the same successful ER tx as
+    /// a signed system transfer to `withdrawal_sink(session, er_source)`. The
+    /// legacy no-memo path still pays the ER source on L1 from sink-balance deltas.
     pub fn settlement_receipt_balances(
         &self,
         session_pda: Pubkey,
     ) -> Vec<ReceiptBalanceSettlement> {
         let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
         let overlay = self.er_account_overlay.read().unwrap();
-        let mut receipt_balances = overlay
+        let receipts = overlay
             .iter()
-            .filter(|(recipient, account)| {
-                !delegated_accounts.contains(recipient)
+            .filter(|(er_source, account)| {
+                !delegated_accounts.contains(er_source)
                     && account.owner() == &solana_sdk_ids::system_program::id()
                     && account.data().is_empty()
             })
-            .filter_map(|(recipient, account)| {
+            .filter_map(|(er_source, account)| {
                 let (receipt_pda, _) = northstar_portal::find_deposit_receipt_pda(
                     &self.portal_program_id.to_bytes(),
                     &session_pda.to_bytes(),
-                    &recipient.to_bytes(),
+                    &er_source.to_bytes(),
                 );
                 let receipt_pda = Pubkey::new_from_array(receipt_pda);
                 let receipt_account = self.l1_anchor_bank.get_account(&receipt_pda)?;
@@ -1396,33 +1408,109 @@ impl EphemeralRuntime {
                 else {
                     return None;
                 };
-                let (withdrawal_sink, _) = northstar_portal::find_withdrawal_sink_pda(
-                    &self.portal_program_id.to_bytes(),
-                    &session_pda.to_bytes(),
-                    &recipient.to_bytes(),
-                );
-                let withdrawal_sink = Pubkey::new_from_array(withdrawal_sink);
-                let withdrawn = overlay
-                    .get(&withdrawal_sink)
-                    .map(|sink| {
-                        let l1_sink_lamports = self
-                            .l1_anchor_bank
-                            .get_account(&withdrawal_sink)
-                            .map(|account| account.lamports())
-                            .unwrap_or_else(|| solana_rent::Rent::default().minimum_balance(0));
-                        sink.lamports().saturating_sub(l1_sink_lamports)
-                    })
-                    .unwrap_or(receipt.withdrawn);
-                (receipt.balance != account.lamports() || receipt.withdrawn != withdrawn).then_some(
-                    ReceiptBalanceSettlement {
-                        recipient: *recipient,
-                        balance: account.lamports(),
-                        withdrawn,
-                    },
-                )
+                Some((
+                    *er_source,
+                    account.lamports(),
+                    receipt.balance,
+                    receipt.withdrawn,
+                ))
             })
             .collect::<Vec<_>>();
-        receipt_balances.sort_by_key(|receipt| receipt.recipient.to_bytes());
+        let receipt_withdrawn = receipts
+            .iter()
+            .map(|(er_source, _, _, withdrawn)| (*er_source, *withdrawn))
+            .collect::<HashMap<_, _>>();
+
+        let mut payout_events_guard = self.withdrawal_payout_events.write().unwrap();
+        payout_events_guard.sort_by(|a, b| {
+            a.er_slot
+                .cmp(&b.er_slot)
+                .then_with(|| a.signature.to_string().cmp(&b.signature.to_string()))
+                .then_with(|| a.er_source.to_bytes().cmp(&b.er_source.to_bytes()))
+                .then_with(|| a.l1_recipient.to_bytes().cmp(&b.l1_recipient.to_bytes()))
+        });
+        let mut cumulative_by_source = HashMap::new();
+        payout_events_guard.retain(|event| {
+            let cumulative = cumulative_by_source.entry(event.er_source).or_insert(0u64);
+            let Some(next_cumulative) = cumulative.checked_add(event.lamports) else {
+                warn!("withdrawal payout counter overflow for {}", event.er_source);
+                return true;
+            };
+            *cumulative = next_cumulative;
+            receipt_withdrawn
+                .get(&event.er_source)
+                .map(|withdrawn| next_cumulative > *withdrawn)
+                .unwrap_or(true)
+        });
+        let payout_events = payout_events_guard.clone();
+        drop(payout_events_guard);
+
+        let mut receipt_balances = Vec::new();
+        for (er_source, er_balance, receipt_balance, receipt_withdrawn) in receipts {
+            let mut cumulative_withdrawn = receipt_withdrawn;
+            let mut current_withdrawn = receipt_withdrawn;
+            for event in payout_events
+                .iter()
+                .filter(|event| event.er_source == er_source)
+            {
+                let Some(next_withdrawn) = cumulative_withdrawn.checked_add(event.lamports) else {
+                    warn!("withdrawal payout counter overflow for {er_source}");
+                    break;
+                };
+                cumulative_withdrawn = next_withdrawn;
+                let payout_lamports = next_withdrawn.saturating_sub(current_withdrawn);
+                if payout_lamports > 0 {
+                    receipt_balances.push(ReceiptBalanceSettlement {
+                        er_source,
+                        l1_recipient: event.l1_recipient,
+                        balance: er_balance,
+                        withdrawn: next_withdrawn,
+                        payout_lamports,
+                    });
+                }
+                current_withdrawn = next_withdrawn;
+            }
+
+            if current_withdrawn != receipt_withdrawn {
+                continue;
+            }
+
+            let (withdrawal_sink, _) = northstar_portal::find_withdrawal_sink_pda(
+                &self.portal_program_id.to_bytes(),
+                &session_pda.to_bytes(),
+                &er_source.to_bytes(),
+            );
+            let withdrawal_sink = Pubkey::new_from_array(withdrawal_sink);
+            let withdrawn = overlay
+                .get(&withdrawal_sink)
+                .map(|sink| {
+                    let l1_sink_lamports = self
+                        .l1_anchor_bank
+                        .get_account(&withdrawal_sink)
+                        .map(|account| account.lamports())
+                        .unwrap_or_else(|| solana_rent::Rent::default().minimum_balance(0));
+                    sink.lamports().saturating_sub(l1_sink_lamports)
+                })
+                .unwrap_or(receipt_withdrawn);
+
+            if receipt_balance != er_balance || receipt_withdrawn != withdrawn {
+                receipt_balances.push(ReceiptBalanceSettlement {
+                    er_source,
+                    l1_recipient: er_source,
+                    balance: er_balance,
+                    withdrawn,
+                    payout_lamports: withdrawn.saturating_sub(receipt_withdrawn),
+                });
+            }
+        }
+
+        receipt_balances.sort_by(|a, b| {
+            a.er_source
+                .to_bytes()
+                .cmp(&b.er_source.to_bytes())
+                .then_with(|| a.withdrawn.cmp(&b.withdrawn))
+                .then_with(|| a.l1_recipient.to_bytes().cmp(&b.l1_recipient.to_bytes()))
+        });
         receipt_balances
     }
 
@@ -1777,6 +1865,7 @@ mod tests {
         solana_compute_budget_interface::ComputeBudgetInstruction,
         solana_fee_structure::FeeStructure,
         solana_gossip::contact_info::ContactInfo,
+        solana_instruction::Instruction,
         solana_keypair::{Keypair, Signer},
         solana_lattice_hash::lt_hash::LtHash,
         solana_message::{Message, SanitizedMessage},
@@ -1826,7 +1915,13 @@ mod tests {
 
     fn create_test_bank() -> Bank {
         use solana_genesis_config::GenesisConfig;
-        let genesis_config = GenesisConfig::new(&[], &[]);
+        let mut genesis_config = GenesisConfig::new(&[], &[]);
+        if let Some((pubkey, account)) =
+            solana_program_binaries::by_id(&spl_memo_interface::v3::id(), &genesis_config.rent)
+                .and_then(|mut accounts| accounts.pop())
+        {
+            genesis_config.add_account(pubkey, account);
+        }
         Bank::new_for_tests(&genesis_config)
     }
 
@@ -2175,12 +2270,161 @@ mod tests {
 
         let receipt_balances = runtime.settlement_receipt_balances(session_pda);
         assert_eq!(receipt_balances.len(), 1);
-        assert_eq!(receipt_balances[0].recipient, recipient);
+        assert_eq!(receipt_balances[0].er_source, recipient);
+        assert_eq!(receipt_balances[0].l1_recipient, recipient);
         assert_eq!(
             receipt_balances[0].balance,
             deposit_amount - withdraw_amount
         );
         assert_eq!(receipt_balances[0].withdrawn, withdraw_amount);
+        assert_eq!(receipt_balances[0].payout_lamports, withdraw_amount);
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_er_withdrawal_transaction_with_memo_settles_to_l1_recipient() {
+        let parent_bank = create_test_bank();
+        let portal_program_id = Pubkey::new_unique();
+        let session_pda = Pubkey::new_unique();
+        let er_source_keypair = Keypair::new();
+        let er_source = er_source_keypair.pubkey();
+        let l1_recipient = Pubkey::new_unique();
+        let deposit_amount = 1_000u64;
+        let withdraw_amount = 250u64;
+        store_deposit_receipt(
+            &parent_bank,
+            &portal_program_id,
+            &session_pda,
+            &er_source,
+            deposit_amount,
+            0,
+        );
+        store_withdrawal_sink(&parent_bank, &portal_program_id, &session_pda, &er_source);
+        parent_bank.freeze();
+
+        let settings = EphemeralRollupSettings {
+            session_pda,
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            portal_program_id,
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.set_session_pda(session_pda);
+        runtime.activate();
+        runtime.credit_deposit(&er_source, deposit_amount);
+
+        let withdrawal_ix = crate::er_withdrawal_instruction(
+            &portal_program_id,
+            &session_pda,
+            &er_source,
+            withdraw_amount,
+        );
+        let memo_ix = Instruction {
+            program_id: spl_memo_interface::v3::id(),
+            accounts: vec![],
+            data: l1_recipient.to_string().into_bytes(),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[withdrawal_ix, memo_ix],
+            Some(&er_source),
+            &[&er_source_keypair],
+            runtime.bank().last_blockhash(),
+        );
+        let wire_tx = bincode::serialize(&VersionedTransaction::from(tx)).unwrap();
+        TransactionClient::send_transactions_in_batch(
+            &runtime._tx_client,
+            vec![wire_tx],
+            &SendTransactionServiceStats::default(),
+        );
+
+        let receipt_balances = runtime.settlement_receipt_balances(session_pda);
+        assert_eq!(receipt_balances.len(), 1);
+        assert_eq!(receipt_balances[0].er_source, er_source);
+        assert_eq!(receipt_balances[0].l1_recipient, l1_recipient);
+        assert_eq!(
+            receipt_balances[0].balance,
+            deposit_amount - withdraw_amount
+        );
+        assert_eq!(receipt_balances[0].withdrawn, withdraw_amount);
+        assert_eq!(receipt_balances[0].payout_lamports, withdraw_amount);
+        assert_ne!(er_source, l1_recipient);
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_er_memo_without_withdrawal_transfer_does_not_create_payout() {
+        let parent_bank = create_test_bank();
+        let portal_program_id = Pubkey::new_unique();
+        let session_pda = Pubkey::new_unique();
+        let er_source_keypair = Keypair::new();
+        let er_source = er_source_keypair.pubkey();
+        let deposit_amount = 1_000u64;
+        store_deposit_receipt(
+            &parent_bank,
+            &portal_program_id,
+            &session_pda,
+            &er_source,
+            deposit_amount,
+            0,
+        );
+        parent_bank.freeze();
+
+        let settings = EphemeralRollupSettings {
+            session_pda,
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            portal_program_id,
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.set_session_pda(session_pda);
+        runtime.activate();
+        runtime.credit_deposit(&er_source, deposit_amount);
+
+        let memo_ix = Instruction {
+            program_id: spl_memo_interface::v3::id(),
+            accounts: vec![],
+            data: Pubkey::new_unique().to_string().into_bytes(),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[memo_ix],
+            Some(&er_source),
+            &[&er_source_keypair],
+            runtime.bank().last_blockhash(),
+        );
+        let wire_tx = bincode::serialize(&VersionedTransaction::from(tx)).unwrap();
+        TransactionClient::send_transactions_in_batch(
+            &runtime._tx_client,
+            vec![wire_tx],
+            &SendTransactionServiceStats::default(),
+        );
+
+        assert!(runtime.settlement_receipt_balances(session_pda).is_empty());
 
         runtime.shutdown();
     }
