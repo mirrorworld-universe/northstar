@@ -4,7 +4,7 @@
 /// deserialises transactions, and feeds them into `EphemeralTransactionClient`.
 use {
     crate::ephemeral_tx_client::EphemeralTransactionClient,
-    crossbeam_channel::{Receiver, unbounded},
+    crossbeam_channel::{unbounded, Receiver},
     log::{debug, info, warn},
     solana_keypair::Keypair,
     solana_perf::packet::PacketBatch,
@@ -12,15 +12,16 @@ use {
     solana_send_transaction_service::transaction_client::TransactionClient,
     solana_streamer::{
         nonblocking::simple_qos::SimpleQosConfig,
-        quic::{QuicStreamerConfig, SpawnServerResult, spawn_simple_qos_server},
+        quic::{spawn_simple_qos_server, QuicStreamerConfig, SpawnServerResult},
+        quic_socket::QuicSocket,
         streamer::StakedNodes,
     },
     std::{
         net::UdpSocket,
         num::NonZeroUsize,
         sync::{
-            Arc, RwLock,
             atomic::{AtomicBool, Ordering},
+            Arc, RwLock,
         },
         thread::{Builder, JoinHandle},
     },
@@ -62,10 +63,10 @@ impl EphemeralTpu {
 
         let qos_config = SimpleQosConfig::default();
 
-        let quic_server = spawn_simple_qos_server(
+        let (quic_server, _banlist) = spawn_simple_qos_server(
             "solErTpu",
             "er_tpu",
-            vec![tpu_socket],
+            vec![QuicSocket::from(tpu_socket)],
             keypair,
             packet_sender,
             staked_nodes,

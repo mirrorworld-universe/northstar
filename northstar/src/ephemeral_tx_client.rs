@@ -4,7 +4,7 @@ use {
     solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
     solana_keypair::Keypair,
     solana_ledger::transaction_balances::compile_collected_balances,
-    solana_message::{AddressLoader, VersionedMessage, v0::LoadedAddresses},
+    solana_message::{v0::LoadedAddresses, AddressLoader, VersionedMessage},
     solana_pubkey::Pubkey,
     solana_rpc::{er_history::ErHistoryStore, rpc_subscriptions::RpcSubscriptions},
     solana_runtime::{
@@ -25,14 +25,14 @@ use {
     solana_tls_utils::NotifyKeyUpdate,
     solana_transaction::versioned::VersionedTransaction,
     solana_transaction_status::{
-        TransactionStatusMeta, VersionedTransactionWithStatusMeta, map_inner_instructions,
+        map_inner_instructions, TransactionStatusMeta, VersionedTransactionWithStatusMeta,
     },
     std::{
         collections::{HashMap, HashSet},
         error::Error,
         sync::{
-            Arc, Mutex, RwLock,
             atomic::{AtomicBool, Ordering},
+            Arc, Mutex, RwLock,
         },
     },
 };
@@ -541,6 +541,26 @@ impl EphemeralTransactionClient {
             );
         }
 
+        let (valid_txs, expired_txs): (Vec<_>, Vec<_>) = txs.into_iter().partition(|tx| {
+            let recent_blockhash = tx.message.recent_blockhash();
+            bank.get_hash_age(recent_blockhash)
+                .is_some_and(|age| age <= self.transaction_max_age as u64)
+        });
+
+        for tx in expired_txs {
+            self.record_failed_transaction(
+                bank,
+                tx,
+                solana_transaction::TransactionError::BlockhashNotFound,
+            );
+        }
+
+        if valid_txs.is_empty() {
+            return Err(solana_transaction::TransactionError::BlockhashNotFound.into());
+        }
+
+        let txs = valid_txs;
+
         let batch = match bank.prepare_entry_batch(txs.clone()) {
             Ok(batch) => batch,
             Err(e) => {
@@ -555,7 +575,6 @@ impl EphemeralTransactionClient {
         };
         let (commit_results, balance_collector) = bank.load_execute_and_commit_transactions(
             &batch,
-            self.transaction_max_age,
             Self::history_recording_config(),
             &mut ExecuteTimings::default(),
             None,
@@ -806,6 +825,9 @@ impl EphemeralTransactionClient {
                     }
                 }
             }
+            // Sonic: V1 currently has no ALT lookups on the ER history path; if
+            // that changes, mirror the V0 load_addresses path before recording meta.
+            VersionedMessage::V1(_) => Some(LoadedAddresses::default()),
         }
     }
 
@@ -1053,13 +1075,14 @@ mod tests {
         },
         solana_fee_structure::FeeDetails,
         solana_keypair::{Keypair, Signer},
+        solana_leader_schedule::SlotLeader,
         solana_message::{
-            Message, MessageHeader,
             v0::{self, MessageAddressTableLookup},
+            Message, MessageHeader,
         },
         solana_sdk_ids::system_program,
         solana_svm::transaction_execution_result::TransactionLoadedAccountsStats,
-        solana_transaction::{Transaction, versioned::VersionedTransaction},
+        solana_transaction::{versioned::VersionedTransaction, Transaction},
         solana_transaction_context::transaction::TransactionReturnData,
         std::{borrow::Cow, sync::Arc},
     };
@@ -1457,9 +1480,7 @@ mod tests {
             bank.register_unique_recent_blockhash_for_test();
         }
         assert!(bank.is_hash_valid_for_age(&old_blockhash, usize::MAX));
-        assert!(
-            !bank.is_hash_valid_for_age(&old_blockhash, crate::DEFAULT_ER_TRANSACTION_MAX_AGE,)
-        );
+        assert!(!bank.is_hash_valid_for_age(&old_blockhash, crate::DEFAULT_ER_TRANSACTION_MAX_AGE,));
 
         let bank_forks = BankForks::new_rw_arc(bank);
         let bank = bank_forks.read().unwrap().root_bank();
@@ -1481,6 +1502,75 @@ mod tests {
             status.err,
             Some(solana_transaction::TransactionError::BlockhashNotFound),
         );
+    }
+
+    #[test]
+    fn test_send_transactions_in_batch_records_expired_blockhash_and_executes_valid_siblings() {
+        let expired_fee_payer = Keypair::new();
+        let valid_fee_payer = Keypair::new();
+        let expired_recipient = Pubkey::new_unique();
+        let valid_recipient = Pubkey::new_unique();
+        let mut bank = create_test_bank();
+        fund_account(&bank, &expired_fee_payer.pubkey(), 10_000_000);
+        fund_account(&bank, &valid_fee_payer.pubkey(), 10_000_000);
+
+        let old_blockhash = bank.last_blockhash();
+        let expired_tx = create_transfer_tx(
+            &expired_fee_payer,
+            expired_fee_payer.pubkey(),
+            expired_recipient,
+            old_blockhash,
+        );
+        let expired_signature = expired_tx.signatures[0];
+
+        let recent_blockhash_max_age =
+            crate::er_recent_blockhash_max_age_for_slot_duration(crate::DEFAULT_ER_SLOT_DURATION);
+        bank.configure_er(
+            &crate::EphemeralRollupSettings::zero_fee_structure(),
+            recent_blockhash_max_age,
+        );
+        for _ in 0..=crate::DEFAULT_ER_TRANSACTION_MAX_AGE {
+            bank.register_unique_recent_blockhash_for_test();
+        }
+        assert!(!bank.is_hash_valid_for_age(&old_blockhash, crate::DEFAULT_ER_TRANSACTION_MAX_AGE,));
+
+        let valid_tx = create_transfer_tx(
+            &valid_fee_payer,
+            valid_fee_payer.pubkey(),
+            valid_recipient,
+            bank.last_blockhash(),
+        );
+        let valid_signature = valid_tx.signatures[0];
+
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let bank = bank_forks.read().unwrap().root_bank();
+        let er_history_store = Arc::new(ErHistoryStore::default());
+        let client = create_client_with_history(bank_forks, vec![], er_history_store.clone());
+
+        <EphemeralTransactionClient as TransactionClient>::send_transactions_in_batch(
+            &client,
+            vec![
+                bincode::serialize(&expired_tx).unwrap(),
+                bincode::serialize(&valid_tx).unwrap(),
+            ],
+            &SendTransactionServiceStats::default(),
+        );
+
+        assert_eq!(bank.get_balance(&expired_recipient), 0);
+        assert_eq!(bank.get_balance(&valid_recipient), 1_000_000);
+        er_history_store.finalize_slot(&bank);
+
+        let expired_status = er_history_store
+            .get_signature_status(&expired_signature)
+            .expect("expired tx should be recorded in ER history");
+        assert_eq!(
+            expired_status.err,
+            Some(solana_transaction::TransactionError::BlockhashNotFound),
+        );
+        let valid_status = er_history_store
+            .get_signature_status(&valid_signature)
+            .expect("valid sibling tx should be recorded in ER history");
+        assert_eq!(valid_status.err, None);
     }
 
     #[test]
@@ -1601,7 +1691,7 @@ mod tests {
         );
         root_bank.store_account(&address_table_key, &address_table_account);
         root_bank.freeze();
-        let bank = Bank::new_from_parent(Arc::new(root_bank), &Pubkey::new_unique(), 1);
+        let bank = Bank::new_from_parent(Arc::new(root_bank), SlotLeader::new_unique(), 1);
         let bank_forks = BankForks::new_rw_arc(bank);
         let bank = bank_forks.read().unwrap().root_bank();
 
@@ -1942,7 +2032,7 @@ mod tests {
         );
         root_bank.store_account(&address_table_key, &address_table_account);
         root_bank.freeze();
-        let bank = Bank::new_from_parent(Arc::new(root_bank), &Pubkey::new_unique(), 1);
+        let bank = Bank::new_from_parent(Arc::new(root_bank), SlotLeader::new_unique(), 1);
         let bank_forks = BankForks::new_rw_arc(bank);
         let bank = bank_forks.read().unwrap().root_bank();
         let client = create_client_with_delegated(bank_forks, vec![delegated_a]);

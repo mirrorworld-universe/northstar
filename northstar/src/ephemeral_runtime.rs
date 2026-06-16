@@ -1,21 +1,20 @@
 use {
     crate::{
-        EphemeralRollupSettings,
         ephemeral_tpu::EphemeralTpu,
         ephemeral_tx_client::{EphemeralTransactionClient, EphemeralTransactionClientOptions},
         settlement::{ReceiptBalanceSettlement, WithdrawalPayoutEvent},
         slot_advancer::SlotAdvancer,
+        EphemeralRollupSettings,
     },
-    crossbeam_channel::{Sender, unbounded},
+    crossbeam_channel::{unbounded, Sender},
     log::{debug, info, warn},
-    solana_account::{
-        AccountSharedData, PROGRAM_OWNERS, ReadableAccount, WritableAccount, state_traits::StateMut,
-    },
+    solana_account::{state_traits::StateMut, AccountSharedData, ReadableAccount, WritableAccount},
     solana_accounts_db::accounts_db::AccountsDb,
     solana_clock::{BankId, Slot},
     solana_gossip::cluster_info::ClusterInfo,
     solana_keypair::Keypair,
     solana_lattice_hash::lt_hash::{Checksum, LtHash},
+    solana_leader_schedule::SlotLeader,
     solana_ledger::{blockstore::Blockstore, leader_schedule_cache::LeaderScheduleCache},
     solana_loader_v3_interface::state::UpgradeableLoaderState,
     solana_pubkey::Pubkey,
@@ -37,12 +36,13 @@ use {
     solana_sdk_ids::bpf_loader_upgradeable,
     solana_send_transaction_service::send_transaction_service,
     solana_signer::Signer,
+    solana_svm::account_loader::PROGRAM_OWNERS,
     std::{
         collections::{HashMap, HashSet},
         net::{IpAddr, Ipv4Addr, SocketAddr},
         sync::{
-            Arc, Mutex, RwLock,
             atomic::{AtomicBool, AtomicU64, Ordering},
+            Arc, Mutex, RwLock,
         },
         thread::{Builder, JoinHandle},
         time::Duration,
@@ -368,8 +368,11 @@ impl EphemeralRuntime {
             let frozen_slot = current_bank.slot();
             let frozen_bank = current_bank.clone();
             let next_bank_slot = frozen_slot.saturating_add(1);
-            let mut next_bank =
-                Bank::new_from_parent_ephemeral(current_bank, &Pubkey::default(), next_bank_slot);
+            let mut next_bank = Bank::new_from_parent_ephemeral(
+                current_bank,
+                SlotLeader::default(),
+                next_bank_slot,
+            );
             next_bank.configure_er(er_fee_structure, recent_blockhash_max_age);
             let next_bank_arc = {
                 let mut bank_forks_write = bank_forks.write().unwrap();
@@ -383,7 +386,7 @@ impl EphemeralRuntime {
             // not mutate the L1 anchor bank.
             if let Some(parent) = frozen_bank.parent() {
                 if parent.slot() >= (1u64 << 40) {
-                    parent.clear_parent();
+                    parent.disconnect_from_parent();
                 }
             }
 
@@ -461,7 +464,7 @@ impl EphemeralRuntime {
             crate::er_recent_blockhash_max_age_for_slot_duration(slot_duration);
         let mut bank = Bank::new_from_parent_ephemeral_isolated(
             parent_bank.clone(),
-            &Pubkey::default(),
+            SlotLeader::default(),
             ephemeral_slot,
         );
         bank.configure_er(&settings.er_fee_structure, recent_blockhash_max_age);
@@ -665,7 +668,7 @@ impl EphemeralRuntime {
         // backed by ErHistoryStore, so enable blockSubscribe on this local path.
         let pubsub_config = PubSubConfig {
             enable_block_subscription: true,
-            ..PubSubConfig::default()
+            ..PubSubConfig::default_for_tests()
         };
         let rpc_subscriptions = Arc::new(RpcSubscriptions::new_with_config_and_er_history(
             rpc_exit.clone(),
@@ -917,7 +920,7 @@ impl EphemeralRuntime {
                 crate::er_recent_blockhash_max_age_for_slot_duration(self.slot_duration);
             let mut bank = Bank::new_from_parent_ephemeral_isolated(
                 parent_bank.clone(),
-                &Pubkey::default(),
+                SlotLeader::default(),
                 ephemeral_slot,
             );
             bank.configure_er(&self.settings.er_fee_structure, recent_blockhash_max_age);
@@ -968,13 +971,18 @@ impl EphemeralRuntime {
             self.delegated_accounts.write().unwrap().clear();
             self.touched_accounts.write().unwrap().clear();
             self.er_account_overlay.write().unwrap().clear();
-            let accounts = match self.l1_anchor_bank.get_all_accounts(false) {
-                Ok(accounts) => accounts,
-                Err(_) => {
-                    warn!("Cannot hydrate existing delegations from L1: account scan failed");
-                    Vec::new()
-                }
-            };
+            let mut accounts = Vec::new();
+            if self
+                .l1_anchor_bank
+                .scan_all_accounts(|entry| {
+                    if let Some((pubkey, account, slot)) = entry {
+                        accounts.push((*pubkey, account, slot));
+                    }
+                })
+                .is_err()
+            {
+                warn!("Cannot hydrate existing delegations from L1: account scan failed");
+            }
 
             let hydrated_delegations = accounts
                 .into_iter()
@@ -1221,7 +1229,7 @@ impl EphemeralRuntime {
             crate::er_recent_blockhash_max_age_for_slot_duration(self.slot_duration);
         let mut bank = Bank::new_from_parent_ephemeral_isolated(
             parent_bank.clone(),
-            &Pubkey::default(),
+            SlotLeader::default(),
             ephemeral_slot,
         );
         bank.configure_er(&self.settings.er_fee_structure, recent_blockhash_max_age);
@@ -1860,7 +1868,7 @@ mod tests {
         super::*,
         northstar_portal::{DelegationRecord, DepositReceipt},
         solana_account::{
-            AccountSharedData, ReadableAccount, WritableAccount, state_traits::StateMut,
+            state_traits::StateMut, AccountSharedData, ReadableAccount, WritableAccount,
         },
         solana_compute_budget_interface::ComputeBudgetInstruction,
         solana_fee_structure::FeeStructure,
@@ -1879,7 +1887,7 @@ mod tests {
         },
         solana_svm::transaction_processor::ExecutionRecordingConfig,
         solana_system_interface::instruction::transfer,
-        solana_transaction::{Transaction, versioned::VersionedTransaction},
+        solana_transaction::{versioned::VersionedTransaction, Transaction},
         solana_transaction_status::{TransactionConfirmationStatus, UiTransactionEncoding},
         std::{collections::HashSet, net::TcpListener, sync::atomic::AtomicU64, time::Duration},
     };
@@ -2822,7 +2830,7 @@ mod tests {
             "ER transaction history should preserve Solana log messages"
         );
 
-        let new_parent = Bank::new_from_parent(parent_bank, &Pubkey::default(), 1);
+        let new_parent = Bank::new_from_parent(parent_bank, SlotLeader::default(), 1);
         new_parent.freeze();
         runtime.reset_to_new_parent(Arc::new(new_parent));
 
@@ -2964,7 +2972,7 @@ mod tests {
         runtime.set_bank_forks_reaper_paused(true);
 
         let old_er_tip = runtime.bank().slot();
-        let new_parent = Arc::new(Bank::new_from_parent(parent_bank, &Pubkey::default(), 1));
+        let new_parent = Arc::new(Bank::new_from_parent(parent_bank, SlotLeader::default(), 1));
         let expected_er_root_slot =
             EphemeralRuntime::er_slot_for(new_parent.as_ref()).max(old_er_tip.saturating_add(1));
         let expected_er_slot = expected_er_root_slot.saturating_add(1);
@@ -3045,7 +3053,7 @@ mod tests {
 
         let new_parent = Arc::new(Bank::new_from_parent(
             parent_bank.clone(),
-            &Pubkey::default(),
+            SlotLeader::default(),
             1,
         ));
         runtime.reset_to_new_parent(new_parent);
@@ -3104,7 +3112,7 @@ mod tests {
         .unwrap();
         runtime.activate();
 
-        let new_parent = Bank::new_from_parent(parent_bank, &Pubkey::default(), 1);
+        let new_parent = Bank::new_from_parent(parent_bank, SlotLeader::default(), 1);
         fund_account(&new_parent, &readonly_account, 2_000_000);
         new_parent.freeze();
         runtime.reanchor_to_l1_parent(Arc::new(new_parent));
@@ -3151,7 +3159,7 @@ mod tests {
             er_bank_before.is_hash_valid_for_age(&er_blockhash, solana_clock::MAX_PROCESSING_AGE)
         );
 
-        let new_parent = Bank::new_from_parent(parent_bank, &Pubkey::default(), 1);
+        let new_parent = Bank::new_from_parent(parent_bank, SlotLeader::default(), 1);
         new_parent.freeze();
         runtime.reanchor_to_l1_parent(Arc::new(new_parent));
 
@@ -3199,7 +3207,7 @@ mod tests {
             er_bank_before.is_hash_valid_for_age(&er_blockhash, solana_clock::MAX_PROCESSING_AGE)
         );
 
-        let new_parent = Bank::new_from_parent(parent_bank, &Pubkey::default(), 1);
+        let new_parent = Bank::new_from_parent(parent_bank, SlotLeader::default(), 1);
         new_parent.freeze();
         runtime.reset_to_new_parent(Arc::new(new_parent));
 
@@ -3246,7 +3254,7 @@ mod tests {
         runtime.credit_deposit(&depositor, 50_000);
         assert_eq!(runtime.bank().get_balance(&depositor), 50_000);
 
-        let new_parent = Bank::new_from_parent(parent_bank, &Pubkey::default(), 1);
+        let new_parent = Bank::new_from_parent(parent_bank, SlotLeader::default(), 1);
         fund_account(&new_parent, &depositor, 9_000_000);
         new_parent.freeze();
         runtime.reanchor_to_l1_parent(Arc::new(new_parent));
@@ -3310,7 +3318,7 @@ mod tests {
             &owner_program
         );
 
-        let new_parent = Bank::new_from_parent(parent_bank, &Pubkey::default(), 1);
+        let new_parent = Bank::new_from_parent(parent_bank, SlotLeader::default(), 1);
         new_parent.freeze();
         runtime.reanchor_to_l1_parent(Arc::new(new_parent));
 
@@ -3363,7 +3371,7 @@ mod tests {
         assert_eq!(runtime.bank().get_balance(&account_a), 10_000_000_000);
 
         // Create a new L1 bank with account B (simulates L1 advancing)
-        let new_parent = Bank::new_from_parent(parent_bank, &Pubkey::default(), 1);
+        let new_parent = Bank::new_from_parent(parent_bank, SlotLeader::default(), 1);
         let account_b = Pubkey::new_unique();
         fund_account(&new_parent, &account_b, 20_000_000_000);
         new_parent.freeze();
@@ -3416,7 +3424,7 @@ mod tests {
         )
         .unwrap();
 
-        let new_parent = Bank::new_from_parent(parent_bank, &Pubkey::default(), 1);
+        let new_parent = Bank::new_from_parent(parent_bank, SlotLeader::default(), 1);
         let sender_keypair = Keypair::new();
         let sender_pubkey = sender_keypair.pubkey();
         let receiver_pubkey = Pubkey::new_unique();
@@ -3494,7 +3502,7 @@ mod tests {
         runtime.activate();
 
         std::thread::sleep(Duration::from_millis(150));
-        let new_parent = Arc::new(Bank::new_from_parent(parent_bank, &Pubkey::default(), 1));
+        let new_parent = Arc::new(Bank::new_from_parent(parent_bank, SlotLeader::default(), 1));
         runtime.reset_to_new_parent(new_parent);
         runtime.shutdown();
 
@@ -3574,7 +3582,6 @@ mod tests {
         let mut timings = solana_svm_timings::ExecuteTimings::default();
         let _ = ephemeral_bank.load_execute_and_commit_transactions(
             &batch,
-            solana_clock::MAX_PROCESSING_AGE,
             ExecutionRecordingConfig::default(),
             &mut timings,
             None,
@@ -3916,7 +3923,7 @@ mod tests {
 
         let l1_bank = Bank::new_from_parent(
             parent_bank.clone(),
-            &Pubkey::default(),
+            SlotLeader::default(),
             parent_bank.slot().saturating_add(1),
         );
         let portal_program_id = runtime.portal_program_id;
@@ -3982,7 +3989,7 @@ mod tests {
 
         let l1_bank = Bank::new_from_parent(
             parent_bank.clone(),
-            &Pubkey::default(),
+            SlotLeader::default(),
             parent_bank.slot().saturating_add(1),
         );
         let portal_program_id = runtime.portal_program_id;
@@ -4021,11 +4028,9 @@ mod tests {
             .expect("delegated account should be restored into ER after reset");
         assert_eq!(er_delegated_account.owner(), &owner_program);
         assert_eq!(er_delegated_account.data(), delegated_l1_snapshot.data());
-        assert!(
-            runtime
-                .initial_account_snapshot(&delegated_pubkey)
-                .is_some()
-        );
+        assert!(runtime
+            .initial_account_snapshot(&delegated_pubkey)
+            .is_some());
         assert!(runtime.bank().get_account(&programdata_address).is_some());
 
         runtime.shutdown();
@@ -4042,7 +4047,7 @@ mod tests {
             .expect("noop ELF should exist");
         let l1_bank = Arc::new(Bank::new_from_parent(
             parent_bank.clone(),
-            &Pubkey::default(),
+            SlotLeader::default(),
             parent_bank.slot().saturating_add(1),
         ));
         let portal_program_id = runtime.portal_program_id;
@@ -4074,7 +4079,7 @@ mod tests {
 
         let next_l1_bank = Arc::new(Bank::new_from_parent(
             l1_bank.clone(),
-            &Pubkey::default(),
+            SlotLeader::default(),
             l1_bank.slot().saturating_add(1),
         ));
         runtime.reanchor_to_l1_parent(next_l1_bank);
@@ -4142,7 +4147,7 @@ mod tests {
             .expect("noop ELF should exist");
         let l1_bank = Arc::new(Bank::new_from_parent(
             parent_bank.clone(),
-            &Pubkey::default(),
+            SlotLeader::default(),
             parent_bank.slot().saturating_add(1),
         ));
         let portal_program_id = runtime.portal_program_id;
@@ -4189,20 +4194,18 @@ mod tests {
             .bank()
             .process_transaction(&transaction)
             .expect("noop program should execute and populate ER ProgramCache");
-        assert!(
-            !runtime
-                .bank()
-                .get_transaction_processor()
-                .global_program_cache
-                .read()
-                .unwrap()
-                .get_slot_versions_for_tests(&owner_program)
-                .is_empty()
-        );
+        assert!(!runtime
+            .bank()
+            .get_transaction_processor()
+            .global_program_cache
+            .read()
+            .unwrap()
+            .get_slot_versions_for_tests(&owner_program)
+            .is_empty());
 
         let l1_upgrade_bank = Bank::new_from_parent(
             l1_bank.clone(),
-            &Pubkey::default(),
+            SlotLeader::default(),
             l1_bank.slot().saturating_add(1),
         );
         store_upgradeable_owner_program(
@@ -4221,16 +4224,14 @@ mod tests {
             .get_account(&programdata_address)
             .expect("upgraded programdata should be hydrated into ER");
         assert_eq!(er_programdata.data(), upgraded_programdata.data());
-        assert!(
-            runtime
-                .bank()
-                .get_transaction_processor()
-                .global_program_cache
-                .read()
-                .unwrap()
-                .get_slot_versions_for_tests(&owner_program)
-                .is_empty()
-        );
+        assert!(runtime
+            .bank()
+            .get_transaction_processor()
+            .global_program_cache
+            .read()
+            .unwrap()
+            .get_slot_versions_for_tests(&owner_program)
+            .is_empty());
 
         runtime.shutdown();
     }
@@ -4324,11 +4325,9 @@ mod tests {
         .unwrap();
 
         assert!(!runtime.delegated_accounts().contains(&delegated_pubkey));
-        assert!(
-            runtime
-                .initial_account_snapshot(&delegated_pubkey)
-                .is_none()
-        );
+        assert!(runtime
+            .initial_account_snapshot(&delegated_pubkey)
+            .is_none());
 
         runtime.shutdown();
     }
@@ -4374,11 +4373,9 @@ mod tests {
         .unwrap();
 
         assert!(!runtime.delegated_accounts().contains(&delegated_pubkey));
-        assert!(
-            runtime
-                .initial_account_snapshot(&delegated_pubkey)
-                .is_none()
-        );
+        assert!(runtime
+            .initial_account_snapshot(&delegated_pubkey)
+            .is_none());
 
         runtime.shutdown();
     }
@@ -4650,7 +4647,7 @@ mod tests {
         let target_slot = slots_per_epoch - 4;
         let mut parent = root_bank;
         for s in 1..=target_slot {
-            let next = Bank::new_from_parent(parent, &Pubkey::default(), s);
+            let next = Bank::new_from_parent(parent, SlotLeader::default(), s);
             parent = Arc::new(next);
         }
         assert!(

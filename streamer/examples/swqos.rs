@@ -117,11 +117,13 @@ async fn main() -> anyhow::Result<()> {
         max_concurrent_connections: _,
     } = solana_streamer::nonblocking::testing_utilities::spawn_stake_weighted_qos_server(
         "quic_streamer_test",
-        [socket.try_clone()?],
+        [socket.try_clone()?.into()],
         &keypair,
         sender,
         staked_nodes,
         QuicStreamerConfig {
+            stream_receive_window_size: solana_message::v1::MAX_TRANSACTION_SIZE as u32,
+            max_stream_data_bytes: solana_message::v1::MAX_TRANSACTION_SIZE as u32,
             ..QuicStreamerConfig::default()
         },
         SwQosConfig {

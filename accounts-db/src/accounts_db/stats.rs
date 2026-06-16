@@ -101,11 +101,69 @@ impl StoreAccountsUnfrozenStats {
     }
 }
 
-/// Stats from storing accounts frozen (i.e. to an account storage file)
+/// Stats from storing accounts for shrink (i.e. moving accounts between storage files)
 #[derive(Debug, Default)]
-pub struct StoreAccountsFrozenStats {
+pub struct StoreAccountsForShrinkStats {
     pub last_report: AtomicInterval,
     pub flush_read_cache_us: AtomicU64,
+    pub write_to_storage_us: AtomicU64,
+    pub mark_zero_lamport_single_ref_accounts_us: AtomicU64,
+    pub update_index_us: AtomicU64,
+    pub num_accounts_stored: AtomicU64,
+    pub num_zero_lamport_single_ref_accounts_marked: AtomicU64,
+}
+
+impl StoreAccountsForShrinkStats {
+    const REPORT_INTERVAL_MS: u64 = Duration::from_secs(1).as_millis() as u64;
+
+    pub fn report(&self) {
+        let should_report = self.last_report.should_update(Self::REPORT_INTERVAL_MS);
+        if !should_report {
+            return;
+        }
+
+        datapoint_info!(
+            "accounts_db_store_accounts_for_shrink",
+            (
+                "flush_read_cache_us",
+                self.flush_read_cache_us.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "write_to_storage_us",
+                self.write_to_storage_us.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "mark_zero_lamport_single_ref_accounts_us",
+                self.mark_zero_lamport_single_ref_accounts_us
+                    .swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "update_index_us",
+                self.update_index_us.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_accounts_stored",
+                self.num_accounts_stored.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_zero_lamport_single_ref_accounts_marked",
+                self.num_zero_lamport_single_ref_accounts_marked
+                    .swap(0, Ordering::Relaxed),
+                i64
+            ),
+        );
+    }
+}
+
+/// Stats from storing accounts for flush (i.e. flushing the write cache to a storage file)
+#[derive(Debug, Default)]
+pub struct StoreAccountsForFlushStats {
+    pub last_report: AtomicInterval,
     pub write_to_storage_us: AtomicU64,
     pub update_index_us: AtomicU64,
     pub mark_zero_lamport_single_ref_accounts_us: AtomicU64,
@@ -117,7 +175,7 @@ pub struct StoreAccountsFrozenStats {
     pub num_obsolete_bytes_removed: AtomicU64,
 }
 
-impl StoreAccountsFrozenStats {
+impl StoreAccountsForFlushStats {
     const REPORT_INTERVAL_MS: u64 = Duration::from_secs(1).as_millis() as u64;
 
     pub fn report(&self) {
@@ -127,12 +185,7 @@ impl StoreAccountsFrozenStats {
         }
 
         datapoint_info!(
-            "accounts_db_store_accounts_frozen",
-            (
-                "flush_read_cache_us",
-                self.flush_read_cache_us.swap(0, Ordering::Relaxed),
-                i64
-            ),
+            "accounts_db_store_accounts_for_flush",
             (
                 "write_to_storage_us",
                 self.write_to_storage_us.swap(0, Ordering::Relaxed),
@@ -397,16 +450,6 @@ impl LatestAccountsIndexRootsStats {
                 "append_vecs_dirty",
                 APPEND_VEC_STATS.files_dirty.load(Ordering::Relaxed),
                 i64
-            ),
-            (
-                "append_vecs_open_as_mmap",
-                APPEND_VEC_STATS.open_as_mmap.load(Ordering::Relaxed),
-                i64
-            ),
-            (
-                "append_vecs_open_as_file_io",
-                APPEND_VEC_STATS.open_as_file_io.load(Ordering::Relaxed),
-                i64
             )
         );
 
@@ -482,7 +525,6 @@ pub struct ShrinkStats {
     pub last_report: AtomicInterval,
     pub num_slots_shrunk: AtomicUsize,
     pub storage_read_elapsed: AtomicU64,
-    pub num_duplicated_accounts: AtomicU64,
     pub index_read_elapsed: AtomicU64,
     pub create_and_insert_store_elapsed: AtomicU64,
     pub store_accounts_elapsed: AtomicU64,
@@ -555,11 +597,6 @@ impl ShrinkStats {
                 (
                     "storage_read_elapsed",
                     self.storage_read_elapsed.swap(0, Ordering::Relaxed),
-                    i64
-                ),
-                (
-                    "num_duplicated_accounts",
-                    self.num_duplicated_accounts.swap(0, Ordering::Relaxed),
                     i64
                 ),
                 (
@@ -716,13 +753,6 @@ impl ShrinkAncientStats {
                 "storage_read_elapsed",
                 self.shrink_stats
                     .storage_read_elapsed
-                    .swap(0, Ordering::Relaxed),
-                i64
-            ),
-            (
-                "num_duplicated_accounts",
-                self.shrink_stats
-                    .num_duplicated_accounts
                     .swap(0, Ordering::Relaxed),
                 i64
             ),
@@ -947,4 +977,41 @@ pub struct WriteAccountsToCacheStats {
     pub num_ephemeral_accounts_skipped: u64,
     pub num_ancestors_zero_lamport_skipped: u64,
     pub account_data_bytes_stored: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct LoadAccountsStats {
+    pub num_loaded_from_write_cache: AtomicU64,
+    pub num_loaded_from_read_cache: AtomicU64,
+    pub num_loaded_from_index_cache: AtomicU64,
+    pub num_loaded_from_index_storage: AtomicU64,
+}
+
+impl LoadAccountsStats {
+    pub fn report(&self) {
+        datapoint_info!(
+            "accounts_db_load_accounts",
+            (
+                "num_loaded_from_write_cache",
+                self.num_loaded_from_write_cache.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_loaded_from_read_cache",
+                self.num_loaded_from_read_cache.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_loaded_from_index_cache",
+                self.num_loaded_from_index_cache.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_loaded_from_index_storage",
+                self.num_loaded_from_index_storage
+                    .swap(0, Ordering::Relaxed),
+                i64
+            ),
+        );
+    }
 }

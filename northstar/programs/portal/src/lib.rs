@@ -9,8 +9,8 @@ mod state;
 use {
     borsh::BorshDeserialize,
     pinocchio::{
-        MAX_TX_ACCOUNTS, ProgramResult, SUCCESS, account_info::AccountInfo,
-        entrypoint::deserialize, no_allocator, program_error::ProgramError,
+        account_info::AccountInfo, entrypoint::deserialize, no_allocator,
+        program_error::ProgramError, ProgramResult, SUCCESS,
     },
 };
 pub use {error::*, instruction::*, pda::*, state::*};
@@ -83,14 +83,21 @@ fn process_instruction(
     }
 }
 
+// Sonic: Portal instructions need far fewer accounts than the transaction-wide
+// maximum. Keeping the Pinocchio account scratch array at MAX_TX_ACCOUNTS burns
+// the SBF stack before dispatch and causes live-validator Portal calls to exhaust
+// compute units without logs. Sixteen accounts covers current Portal instructions,
+// including batched Delegate calls, while keeping the stack scratch space small.
 #[no_mangle]
 /// # Safety
 /// `input` must be a valid pointer to a serialized Solana program input buffer.
 pub unsafe extern "C" fn entrypoint(input: *mut u8) -> u64 {
+    const MAX_PORTAL_ACCOUNTS: usize = 16;
     const UNINIT: core::mem::MaybeUninit<AccountInfo> = core::mem::MaybeUninit::uninit();
-    let mut accounts_arr = [UNINIT; MAX_TX_ACCOUNTS];
+    let mut accounts_arr = [UNINIT; MAX_PORTAL_ACCOUNTS];
 
-    let (program_id, count, instruction_data) = deserialize(input, &mut accounts_arr);
+    let (program_id, count, instruction_data) =
+        deserialize::<MAX_PORTAL_ACCOUNTS>(input, &mut accounts_arr);
 
     let accounts: &[AccountInfo] =
         core::slice::from_raw_parts(accounts_arr.as_ptr() as *const AccountInfo, count);

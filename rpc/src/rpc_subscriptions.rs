@@ -137,7 +137,7 @@ impl std::fmt::Debug for NotificationEntry {
 fn check_commitment_and_notify<P, S, B, F, X, I>(
     params: &P,
     subscription: &SubscriptionInfo,
-    bank_forks: &Arc<RwLock<BankForks>>,
+    bank_forks: &RwLock<BankForks>,
     slot: Slot,
     bank_method: B,
     filter_results: F,
@@ -540,26 +540,6 @@ impl Drop for RpcSubscriptions {
 }
 
 impl RpcSubscriptions {
-    pub fn new(
-        exit: Arc<AtomicBool>,
-        max_complete_transaction_status_slot: Arc<AtomicU64>,
-        blockstore: Arc<Blockstore>,
-        bank_forks: Arc<RwLock<BankForks>>,
-        block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
-        optimistically_confirmed_bank: Arc<RwLock<OptimisticallyConfirmedBank>>,
-    ) -> Self {
-        Self::new_with_config(
-            exit,
-            max_complete_transaction_status_slot,
-            blockstore,
-            bank_forks,
-            block_commitment_cache,
-            optimistically_confirmed_bank,
-            &PubSubConfig::default(),
-            None,
-        )
-    }
-
     pub fn new_for_tests(
         exit: Arc<AtomicBool>,
         max_complete_transaction_status_slot: Arc<AtomicU64>,
@@ -719,13 +699,15 @@ impl RpcSubscriptions {
         let blockstore = Arc::new(blockstore);
         let optimistically_confirmed_bank =
             OptimisticallyConfirmedBank::locked_from_bank_forks_root(&bank_forks);
-        Self::new(
+        Self::new_with_config(
             Arc::new(AtomicBool::new(false)),
             max_complete_transaction_status_slot,
             blockstore,
             bank_forks,
             Arc::new(RwLock::new(BlockCommitmentCache::default())),
             optimistically_confirmed_bank,
+            &PubSubConfig::default_for_tests(),
+            None,
         )
     }
 
@@ -951,7 +933,7 @@ impl RpcSubscriptions {
     fn notify_watchers(
         max_complete_transaction_status_slot: Arc<AtomicU64>,
         subscriptions: &HashMap<SubscriptionId, Arc<SubscriptionInfo>>,
-        bank_forks: &Arc<RwLock<BankForks>>,
+        bank_forks: &RwLock<BankForks>,
         blockstore: &Blockstore,
         commitment_slots: &CommitmentSlots,
         notifier: &RpcNotifier,
@@ -1277,13 +1259,14 @@ pub(crate) mod tests {
         solana_commitment_config::CommitmentConfig,
         solana_keypair::Keypair,
         solana_ledger::get_tmp_ledger_path_auto_delete,
-        solana_message::Message,
+        solana_message::{Message, v0},
         solana_rpc_client_api::config::{
             RpcAccountInfoConfig, RpcBlockSubscribeConfig, RpcBlockSubscribeFilter,
             RpcProgramAccountsConfig, RpcSignatureSubscribeConfig, RpcTransactionLogsConfig,
             RpcTransactionLogsFilter,
         },
         solana_runtime::{
+            bank::SlotLeader,
             commitment::BlockCommitment,
             genesis_utils::{GenesisConfigInfo, create_genesis_config},
             prioritization_fee_cache::PrioritizationFeeCache,
@@ -1343,7 +1326,7 @@ pub(crate) mod tests {
         let blockhash = bank.last_blockhash();
         let bank_forks = BankForks::new_rw_arc(bank);
         let bank0 = bank_forks.read().unwrap().get(0).unwrap();
-        let bank1 = Bank::new_from_parent(bank0, &Pubkey::default(), 1);
+        let bank1 = Bank::new_from_parent(bank0, SlotLeader::default(), 1);
         bank_forks.write().unwrap().insert(bank1);
         let alice = Keypair::new();
 
@@ -1790,7 +1773,7 @@ pub(crate) mod tests {
                     pre_token_balances: None,
                     post_token_balances: None,
                     rewards: Some(vec![]),
-                    loaded_addresses: Default::default(),
+                    loaded_addresses: v0::LoadedAddresses::default(),
                     return_data: None,
                     compute_units_consumed: Some(0),
                     cost_units: None,
@@ -1817,7 +1800,7 @@ pub(crate) mod tests {
                     pre_token_balances: None,
                     post_token_balances: None,
                     rewards: Some(vec![]),
-                    loaded_addresses: Default::default(),
+                    loaded_addresses: v0::LoadedAddresses::default(),
                     return_data: None,
                     compute_units_consumed: Some(0),
                     cost_units: None,
@@ -2112,7 +2095,7 @@ pub(crate) mod tests {
         let bank_forks = BankForks::new_rw_arc(bank);
 
         let bank0 = bank_forks.read().unwrap().get(0).unwrap();
-        let bank1 = Bank::new_from_parent(bank0, &Pubkey::default(), 1);
+        let bank1 = Bank::new_from_parent(bank0, SlotLeader::default(), 1);
         bank_forks.write().unwrap().insert(bank1);
         let bank1 = bank_forks.read().unwrap().get(1).unwrap();
 
@@ -2129,7 +2112,7 @@ pub(crate) mod tests {
 
         bank1.process_transaction(&tx).unwrap();
 
-        let bank2 = Bank::new_from_parent(bank1, &Pubkey::default(), 2);
+        let bank2 = Bank::new_from_parent(bank1, SlotLeader::default(), 2);
         bank_forks.write().unwrap().insert(bank2);
 
         // add account for bob and process the transaction at bank2
@@ -2146,7 +2129,7 @@ pub(crate) mod tests {
 
         bank2.process_transaction(&tx).unwrap();
 
-        let bank3 = Bank::new_from_parent(bank2, &Pubkey::default(), 3);
+        let bank3 = Bank::new_from_parent(bank2, SlotLeader::default(), 3);
         bank_forks.write().unwrap().insert(bank3);
 
         // add account for joe and process the transaction at bank3
@@ -2314,7 +2297,7 @@ pub(crate) mod tests {
         let bank_forks = BankForks::new_rw_arc(bank);
 
         let bank0 = bank_forks.read().unwrap().get(0).unwrap();
-        let bank1 = Bank::new_from_parent(bank0, &Pubkey::default(), 1);
+        let bank1 = Bank::new_from_parent(bank0, SlotLeader::default(), 1);
         bank_forks.write().unwrap().insert(bank1);
         let bank1 = bank_forks.read().unwrap().get(1).unwrap();
 
@@ -2331,7 +2314,7 @@ pub(crate) mod tests {
 
         bank1.process_transaction(&tx).unwrap();
 
-        let bank2 = Bank::new_from_parent(bank1, &Pubkey::default(), 2);
+        let bank2 = Bank::new_from_parent(bank1, SlotLeader::default(), 2);
         bank_forks.write().unwrap().insert(bank2);
 
         // add account for bob and process the transaction at bank2
@@ -2433,7 +2416,7 @@ pub(crate) mod tests {
         let bank_forks = BankForks::new_rw_arc(bank);
 
         let bank0 = bank_forks.read().unwrap().get(0).unwrap();
-        let bank1 = Bank::new_from_parent(bank0, &Pubkey::default(), 1);
+        let bank1 = Bank::new_from_parent(bank0, SlotLeader::default(), 1);
         bank_forks.write().unwrap().insert(bank1);
         let bank1 = bank_forks.read().unwrap().get(1).unwrap();
 
@@ -2450,7 +2433,7 @@ pub(crate) mod tests {
 
         bank1.process_transaction(&tx).unwrap();
 
-        let bank2 = Bank::new_from_parent(bank1, &Pubkey::default(), 2);
+        let bank2 = Bank::new_from_parent(bank1, SlotLeader::default(), 2);
         bank_forks.write().unwrap().insert(bank2);
 
         // add account for bob and process the transaction at bank2
@@ -2558,7 +2541,7 @@ pub(crate) mod tests {
             })
         };
 
-        let bank3 = Bank::new_from_parent(bank2, &Pubkey::default(), 3);
+        let bank3 = Bank::new_from_parent(bank2, SlotLeader::default(), 3);
         bank_forks.write().unwrap().insert(bank3);
 
         // add account for joe and process the transaction at bank3
@@ -2645,7 +2628,7 @@ pub(crate) mod tests {
 
         let next_bank = Bank::new_from_parent(
             bank_forks.read().unwrap().get(0).unwrap(),
-            &solana_pubkey::new_rand(),
+            SlotLeader::new_unique(),
             1,
         );
         bank_forks.write().unwrap().insert(next_bank);
@@ -2953,12 +2936,14 @@ pub(crate) mod tests {
         let blockhash = bank.last_blockhash();
         let bank_forks = BankForks::new_rw_arc(bank);
         let bank0 = bank_forks.read().unwrap().get(0).unwrap();
-        let bank1 = Bank::new_from_parent(bank0.clone(), &Pubkey::default(), 1);
+        let bank1 = Bank::new_from_parent(bank0.clone(), SlotLeader::default(), 1);
         bank_forks.write().unwrap().insert(bank1);
-        let bank2 = Bank::new_from_parent(bank0, &Pubkey::default(), 2);
+        let bank2 = Bank::new_from_parent(bank0, SlotLeader::default(), 2);
         bank_forks.write().unwrap().insert(bank2);
 
-        let alice = Keypair::from_base58_string("sfLnS4rZ5a8gXke3aGxCgM6usFAVPxLUaBSRdssGY9uS5eoiEWQ41CqDcpXbcekpKsie8Lyy3LNFdhEvjUE1wd9");
+        let alice = Keypair::from_base58_string(
+            "sfLnS4rZ5a8gXke3aGxCgM6usFAVPxLUaBSRdssGY9uS5eoiEWQ41CqDcpXbcekpKsie8Lyy3LNFdhEvjUE1wd9",
+        );
 
         let optimistically_confirmed_bank =
             OptimisticallyConfirmedBank::locked_from_bank_forks_root(&bank_forks);

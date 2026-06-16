@@ -16,7 +16,6 @@ use {
         },
         blockstore_options::{AccessType, BlockstoreOptions, LedgerColumnOptions},
     },
-    bincode::deserialize,
     log::*,
     prost::Message,
     rocksdb::{
@@ -27,7 +26,6 @@ use {
         compaction_filter_factory::{CompactionFilterContext, CompactionFilterFactory},
         properties as RocksProperties,
     },
-    serde::de::DeserializeOwned,
     solana_clock::Slot,
     std::{
         collections::HashSet,
@@ -41,6 +39,7 @@ use {
             atomic::{AtomicU64, Ordering},
         },
     },
+    wincode::{SchemaReadOwned, deserialize},
 };
 
 const BLOCKSTORE_METRICS_ERROR: i64 = -1;
@@ -188,6 +187,11 @@ impl Rocks {
             new_cf_descriptor::<columns::BlockHeight>(options, oldest_slot),
             new_cf_descriptor::<columns::OptimisticSlots>(options, oldest_slot),
             new_cf_descriptor::<columns::MerkleRootMeta>(options, oldest_slot),
+            new_cf_descriptor::<columns::AlternateSlotMeta>(options, oldest_slot),
+            new_cf_descriptor::<columns::AlternateIndex>(options, oldest_slot),
+            new_cf_descriptor::<columns::AlternateShredData>(options, oldest_slot),
+            new_cf_descriptor::<columns::AlternateMerkleRootMeta>(options, oldest_slot),
+            new_cf_descriptor::<columns::DoubleMerkleMeta>(options, oldest_slot),
         ];
 
         // When remaining columns are optional we can just return immediately here.
@@ -232,7 +236,7 @@ impl Rocks {
         cf_descriptors
     }
 
-    const fn columns() -> [&'static str; 19] {
+    const fn columns() -> [&'static str; 24] {
         [
             columns::ErasureMeta::NAME,
             columns::DeadSlots::NAME,
@@ -253,6 +257,11 @@ impl Rocks {
             columns::BlockHeight::NAME,
             columns::OptimisticSlots::NAME,
             columns::MerkleRootMeta::NAME,
+            columns::AlternateSlotMeta::NAME,
+            columns::AlternateIndex::NAME,
+            columns::AlternateShredData::NAME,
+            columns::AlternateMerkleRootMeta::NAME,
+            columns::DoubleMerkleMeta::NAME,
         ]
     }
 
@@ -544,19 +553,16 @@ impl AsRef<[u8]> for BlockstoreByteReference<'_> {
 }
 
 impl WriteBatch {
-    fn put_cf<K: AsRef<[u8]>>(&mut self, cf: &ColumnFamily, key: K, value: &[u8]) -> Result<()> {
+    fn put_cf<K: AsRef<[u8]>>(&mut self, cf: &ColumnFamily, key: K, value: &[u8]) {
         self.write_batch.put_cf(cf, key, value);
-        Ok(())
     }
 
-    fn delete_cf<K: AsRef<[u8]>>(&mut self, cf: &ColumnFamily, key: K) -> Result<()> {
+    fn delete_cf<K: AsRef<[u8]>>(&mut self, cf: &ColumnFamily, key: K) {
         self.write_batch.delete_cf(cf, key);
-        Ok(())
     }
 
-    fn delete_range_cf<K: AsRef<[u8]>>(&mut self, cf: &ColumnFamily, from: K, to: K) -> Result<()> {
+    fn delete_range_cf<K: AsRef<[u8]>>(&mut self, cf: &ColumnFamily, from: K, to: K) {
         self.write_batch.delete_range_cf(cf, from, to);
-        Ok(())
     }
 }
 
@@ -572,6 +578,26 @@ where
 
         let key = <C as Column>::key(&index);
         let result = self.backend.get_cf(self.handle(), key);
+
+        if let Some(op_start_instant) = is_perf_enabled {
+            report_rocksdb_read_perf(
+                C::NAME,
+                PERF_METRIC_OP_NAME_GET,
+                &op_start_instant.elapsed(),
+                &self.column_options,
+            );
+        }
+        result
+    }
+
+    pub fn get_slice(&self, index: C::Index) -> Result<Option<DBPinnableSlice<'_>>> {
+        let is_perf_enabled = maybe_enable_rocksdb_perf(
+            self.column_options.rocks_perf_sample_interval,
+            &self.read_perf_status,
+        );
+
+        let key = <C as Column>::key(&index);
+        let result = self.backend.get_pinned_cf(self.handle(), key);
 
         if let Some(op_start_instant) = is_perf_enabled {
             report_rocksdb_read_perf(
@@ -695,14 +721,9 @@ where
         result
     }
 
-    pub fn put_bytes_in_batch(
-        &self,
-        batch: &mut WriteBatch,
-        index: C::Index,
-        value: &[u8],
-    ) -> Result<()> {
+    pub fn put_bytes_in_batch(&self, batch: &mut WriteBatch, index: C::Index, value: &[u8]) {
         let key = <C as Column>::key(&index);
-        batch.put_cf(self.handle(), key, value)
+        batch.put_cf(self.handle(), key, value);
     }
 
     /// Retrieves the specified RocksDB integer property of the current
@@ -734,15 +755,15 @@ where
         result
     }
 
-    pub fn delete_in_batch(&self, batch: &mut WriteBatch, index: C::Index) -> Result<()> {
+    pub fn delete_in_batch(&self, batch: &mut WriteBatch, index: C::Index) {
         let key = <C as Column>::key(&index);
-        batch.delete_cf(self.handle(), key)
+        batch.delete_cf(self.handle(), key);
     }
 
     /// Adds a \[`from`, `to`\] range that deletes all entries between the `from` slot
     /// and `to` slot inclusively.  If `from` slot and `to` slot are the same, then all
     /// entries in that slot will be removed.
-    pub fn delete_range_in_batch(&self, batch: &mut WriteBatch, from: Slot, to: Slot) -> Result<()>
+    pub fn delete_range_in_batch(&self, batch: &mut WriteBatch, from: Slot, to: Slot)
     where
         C: Column + ColumnName,
     {
@@ -753,7 +774,7 @@ where
         // adjusting the `to` slot range by 1.
         let from_key = <C as Column>::key(&C::as_index(from));
         let to_key = <C as Column>::key(&C::as_index(to.saturating_add(1)));
-        batch.delete_range_cf(self.handle(), from_key, to_key)
+        batch.delete_range_cf(self.handle(), from_key, to_key);
     }
 
     /// Delete files whose slot range is within \[`from`, `to`\].
@@ -858,7 +879,8 @@ where
     ) -> Result<()> {
         let key = <C as Column>::key(&index);
         let serialized_value = C::serialize(value)?;
-        batch.put_cf(self.handle(), key, &serialized_value)
+        batch.put_cf(self.handle(), key, &serialized_value);
+        Ok(())
     }
 }
 
@@ -866,15 +888,19 @@ impl<C> LedgerColumn<C>
 where
     C: ProtobufColumn + ColumnName,
 {
-    pub fn get_protobuf_or_bincode<T: DeserializeOwned + Into<C::Type>>(
+    pub fn get_protobuf_or_wincode<
+        T: SchemaReadOwned<wincode::config::DefaultConfig, Dst = T> + Into<C::Type>,
+    >(
         &self,
         index: C::Index,
     ) -> Result<Option<C::Type>> {
         let key = <C as Column>::key(&index);
-        self.get_raw_protobuf_or_bincode::<T>(key)
+        self.get_raw_protobuf_or_wincode::<T>(key)
     }
 
-    pub(crate) fn get_raw_protobuf_or_bincode<T: DeserializeOwned + Into<C::Type>>(
+    pub(crate) fn get_raw_protobuf_or_wincode<
+        T: SchemaReadOwned<wincode::config::DefaultConfig, Dst = T> + Into<C::Type>,
+    >(
         &self,
         key: impl AsRef<[u8]>,
     ) -> Result<Option<C::Type>> {

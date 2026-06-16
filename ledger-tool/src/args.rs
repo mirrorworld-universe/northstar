@@ -4,12 +4,12 @@ use {
     log::*,
     solana_account_decoder::{UiAccountEncoding, UiDataSliceConfig},
     solana_accounts_db::{
-        accounts_db::AccountsDbConfig,
-        accounts_file::StorageAccess,
+        accounts_db::{AccountShrinkThreshold, AccountsDbConfig},
         accounts_index::{
             AccountsIndexConfig, DEFAULT_NUM_ENTRIES_OVERHEAD, DEFAULT_NUM_ENTRIES_TO_EVICT,
             IndexLimit, IndexLimitThreshold, ScanFilter,
         },
+        partitioned_rewards::PartitionedEpochRewardsConfig,
     },
     solana_clap_utils::{
         hidden_unless_forced,
@@ -18,7 +18,6 @@ use {
     },
     solana_cli_output::CliAccountNewConfig,
     solana_clock::Slot,
-    solana_core::resource_limits,
     solana_ledger::{
         blockstore_processor::ProcessOptions,
         use_snapshot_archives_at_startup::{self, UseSnapshotArchivesAtStartup},
@@ -84,9 +83,9 @@ pub fn accounts_db_args<'a, 'b>() -> Box<[Arg<'a, 'b>]> {
                 "Sets the memory limit for the accounts index. The size options will limit the \
                  accounts index memory to the specified value. E.g. \"50GB\" means the accounts \
                  index may use up to 50 GB of memory. The \"unlimited\" option keeps the entire \
-                 accounts index in memory. The \"minimal\" option reduces memory usage as much as \
-                 possible. All index entries that are not in memory are kept in the disk-backed \
-                 index. The disk-backed index has lower performance; prefer higher limits here.",
+                 accounts index in memory. All index entries that are not in memory are kept in \
+                 the disk-backed index. The disk-backed index has lower performance; prefer \
+                 higher explicit limits here.",
             ),
         Arg::with_name("accounts_db_skip_shrink")
             .long("accounts-db-skip-shrink")
@@ -135,7 +134,11 @@ pub fn accounts_db_args<'a, 'b>() -> Box<[Arg<'a, 'b>]> {
             .value_name("METHOD")
             .takes_value(true)
             .possible_values(&["mmap", "file"])
-            .help("Access account storages using this method"),
+            .help(
+                "[DEPRECATED] Access account storages using this method. This flag is now a \
+                 no-op: storages are always accessed via file I/O. The flag is preserved for \
+                 backward compatibility and will be removed in a future release.",
+            ),
         Arg::with_name("accounts_db_ancient_storage_ideal_size")
             .long("accounts-db-ancient-storage-ideal-size")
             .value_name("BYTES")
@@ -285,12 +288,16 @@ pub fn get_accounts_db_config(
         value_t!(arg_matches, "accounts_index_limit", String).unwrap_or_else(|err| err.exit());
     let index_limit = {
         enum CliIndexLimit {
+            // deprecated in v4.1.0
             Minimal,
             Unlimited,
             Threshold(u64),
         }
         let cli_index_limit = match accounts_index_limit.as_str() {
-            "minimal" => CliIndexLimit::Minimal,
+            "minimal" => {
+                warn!("Using `minimal` for `--accounts-index-limit` is deprecated.");
+                CliIndexLimit::Minimal
+            }
             "unlimited" => CliIndexLimit::Unlimited,
             "25GB" => CliIndexLimit::Threshold(25_000_000_000),
             "50GB" => CliIndexLimit::Threshold(50_000_000_000),
@@ -325,21 +332,18 @@ pub fn get_accounts_db_config(
         ..AccountsIndexConfig::default()
     };
 
-    let storage_access = arg_matches
+    // The `--accounts-db-access-storages-method` flag is now a no-op. Storages are
+    // always accessed via file I/O. The flag is preserved for backward compatibility,
+    // but the value is ignored with a warning.
+    if arg_matches
         .value_of("accounts_db_access_storages_method")
-        .map(|method| match method {
-            "mmap" => {
-                warn!("Using `mmap` for `--accounts-db-access-storages-method` is now deprecated.");
-                #[allow(deprecated)]
-                StorageAccess::Mmap
-            }
-            "file" => StorageAccess::File,
-            _ => {
-                // clap will enforce one of the above values is given
-                unreachable!("invalid value given to accounts-db-access-storages-method")
-            }
-        })
-        .unwrap_or_default();
+        .is_some()
+    {
+        warn!(
+            "`--accounts-db-access-storages-method` is now a no-op; storages are always accessed \
+             via file I/O."
+        );
+    }
 
     let scan_filter_for_shrinking = arg_matches
         .value_of("accounts_db_scan_filter_for_shrinking")
@@ -356,7 +360,13 @@ pub fn get_accounts_db_config(
 
     AccountsDbConfig {
         index: Some(accounts_index_config),
+        account_indexes: None,
         bank_hash_details_dir: ledger_tool_ledger_path,
+        shrink_ratio: AccountShrinkThreshold::default(),
+        read_cache_limit_bytes: None,
+        read_cache_evict_sample_size: None,
+        read_cache_num_shards: None,
+        write_cache_limit_bytes: None,
         ancient_append_vec_offset: value_t!(arg_matches, "accounts_db_ancient_append_vecs", i64)
             .ok(),
         ancient_storage_ideal_size: value_t!(
@@ -368,13 +378,10 @@ pub fn get_accounts_db_config(
         max_ancient_storages: value_t!(arg_matches, "accounts_db_max_ancient_storages", usize).ok(),
         exhaustively_verify_refcounts: arg_matches.is_present("accounts_db_verify_refcounts"),
         skip_initial_hash_calc: arg_matches.is_present("accounts_db_skip_initial_hash_calculation"),
-        storage_access,
+        partitioned_epoch_rewards_config: PartitionedEpochRewardsConfig::default(),
         scan_filter_for_shrinking,
-        use_registered_io_uring_buffers: resource_limits::check_memlock_limit_for_disk_io(
-            solana_accounts_db::accounts_db::TOTAL_IO_URING_BUFFERS_SIZE_LIMIT,
-        ),
-        snapshots_use_direct_io: !arg_matches.is_present("no_accounts_db_snapshots_direct_io"),
-        ..AccountsDbConfig::default()
+        num_background_threads: None,
+        num_foreground_threads: None,
     }
 }
 

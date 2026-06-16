@@ -2,14 +2,16 @@
 use {
     crate::{
         blockstore::error::Result,
-        blockstore_meta::{self},
+        blockstore_meta::{self, BlockLocation, PerfSample},
     },
-    bincode::Options as BincodeOptions,
-    serde::{Serialize, de::DeserializeOwned},
     solana_clock::{Slot, UnixTimestamp},
+    solana_hash::{HASH_BYTES, Hash},
     solana_pubkey::{PUBKEY_BYTES, Pubkey},
     solana_signature::{SIGNATURE_BYTES, Signature},
     solana_storage_proto::convert::generated,
+    wincode::{
+        ReadError, SchemaRead, SchemaReadOwned, SchemaWrite, config::DefaultConfig, io::Reader,
+    },
 };
 
 pub(crate) const DEPRECATED_PROGRAM_COSTS_COLUMN_NAME: &str = "program_costs";
@@ -38,6 +40,16 @@ pub mod columns {
     /// * index type: `u64` (see [`SlotColumn`])
     /// * value type: [`blockstore_meta::SlotMeta`]
     pub struct SlotMeta;
+
+    #[derive(Debug)]
+    /// The alternate slot metadata column.
+    ///
+    /// Similar to [`SlotMeta`], however this column is only populated for alternate
+    /// versions fetched via block_id based repair.
+    ///
+    /// * index type: `(slot: u64, block_id: Hash)`
+    /// * value type: [`blockstore_meta::SlotMeta`]
+    pub struct AlternateSlotMeta;
 
     #[derive(Debug)]
     /// The orphans column.
@@ -121,6 +133,16 @@ pub mod columns {
     pub struct Index;
 
     #[derive(Debug)]
+    /// The alternate index column.
+    ///
+    /// Similar to [`Index`], however this column is only populated for alternate
+    /// versions fetched via block_id based repair.
+    ///
+    /// * index type: `(slot: u64, block_id: Hash)`
+    /// * value type: [`blockstore_meta::Index`]
+    pub struct AlternateIndex;
+
+    #[derive(Debug)]
     /// The shred data column
     ///
     /// * index type: `(u64, u64)`
@@ -133,6 +155,16 @@ pub mod columns {
     /// * index type: `(u64, u64)`
     /// * value type: [`Vec<u8>`]
     pub struct ShredCode;
+
+    #[derive(Debug)]
+    /// The alternate shred data column
+    ///
+    /// Similar to [`ShredData`], however this column is only populated for alternate
+    /// versions fetched via block_id based repair.
+    ///
+    /// * index type: `(slot: u64, block_id: Hash, shred_index: u64)`
+    /// * value type: [`Vec<u8>`]
+    pub struct AlternateShredData;
 
     #[derive(Debug)]
     /// The transaction status column
@@ -200,8 +232,28 @@ pub mod columns {
     /// Its index type is (Slot, fec_set_index).
     ///
     /// * index type: `crate::shred::ErasureSetId` `(Slot, fec_set_index: u32)`
-    /// * value type: [`blockstore_meta::MerkleRootMeta`]`
+    /// * value type: [`blockstore_meta::MerkleRootMeta`]
     pub struct MerkleRootMeta;
+
+    #[derive(Debug)]
+    /// The alternate merkle root meta column
+    ///
+    /// Similar to [`MerkleRootMeta`], however this column is only populated for alternate
+    /// versions fetched via block_id based repair.
+    ///
+    /// * index type: `(slot: u64, block_id: Hash, fec_set_index: u32)`
+    /// * value type: [`blockstore_meta::MerkleRootMeta`]
+    pub struct AlternateMerkleRootMeta;
+
+    #[derive(Debug)]
+    /// The double merkle root metadata column
+    ///
+    /// This column stores details about the double merkle root of a block.
+    /// We update this column when we finish ingesting all the shreds of the block.
+    ///
+    /// * index type: `(Slot, BlockLocation)`
+    /// * value type: [`blockstore_meta::DoubleMerkleMeta`]
+    pub struct DoubleMerkleMeta;
 }
 
 macro_rules! convert_column_index_to_key_bytes {
@@ -217,6 +269,20 @@ macro_rules! convert_column_key_bytes_to_index {
     ($k:ident, $($a:literal..$b:literal => $f:expr),* $(,)?) => {{
         ($($f(<[u8; $b-$a]>::try_from(&$k[$a..$b]).unwrap())),*)
     }};
+}
+
+// TODO: replace with dedicated wincode API on wincode>=0.5.1
+fn deserialize_reject_trailing<'de, T>(src: &'de [u8]) -> Result<T>
+where
+    T: SchemaRead<'de, DefaultConfig, Dst = T>,
+{
+    let mut reader = src;
+    let value = <T as SchemaRead<'de, DefaultConfig>>::get(reader.by_ref())?;
+    if reader.is_empty() {
+        Ok(value)
+    } else {
+        Err(ReadError::Custom("trailing bytes").into())
+    }
 }
 
 pub trait Column {
@@ -242,14 +308,17 @@ pub trait ColumnName {
 
 // Columns that serialize data on insertion and deserialize on fetch
 pub trait TypedColumn: Column {
-    type Type: Serialize + DeserializeOwned;
+    type Type: SchemaWrite<DefaultConfig, Src = Self::Type>
+        + SchemaReadOwned<DefaultConfig, Dst = Self::Type>;
 
+    #[inline]
     fn deserialize(data: &[u8]) -> Result<Self::Type> {
-        Ok(bincode::deserialize(data)?)
+        Ok(wincode::deserialize(data)?)
     }
 
+    #[inline]
     fn serialize(data: &Self::Type) -> Result<Vec<u8>> {
-        Ok(bincode::serialize(data)?)
+        Ok(wincode::serialize(data)?)
     }
 }
 
@@ -430,6 +499,10 @@ impl ColumnName for columns::PerfSamples {
     const NAME: &'static str = "perf_samples";
 }
 
+impl TypedColumn for columns::PerfSamples {
+    type Type = PerfSample;
+}
+
 impl SlotColumn for columns::BlockHeight {}
 impl ColumnName for columns::BlockHeight {
     const NAME: &'static str = "block_height";
@@ -495,6 +568,39 @@ impl ColumnName for columns::ShredData {
     const NAME: &'static str = "data_shred";
 }
 
+impl Column for columns::AlternateShredData {
+    type Index = (Slot, /* block_id */ Hash, /* shred index: */ u64);
+    type Key = [u8; std::mem::size_of::<Slot>() + std::mem::size_of::<u64>() + HASH_BYTES];
+
+    #[inline]
+    fn key((slot, block_id, index): &Self::Index) -> Self::Key {
+        convert_column_index_to_key_bytes!(Key,
+            ..8 => &slot.to_be_bytes(),
+            8..40 => &block_id.to_bytes(),
+            40.. => &index.to_be_bytes(),
+        )
+    }
+
+    fn index(key: &[u8]) -> Self::Index {
+        convert_column_key_bytes_to_index!(key,
+            0..8  => Slot::from_be_bytes,
+            8..40 => Hash::new_from_array, // block_id
+            40..48 => u64::from_be_bytes,  // shred index
+        )
+    }
+
+    fn slot(index: Self::Index) -> Slot {
+        index.0
+    }
+
+    fn as_index(slot: Slot) -> Self::Index {
+        (slot, Hash::default(), 0)
+    }
+}
+impl ColumnName for columns::AlternateShredData {
+    const NAME: &'static str = "alt_data_shred";
+}
+
 impl SlotColumn for columns::Index {}
 impl ColumnName for columns::Index {
     const NAME: &'static str = "index";
@@ -502,13 +608,42 @@ impl ColumnName for columns::Index {
 impl TypedColumn for columns::Index {
     type Type = blockstore_meta::Index;
 
+    #[inline]
     fn deserialize(data: &[u8]) -> Result<Self::Type> {
-        let config = bincode::DefaultOptions::new()
-            // `bincode::serialize` uses fixint encoding by default, so we need to use the same here
-            .with_fixint_encoding()
-            .reject_trailing_bytes();
+        deserialize_reject_trailing(data)
+    }
+}
 
-        Ok(config.deserialize(data)?)
+impl Column for columns::AlternateIndex {
+    // AlternateIndex and AlternateSlotMeta share the same key type so reuse code here
+    type Index = <columns::AlternateSlotMeta as Column>::Index;
+    type Key = <columns::AlternateSlotMeta as Column>::Key;
+
+    #[inline]
+    fn key(index: &Self::Index) -> Self::Key {
+        <columns::AlternateSlotMeta as Column>::key(index)
+    }
+
+    fn index(key: &[u8]) -> Self::Index {
+        <columns::AlternateSlotMeta as Column>::index(key)
+    }
+
+    fn slot(index: Self::Index) -> Slot {
+        <columns::AlternateSlotMeta as Column>::slot(index)
+    }
+
+    fn as_index(slot: Slot) -> Self::Index {
+        <columns::AlternateSlotMeta as Column>::as_index(slot)
+    }
+}
+impl ColumnName for columns::AlternateIndex {
+    const NAME: &'static str = "alt_index";
+}
+impl TypedColumn for columns::AlternateIndex {
+    type Type = <columns::Index as TypedColumn>::Type;
+
+    fn deserialize(data: &[u8]) -> Result<Self::Type> {
+        <columns::Index as TypedColumn>::deserialize(data)
     }
 }
 
@@ -558,6 +693,40 @@ impl ColumnName for columns::SlotMeta {
 }
 impl TypedColumn for columns::SlotMeta {
     type Type = blockstore_meta::SlotMeta;
+}
+
+impl Column for columns::AlternateSlotMeta {
+    type Index = (Slot, /* block_id */ Hash);
+    type Key = [u8; std::mem::size_of::<Slot>() + HASH_BYTES];
+
+    #[inline]
+    fn key((slot, block_id): &Self::Index) -> Self::Key {
+        convert_column_index_to_key_bytes!(Key,
+            ..8 => &slot.to_be_bytes(),
+            8.. => &block_id.to_bytes(),
+        )
+    }
+
+    fn index(key: &[u8]) -> Self::Index {
+        convert_column_key_bytes_to_index!(key,
+            0..8  => Slot::from_be_bytes,
+            8..40 => Hash::new_from_array,
+        )
+    }
+
+    fn slot(index: Self::Index) -> Slot {
+        index.0
+    }
+
+    fn as_index(slot: Slot) -> Self::Index {
+        (slot, Hash::default())
+    }
+}
+impl ColumnName for columns::AlternateSlotMeta {
+    const NAME: &'static str = "alt_meta";
+}
+impl TypedColumn for columns::AlternateSlotMeta {
+    type Type = <columns::SlotMeta as TypedColumn>::Type;
 }
 
 impl Column for columns::ErasureMeta {
@@ -637,12 +806,89 @@ impl TypedColumn for columns::MerkleRootMeta {
     type Type = blockstore_meta::MerkleRootMeta;
 }
 
+impl Column for columns::AlternateMerkleRootMeta {
+    type Index = (Slot, /* block_id */ Hash, /*fec_set_index:*/ u32);
+    type Key = [u8; std::mem::size_of::<Slot>() + std::mem::size_of::<u32>() + HASH_BYTES];
+
+    #[inline]
+    fn key((slot, block_id, fec_set_index): &Self::Index) -> Self::Key {
+        convert_column_index_to_key_bytes!(Key,
+            ..8 => &slot.to_be_bytes(),
+            8..40 => &block_id.to_bytes(),
+            40.. => &fec_set_index.to_be_bytes(),
+        )
+    }
+
+    fn index(key: &[u8]) -> Self::Index {
+        convert_column_key_bytes_to_index!(key,
+            0..8  => Slot::from_be_bytes,
+            8..40 => Hash::new_from_array, // block_id
+            40..44 => u32::from_be_bytes,  // fec_set_index
+        )
+    }
+
+    fn slot((slot, _block_id, _fec_set_index): Self::Index) -> Slot {
+        slot
+    }
+
+    fn as_index(slot: Slot) -> Self::Index {
+        (slot, Hash::default(), 0)
+    }
+}
+
+impl ColumnName for columns::AlternateMerkleRootMeta {
+    const NAME: &'static str = "alt_merkle_root_meta";
+}
+impl TypedColumn for columns::AlternateMerkleRootMeta {
+    type Type = blockstore_meta::MerkleRootMeta;
+}
+
+impl Column for columns::DoubleMerkleMeta {
+    type Index = (Slot, BlockLocation);
+    // Key size: Slot (8 bytes) + Hash (32 bytes)
+    // When BlockLocation::Original, the hash is Hash::default().
+    type Key = [u8; std::mem::size_of::<Slot>() + HASH_BYTES];
+
+    #[inline]
+    fn key((slot, location): &Self::Index) -> Self::Key {
+        debug_assert_eq!(std::mem::size_of::<Slot>(), 8);
+        convert_column_index_to_key_bytes!(Key,
+            ..8 => &slot.to_be_bytes(),
+            8.. => &location.as_bytes()
+        )
+    }
+
+    fn index(key: &[u8]) -> Self::Index {
+        convert_column_key_bytes_to_index!(key,
+            0..8 => Slot::from_be_bytes,
+            8..40 => BlockLocation::from_bytes,
+        )
+    }
+
+    fn as_index(slot: Slot) -> Self::Index {
+        (slot, BlockLocation::Original)
+    }
+
+    fn slot((slot, _location): Self::Index) -> Slot {
+        slot
+    }
+}
+
+impl ColumnName for columns::DoubleMerkleMeta {
+    const NAME: &'static str = "double_merkle_meta";
+}
+
+impl TypedColumn for columns::DoubleMerkleMeta {
+    type Type = blockstore_meta::DoubleMerkleMeta;
+}
+
 #[cfg(test)]
 mod tests {
     use {
         super::*,
-        crate::blockstore_meta::{ConnectedFlags, SlotMetaV3},
+        crate::blockstore_meta::{CompletedDataIndexes, ConnectedFlags},
         solana_hash::Hash,
+        wincode,
     };
 
     #[test]
@@ -657,6 +903,8 @@ mod tests {
             next_slots: vec![43, 44],
             connected_flags: ConnectedFlags::CONNECTED | ConnectedFlags::PARENT_CONNECTED,
             completed_data_indexes: [0u32, 5, 10].into_iter().collect(),
+            parent_block_id: Hash::new_unique(),
+            replay_fec_set_index: 7,
         };
 
         let bytes = <columns::SlotMeta as TypedColumn>::serialize(&meta).unwrap();
@@ -665,10 +913,8 @@ mod tests {
     }
 
     #[test]
-    fn test_slot_meta_column_deserialize_v2_from_v3_bytes() {
-        use bincode::Options;
-
-        let meta_v3 = SlotMetaV3 {
+    fn test_slot_meta_column_deserialize_from_v2_bytes() {
+        let v2 = blockstore_meta::SlotMetaV2 {
             slot: 42,
             consumed: 10,
             received: 15,
@@ -678,23 +924,58 @@ mod tests {
             next_slots: vec![43, 44],
             connected_flags: ConnectedFlags::CONNECTED | ConnectedFlags::PARENT_CONNECTED,
             completed_data_indexes: [0u32, 5, 10].into_iter().collect(),
+        };
+        let v2_bytes = wincode::serialize(&v2).unwrap();
+
+        let deserialized = <columns::SlotMeta as TypedColumn>::deserialize(&v2_bytes).unwrap();
+        let expected = blockstore_meta::SlotMeta {
+            slot: 42,
+            consumed: 10,
+            received: 15,
+            first_shred_timestamp: 1234567890,
+            last_index: Some(14),
+            parent_slot: Some(41),
+            next_slots: vec![43, 44],
+            connected_flags: ConnectedFlags::CONNECTED | ConnectedFlags::PARENT_CONNECTED,
+            completed_data_indexes: [0u32, 5, 10].into_iter().collect(),
+            ..Default::default()
+        };
+        assert_eq!(deserialized, expected);
+    }
+
+    #[test]
+    fn test_default_wincode_deserialize_handles_v2_bytes() {
+        let v2 = blockstore_meta::SlotMetaV2 {
+            slot: 1,
+            consumed: 0,
+            received: 0,
+            first_shred_timestamp: 0,
+            last_index: None,
+            parent_slot: Some(0),
+            next_slots: vec![],
+            connected_flags: ConnectedFlags::empty(),
+            completed_data_indexes: CompletedDataIndexes::default(),
+        };
+        let v2_bytes = wincode::serialize(&v2).unwrap();
+        let deserialized = wincode::deserialize::<blockstore_meta::SlotMeta>(&v2_bytes).unwrap();
+        assert_eq!(deserialized.parent_block_id, Hash::default());
+        assert_eq!(deserialized.replay_fec_set_index, 0);
+
+        let v3 = blockstore_meta::SlotMeta {
+            slot: 1,
+            consumed: 0,
+            received: 0,
+            first_shred_timestamp: 0,
+            last_index: None,
+            parent_slot: Some(0),
+            next_slots: vec![],
+            connected_flags: ConnectedFlags::empty(),
+            completed_data_indexes: CompletedDataIndexes::default(),
             parent_block_id: Hash::new_unique(),
             replay_fec_set_index: 7,
         };
-        let v3_bytes = bincode::serialize(&meta_v3).unwrap();
-
-        let expected = blockstore_meta::SlotMeta::from(meta_v3);
-
-        let config = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .reject_trailing_bytes();
-        assert!(
-            config
-                .deserialize::<blockstore_meta::SlotMeta>(&v3_bytes)
-                .is_err()
-        );
-
-        let deserialized = <columns::SlotMeta as TypedColumn>::deserialize(&v3_bytes).unwrap();
-        assert_eq!(expected, deserialized);
+        let v3_bytes = wincode::serialize(&v3).unwrap();
+        let deserialized = wincode::deserialize::<blockstore_meta::SlotMeta>(&v3_bytes).unwrap();
+        assert_eq!(deserialized, v3);
     }
 }

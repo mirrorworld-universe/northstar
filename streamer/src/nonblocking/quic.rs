@@ -5,28 +5,28 @@ use {
             qos::{ConnectionContext, OpaqueStreamerCounter, QosController},
         },
         quic::{QuicServerError, QuicStreamerConfig, StreamerStats, configure_server},
+        quic_socket::{QuicSocket, QuicXdpSocketParts, QuicXdpTxSocket},
         streamer::StakedNodes,
     },
     bytes::{BufMut, Bytes, BytesMut},
     crossbeam_channel::{Sender, TrySendError},
     futures::{Future, StreamExt as _, stream::FuturesUnordered},
     indexmap::map::{Entry, IndexMap},
-    quinn::{Accept, Connecting, Connection, Endpoint, EndpointConfig, TokioRuntime},
+    quinn::{
+        Accept, AsyncUdpSocket, Connecting, Connection, Endpoint, EndpointConfig, TokioRuntime,
+    },
     rand::{Rng, rng},
     smallvec::SmallVec,
     solana_keypair::Keypair,
-    solana_measure::measure::Measure,
     solana_net_utils::token_bucket::TokenBucket,
-    solana_packet::{Meta, PACKET_DATA_SIZE},
+    solana_packet::Meta,
     solana_perf::packet::{BytesPacket, PacketBatch},
     solana_pubkey::Pubkey,
-    solana_signature::Signature,
-    solana_tls_utils::get_pubkey_from_tls_certificate,
-    solana_transaction_metrics_tracker::signature_if_should_track_packet,
+    solana_tls_utils::get_remote_pubkey,
     std::{
         array, fmt,
         iter::repeat_with,
-        net::{IpAddr, SocketAddr, UdpSocket},
+        net::{IpAddr, SocketAddr},
         pin::Pin,
         sync::{
             Arc, RwLock,
@@ -86,6 +86,13 @@ pub(crate) const MAX_RTT: Duration = Duration::from_millis(320);
 /// as this would break some BDP calculations and assign zero bandwidth
 pub(crate) const MIN_RTT: Duration = Duration::from_millis(2);
 
+/// How many RTTs worth of delay can we tolerate on stream reassembly
+/// before considering stream to be "too late". 1.5 RTT should be enough
+/// for any reasonable fragmentation to be resolved, so the only way
+/// a stream reassembly would be delayed more is when something
+/// extraordinary has occured (congestion control or flow control blocking)
+const LATE_REASSEMBLY_THRESHOLD: f32 = 1.5;
+
 // A struct to accumulate the bytes making up
 // a packet, along with their offsets, and the
 // packet metadata. We use this accumulator to avoid
@@ -133,11 +140,11 @@ pub struct SpawnNonBlockingServerResult {
 pub(crate) fn spawn_server<Q, C>(
     name: &'static str,
     stats: Arc<StreamerStats>,
-    sockets: impl IntoIterator<Item = UdpSocket>,
+    sockets: impl IntoIterator<Item = QuicSocket>,
     keypair: &Keypair,
     packet_sender: Sender<PacketBatch>,
     quic_server_params: QuicStreamerConfig,
-    qos: Arc<Q>,
+    qos: Q,
     cancel: CancellationToken,
 ) -> Result<SpawnNonBlockingServerResult, QuicServerError>
 where
@@ -146,39 +153,49 @@ where
 {
     let sockets: Vec<_> = sockets.into_iter().collect();
     info!("Start {name} quic server on {sockets:?}");
-    let (config, _) = configure_server(keypair)?;
+    let (config, _) = configure_server(keypair, &quic_server_params)?;
 
     let endpoints = sockets
         .into_iter()
-        .map(|sock| {
-            Endpoint::new(
+        .map(|sock| match sock {
+            QuicSocket::Kernel(socket) => Endpoint::new(
                 EndpointConfig::default(),
                 Some(config.clone()),
-                sock,
+                socket,
                 Arc::new(TokioRuntime),
             )
-            .map_err(QuicServerError::EndpointFailed)
+            .map_err(QuicServerError::EndpointFailed),
+            QuicSocket::Xdp(QuicXdpSocketParts {
+                socket,
+                fallback_src_ip,
+                xdp_sender,
+            }) => {
+                let socket = Arc::new(
+                    QuicXdpTxSocket::new(socket, fallback_src_ip, xdp_sender)
+                        .map_err(QuicServerError::EndpointFailed)?,
+                ) as Arc<dyn AsyncUdpSocket>;
+                Endpoint::new_with_abstract_socket(
+                    EndpointConfig::default(),
+                    Some(config.clone()),
+                    socket,
+                    Arc::new(TokioRuntime),
+                )
+                .map_err(QuicServerError::EndpointFailed)
+            }
         })
         .collect::<Result<Vec<_>, _>>()?;
 
     let max_concurrent_connections = qos.max_concurrent_connections();
     let handle = tokio::spawn({
-        let endpoints = endpoints.clone();
-        let stats = stats.clone();
-        async move {
-            let tasks = run_server(
-                name,
-                endpoints.clone(),
-                packet_sender,
-                stats.clone(),
-                quic_server_params,
-                cancel,
-                qos,
-            )
-            .await;
-            tasks.close();
-            tasks.wait().await;
-        }
+        run_server(
+            name,
+            endpoints.clone(),
+            packet_sender,
+            stats.clone(),
+            quic_server_params,
+            cancel,
+            qos,
+        )
     });
 
     Ok(SpawnNonBlockingServerResult {
@@ -242,8 +259,8 @@ async fn run_server<Q, C>(
     stats: Arc<StreamerStats>,
     quic_server_params: QuicStreamerConfig,
     cancel: CancellationToken,
-    qos: Arc<Q>,
-) -> TaskTracker
+    qos: Q,
+) -> ()
 where
     Q: QosController<C> + Send + Sync + 'static,
     C: ConnectionContext + Send + Sync + 'static,
@@ -280,7 +297,9 @@ where
             })
         })
         .collect::<FuturesUnordered<_>>();
-
+    let mut qos = qos;
+    qos.spawn_background_tasks();
+    let qos = Arc::new(qos);
     let tasks = TaskTracker::new();
     loop {
         let timeout_connection = select! {
@@ -310,6 +329,16 @@ where
         }
 
         if let Ok(Some(incoming)) = timeout_connection {
+            // our connection/handshake abuse mitigation policy is one of shed
+            // fast and bound resource consumption. attempting to be "smarter"
+            // before a peer has asserted control over their ip address by
+            // completing the retry challenge creates a scenario whereby peers
+            // can attack one another via ip spoofing. employ the following
+            // * limit duration of in-flight connection attempts with a timeout
+            // * protect against connection attempt bursts with a global rate-limiter
+            // * rate-limit abusive peers by (control-asserted) ip
+            // * cap total connections per-peer/ip
+
             stats
                 .total_incoming_connection_attempts
                 .fetch_add(1, Ordering::Relaxed);
@@ -380,18 +409,8 @@ where
             debug!("accept(): Timed out waiting for connection");
         }
     }
-    tasks
-}
-
-pub fn get_remote_pubkey(connection: &Connection) -> Option<Pubkey> {
-    // Use the client cert only if it is self signed and the chain length is 1.
-    connection
-        .peer_identity()?
-        .downcast::<Vec<rustls::pki_types::CertificateDer>>()
-        .ok()
-        .filter(|certs| certs.len() == 1)?
-        .first()
-        .and_then(get_pubkey_from_tls_certificate)
+    tasks.close();
+    tasks.wait().await;
 }
 
 pub fn get_connection_stake(
@@ -505,6 +524,7 @@ async fn setup_connection<Q, C>(
                         new_connection,
                         stats,
                         server_params.wait_for_chunk_timeout,
+                        server_params.max_stream_data_bytes,
                         conn_context.clone(),
                         qos,
                         cancel_connection,
@@ -560,41 +580,13 @@ fn handle_connection_error(e: quinn::ConnectionError, stats: &StreamerStats, fro
     }
 }
 
-fn track_streamer_fetch_packet_performance(
-    packet_perf_measure: &[([u8; 64], Instant)],
-    stats: &StreamerStats,
-) {
-    if packet_perf_measure.is_empty() {
-        return;
-    }
-    let mut measure = Measure::start("track_perf");
-    let mut process_sampled_packets_us_hist = stats.process_sampled_packets_us_hist.lock().unwrap();
-
-    let now = Instant::now();
-    for (signature, start_time) in packet_perf_measure {
-        let duration = now.duration_since(*start_time);
-        debug!(
-            "QUIC streamer fetch stage took {duration:?} for transaction {:?}",
-            Signature::from(*signature)
-        );
-        process_sampled_packets_us_hist
-            .increment(duration.as_micros() as u64)
-            .unwrap();
-    }
-
-    drop(process_sampled_packets_us_hist);
-    measure.stop();
-    stats
-        .perf_track_overhead_us
-        .fetch_add(measure.as_us(), Ordering::Relaxed);
-}
-
 async fn handle_connection<Q, C>(
     packet_sender: Sender<PacketBatch>,
     remote_address: SocketAddr,
     connection: Connection,
     stats: Arc<StreamerStats>,
     wait_for_chunk_timeout: Duration,
+    max_stream_data_bytes: u32,
     context: C,
     qos: Arc<Q>,
     cancel: CancellationToken,
@@ -611,6 +603,10 @@ async fn handle_connection<Q, C>(
     );
     stats.total_connections.fetch_add(1, Ordering::Relaxed);
 
+    // cache the RTT to avoid grabbing lock for every stream.
+    // we only use that for some stats here, so if it gets stale during connection lifetime
+    // it is not the end of the world.
+    let rtt = connection.rtt();
     'conn: loop {
         // Wait for new streams. If the peer is disconnected we get a cancellation signal and stop
         // the connection task.
@@ -684,9 +680,11 @@ async fn handle_connection<Q, C>(
                 // Bytes::clone() is a cheap atomic inc
                 chunks.iter().take(n_chunks).cloned(),
                 &mut accum,
+                rtt,
                 &packet_sender,
                 &stats,
                 peer_type,
+                max_stream_data_bytes,
             ) {
                 // The stream is finished, break out of the loop and close the stream.
                 Ok(StreamState::Finished) => {
@@ -739,17 +737,18 @@ enum StreamState {
 fn handle_chunks(
     chunks: impl ExactSizeIterator<Item = Bytes>,
     accum: &mut PacketAccumulator,
+    rtt: Duration,
     packet_sender: &Sender<PacketBatch>,
     stats: &StreamerStats,
     peer_type: ConnectionPeerType,
+    max_stream_data_bytes: u32,
 ) -> Result<StreamState, ()> {
     let n_chunks = chunks.len();
     for chunk in chunks {
         accum.meta.size += chunk.len();
-        if accum.meta.size > PACKET_DATA_SIZE {
-            // The stream window size is set to PACKET_DATA_SIZE, so one individual chunk can
-            // never exceed this size. A peer can send two chunks that together exceed the size
-            // tho, in which case we report the error.
+        if accum.meta.size > max_stream_data_bytes as usize {
+            // A peer can send multiple chunks that together exceed the
+            // configured maximum data bytes receivable over one stream; reject the stream in that case.
             stats.invalid_stream_size.fetch_add(1, Ordering::Relaxed);
             debug!("invalid stream size {}", accum.meta.size);
             return Err(());
@@ -788,7 +787,7 @@ fn handle_chunks(
     // 14% of them come in multiple chunks. In that case, we copy
     // them into one `Bytes` buffer. We make a copy once, with
     // intention to not do it again.
-    let mut packet = if accum.chunks.len() == 1 {
+    let packet = if accum.chunks.len() == 1 {
         BytesPacket::new(
             accum.chunks.pop().expect("expected one chunk"),
             accum.meta.clone(),
@@ -802,12 +801,15 @@ fn handle_chunks(
     };
 
     let packet_size = packet.meta().size;
-
-    let mut packet_perf_measure = None;
-    if let Some(signature) = signature_if_should_track_packet(&packet).ok().flatten() {
-        packet_perf_measure = Some((*signature, accum.start_time));
-        // we set the PERF_TRACK_PACKET on
-        packet.meta_mut().set_track_performance(true);
+    let total_latency = accum.start_time.elapsed();
+    if total_latency > rtt.mul_f32(LATE_REASSEMBLY_THRESHOLD) {
+        debug!("Stream reassembly dealyed {}", total_latency.as_millis());
+        stats
+            .reassembly_delayed_streams
+            .fetch_add(1, Ordering::Relaxed);
+        stats
+            .reassembly_delayed_streams_cumulative_delay_us
+            .fetch_add(total_latency.as_micros() as usize, Ordering::Relaxed);
     }
     let packet_batch = PacketBatch::Single(packet);
 
@@ -829,10 +831,6 @@ fn handle_chunks(
         }
         trace!("packet batch send error {err:?}");
     } else {
-        if let Some(ppm) = &packet_perf_measure {
-            track_streamer_fetch_packet_performance(core::array::from_ref(ppm), stats);
-        }
-
         stats
             .total_bytes_sent_to_consumer
             .fetch_add(packet_size, Ordering::Relaxed);
@@ -1087,6 +1085,27 @@ impl<S: OpaqueStreamerCounter> ConnectionTable<S> {
             0
         }
     }
+
+    /// Removes all connections associated with `key`.
+    ///
+    /// Returns the number of removed connections.
+    pub(crate) fn remove_connections_by_key(&mut self, key: ConnectionTableKey) -> usize {
+        self.table
+            .swap_remove(&key)
+            .map(|connections| {
+                let num_removed = connections.len();
+                debug_assert!(
+                    self.total_size >= num_removed,
+                    "connection table size underflow while removing by key; total_size={}, \
+                     removed={}",
+                    self.total_size,
+                    num_removed
+                );
+                self.total_size = self.total_size.saturating_sub(num_removed);
+                num_removed
+            })
+            .unwrap_or_default()
+    }
 }
 
 struct EndpointAccept<'a> {
@@ -1125,6 +1144,7 @@ pub mod test {
         quinn::{ApplicationClose, ConnectionError},
         solana_keypair::Keypair,
         solana_net_utils::sockets::bind_to_localhost_unique,
+        solana_packet::PACKET_DATA_SIZE,
         solana_signer::Signer,
         std::collections::HashMap,
         tokio::time::sleep,
@@ -1579,7 +1599,7 @@ pub mod test {
             max_concurrent_connections: _,
         } = spawn_stake_weighted_qos_server(
             "quic_streamer_test",
-            [s],
+            [s.into()],
             &keypair,
             sender,
             staked_nodes,
@@ -1615,7 +1635,7 @@ pub mod test {
             max_concurrent_connections: _,
         } = spawn_stake_weighted_qos_server(
             "quic_streamer_test",
-            [s],
+            [s.into()],
             &keypair,
             sender,
             staked_nodes,
@@ -1737,6 +1757,55 @@ pub mod test {
         }
         assert_eq!(table.total_size, 0);
         assert_eq!(stats.open_connections.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_remove_connections_by_key() {
+        agave_logger::setup();
+        let cancel = CancellationToken::new();
+        let mut table = ConnectionTable::new(ConnectionTableType::Unstaked, cancel);
+        let pubkey1 = Pubkey::new_unique();
+        let pubkey2 = Pubkey::new_unique();
+        let max_connections_per_peer = 10;
+        let stats = Arc::new(StreamerStats::default());
+
+        (0..2).for_each(|i| {
+            table
+                .try_add_connection(
+                    ConnectionTableKey::Pubkey(pubkey1),
+                    0,
+                    ClientConnectionTracker::new(stats.clone(), 1000).unwrap(),
+                    None,
+                    ConnectionPeerType::Unstaked,
+                    Arc::new(AtomicU64::new(i)),
+                    max_connections_per_peer,
+                    || Arc::new(NullStreamerCounter {}),
+                )
+                .unwrap();
+        });
+        table
+            .try_add_connection(
+                ConnectionTableKey::Pubkey(pubkey2),
+                0,
+                ClientConnectionTracker::new(stats.clone(), 1000).unwrap(),
+                None,
+                ConnectionPeerType::Unstaked,
+                Arc::new(AtomicU64::new(2)),
+                max_connections_per_peer,
+                || Arc::new(NullStreamerCounter {}),
+            )
+            .unwrap();
+
+        assert_eq!(table.total_size, 3);
+        let removed = table.remove_connections_by_key(ConnectionTableKey::Pubkey(pubkey1));
+        assert_eq!(removed, 2);
+        assert_eq!(table.total_size, 1);
+        assert_eq!(table.table.len(), 1);
+        assert!(
+            table
+                .table
+                .contains_key(&ConnectionTableKey::Pubkey(pubkey2))
+        );
     }
 
     #[test]
@@ -2020,6 +2089,42 @@ pub mod test {
             _ => panic!("unexpected close"),
         }
         assert_eq!(stats.invalid_stream_size.load(Ordering::Relaxed), 1);
+        cancel.cancel();
+        join_handle.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_client_connection_accepts_packet_up_to_configured_max_stream_data_bytes() {
+        let max_stream_data_bytes = PACKET_DATA_SIZE as u32 * 2;
+        let SpawnTestServerResult {
+            join_handle,
+            receiver,
+            server_address,
+            stats,
+            cancel,
+        } = setup_quic_server(
+            None,
+            QuicStreamerConfig {
+                stream_receive_window_size: max_stream_data_bytes,
+                max_stream_data_bytes,
+                ..QuicStreamerConfig::default_for_tests()
+            },
+            SwQosConfig::default(),
+        );
+
+        let client_connection = make_client_endpoint(&server_address, None).await;
+        let mut send_stream = client_connection.open_uni().await.unwrap();
+
+        let num_bytes = max_stream_data_bytes - 1;
+        send_stream
+            .write_all(&vec![42; num_bytes as usize])
+            .await
+            .unwrap();
+        send_stream.finish().unwrap();
+
+        check_received_packets(receiver, 1, num_bytes as usize).await;
+        assert_eq!(stats.invalid_stream_size.load(Ordering::Relaxed), 0);
+
         cancel.cancel();
         join_handle.await.unwrap();
     }

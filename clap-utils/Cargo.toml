@@ -19,8 +19,9 @@ name = "solana_clap_utils"
 agave-unstable-api = []
 
 [dependencies]
+bs58 = { workspace = true, features = ["std"] }
 chrono = { workspace = true, features = ["default"] }
-clap = "2.33.0"
+clap = { version = "2.33.0", default-features = false, features = ["suggestions"] }
 rpassword = { workspace = true }
 solana-bls-signatures = { workspace = true }
 solana-clock = { workspace = true }
@@ -47,3 +48,6 @@ assert_matches = { workspace = true }
 solana-pubkey = { workspace = true, features = ["rand"] }
 solana-system-interface = { workspace = true, features = ["bincode"] }
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

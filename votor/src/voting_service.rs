@@ -3,7 +3,10 @@ use {
         staked_validators_cache::StakedValidatorsCache,
         vote_history_storage::{SavedVoteHistoryVersions, VoteHistoryStorage},
     },
-    agave_votor_messages::consensus_message::{Certificate, ConsensusMessage},
+    agave_votor_messages::{
+        certificate::Certificate,
+        consensus_message::{ConsensusMessage, VoteMessage},
+    },
     crossbeam_channel::Receiver,
     solana_client::connection_cache::ConnectionCache,
     solana_clock::Slot,
@@ -23,13 +26,15 @@ use {
 };
 
 const STAKED_VALIDATORS_CACHE_TTL_S: u64 = 5;
-const STAKED_VALIDATORS_CACHE_NUM_EPOCH_CAP: usize = 5;
+/// Target number of epochs to keep in the staked validators cache. Due to lazy-lru eviction
+/// semantics, the cache may hold up to `2 * STAKED_VALIDATORS_CACHE_NUM_EPOCH_TARGET` entries
+/// before evicting down to this target.
+const STAKED_VALIDATORS_CACHE_NUM_EPOCH_TARGET: usize = 3;
 
 #[derive(Debug)]
 pub enum BLSOp {
     PushVote {
-        message: Arc<ConsensusMessage>,
-        slot: Slot,
+        vote: Arc<VoteMessage>,
         saved_vote_history: SavedVoteHistoryVersions,
     },
     PushCertificate {
@@ -135,7 +140,7 @@ impl VotingService {
                 let mut staked_validators_cache = StakedValidatorsCache::new(
                     bank_forks.clone(),
                     Duration::from_secs(STAKED_VALIDATORS_CACHE_TTL_S),
-                    STAKED_VALIDATORS_CACHE_NUM_EPOCH_CAP,
+                    STAKED_VALIDATORS_CACHE_NUM_EPOCH_TARGET,
                     false,
                     alpenglow_port_override,
                 );
@@ -199,8 +204,7 @@ impl VotingService {
     ) {
         match bls_op {
             BLSOp::PushVote {
-                message,
-                slot,
+                vote,
                 saved_vote_history,
             } => {
                 let mut measure = Measure::start("alpenglow vote history save");
@@ -210,21 +214,22 @@ impl VotingService {
                 }
                 measure.stop();
                 trace!("{measure}");
-
+                let slot = vote.vote.slot();
+                let msg = ConsensusMessage::Vote(Arc::unwrap_or_clone(vote));
                 Self::broadcast_consensus_message(
                     slot,
                     cluster_info,
-                    &message,
+                    &msg,
                     connection_cache,
                     additional_listeners,
                     staked_validators_cache,
                 );
             }
             BLSOp::PushCertificate { certificate } => {
-                let vote_slot = certificate.cert_type.slot();
-                let message = ConsensusMessage::Certificate((*certificate).clone());
+                let slot = certificate.cert_type.slot();
+                let message = ConsensusMessage::Certificate(Arc::unwrap_or_clone(certificate));
                 Self::broadcast_consensus_message(
-                    vote_slot,
+                    slot,
                     cluster_info,
                     &message,
                     connection_cache,
@@ -248,10 +253,11 @@ mod tests {
             NullVoteHistoryStorage, SavedVoteHistory, SavedVoteHistoryVersions,
         },
         agave_votor_messages::{
-            consensus_message::{Certificate, CertificateType, ConsensusMessage, VoteMessage},
+            certificate::{Certificate, CertificateType},
+            consensus_message::{ConsensusMessage, VoteMessage},
             vote::Vote,
         },
-        solana_bls_signatures::Signature as BLSSignature,
+        solana_bls_signatures::{BLS_SIGNATURE_AFFINE_SIZE, Signature as BLSSignature},
         solana_gossip::{cluster_info::ClusterInfo, contact_info::ContactInfo},
         solana_keypair::Keypair,
         solana_net_utils::{SocketAddrSpace, sockets::bind_to_localhost_unique},
@@ -265,7 +271,7 @@ mod tests {
         solana_signer::Signer,
         solana_streamer::{
             nonblocking::swqos::SwQosConfig,
-            quic::{QuicStreamerConfig, SpawnServerResult, spawn_stake_wighted_qos_server},
+            quic::{QuicStreamerConfig, SpawnServerResult, spawn_stake_weighted_qos_server},
             streamer::StakedNodes,
         },
         std::{
@@ -319,27 +325,26 @@ mod tests {
     }
 
     #[test_case(BLSOp::PushVote {
-        message: Arc::new(ConsensusMessage::Vote(VoteMessage {
+        vote: Arc::new(VoteMessage {
             vote: Vote::new_skip_vote(5),
-            signature: BLSSignature::default(),
+            signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
             rank: 1,
-        })),
-        slot: 5,
+        }),
         saved_vote_history: SavedVoteHistoryVersions::Current(SavedVoteHistory::default()),
     }, ConsensusMessage::Vote(VoteMessage {
         vote: Vote::new_skip_vote(5),
-        signature: BLSSignature::default(),
+        signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
         rank: 1,
     }))]
     #[test_case(BLSOp::PushCertificate {
         certificate: Arc::new(Certificate {
             cert_type: CertificateType::Skip(5),
-            signature: BLSSignature::default(),
+            signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
             bitmap: Vec::new(),
         }),
     }, ConsensusMessage::Certificate(Certificate {
         cert_type: CertificateType::Skip(5),
-        signature: BLSSignature::default(),
+        signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
         bitmap: Vec::new(),
     }))]
     fn test_send_message(bls_op: BLSOp, expected_message: ConsensusMessage) {
@@ -372,10 +377,10 @@ mod tests {
             endpoints: _,
             thread: quic_server_thread,
             key_updater: _,
-        } = spawn_stake_wighted_qos_server(
+        } = spawn_stake_weighted_qos_server(
             "AlpenglowLocalClusterTest",
             "voting_service_test",
-            [socket],
+            [socket.into()],
             &Keypair::new(),
             sender,
             staked_nodes,

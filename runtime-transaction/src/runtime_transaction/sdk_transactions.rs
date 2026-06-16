@@ -2,10 +2,14 @@ use {
     super::{ComputeBudgetInstructionDetails, RuntimeTransaction},
     crate::{
         instruction_meta::InstructionMeta,
-        transaction_meta::{StaticMeta, TransactionMeta},
+        transaction_meta::{
+            CachedTransactionMeta, TransactionConfiguration, TransactionMeta,
+            VersionedTransactionConfiguration,
+        },
         transaction_with_meta::TransactionWithMeta,
     },
-    solana_message::{AddressLoader, TransactionSignatureDetails},
+    solana_message::{AddressLoader, TransactionSignatureDetails, VersionedMessage},
+    solana_program_entrypoint::HEAP_LENGTH,
     solana_pubkey::Pubkey,
     solana_svm_transaction::instruction::SVMInstruction,
     solana_transaction::{
@@ -51,20 +55,36 @@ impl RuntimeTransaction<SanitizedVersionedTransaction> {
             precompile_signature_details.num_ed25519_instruction_signatures,
             precompile_signature_details.num_secp256r1_instruction_signatures,
         );
-        let compute_budget_instruction_details = ComputeBudgetInstructionDetails::try_from(
-            sanitized_versioned_tx
-                .get_message()
-                .program_instructions_iter()
-                .map(|(program_id, ix)| (program_id, SVMInstruction::from(ix))),
-        )?;
+
+        let versioned_transaction_config = match &sanitized_versioned_tx.get_message().message {
+            VersionedMessage::V1(msg) => {
+                VersionedTransactionConfiguration::V1(TransactionConfiguration {
+                    priority_fee_lamports: msg.config.priority_fee.unwrap_or(0),
+                    compute_unit_limit: msg.config.compute_unit_limit.unwrap_or(0),
+                    loaded_accounts_data_size_limit: msg
+                        .config
+                        .loaded_accounts_data_size_limit
+                        .unwrap_or(0),
+                    updated_heap_bytes: msg.config.heap_size.unwrap_or(HEAP_LENGTH as u32),
+                })
+            }
+            _ => VersionedTransactionConfiguration::LegacyAndV0(
+                ComputeBudgetInstructionDetails::try_from(
+                    sanitized_versioned_tx
+                        .get_message()
+                        .program_instructions_iter()
+                        .map(|(program_id, ix)| (program_id, SVMInstruction::from(ix))),
+                )?,
+            ),
+        };
 
         Ok(Self {
             transaction: sanitized_versioned_tx,
-            meta: TransactionMeta {
+            meta: CachedTransactionMeta {
                 message_hash,
                 is_simple_vote_transaction: is_simple_vote_tx,
                 signature_details,
-                compute_budget_instruction_details,
+                versioned_transaction_config,
                 instruction_data_len,
             },
         })
@@ -80,12 +100,10 @@ impl RuntimeTransaction<SanitizedTransaction> {
         is_simple_vote_tx: Option<bool>,
         address_loader: impl AddressLoader,
         reserved_account_keys: &HashSet<Pubkey>,
-        enable_static_instruction_limit: bool,
         enable_instruction_accounts_limit: bool,
     ) -> Result<Self> {
-        if enable_static_instruction_limit
-            && tx.message.instructions().len()
-                > solana_transaction_context::MAX_INSTRUCTION_TRACE_LENGTH
+        if tx.message.instructions().len()
+            > solana_transaction_context::MAX_INSTRUCTION_TRACE_LENGTH
         {
             return Err(solana_transaction_error::TransactionError::SanitizeFailure);
         }
@@ -129,17 +147,12 @@ impl RuntimeTransaction<SanitizedTransaction> {
             reserved_account_keys,
         )?;
 
-        let mut tx = Self {
+        let tx = Self {
             transaction: sanitized_transaction,
             meta: statically_loaded_runtime_tx.meta,
         };
-        tx.load_dynamic_metadata()?;
 
         Ok(tx)
-    }
-
-    fn load_dynamic_metadata(&mut self) -> Result<()> {
-        Ok(())
     }
 }
 
@@ -155,7 +168,7 @@ impl TransactionWithMeta for RuntimeTransaction<SanitizedTransaction> {
     }
 
     fn serialized_size(&self) -> usize {
-        bincode::serialized_size(&self.to_versioned_transaction())
+        wincode::serialized_size(&self.to_versioned_transaction())
             .expect("versioned transaction serialization should succeed") as usize
     }
 }
@@ -164,7 +177,6 @@ impl TransactionWithMeta for RuntimeTransaction<SanitizedTransaction> {
 impl RuntimeTransaction<SanitizedTransaction> {
     pub fn from_transaction_for_tests(transaction: solana_transaction::Transaction) -> Self {
         let versioned_transaction = VersionedTransaction::from(transaction);
-        let enable_static_instruction_limit = true;
         let enable_instruction_accounts_limit = true;
         Self::try_create(
             versioned_transaction,
@@ -172,7 +184,6 @@ impl RuntimeTransaction<SanitizedTransaction> {
             None,
             solana_message::SimpleAddressLoader::Disabled,
             &HashSet::new(),
-            enable_static_instruction_limit,
             enable_instruction_accounts_limit,
         )
         .expect("failed to create RuntimeTransaction from Transaction")
@@ -187,28 +198,32 @@ mod tests {
         agave_reserved_account_keys::ReservedAccountKeys,
         solana_compute_budget_interface::ComputeBudgetInstruction,
         solana_hash::Hash,
-        solana_instruction::Instruction,
+        solana_instruction::{AccountMeta, Instruction},
         solana_keypair::Keypair,
         solana_message::{
             Message, MessageHeader, SimpleAddressLoader, VersionedMessage,
             compiled_instruction::CompiledInstruction,
         },
+        solana_sdk_ids::vote,
         solana_signature::Signature,
         solana_signer::Signer,
         solana_system_interface::instruction as system_instruction,
         solana_transaction::{Transaction, versioned::VersionedTransaction},
-        solana_vote_interface::{self as vote, state::Vote},
     };
 
     fn vote_sanitized_versioned_transaction() -> SanitizedVersionedTransaction {
-        let bank_hash = Hash::new_unique();
         let block_hash = Hash::new_unique();
         let vote_keypair = Keypair::new();
         let node_keypair = Keypair::new();
         let auth_keypair = Keypair::new();
-        let votes = Vote::new(vec![1, 2, 3], bank_hash);
-        let vote_ix =
-            vote::instruction::vote(&vote_keypair.pubkey(), &auth_keypair.pubkey(), votes);
+        let vote_ix = Instruction::new_with_bytes(
+            vote::id(),
+            &[],
+            vec![
+                AccountMeta::new(vote_keypair.pubkey(), false),
+                AccountMeta::new_readonly(auth_keypair.pubkey(), true),
+            ],
+        );
         let mut vote_tx = Transaction::new_with_payer(&[vote_ix], Some(&node_keypair.pubkey()));
         vote_tx.partial_sign(&[&node_keypair], block_hash);
         vote_tx.partial_sign(&[&auth_keypair], block_hash);
@@ -361,15 +376,20 @@ mod tests {
         assert_eq!(0, signature_details.num_ed25519_instruction_signatures());
 
         for feature_set in [FeatureSet::default(), FeatureSet::all_enabled()] {
-            let compute_budget_limits = runtime_transaction_static
-                .compute_budget_instruction_details()
-                .sanitize_and_convert_to_compute_budget_limits(&feature_set)
+            let transaction_configuration = runtime_transaction_static
+                .transaction_configuration(&feature_set)
                 .unwrap();
-            assert_eq!(compute_unit_limit, compute_budget_limits.compute_unit_limit);
-            assert_eq!(compute_unit_price, compute_budget_limits.compute_unit_price);
+            assert_eq!(
+                compute_unit_limit,
+                transaction_configuration.compute_unit_limit
+            );
+            assert_eq!(
+                compute_unit_price,
+                transaction_configuration.compute_unit_price_in_microlamports()
+            );
             assert_eq!(
                 loaded_accounts_bytes,
-                compute_budget_limits.loaded_accounts_bytes.get()
+                transaction_configuration.loaded_accounts_data_size_limit
             );
         }
     }
@@ -388,8 +408,14 @@ mod tests {
         )
         .unwrap();
 
-        let expected = bincode::serialized_size(&transaction.to_versioned_transaction()).unwrap();
+        let expected = wincode::serialized_size(&transaction.to_versioned_transaction()).unwrap();
         assert_eq!(transaction.serialized_size(), expected as usize);
+        assert_eq!(
+            expected,
+            wincode::serialize(&transaction.to_versioned_transaction())
+                .unwrap()
+                .len() as u64
+        );
     }
 
     #[test]
@@ -420,7 +446,6 @@ mod tests {
             solana_message::SimpleAddressLoader::Disabled,
             &HashSet::new(),
             true,
-            true,
         );
         assert!(result.is_ok());
 
@@ -442,7 +467,6 @@ mod tests {
             None,
             solana_message::SimpleAddressLoader::Disabled,
             &HashSet::new(),
-            true,
             true,
         );
         assert_eq!(

@@ -30,10 +30,10 @@ mod tests {
         super::*,
         crate::{
             accounts::Accounts,
-            accounts_db::{ACCOUNTS_DB_CONFIG_FOR_TESTING, AccountsDbConfig, MarkObsoleteAccounts},
             accounts_update_notifier_interface::{
                 AccountForGeyser, AccountsUpdateNotifier, AccountsUpdateNotifierInterface,
             },
+            ancestors::Ancestors,
             utils::create_account_shared_data,
         },
         dashmap::DashMap,
@@ -42,7 +42,6 @@ mod tests {
             Arc,
             atomic::{AtomicBool, Ordering},
         },
-        test_case::test_case,
     };
 
     impl AccountsDb {
@@ -97,18 +96,9 @@ mod tests {
         }
     }
 
-    #[test_case(MarkObsoleteAccounts::Enabled)]
-    #[test_case(MarkObsoleteAccounts::Disabled)]
-    fn test_notify_account_restore_from_snapshot(mark_obsolete_accounts: MarkObsoleteAccounts) {
-        let mut accounts_db = AccountsDb::new_with_config(
-            Vec::new(),
-            AccountsDbConfig {
-                mark_obsolete_accounts,
-                ..ACCOUNTS_DB_CONFIG_FOR_TESTING
-            },
-            None,
-            Arc::default(),
-        );
+    #[test]
+    fn test_notify_account_restore_from_snapshot() {
+        let mut accounts_db = AccountsDb::new_single_for_tests();
         let key1 = Pubkey::new_unique();
         let key2 = Pubkey::new_unique();
         let account = AccountSharedData::new(1, 0, &Pubkey::default());
@@ -189,24 +179,26 @@ mod tests {
         let account1 =
             AccountSharedData::new(account1_lamports1, 1, AccountSharedData::default().owner());
         let slot0 = 0;
-        accounts.store_accounts_seq((slot0, &[(&key1, &account1)][..]), None, None);
+        let mut ancestors = Ancestors::from(vec![slot0]);
+        accounts.store_accounts_seq((slot0, &[(&key1, &account1)][..]), None, &ancestors);
 
         let key2 = solana_pubkey::new_rand();
         let account2_lamports: u64 = 200;
         let account2 =
             AccountSharedData::new(account2_lamports, 1, AccountSharedData::default().owner());
-        accounts.store_accounts_seq((slot0, &[(&key2, &account2)][..]), None, None);
+        accounts.store_accounts_seq((slot0, &[(&key2, &account2)][..]), None, &ancestors);
 
         let account1_lamports2 = 2;
         let slot1 = 1;
+        ancestors.insert(slot1);
         let account1 = AccountSharedData::new(account1_lamports2, 1, account1.owner());
-        accounts.store_accounts_seq((slot1, &[(&key1, &account1)][..]), None, None);
+        accounts.store_accounts_seq((slot1, &[(&key1, &account1)][..]), None, &ancestors);
 
         let key3 = solana_pubkey::new_rand();
         let account3_lamports: u64 = 300;
         let account3 =
             AccountSharedData::new(account3_lamports, 1, AccountSharedData::default().owner());
-        accounts.store_accounts_seq((slot1, &[(&key3, &account3)][..]), None, None);
+        accounts.store_accounts_seq((slot1, &[(&key3, &account3)][..]), None, &ancestors);
 
         assert_eq!(notifier.accounts_notified.get(&key1).unwrap().len(), 2);
         assert_eq!(
@@ -261,12 +253,12 @@ mod tests {
         accounts.store_accounts_seq(
             (slot_open, [(&address, &account_open)].as_slice()),
             None,
-            None,
+            &Ancestors::from(vec![slot_open]),
         );
         accounts.store_accounts_seq(
             (slot_close, [(&address, &account_close)].as_slice()),
             None,
-            None,
+            &Ancestors::from(vec![slot_open, slot_close]),
         );
 
         let notifications = notifier.accounts_notified.get(&address).unwrap().clone();

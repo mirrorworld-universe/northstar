@@ -7,8 +7,8 @@ on:
     branches: [master, main]
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: false
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -41,25 +41,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler libprotobuf-dev libudev-dev libclang-dev
-      - name: Install Solana tools
-        run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
-          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
-      - name: Read Solana platform-tools version
-        id: solana_tools
-        run: |
-          cargo build-sbf --version
-          version=$(cargo build-sbf --version | awk '/platform-tools/{print $2}')
-          echo "platform_tools_version=$version" >> "$GITHUB_OUTPUT"
-      - name: Cache Solana platform tools
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/solana
-            ~/.local/share/solana/install/active_release/bin/platform-tools-sdk/sbf/dependencies/platform-tools
-          key: ${{ runner.os }}-solana-platform-tools-v3-${{ steps.solana_tools.outputs.platform_tools_version }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-solana-platform-tools-v3-${{ steps.solana_tools.outputs.platform_tools_version }}-
       - run: cargo clippy --all --tests -- -D warnings
 
   test:
@@ -98,4 +79,9 @@ jobs:
           key: ${{ runner.os }}-solana-platform-tools-v3-${{ steps.solana_tools.outputs.platform_tools_version }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-solana-platform-tools-v3-${{ steps.solana_tools.outputs.platform_tools_version }}-
-      - run: cargo test -p solana-core -p solana-svm -p northstar -p northstar-portal --no-fail-fast
+      - name: Run Northstar crate tests
+        run: cargo test -p northstar -p northstar-portal --no-fail-fast
+      - name: Run Northstar SVM regression tests
+        run: cargo test -p solana-svm northstar --no-fail-fast
+      - name: Run Northstar core service tests
+        run: cargo test -p solana-core northstar_service --no-fail-fast

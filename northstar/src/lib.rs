@@ -1,10 +1,10 @@
 use {
     log::*,
     northstar_portal::{
-        DepositReceipt, SettlementStatus,
-        find_delegation_record_pda as find_portal_delegation_record_pda,
+        find_delegation_record_pda as find_portal_delegation_record_pda, DepositReceipt,
+        SettlementStatus,
     },
-    portal_state::{PortalAccount, try_parse_raw_portal_account},
+    portal_state::{try_parse_raw_portal_account, PortalAccount},
     solana_account::{AccountSharedData, ReadableAccount},
     solana_fee_structure::FeeStructure,
     solana_gossip::cluster_info::ClusterInfo,
@@ -29,7 +29,7 @@ pub mod slot_advancer;
 
 pub use crate::{
     ephemeral_runtime::{EphemeralRuntime, ErStateDiff, ErStateDiffAccount},
-    settlement::{SettlementPlan, build_settlement_plan},
+    settlement::{build_settlement_plan, SettlementPlan},
 };
 
 const DEFAULT_ER_SLOT_DURATION_MS: u64 = 50;
@@ -767,12 +767,13 @@ mod portal_e2e_tests {
         solana_instruction::{AccountMeta, Instruction},
         solana_keypair::{Keypair, Signer},
         solana_lattice_hash::lt_hash::LtHash,
+        solana_leader_schedule::SlotLeader,
         solana_net_utils::SocketAddrSpace,
         solana_rent::Rent,
         solana_rpc_client::rpc_client::RpcClient,
         solana_runtime::{
             bank_forks::BankForks,
-            genesis_utils::{GenesisConfigInfo, create_genesis_config},
+            genesis_utils::{create_genesis_config, GenesisConfigInfo},
         },
         solana_sdk_ids::system_program,
         solana_system_interface::instruction::transfer,
@@ -808,7 +809,7 @@ mod portal_e2e_tests {
 
         let (bank, _) = Bank::new_with_bank_forks_for_tests(&genesis_config);
         bank.fill_bank_with_ticks_for_tests();
-        let bank = Bank::new_from_parent(bank.clone(), bank.leader_id(), bank.slot() + 1);
+        let bank = Bank::new_from_parent(bank.clone(), *bank.leader(), bank.slot() + 1);
         let bank_forks = BankForks::new_rw_arc(bank);
         let bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
         (bank, bank_forks, program_id, mint_keypair)
@@ -1675,7 +1676,7 @@ mod portal_e2e_tests {
         let validator = owner_keypair;
         let first_settlement_bank = Bank::new_from_parent(
             bank.clone(),
-            &Pubkey::default(),
+            SlotLeader::default(),
             bank.slot().saturating_add(11),
         );
         let first_plan = build_settlement_plan(
@@ -1708,7 +1709,7 @@ mod portal_e2e_tests {
         let withdraw_amount = 250_000_000u64;
         let second_settlement_bank = Bank::new_from_parent(
             Arc::new(first_settlement_bank),
-            &Pubkey::default(),
+            SlotLeader::default(),
             bank.slot().saturating_add(22),
         );
         let balance_before = second_settlement_bank.get_balance(&l1_recipient);
@@ -1802,7 +1803,7 @@ mod portal_e2e_tests {
         bank.freeze();
         let settlement_bank = Bank::new_from_parent(
             bank.clone(),
-            &Pubkey::default(),
+            SlotLeader::default(),
             bank.slot().saturating_add(11),
         );
         let first_er_account = AccountSharedData::new(9_000_000, 1, &new_owner);
@@ -1903,7 +1904,7 @@ mod portal_e2e_tests {
         bank.freeze();
         let settlement_bank = Bank::new_from_parent(
             bank.clone(),
-            &Pubkey::default(),
+            SlotLeader::default(),
             bank.slot().saturating_add(11),
         );
         let mut er_account = AccountSharedData::new(1_000_000, er_data.len(), &program_id);
@@ -2004,7 +2005,7 @@ mod portal_e2e_tests {
         bank.freeze();
         let settlement_bank = Bank::new_from_parent(
             bank.clone(),
-            &Pubkey::default(),
+            SlotLeader::default(),
             bank.slot().saturating_add(11),
         );
         let mut er_account = AccountSharedData::new(1_000_000, er_data.len(), &program_id);
@@ -2223,7 +2224,7 @@ mod portal_e2e_tests {
 
         let bank_slot = bank.slot();
         bank.freeze();
-        let child_bank = Bank::new_from_parent(bank, &Pubkey::default(), bank_slot + 1);
+        let child_bank = Bank::new_from_parent(bank, SlotLeader::default(), bank_slot + 1);
 
         let grid_id = 1u64;
         let (session_pda, _) = find_session_pda(&program_id);
@@ -2266,7 +2267,7 @@ mod portal_e2e_tests {
 
         child_bank.freeze();
         let child_bank =
-            Bank::new_from_parent(Arc::new(child_bank), &Pubkey::default(), bank_slot + 2);
+            Bank::new_from_parent(Arc::new(child_bank), SlotLeader::default(), bank_slot + 2);
 
         let deposit2_amount = 3_000_000_000u64;
         let deposit_fee_ix2 = build_deposit_fee_ix(
@@ -2347,13 +2348,14 @@ mod portal_e2e_tests {
 #[cfg(test)]
 mod ephemeral_accounts_background_service_regression {
     use {
-        super::{EphemeralRollupSettings, ephemeral_runtime::EphemeralRuntime},
+        super::{ephemeral_runtime::EphemeralRuntime, EphemeralRollupSettings},
         agave_logger::setup,
-        agave_snapshots::{SnapshotInterval, snapshot_config::SnapshotConfig},
+        agave_snapshots::{snapshot_config::SnapshotConfig, SnapshotInterval},
         crossbeam_channel::unbounded,
         solana_genesis_config::GenesisConfig,
         solana_gossip::{cluster_info::ClusterInfo, contact_info::ContactInfo},
         solana_keypair::Keypair,
+        solana_leader_schedule::SlotLeader,
         solana_message::Message,
         solana_net_utils::SocketAddrSpace,
         solana_pubkey::Pubkey,
@@ -2374,8 +2376,8 @@ mod ephemeral_accounts_background_service_regression {
             net::TcpListener,
             num::NonZeroU64,
             sync::{
-                Arc, Mutex,
                 atomic::{AtomicBool, Ordering},
+                Arc, Mutex,
             },
             thread::sleep,
             time::Duration,
@@ -2414,6 +2416,7 @@ mod ephemeral_accounts_background_service_regression {
         );
         root_bank.fill_bank_with_ticks_for_tests();
         root_bank.freeze();
+        root_bank.set_block_id(Some(root_bank.hash()));
 
         // Wire ABS drop-callback plumbing against the L1 BankForks.
         root_bank
@@ -2467,7 +2470,6 @@ mod ephemeral_accounts_background_service_regression {
             let mut timings = solana_svm_timings::ExecuteTimings::default();
             let _ = er_bank.load_execute_and_commit_transactions(
                 &batch,
-                solana_clock::MAX_PROCESSING_AGE,
                 ExecutionRecordingConfig::default(),
                 &mut timings,
                 None,
@@ -2516,7 +2518,7 @@ mod ephemeral_accounts_background_service_regression {
         const SET_ROOT_EVERY: u64 = 4;
         for slot in 1..=LAST_SLOT {
             let parent = bank_forks.read().unwrap().get(slot - 1).unwrap();
-            let child = Bank::new_from_parent(parent, &Pubkey::default(), slot);
+            let child = Bank::new_from_parent(parent, SlotLeader::default(), slot);
             let child = bank_forks
                 .write()
                 .unwrap()
@@ -2533,6 +2535,7 @@ mod ephemeral_accounts_background_service_regression {
             let _ = child.process_transaction(&tx);
             child.fill_bank_with_ticks_for_tests();
             child.freeze();
+            child.set_block_id(Some(child.hash()));
 
             if slot % SET_ROOT_EVERY == 0 {
                 bank_forks

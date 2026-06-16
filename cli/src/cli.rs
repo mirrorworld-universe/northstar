@@ -1,7 +1,17 @@
 use {
     crate::{
-        address_lookup_table::*, clap_app::*, cluster_query::*, feature::*, inflation::*, nonce::*,
-        portal::*, program::*, program_v4::*, spend_utils::*, stake::*, validator_info::*, vote::*,
+        address_lookup_table::*,
+        clap_app::*,
+        cluster_query::*,
+        feature::*,
+        inflation::*,
+        nonce::*,
+        portal::{PortalCliCommand, parse_portal_subcommand, process_portal_subcommand},
+        program::*,
+        spend_utils::*,
+        stake::*,
+        validator_info::*,
+        vote::*,
         wallet::*,
     },
     clap::{ArgMatches, Shell, crate_description, crate_name},
@@ -12,10 +22,8 @@ use {
     solana_cli_output::{
         CliSignature, CliValidatorsSortOrder, OutputFormat, display::println_name_value,
     },
-    solana_client::connection_cache::ConnectionCache,
     solana_clock::{Epoch, Slot},
     solana_commitment_config::CommitmentConfig,
-    solana_hash::Hash,
     solana_instruction::error::InstructionError,
     solana_offchain_message::OffchainMessage,
     solana_pubkey::Pubkey,
@@ -29,10 +37,6 @@ use {
     solana_signature::Signature,
     solana_signer::{Signer, SignerError},
     solana_stake_interface::{instruction::LockupArgs, state::Lockup},
-    solana_tpu_client::{
-        nonblocking::tpu_client::TpuClient,
-        tpu_client::{DEFAULT_TPU_CONNECTION_POOL_SIZE, TpuClientConfig},
-    },
     solana_transaction::versioned::VersionedTransaction,
     solana_transaction_error::TransactionError,
     solana_vote_program::vote_state::VoteAuthorize,
@@ -45,7 +49,6 @@ use {
 pub const DEFAULT_RPC_TIMEOUT_SECONDS: &str = "30";
 pub const DEFAULT_CONFIRM_TX_TIMEOUT_SECONDS: &str = "5";
 const CHECKED: bool = true;
-pub const DEFAULT_PING_USE_TPU_CLIENT: bool = false;
 
 #[derive(Debug, PartialEq)]
 #[allow(clippy::large_enum_variant)]
@@ -92,14 +95,6 @@ pub enum CliCommand {
     LiveSlots,
     Logs {
         filter: RpcTransactionLogsFilter,
-    },
-    Ping {
-        interval: Duration,
-        count: Option<u64>,
-        timeout: Duration,
-        blockhash: Option<Hash>,
-        print_timestamp: bool,
-        compute_unit_price: Option<u64>,
     },
     Rent {
         data_length: usize,
@@ -176,9 +171,9 @@ pub enum CliCommand {
     },
     // Program Deployment
     Deploy,
-    Portal(PortalCliCommand),
     Program(ProgramCliCommand),
-    ProgramV4(ProgramV4CliCommand),
+    // Sonic: Northstar Portal CLI commands.
+    Portal(PortalCliCommand),
     // Stake Commands
     CreateStakeAccount {
         stake_account: SignerIndex,
@@ -312,7 +307,7 @@ pub enum CliCommand {
     },
     // Validator Info Commands
     GetValidatorInfo(Option<Pubkey>),
-    SetValidatorInfo {
+    PublishValidatorInfo {
         validator_info: Value,
         force_keybase: bool,
         info_pubkey: Option<Pubkey>,
@@ -467,6 +462,7 @@ pub enum CliCommand {
         signature: Signature,
         message: OffchainMessage,
     },
+    GetAgGenesisInfo,
 }
 
 #[derive(Debug, PartialEq)]
@@ -508,6 +504,8 @@ pub enum CliError {
     KeypairFileNotFound(String),
     #[error("Invalid signature")]
     InvalidSignature,
+    #[error("Invalid alpenglow genesis cert")]
+    InvalidAgGenesisCert,
 }
 
 impl From<Box<dyn error::Error>> for CliError {
@@ -541,7 +539,6 @@ pub struct CliConfig<'a> {
     pub send_transaction_config: RpcSendTransactionConfig,
     pub confirm_transaction_initial_timeout: Duration,
     pub address_labels: HashMap<String, String>,
-    pub use_tpu_client: bool,
 }
 
 impl CliConfig<'_> {
@@ -589,7 +586,6 @@ impl Default for CliConfig<'_> {
                 u64::from_str(DEFAULT_CONFIRM_TX_TIMEOUT_SECONDS).unwrap(),
             ),
             address_labels: HashMap::new(),
-            use_tpu_client: DEFAULT_PING_USE_TPU_CLIENT,
         }
     }
 }
@@ -637,6 +633,7 @@ pub fn parse_command(
         }
         ("epoch", Some(matches)) => parse_get_epoch(matches),
         ("epoch-info", Some(matches)) => parse_get_epoch_info(matches),
+        ("alpenglow-genesis-info", Some(matches)) => parse_get_ag_genesis_info(matches),
         ("feature", Some(matches)) => {
             parse_feature_subcommand(matches, default_signer, wallet_manager)
         }
@@ -656,7 +653,6 @@ pub fn parse_command(
             Ok(CliCommandInfo::without_signers(CliCommand::LiveSlots))
         }
         ("logs", Some(matches)) => parse_logs(matches, wallet_manager),
-        ("ping", Some(matches)) => parse_cluster_ping(matches, default_signer, wallet_manager),
         ("rent", Some(matches)) => {
             let data_length = value_of::<RentLengthValue>(matches, "data_length")
                 .unwrap()
@@ -696,14 +692,11 @@ pub fn parse_command(
             clap::ErrorKind::UnrecognizedSubcommand,
         )
         .exit(),
-        ("portal", Some(matches)) => {
-            parse_portal_subcommand(matches, default_signer, wallet_manager)
-        }
         ("program", Some(matches)) => {
             parse_program_subcommand(matches, default_signer, wallet_manager)
         }
-        ("program-v4", Some(matches)) => {
-            parse_program_v4_subcommand(matches, default_signer, wallet_manager)
+        ("portal", Some(matches)) => {
+            parse_portal_subcommand(matches, default_signer, wallet_manager)
         }
         ("address-lookup-table", Some(matches)) => {
             parse_address_lookup_table_subcommand(matches, default_signer, wallet_manager)
@@ -753,7 +746,7 @@ pub fn parse_command(
         // Validator Info Commands
         ("validator-info", Some(matches)) => match matches.subcommand() {
             ("publish", Some(matches)) => {
-                parse_validator_info_command(matches, default_signer, wallet_manager)
+                parse_publish_validator_info_command(matches, default_signer, wallet_manager)
             }
             ("get", Some(matches)) => parse_get_validator_info_command(matches),
             _ => unreachable!(),
@@ -941,106 +934,6 @@ pub async fn process_command(config: &CliConfig<'_>) -> ProcessResult {
         }
         CliCommand::LiveSlots => process_live_slots(config),
         CliCommand::Logs { filter } => process_logs(config, filter),
-        CliCommand::Ping {
-            interval,
-            count,
-            timeout,
-            blockhash,
-            print_timestamp,
-            compute_unit_price,
-        } => {
-            eprintln!(
-                "Warning: The 'ping' command is deprecated in v4.0 and will be removed in v4.1."
-            );
-
-            let connection_cache = if config.use_tpu_client {
-                Some({
-                    #[cfg(feature = "dev-context-only-utils")]
-                    let cache = ConnectionCache::new_quic_for_tests(
-                        "connection_cache_cli_ping_quic",
-                        DEFAULT_TPU_CONNECTION_POOL_SIZE,
-                    );
-                    #[cfg(not(feature = "dev-context-only-utils"))]
-                    let cache = ConnectionCache::new_quic(
-                        "connection_cache_cli_ping_quic",
-                        DEFAULT_TPU_CONNECTION_POOL_SIZE,
-                    );
-                    cache
-                })
-            } else {
-                None
-            };
-
-            match connection_cache {
-                Some(ConnectionCache::Quic(cache)) => {
-                    let tpu_client = TpuClient::new_with_connection_cache(
-                        rpc_client.clone(),
-                        &config.websocket_url,
-                        TpuClientConfig::default(),
-                        cache,
-                    )
-                    .await
-                    .unwrap_or_else(|err| {
-                        eprintln!("Could not create TpuClient {err:?}");
-                        std::process::exit(1);
-                    });
-
-                    process_ping(
-                        Some(&tpu_client),
-                        config,
-                        interval,
-                        count,
-                        timeout,
-                        blockhash,
-                        *print_timestamp,
-                        *compute_unit_price,
-                        &rpc_client,
-                    )
-                    .await
-                }
-                Some(ConnectionCache::Udp(cache)) => {
-                    let tpu_client = TpuClient::new_with_connection_cache(
-                        rpc_client.clone(),
-                        &config.websocket_url,
-                        TpuClientConfig::default(),
-                        cache,
-                    )
-                    .await
-                    .unwrap_or_else(|err| {
-                        eprintln!("Could not create TpuClient {err:?}");
-                        std::process::exit(1);
-                    });
-
-                    process_ping(
-                        Some(&tpu_client),
-                        config,
-                        interval,
-                        count,
-                        timeout,
-                        blockhash,
-                        *print_timestamp,
-                        *compute_unit_price,
-                        &rpc_client,
-                    )
-                    .await
-                }
-                None => {
-                    use solana_quic_client::{QuicConfig, QuicConnectionManager, QuicPool};
-                    process_ping::<QuicPool, QuicConnectionManager, QuicConfig>(
-                        None,
-                        config,
-                        interval,
-                        count,
-                        timeout,
-                        blockhash,
-                        *print_timestamp,
-                        *compute_unit_price,
-                        &rpc_client,
-                    )
-                    .await
-                }
-            }
-        }
         CliCommand::Rent {
             data_length,
             use_lamports_unit,
@@ -1226,19 +1119,12 @@ pub async fn process_command(config: &CliConfig<'_>) -> ProcessResult {
             std::process::exit(1);
         }
 
-        // Portal interaction
-        CliCommand::Portal(portal_subcommand) => {
-            process_portal_subcommand(&rpc_client, config, portal_subcommand).await
-        }
-
         // Deploy a custom program to the chain
         CliCommand::Program(program_subcommand) => {
             process_program_subcommand(rpc_client, config, program_subcommand).await
         }
-
-        // Deploy a custom program v4 to the chain
-        CliCommand::ProgramV4(program_subcommand) => {
-            process_program_v4_subcommand(rpc_client, config, program_subcommand).await
+        CliCommand::Portal(portal_subcommand) => {
+            process_portal_subcommand(&rpc_client, config, portal_subcommand).await
         }
 
         // Stake Commands
@@ -1550,13 +1436,13 @@ pub async fn process_command(config: &CliConfig<'_>) -> ProcessResult {
             process_get_validator_info(&rpc_client, config, *info_pubkey).await
         }
         // Publish validator info
-        CliCommand::SetValidatorInfo {
+        CliCommand::PublishValidatorInfo {
             validator_info,
             force_keybase,
             info_pubkey,
             compute_unit_price,
         } => {
-            process_set_validator_info(
+            process_publish_validator_info(
                 &rpc_client,
                 config,
                 validator_info,
@@ -1863,6 +1749,7 @@ pub async fn process_command(config: &CliConfig<'_>) -> ProcessResult {
             signature,
             message,
         } => process_verify_offchain_signature(config, signer_pubkey, signature, message),
+        CliCommand::GetAgGenesisInfo => process_get_ag_genesis_info(&rpc_client, config).await,
     }
 }
 
@@ -2789,7 +2676,7 @@ mod tests {
         );
 
         //Test Transfer Subcommand, offline sign
-        let blockhash = Hash::new_from_array([1u8; 32]);
+        let blockhash = solana_hash::Hash::new_from_array([1u8; 32]);
         let blockhash_string = blockhash.to_string();
         let test_transfer = test_commands.clone().get_matches_from(vec![
             "test",

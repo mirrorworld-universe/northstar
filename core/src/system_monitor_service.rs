@@ -703,6 +703,34 @@ impl SystemMonitorService {
         }
     }
 
+    #[cfg(not(any(target_env = "msvc", target_os = "freebsd")))]
+    fn report_jemalloc_stats() {
+        use jemalloc_ctl::{epoch, stats};
+        // Advance the epoch so jemalloc refreshes its cached stat values.
+        epoch::mib().unwrap().advance().unwrap();
+        let allocated = stats::allocated::mib()
+            .and_then(|m| m.read())
+            .expect("Jemalloc stats is compiled in");
+        let active = stats::active::mib()
+            .and_then(|m| m.read())
+            .expect("Jemalloc stats is compiled in");
+        let resident = stats::resident::mib()
+            .and_then(|m| m.read())
+            .expect("Jemalloc stats is compiled in");
+        let retained = stats::retained::mib()
+            .and_then(|m| m.read())
+            .expect("Jemalloc stats is compiled in");
+        datapoint_info!(
+            "jemalloc_stats",
+            ("allocated_bytes", allocated, i64),
+            ("active_bytes", active, i64),
+            ("resident_bytes", resident, i64),
+            ("retained_bytes", retained, i64),
+            // Freed memory jemalloc is holding but hasn't returned to the OS yet.
+            ("dirty_bytes", resident.saturating_sub(active), i64),
+        );
+    }
+
     fn cpu_info() -> Result<CpuInfo, Error> {
         let cpu_num = sys_info::cpu_num()?;
         let cpu_freq_mhz = sys_info::cpu_speed()?;
@@ -726,88 +754,86 @@ impl SystemMonitorService {
         const CPUID_MANUFACTURER_EDX_AMD: u32 = 0x69746e65;
         const CPUID_MANUFACTURER_ECX_AMD: u32 = 0x444d4163;
 
-        unsafe {
-            let cpuid_mfr = __cpuid(0);
-            let cpuid_empty = CpuidResult {
-                eax: 0,
-                ebx: 0,
-                ecx: 0,
-                edx: 0,
-            };
-
-            let max_leaf = match CpuidParamValue::try_from(std::cmp::min(
-                cpuid_mfr.eax,
-                CPUID_PARAM_MAX_SUPPORTED_VALUE,
-            )) {
-                Ok(val) => val,
-                Err(_err) => CpuidParamValue::Manufacturer,
-            };
-
-            let mfr_id = if cpuid_mfr.ebx == CPUID_MANUFACTURER_EBX_INTEL
-                && cpuid_mfr.edx == CPUID_MANUFACTURER_EDX_INTEL
-                && cpuid_mfr.ecx == CPUID_MANUFACTURER_ECX_INTEL
-            {
-                CpuManufacturer::Intel // GenuineIntel
-            } else if cpuid_mfr.ebx == CPUID_MANUFACTURER_EBX_AMD
-                && cpuid_mfr.edx == CPUID_MANUFACTURER_EDX_AMD
-                && cpuid_mfr.ecx == CPUID_MANUFACTURER_ECX_AMD
-            {
-                CpuManufacturer::Amd // AuthenticAMD
-            } else {
-                CpuManufacturer::Other // anything else
-            };
-
-            let cpuid_processor = if CpuidParamValue::Processor <= max_leaf {
-                __cpuid(CpuidParamValue::Processor.into())
-            } else {
-                cpuid_empty
-            };
-            let cpuid_cache = if CpuidParamValue::Cache <= max_leaf {
-                __cpuid(CpuidParamValue::Cache.into())
-            } else {
-                cpuid_empty
-            };
-            let cpuid_topology = if CpuidParamValue::Topology <= max_leaf {
-                __cpuid(CpuidParamValue::Topology.into())
-            } else {
-                cpuid_empty
-            };
-            let cpuid_extended_0 = if CpuidParamValue::Extended <= max_leaf {
-                __cpuid_count(CpuidParamValue::Extended.into(), 0)
-            } else {
-                cpuid_empty
-            };
-            let cpuid_extended_1 = if CpuidParamValue::Extended <= max_leaf {
-                if 1 <= __get_cpuid_max(CpuidParamValue::Extended.into()).1 {
-                    __cpuid_count(CpuidParamValue::Extended.into(), 1)
-                } else {
-                    cpuid_empty
-                }
-            } else {
-                cpuid_empty
-            };
-
-            datapoint_info!(
-                "cpuid-values",
-                ("manufacturer_id", i64::from(mfr_id), i64),
-                ("cpuid_processor_eax", i64::from(cpuid_processor.eax), i64),
-                ("cpuid_processor_ebx", i64::from(cpuid_processor.ebx), i64),
-                ("cpuid_processor_ecx", i64::from(cpuid_processor.ecx), i64),
-                ("cpuid_processor_edx", i64::from(cpuid_processor.edx), i64),
-                ("cpuid_cache_eax", i64::from(cpuid_cache.eax), i64),
-                ("cpuid_cache_ebx", i64::from(cpuid_cache.ebx), i64),
-                ("cpuid_cache_ecx", i64::from(cpuid_cache.ecx), i64),
-                ("cpuid_cache_edx", i64::from(cpuid_cache.edx), i64),
-                ("cpuid_topology_eax", i64::from(cpuid_topology.eax), i64),
-                ("cpuid_topology_ebx", i64::from(cpuid_topology.ebx), i64),
-                ("cpuid_topology_ecx", i64::from(cpuid_topology.ecx), i64),
-                ("cpuid_topology_edx", i64::from(cpuid_topology.edx), i64),
-                ("cpuid_extended_0_ebx", i64::from(cpuid_extended_0.ebx), i64),
-                ("cpuid_extended_0_ecx", i64::from(cpuid_extended_0.ecx), i64),
-                ("cpuid_extended_0_edx", i64::from(cpuid_extended_0.edx), i64),
-                ("cpuid_extended_1_eax", i64::from(cpuid_extended_1.eax), i64),
-            );
+        let cpuid_mfr = __cpuid(0);
+        let cpuid_empty = CpuidResult {
+            eax: 0,
+            ebx: 0,
+            ecx: 0,
+            edx: 0,
         };
+
+        let max_leaf = match CpuidParamValue::try_from(std::cmp::min(
+            cpuid_mfr.eax,
+            CPUID_PARAM_MAX_SUPPORTED_VALUE,
+        )) {
+            Ok(val) => val,
+            Err(_err) => CpuidParamValue::Manufacturer,
+        };
+
+        let mfr_id = if cpuid_mfr.ebx == CPUID_MANUFACTURER_EBX_INTEL
+            && cpuid_mfr.edx == CPUID_MANUFACTURER_EDX_INTEL
+            && cpuid_mfr.ecx == CPUID_MANUFACTURER_ECX_INTEL
+        {
+            CpuManufacturer::Intel // GenuineIntel
+        } else if cpuid_mfr.ebx == CPUID_MANUFACTURER_EBX_AMD
+            && cpuid_mfr.edx == CPUID_MANUFACTURER_EDX_AMD
+            && cpuid_mfr.ecx == CPUID_MANUFACTURER_ECX_AMD
+        {
+            CpuManufacturer::Amd // AuthenticAMD
+        } else {
+            CpuManufacturer::Other // anything else
+        };
+
+        let cpuid_processor = if CpuidParamValue::Processor <= max_leaf {
+            __cpuid(CpuidParamValue::Processor.into())
+        } else {
+            cpuid_empty
+        };
+        let cpuid_cache = if CpuidParamValue::Cache <= max_leaf {
+            __cpuid(CpuidParamValue::Cache.into())
+        } else {
+            cpuid_empty
+        };
+        let cpuid_topology = if CpuidParamValue::Topology <= max_leaf {
+            __cpuid(CpuidParamValue::Topology.into())
+        } else {
+            cpuid_empty
+        };
+        let cpuid_extended_0 = if CpuidParamValue::Extended <= max_leaf {
+            __cpuid_count(CpuidParamValue::Extended.into(), 0)
+        } else {
+            cpuid_empty
+        };
+        let cpuid_extended_1 = if CpuidParamValue::Extended <= max_leaf {
+            if 1 <= __get_cpuid_max(CpuidParamValue::Extended.into()).1 {
+                __cpuid_count(CpuidParamValue::Extended.into(), 1)
+            } else {
+                cpuid_empty
+            }
+        } else {
+            cpuid_empty
+        };
+
+        datapoint_info!(
+            "cpuid-values",
+            ("manufacturer_id", i64::from(mfr_id), i64),
+            ("cpuid_processor_eax", i64::from(cpuid_processor.eax), i64),
+            ("cpuid_processor_ebx", i64::from(cpuid_processor.ebx), i64),
+            ("cpuid_processor_ecx", i64::from(cpuid_processor.ecx), i64),
+            ("cpuid_processor_edx", i64::from(cpuid_processor.edx), i64),
+            ("cpuid_cache_eax", i64::from(cpuid_cache.eax), i64),
+            ("cpuid_cache_ebx", i64::from(cpuid_cache.ebx), i64),
+            ("cpuid_cache_ecx", i64::from(cpuid_cache.ecx), i64),
+            ("cpuid_cache_edx", i64::from(cpuid_cache.edx), i64),
+            ("cpuid_topology_eax", i64::from(cpuid_topology.eax), i64),
+            ("cpuid_topology_ebx", i64::from(cpuid_topology.ebx), i64),
+            ("cpuid_topology_ecx", i64::from(cpuid_topology.ecx), i64),
+            ("cpuid_topology_edx", i64::from(cpuid_topology.edx), i64),
+            ("cpuid_extended_0_ebx", i64::from(cpuid_extended_0.ebx), i64),
+            ("cpuid_extended_0_ecx", i64::from(cpuid_extended_0.ecx), i64),
+            ("cpuid_extended_0_edx", i64::from(cpuid_extended_0.edx), i64),
+            ("cpuid_extended_1_eax", i64::from(cpuid_extended_1.eax), i64),
+        );
     }
 
     fn report_cpu_stats() {
@@ -983,6 +1009,8 @@ impl SystemMonitorService {
             }
             if config.report_os_memory_stats && mem_timer.should_update(SAMPLE_INTERVAL_MEM_MS) {
                 Self::report_mem_stats();
+                #[cfg(not(any(target_env = "msvc", target_os = "freebsd")))]
+                Self::report_jemalloc_stats();
             }
             if config.report_os_cpu_stats {
                 if cpu_timer.should_update(SAMPLE_INTERVAL_CPU_MS) {

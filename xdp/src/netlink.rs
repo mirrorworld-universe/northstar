@@ -23,6 +23,10 @@ use {
 
 const NETLINK_RCVBUF_SIZE: i32 = 1 << 16;
 const NLA_HDR_LEN: usize = align_to(mem::size_of::<nlattr>(), NLA_ALIGNTO as usize);
+
+// MTU of the device (from include/uapi/linux/if_link.h)
+const IFLA_MTU: u16 = 4;
+
 // GRE nested attributes (from include/uapi/linux/if_tunnel.h)
 const IFLA_GRE_LOCAL: u16 = 6;
 const IFLA_GRE_REMOTE: u16 = 7;
@@ -385,6 +389,7 @@ pub struct GreTunnelInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterfaceInfo {
     pub if_index: u32,
+    pub mtu: u32,
     pub gre_tunnel: Option<GreTunnelInfo>,
 }
 
@@ -442,10 +447,15 @@ pub(crate) fn parse_rtm_ifinfomsg(msg: &NetlinkMessage) -> Option<InterfaceInfo>
         return None;
     };
 
+    let mtu = attrs
+        .get(&IFLA_MTU)
+        .and_then(|a| u32_from_ne_bytes(a.data))?;
+
     // Parse GRE tunnel information if this is a GRE interface
     let gre_tunnel = parse_gre_tunnel_info_from_linkinfo(&attrs);
     Some(InterfaceInfo {
         if_index: ifi.ifi_index,
+        mtu,
         gre_tunnel,
     })
 }
@@ -615,7 +625,7 @@ pub fn parse_rtm_newneigh(msg: &NetlinkMessage, if_index: Option<u32>) -> Option
     Some(neighbor)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct RouteEntry {
     pub destination: Option<IpAddr>,
     pub gateway: Option<IpAddr>,
@@ -630,17 +640,6 @@ pub struct RouteEntry {
     pub family: u8,
     pub dst_len: u8,
     pub flags: u32,
-}
-
-impl RouteEntry {
-    #[inline]
-    pub fn same_key(&self, other: &Self) -> bool {
-        self.family == other.family
-            && self.dst_len == other.dst_len
-            && self.destination == other.destination
-            && self.table == other.table
-            && self.type_ == other.type_
-    }
 }
 
 #[repr(C)]
@@ -750,11 +749,6 @@ pub fn parse_rtm_newroute(msg: &NetlinkMessage) -> Option<RouteEntry> {
         route.gateway = parse_ip_address(gateway_attr.data, rt_msg.rtm_family);
     }
 
-    let u32_from_ne_bytes = |data: &[u8]| -> Option<u32> {
-        data.get(..4)
-            .map(|data| u32::from_ne_bytes([data[0], data[1], data[2], data[3]]))
-    };
-
     if let Some(oif_attr) = attrs.get(&RTA_OIF) {
         route.out_if_index = u32_from_ne_bytes(oif_attr.data).map(|i| i as i32);
     }
@@ -783,4 +777,9 @@ fn push_nlattr<T>(buf: &mut Vec<u8>, attr_type: u16, value: &T) {
     buf.extend_from_slice(bytes_of(&attr));
     buf.extend_from_slice(bytes_of(value));
     buf.resize(buf.len() + (aligned_len - attr_len), 0);
+}
+
+fn u32_from_ne_bytes(data: &[u8]) -> Option<u32> {
+    let bytes: [u8; 4] = data.get(..4)?.try_into().ok()?;
+    Some(u32::from_ne_bytes(bytes))
 }

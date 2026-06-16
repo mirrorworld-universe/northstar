@@ -17,7 +17,7 @@ while [[ -n $1 ]]; do
   fi
 done
 
-cargo_audit_ignores=(
+default_cargo_audit_extra_args=(
   # Crate:     ed25519-dalek
   # Version:   1.0.1
   # Title:     Double Public Key Signing Function Oracle Attack on `ed25519-dalek`
@@ -100,6 +100,44 @@ cargo_audit_ignores=(
   # AGAVE OK: vendored the upstream fix again
   --ignore RUSTSEC-2026-0104
 )
-scripts/cargo-for-all-lock-files.sh audit "${cargo_audit_ignores[@]}" | $dep_tree_filter
-# we want the `cargo audit` exit code, not `$dep_tree_filter`'s
-exit "${PIPESTATUS[0]}"
+
+xtask_cargo_audit_extra_args=(
+  # Crate:     rsa
+  # Version:   0.9.10
+  # Title:     Marvin Attack: potential key recovery through timing sidechannels
+  # Date:      2023-11-22
+  # ID:        RUSTSEC-2023-0071
+  # URL:       https://rustsec.org/advisories/RUSTSEC-2023-0071
+  # Severity:  5.9 (medium)
+  # Solution:  No fixed upgrade is available!
+  --ignore RUSTSEC-2023-0071
+)
+
+lock_files="$(git ls-files ':**Cargo.lock')"
+
+for lock_file in $lock_files; do
+  audit_extra_args=()
+  case "$lock_file" in
+  ci/xtask/Cargo.lock)
+    audit_extra_args=("${xtask_cargo_audit_extra_args[@]}")
+    ;;
+  *)
+    audit_extra_args=("${default_cargo_audit_extra_args[@]}")
+    ;;
+  esac
+
+  echo "--- [$lock_file]: cargo audit ${audit_extra_args[*]}"
+
+  set +e
+  (
+    cd "$(dirname "$lock_file")"
+    cargo audit --color always "${audit_extra_args[@]}" </dev/null
+  ) | $dep_tree_filter
+  pipeline_status=("${PIPESTATUS[@]}")
+  set -e
+
+  exit_code="${pipeline_status[0]}"
+  if [[ $exit_code -ne 0 ]]; then
+    exit "$exit_code"
+  fi
+done

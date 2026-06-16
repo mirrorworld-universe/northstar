@@ -3,6 +3,7 @@ use {
         admin_rpc_service, cli, commands::FromClapArgMatches, dashboard::Dashboard,
         ledger_lockfile, lock_ledger, println_name_value,
     },
+    agave_votor::vote_history_storage::FileVoteHistoryStorage,
     clap::{crate_name, value_t, value_t_or_exit, values_t_or_exit},
     crossbeam_channel::unbounded,
     itertools::Itertools,
@@ -132,6 +133,15 @@ fn main() {
         None
     };
     agave_logger::initialize_logging(logfile);
+    // NB: Align with agave to exit if any thread panics.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // Call the default hook.
+        default_hook(info);
+
+        // Force a process exit (no stack unwind).
+        std::process::exit(1);
+    }));
 
     info!("{} {}", crate_name!(), solana_version::version!());
     info!("Starting validator with: {:#?}", std::env::args_os());
@@ -431,6 +441,7 @@ fn main() {
     genesis.enable_scheduler_bindings = matches.is_present("enable_scheduler_bindings");
 
     let tower_storage = Arc::new(FileTowerStorage::new(ledger_path.clone()));
+    let vote_history_storage = Arc::new(FileVoteHistoryStorage::new(ledger_path.clone()));
 
     let admin_service_post_init = Arc::new(RwLock::new(None));
     // If geyser_plugin_config value is invalid, the validator will exit when the values are extracted below
@@ -453,6 +464,7 @@ fn main() {
             staked_nodes_overrides: genesis.staked_nodes_overrides.clone(),
             post_init: admin_service_post_init,
             tower_storage: tower_storage.clone(),
+            vote_history_storage: vote_history_storage.clone(),
             rpc_to_plugin_manager_sender,
         },
     );
@@ -599,7 +611,7 @@ fn main() {
             /* enable_warmup_epochs = */ false,
         ));
 
-        genesis.rent = Rent::with_slots_per_epoch(slots_per_epoch);
+        genesis.rent = Rent::default();
     }
 
     if let Some(inflation_fixed) = inflation_fixed {
