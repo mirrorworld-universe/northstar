@@ -579,11 +579,6 @@ impl NorthStarService {
                             } => {
                                 manager.credit_deposit(&depositor, delta);
                             }
-                            L1Event::FeeWithdrawn {
-                                delta, recipient, ..
-                            } => {
-                                manager.debit_withdrawal(&recipient, delta);
-                            }
                             other => {
                                 debug!("Unhandled L1 event: {other:?}");
                             }
@@ -651,6 +646,7 @@ mod tests {
         solana_gossip::contact_info::ContactInfo,
         solana_instruction::{AccountMeta, Instruction},
         solana_keypair::{Keypair, Signer},
+        solana_leader_schedule::SlotLeader,
         solana_net_utils::SocketAddrSpace,
         solana_pubkey::Pubkey,
         solana_rent::Rent,
@@ -840,7 +836,7 @@ mod tests {
     #[test]
     fn stuck_in_progress_settlement_is_reported_and_throttled() {
         let root_bank = create_processable_test_bank();
-        let bank = Bank::new_from_parent(root_bank, &Pubkey::default(), 20);
+        let bank = Bank::new_from_parent(root_bank, SlotLeader::new_unique(), 20);
         let program_id = Pubkey::new_unique();
         let session_pda = Pubkey::new_unique();
         let session = Session {
@@ -933,7 +929,7 @@ mod tests {
 
         let (bank, _) = Bank::new_with_bank_forks_for_tests(&genesis_config);
         bank.fill_bank_with_ticks_for_tests();
-        let bank = Bank::new_from_parent(bank.clone(), bank.leader_id(), bank.slot() + 1);
+        let bank = Bank::new_from_parent(bank.clone(), SlotLeader::new_unique(), bank.slot() + 1);
         let bank_forks = BankForks::new_rw_arc(bank);
         let bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
         (bank, bank_forks, program_id, mint_keypair)
@@ -1350,7 +1346,7 @@ mod tests {
 
         let close_bank = Bank::new_from_parent(
             bank_for_open.clone(),
-            &Pubkey::default(),
+            SlotLeader::new_unique(),
             bank_for_open.slot() + 3,
         );
         let close_ix =
@@ -1488,7 +1484,7 @@ mod tests {
         let l1_balance = 123_456_789;
         let reanchor_bank = Bank::new_from_parent(
             bank_for_open.clone(),
-            &Pubkey::default(),
+            SlotLeader::new_unique(),
             bank_for_open.slot() + 1,
         );
         reanchor_bank.store_account(
@@ -1620,7 +1616,7 @@ mod tests {
 
         let delegate_bank = Bank::new_from_parent(
             bank_for_open.clone(),
-            &Pubkey::default(),
+            SlotLeader::new_unique(),
             bank_for_open.slot() + 1,
         );
         let delegate_ix = build_delegate_ix(
@@ -1675,7 +1671,7 @@ mod tests {
 
         let deposit_bank = Bank::new_from_parent(
             delegate_bank.clone(),
-            &Pubkey::default(),
+            SlotLeader::new_unique(),
             delegate_bank.slot() + 1,
         );
         let deposit_ix = build_deposit_fee_ix(

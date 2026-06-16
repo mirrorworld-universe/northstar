@@ -361,6 +361,7 @@ mod tests {
     use {
         super::*,
         solana_keypair::{Keypair, Signer},
+        solana_leader_schedule::SlotLeader,
         solana_message::{MessageHeader, VersionedMessage, v0},
         solana_runtime::genesis_utils::create_genesis_config,
         solana_system_interface::instruction as system_instruction,
@@ -398,7 +399,7 @@ mod tests {
                 pre_token_balances: None,
                 post_token_balances: None,
                 rewards: Some(vec![]),
-                loaded_addresses: Default::default(),
+                loaded_addresses: v0::LoadedAddresses::default(),
                 return_data: None,
                 compute_units_consumed: Some(0),
                 cost_units: None,
@@ -441,7 +442,7 @@ mod tests {
                 .is_none()
         );
 
-        let bank1 = Bank::new_from_parent(Arc::new(bank0), &Pubkey::new_unique(), 1);
+        let bank1 = Bank::new_from_parent(Arc::new(bank0), SlotLeader::new_unique(), 1);
         store.finalize_slot(&bank1);
 
         assert_eq!(
@@ -474,7 +475,7 @@ mod tests {
         for slot in 1u64..6 {
             let bank = Arc::new(Bank::new_from_parent(
                 prev.clone(),
-                &Pubkey::new_unique(),
+                SlotLeader::new_unique(),
                 slot,
             ));
             let tx = VersionedTransactionWithStatusMeta {
@@ -492,7 +493,7 @@ mod tests {
                     pre_token_balances: None,
                     post_token_balances: None,
                     rewards: Some(vec![]),
-                    loaded_addresses: Default::default(),
+                    loaded_addresses: v0::LoadedAddresses::default(),
                     return_data: None,
                     compute_units_consumed: Some(0),
                     cost_units: None,
@@ -534,7 +535,7 @@ mod tests {
         store.record_transaction(&bank0, tx0);
         store.finalize_slot(&bank0);
 
-        let bank1 = Bank::new_from_parent(Arc::new(bank0), &Pubkey::new_unique(), 1);
+        let bank1 = Bank::new_from_parent(Arc::new(bank0), SlotLeader::new_unique(), 1);
         let tx1 = VersionedTransactionWithStatusMeta {
             transaction: VersionedTransaction {
                 signatures: vec![Signature::from([0u8; 64])],
@@ -550,7 +551,7 @@ mod tests {
                 pre_token_balances: None,
                 post_token_balances: None,
                 rewards: Some(vec![]),
-                loaded_addresses: Default::default(),
+                loaded_addresses: v0::LoadedAddresses::default(),
                 return_data: None,
                 compute_units_consumed: Some(0),
                 cost_units: None,

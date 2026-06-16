@@ -2,13 +2,54 @@
 
 All notable changes to this project will be documented in this file.
 
-Please follow the [guidance](#adding-to-this-changelog) at the bottom of this file when making changes.
+Please follow the [guidance](#adding-to-this-changelog) at the bottom of this file when making changes
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
-This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
+and follows a [Backwards Compatibility Policy](https://docs.anza.xyz/backwards-compatibility)
 
-> **Note:** entries below v4.0.0 are inherited from the upstream Agave validator
-> client and predate NorthStar. They are retained for operators who need
-> historical context on validator behavior changes.
+Release channels have their own copy of this changelog:
+* [edge - v4.2](#edge-channel)
+* [alpha - v4.1](https://github.com/anza-xyz/agave/blob/v4.1/CHANGELOG.md)
+* [beta - v4.0](https://github.com/anza-xyz/agave/blob/v4.0/CHANGELOG.md)
+* [stable - v3.1](https://github.com/anza-xyz/agave/blob/v3.1/CHANGELOG.md)
+
+<a name="edge-channel"></a>
+## 4.2.0-Unreleased
+### RPC
+#### Breaking
+#### Changes
+* Added `RpcClient::get_latest_blockhash_with_commitment_and_context`, which returns the
+  `getLatestBlockhash` response together with its context (notably `context.slot`).
+### Validator
+#### Breaking
+#### Deprecations
+* `--accounts-db-access-storages-method` is now deprecated and a no-op (the `mmap` value was
+  deprecated in v4.0.0; mmap mode has now been removed entirely). The flag is still accepted for
+  backward compatibility, but account storages are always accessed via file I/O.
+#### Changes
+### CLI
+#### Breaking
+#### Changes
+* `vote-account` supports Alpenglow and as such `vote-account --output json` breaks compatibility with older versions.
+
+## 4.1.0
+### RPC
+#### Breaking
+#### Changes
+### Validator
+#### Breaking
+* `--block-production-method central-scheduler` is no longer supported. If passed, a warning is emitted and behavior
+  will default to the greedy-scheduler implementation.
+* scheduler-bindings version has been increased to 4. Connecting external schedulers must be updated.
+* Validator now requires 26 ports, `--dynamic-port-range` must be at least 26 wide.
+#### Deprecations
+* Using `minimal` for `--accounts-index-limit` is now deprecated.
+* `--account-shrink-path` is now deprecated.
+* `sbf-sdk.tar.bz2` is not included anymore in the Agave release tarball. The file will be made available in the new
+  [`cargo-build-sbf`](https://github.com/anza-xyz/cargo-build-sbf) repository.
+* XDP support is no longer experimental. The `--experimental-retransmit-xdp-interface`, `--experimental-retransmit-xdp-cpu-cores`, and
+  `--experimental-retransmit-xdp-zero-copy` flags have been deprecated. Use `--xdp-interface`, `--xdp-cpu-cores`, and `--xdp-zero-copy` instead. Behavior is unchanged: pass `--xdp-cpu-cores` to enable XDP on the specified cores.
+#### Changes
 
 ## 4.0.0
 ### RPC
@@ -42,10 +83,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   * `--tpu-enable-udp`
 * `--block-verification-method blockstore-processor` is no longer supported. Remove the argument or switch to `--block-verification-method unified-scheduler` instead.
 * Removed support for ingestion of transactions via UDP. QUIC is now the only option.
-* All monorepo crates falling outside the upstream Agave backwards-compatibility
-policy are now part of the Agave Unstable API and their symbols have been made
-private. Enable the `agave-unstable-api` crate feature to acknowledge use of an
-interface that may break without warning.
+* All monorepo crates falling outside the
+[backward compatibility policy](https://docs.anza.xyz/backwards-compatibility) are now part
+of the Agave Unstable API and their symbols have been made private. Enable the
+`agave-unstable-api` crate feature to acknowledge use of an interface that may break
+without warning.
 * Linux Capability handling has been hardened wrt requirements for configuring XDP (#9133)
   * It is now an explicit _*error*_ + exit(1) if the process has not been permitted a
     capability required by the current configuration
@@ -78,7 +120,7 @@ interface that may break without warning.
         sudo setcap cap_net_raw,cap_net_admin,cap_bpf,cap_perfmon=p /path/to/agave-validator
         ```
 * Interpretation of the `Version` struct fields in gossip `ContactInfo` has been
-changed to support communicating
+[changed](https://github.com/anza-xyz/agave/pull/10286) to support communicating
 [semver prerelease notation](https://semver.org/#spec-item-9). Implementations lacking this
 support will observe a larger than expected _`min` version_ field from node publishing from a
 prerelease version. The new interpretation is as follows:
@@ -137,11 +179,12 @@ prerelease version. The new interpretation is as follows:
 #### Deprecations
 * The `--monitor` flag with `agave-validator exit` is now deprecated. Operators can use the `monitor` command after `exit` instead.
 * The `--disable-accounts-disk-index` flag is now deprecated.
-* All monorepo crates falling outside the upstream Agave backwards-compatibility
-policy are now deprecated, signaling their inclusion in the Agave Unstable API.
-Enable the `agave-unstable-api` crate feature to acknowledge use of an interface
-that may break without warning. From v4.0.0 onward, symbols in these crates will
-be unavailable without `agave-unstable-api` enabled.
+* All monorepo crates falling outside the
+[backward compatibility policy](https://docs.anza.xyz/backwards-compatibility) are now
+deprecated, signaling their inclusion in the Agave Unstable API. Enable the
+`agave-unstable-api` crate feature to acknowledge use of an interface that may break
+without warning. From v4.0.0 onward, symbols in these crates will be unavailable without
+`agave-unstable-api` enabled.
 * The `--dev-halt-at-slot` flag is now deprecated.
 
 #### Changes

@@ -2,6 +2,7 @@
 
 use {
     crate::{
+        XdpSender,
         addr_cache::AddrCache,
         cluster_nodes::{
             ClusterNodes, ClusterNodesCache, DATA_PLANE_FANOUT, Error, MAX_NUM_TURBINE_HOPS,
@@ -9,7 +10,6 @@ use {
     },
     agave_votor::event::VotorEvent,
     agave_votor_messages::migration::MigrationStatus,
-    agave_xdp::xdp_retransmitter::XdpSender,
     crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError},
     lru::LruCache,
     rand::Rng,
@@ -190,12 +190,7 @@ impl<const K: usize> ShredDeduper<K> {
         }
     }
 
-    fn maybe_reset<R: Rng>(
-        &mut self,
-        rng: &mut R,
-        false_positive_rate: f64,
-        reset_cycle: Duration,
-    ) {
+    fn maybe_reset<R: Rng>(&self, rng: &mut R, false_positive_rate: f64, reset_cycle: Duration) {
         self.deduper
             .maybe_reset(rng, false_positive_rate, reset_cycle);
         self.shred_id_filter
@@ -240,8 +235,8 @@ impl<'a> RetransmitSocket<'a> {
         xdp_sender: Option<&'a XdpSender>,
         cluster_info: &'a ClusterInfo,
     ) -> Self {
-        if let Some(xdp_sender) = xdp_sender {
-            RetransmitSocket::Xdp(xdp_sender)
+        if let Some(sender) = xdp_sender {
+            RetransmitSocket::Xdp(sender)
         } else if cluster_info.bind_ip_addrs().multihoming_enabled() {
             let sockets_per_interface =
                 retransmit_sockets.len() / cluster_info.bind_ip_addrs().len();
@@ -296,7 +291,7 @@ fn retransmit(
     stats: &mut RetransmitStats,
     cluster_nodes_cache: &ClusterNodesCache<RetransmitStage>,
     addr_cache: &mut AddrCache,
-    shred_deduper: &mut ShredDeduper,
+    shred_deduper: &ShredDeduper,
     max_slots: &MaxSlots,
     rpc_subscriptions: Option<&RpcSubscriptions>,
     slot_status_notifier: Option<&SlotStatusNotifier>,
@@ -652,7 +647,7 @@ impl RetransmitStage {
         let mut rng = rand::rng();
         let mut stats = RetransmitStats::new(Instant::now());
         let mut addr_cache = AddrCache::with_capacity(/*capacity:*/ 4);
-        let mut shred_deduper = ShredDeduper::new(&mut rng, DEDUPER_NUM_BITS);
+        let shred_deduper = ShredDeduper::new(&mut rng, DEDUPER_NUM_BITS);
 
         let thread_pool = {
             let num_threads = retransmit_sockets.len();
@@ -679,7 +674,7 @@ impl RetransmitStage {
                         &mut stats,
                         &cluster_nodes_cache,
                         &mut addr_cache,
-                        &mut shred_deduper,
+                        &shred_deduper,
                         &max_slots,
                         rpc_subscriptions.as_deref(),
                         slot_status_notifier.as_ref(),

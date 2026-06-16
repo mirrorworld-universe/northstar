@@ -2,8 +2,9 @@ use {
     crate::{ErStateDiff, ErStateDiffAccount},
     log::warn,
     northstar_portal::{
-        BeginSettlement, FinishSettlement, MAX_SETTLEMENT_CHUNK, PortalInstruction,
-        SettleDepositReceipt, WriteSettlementChunk, find_delegation_record_pda,
+        find_delegation_record_pda, BeginSettlement, FinishSettlement, PortalInstruction,
+        SettleAccountLamports, SettleAccountOwner, SettleDepositReceipt, WriteSettlementChunk,
+        MAX_SETTLEMENT_CHUNK, MAX_SETTLEMENT_LAMPORT_ACCOUNTS,
     },
     solana_account::ReadableAccount,
     solana_clock::Slot,
@@ -15,7 +16,7 @@ use {
     solana_sha256_hasher::hashv,
     solana_signer::Signer,
     solana_transaction::Transaction,
-    std::collections::HashSet,
+    std::collections::{HashMap, HashSet},
 };
 
 const SETTLEMENT_CHECKSUM_DOMAIN: &[u8] = b"northstar-settlement-v0";
@@ -29,8 +30,34 @@ pub struct SettlementChunk {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceiptBalanceSettlement {
-    pub recipient: Pubkey,
+    pub er_source: Pubkey,
+    pub l1_recipient: Pubkey,
     pub balance: u64,
+    /// Cumulative lamports withdrawn from this ER source's DepositReceipt.
+    pub withdrawn: u64,
+    /// Lamports paid to `l1_recipient` by this settlement item.
+    pub payout_lamports: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WithdrawalPayoutEvent {
+    pub er_source: Pubkey,
+    pub l1_recipient: Pubkey,
+    pub lamports: u64,
+    pub signature: solana_signature::Signature,
+    pub er_slot: Slot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountOwnerSettlement {
+    pub account: Pubkey,
+    pub owner: Pubkey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountLamportsSettlement {
+    pub account: Pubkey,
+    pub lamports: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +90,10 @@ pub enum SettlementUnsupportedChange {
         l1_rent_epoch: u64,
         er_rent_epoch: u64,
     },
+    TooManyLamportChanges {
+        count: usize,
+        max: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,13 +101,18 @@ pub struct SettlementPlan {
     pub er_slot: Slot,
     pub checksum: [u8; 32],
     pub chunks: Vec<SettlementChunk>,
+    pub owner_changes: Vec<AccountOwnerSettlement>,
+    pub lamport_changes: Vec<AccountLamportsSettlement>,
     pub receipt_balances: Vec<ReceiptBalanceSettlement>,
     pub unsupported_changes: Vec<SettlementUnsupportedChange>,
 }
 
 impl SettlementPlan {
     pub fn is_empty(&self) -> bool {
-        self.chunks.is_empty() && self.receipt_balances.is_empty()
+        self.chunks.is_empty()
+            && self.owner_changes.is_empty()
+            && self.lamport_changes.is_empty()
+            && self.receipt_balances.is_empty()
     }
 
     pub fn has_unsupported_changes(&self) -> bool {
@@ -176,7 +212,13 @@ impl SettlementPlan {
             return vec![];
         }
 
-        let mut instructions = Vec::with_capacity(self.chunks.len() + 2);
+        let mut instructions = Vec::with_capacity(
+            self.chunks.len()
+                + self.owner_changes.len()
+                + usize::from(!self.lamport_changes.is_empty())
+                + self.receipt_balances.len()
+                + 2,
+        );
         if include_begin {
             instructions.push(Instruction {
                 program_id: portal_program_id,
@@ -220,12 +262,67 @@ impl SettlementPlan {
             });
         }
 
+        for owner_change in &self.owner_changes {
+            let (delegation_record, _) = find_delegation_record_pda(
+                &portal_program_id.to_bytes(),
+                &owner_change.account.to_bytes(),
+            );
+            instructions.push(Instruction {
+                program_id: portal_program_id,
+                accounts: vec![
+                    AccountMeta::new_readonly(validator, true),
+                    AccountMeta::new(session_pda, false),
+                    AccountMeta::new(owner_change.account, false),
+                    AccountMeta::new(Pubkey::new_from_array(delegation_record), false),
+                ],
+                data: borsh::to_vec(&PortalInstruction::SettleAccountOwner(SettleAccountOwner {
+                    er_slot: self.er_slot,
+                    checksum: self.checksum,
+                    owner: owner_change.owner.to_bytes(),
+                }))
+                .unwrap(),
+            });
+        }
+
+        if !self.lamport_changes.is_empty() {
+            let mut lamports = [0; MAX_SETTLEMENT_LAMPORT_ACCOUNTS];
+            let mut accounts = vec![
+                AccountMeta::new_readonly(validator, true),
+                AccountMeta::new(session_pda, false),
+            ];
+            for (index, lamport_change) in self.lamport_changes.iter().enumerate() {
+                lamports[index] = lamport_change.lamports;
+                let (delegation_record, _) = find_delegation_record_pda(
+                    &portal_program_id.to_bytes(),
+                    &lamport_change.account.to_bytes(),
+                );
+                accounts.push(AccountMeta::new(lamport_change.account, false));
+                accounts.push(AccountMeta::new_readonly(
+                    Pubkey::new_from_array(delegation_record),
+                    false,
+                ));
+            }
+            instructions.push(Instruction {
+                program_id: portal_program_id,
+                accounts,
+                data: borsh::to_vec(&PortalInstruction::SettleAccountLamports(
+                    SettleAccountLamports {
+                        er_slot: self.er_slot,
+                        checksum: self.checksum,
+                        account_count: self.lamport_changes.len() as u8,
+                        lamports,
+                    },
+                ))
+                .unwrap(),
+            });
+        }
+
         for receipt in &self.receipt_balances {
             let deposit_receipt = Pubkey::find_program_address(
                 &[
                     b"deposit_receipt",
                     session_pda.as_ref(),
-                    receipt.recipient.as_ref(),
+                    receipt.er_source.as_ref(),
                 ],
                 &portal_program_id,
             )
@@ -236,13 +333,17 @@ impl SettlementPlan {
                     AccountMeta::new_readonly(validator, true),
                     AccountMeta::new(session_pda, false),
                     AccountMeta::new(deposit_receipt, false),
-                    AccountMeta::new_readonly(receipt.recipient, false),
+                    AccountMeta::new_readonly(receipt.er_source, false),
+                    AccountMeta::new(receipt.l1_recipient, false),
                 ],
                 data: borsh::to_vec(&PortalInstruction::SettleDepositReceipt(
                     SettleDepositReceipt {
                         er_slot: self.er_slot,
                         checksum: self.checksum,
                         balance: receipt.balance,
+                        withdrawn: receipt.withdrawn,
+                        payout_lamports: receipt.payout_lamports,
+                        l1_recipient: receipt.l1_recipient.to_bytes(),
                     },
                 ))
                 .unwrap(),
@@ -330,7 +431,15 @@ pub fn build_settlement_plan(
     receipt_balances: Vec<ReceiptBalanceSettlement>,
 ) -> Option<SettlementPlan> {
     let mut chunks = vec![];
+    let mut owner_changes = vec![];
+    let mut lamport_candidates = vec![];
     let mut unsupported_changes = vec![];
+    let mut receipt_payouts_by_recipient = HashMap::<Pubkey, u128>::new();
+    for receipt in &receipt_balances {
+        *receipt_payouts_by_recipient
+            .entry(receipt.l1_recipient)
+            .or_default() += receipt.payout_lamports as u128;
+    }
 
     for account_diff in &diff.accounts {
         if !delegated_accounts.contains(&account_diff.pubkey) {
@@ -346,24 +455,102 @@ pub fn build_settlement_plan(
         let Some(l1_account) = account_diff.l1_account.as_ref() else {
             continue;
         };
+        let er_account = &account_diff.er_account;
+
+        if l1_account.owner() != er_account.owner() {
+            owner_changes.push(AccountOwnerSettlement {
+                account: account_diff.pubkey,
+                owner: *er_account.owner(),
+            });
+        }
+        let l1_lamports = l1_account.lamports();
+        let er_lamports = er_account.lamports();
+        let receipt_payout = receipt_payouts_by_recipient
+            .get(&account_diff.pubkey)
+            .copied()
+            .unwrap_or(0);
+        let post_receipt_l1_lamports = (l1_lamports as u128).saturating_add(receipt_payout);
+        if post_receipt_l1_lamports != er_lamports as u128 {
+            if receipt_payout > 0 {
+                unsupported_changes.push(SettlementUnsupportedChange::LamportsChanged {
+                    account: account_diff.pubkey,
+                    l1_lamports,
+                    er_lamports,
+                });
+            } else {
+                lamport_candidates.push((account_diff.pubkey, l1_lamports, er_lamports));
+            }
+        }
         chunks.extend(data_chunks_for_account(
             account_diff.pubkey,
             l1_account.data(),
-            account_diff.er_account.data(),
+            er_account.data(),
         ));
     }
 
-    if chunks.is_empty() && receipt_balances.is_empty() && unsupported_changes.is_empty() {
-        return None;
+    let mut lamport_changes = vec![];
+    if lamport_candidates.len() > MAX_SETTLEMENT_LAMPORT_ACCOUNTS {
+        unsupported_changes.push(SettlementUnsupportedChange::TooManyLamportChanges {
+            count: lamport_candidates.len(),
+            max: MAX_SETTLEMENT_LAMPORT_ACCOUNTS,
+        });
+    } else if !lamport_candidates.is_empty() {
+        let l1_total = lamport_candidates
+            .iter()
+            .map(|(_, l1_lamports, _)| *l1_lamports as u128)
+            .sum::<u128>();
+        let er_total = lamport_candidates
+            .iter()
+            .map(|(_, _, er_lamports)| *er_lamports as u128)
+            .sum::<u128>();
+        if l1_total != er_total {
+            unsupported_changes.extend(lamport_candidates.iter().map(
+                |(account, l1_lamports, er_lamports)| {
+                    SettlementUnsupportedChange::LamportsChanged {
+                        account: *account,
+                        l1_lamports: *l1_lamports,
+                        er_lamports: *er_lamports,
+                    }
+                },
+            ));
+        } else {
+            lamport_changes.extend(lamport_candidates.into_iter().map(
+                |(account, _, er_lamports)| AccountLamportsSettlement {
+                    account,
+                    lamports: er_lamports,
+                },
+            ));
+        }
     }
+
     if !unsupported_changes.is_empty() {
+        chunks.clear();
+        owner_changes.clear();
+        lamport_changes.clear();
         warn!("Portal settlement blocked by unsupported account changes: {unsupported_changes:?}",);
+    }
+
+    if chunks.is_empty()
+        && owner_changes.is_empty()
+        && lamport_changes.is_empty()
+        && receipt_balances.is_empty()
+        && unsupported_changes.is_empty()
+    {
+        return None;
     }
 
     Some(SettlementPlan {
         er_slot,
-        checksum: checksum_settlement(er_slot, &chunks, &receipt_balances),
+        checksum: checksum_settlement(
+            er_slot,
+            &chunks,
+            &owner_changes,
+            &lamport_changes,
+            &receipt_balances,
+        ),
         chunks,
+        owner_changes,
+        lamport_changes,
         receipt_balances,
         unsupported_changes,
     })
@@ -386,20 +573,6 @@ fn unsupported_changes_for_account(
             account: account_diff.pubkey,
             l1_len: l1_account.data().len(),
             er_len: er_account.data().len(),
-        });
-    }
-    if l1_account.lamports() != er_account.lamports() {
-        unsupported_changes.push(SettlementUnsupportedChange::LamportsChanged {
-            account: account_diff.pubkey,
-            l1_lamports: l1_account.lamports(),
-            er_lamports: er_account.lamports(),
-        });
-    }
-    if l1_account.owner() != er_account.owner() {
-        unsupported_changes.push(SettlementUnsupportedChange::OwnerChanged {
-            account: account_diff.pubkey,
-            l1_owner: *l1_account.owner(),
-            er_owner: *er_account.owner(),
         });
     }
     if l1_account.executable() != er_account.executable() {
@@ -455,6 +628,8 @@ fn data_chunks_for_account(pubkey: Pubkey, l1_data: &[u8], er_data: &[u8]) -> Ve
 fn checksum_settlement(
     er_slot: Slot,
     chunks: &[SettlementChunk],
+    owner_changes: &[AccountOwnerSettlement],
+    lamport_changes: &[AccountLamportsSettlement],
     receipt_balances: &[ReceiptBalanceSettlement],
 ) -> [u8; 32] {
     let mut checksum = initial_settlement_checksum(er_slot);
@@ -466,12 +641,30 @@ fn checksum_settlement(
             &chunk.data,
         );
     }
+    for owner_change in owner_changes {
+        checksum = accumulate_owner_checksum(checksum, &owner_change.account, &owner_change.owner);
+    }
+    for lamport_change in lamport_changes {
+        checksum = accumulate_lamports_checksum(
+            checksum,
+            &lamport_change.account,
+            lamport_change.lamports,
+        );
+    }
     for receipt in receipt_balances {
-        checksum = accumulate_receipt_checksum(checksum, &receipt.recipient, receipt.balance);
+        checksum = accumulate_receipt_checksum(
+            checksum,
+            &receipt.er_source,
+            &receipt.l1_recipient,
+            receipt.balance,
+            receipt.withdrawn,
+            receipt.payout_lamports,
+        );
     }
     checksum
 }
 
+// Sonic: Must stay byte-identical to programs/portal/src/instructions/settlement.rs helpers.
 fn initial_settlement_checksum(er_slot: Slot) -> [u8; 32] {
     hashv(&[SETTLEMENT_CHECKSUM_DOMAIN, &er_slot.to_le_bytes()]).to_bytes()
 }
@@ -493,16 +686,40 @@ fn accumulate_data_chunk_checksum(
     .to_bytes()
 }
 
+fn accumulate_owner_checksum(accumulator: [u8; 32], account: &Pubkey, owner: &Pubkey) -> [u8; 32] {
+    hashv(&[&accumulator, b"owner", account.as_ref(), owner.as_ref()]).to_bytes()
+}
+
+fn accumulate_lamports_checksum(
+    accumulator: [u8; 32],
+    account: &Pubkey,
+    lamports: u64,
+) -> [u8; 32] {
+    hashv(&[
+        &accumulator,
+        b"lamports",
+        account.as_ref(),
+        &lamports.to_le_bytes(),
+    ])
+    .to_bytes()
+}
+
 fn accumulate_receipt_checksum(
     accumulator: [u8; 32],
-    recipient: &Pubkey,
+    er_source: &Pubkey,
+    l1_recipient: &Pubkey,
     balance: u64,
+    withdrawn: u64,
+    payout_lamports: u64,
 ) -> [u8; 32] {
     hashv(&[
         &accumulator,
         b"receipt",
-        recipient.as_ref(),
+        er_source.as_ref(),
+        l1_recipient.as_ref(),
         &balance.to_le_bytes(),
+        &withdrawn.to_le_bytes(),
+        &payout_lamports.to_le_bytes(),
     ])
     .to_bytes()
 }
@@ -584,7 +801,147 @@ mod tests {
         let plan = build_settlement_plan(&diff, &delegated_accounts, 5, vec![]).unwrap();
 
         assert_eq!(plan.chunks.len(), 1);
+        assert_eq!(plan.owner_changes, vec![]);
+        assert_eq!(plan.lamport_changes, vec![]);
         assert_eq!(plan.unsupported_changes, vec![]);
+    }
+
+    #[test]
+    fn owner_diff_builds_owner_settlement() {
+        let pubkey = Pubkey::new_unique();
+        let l1_owner = Pubkey::new_unique();
+        let er_owner = Pubkey::new_unique();
+        let diff = diff_for_account(
+            pubkey,
+            Some(account(&[1], 10, &l1_owner)),
+            account(&[1], 10, &er_owner),
+        );
+        let delegated_accounts = HashSet::from([pubkey]);
+
+        let plan = build_settlement_plan(&diff, &delegated_accounts, 5, vec![]).unwrap();
+
+        assert_eq!(plan.chunks, vec![]);
+        assert_eq!(
+            plan.owner_changes,
+            vec![AccountOwnerSettlement {
+                account: pubkey,
+                owner: er_owner,
+            }]
+        );
+        assert_eq!(plan.unsupported_changes, vec![]);
+    }
+
+    #[test]
+    fn net_zero_lamport_diff_builds_lamport_settlement() {
+        let first = Pubkey::new_unique();
+        let second = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let diff = ErStateDiff {
+            accounts: vec![
+                ErStateDiffAccount {
+                    pubkey: first,
+                    l1_account: Some(account(&[1], 10, &owner)),
+                    er_account: account(&[1], 7, &owner),
+                    l1_lt_hash: LtHash::identity(),
+                    er_lt_hash: LtHash::identity(),
+                },
+                ErStateDiffAccount {
+                    pubkey: second,
+                    l1_account: Some(account(&[2], 20, &owner)),
+                    er_account: account(&[2], 23, &owner),
+                    l1_lt_hash: LtHash::identity(),
+                    er_lt_hash: LtHash::identity(),
+                },
+            ],
+            lt_hash: LtHash::identity(),
+        };
+        let delegated_accounts = HashSet::from([first, second]);
+
+        let plan = build_settlement_plan(&diff, &delegated_accounts, 5, vec![]).unwrap();
+
+        assert_eq!(plan.chunks, vec![]);
+        assert_eq!(plan.owner_changes, vec![]);
+        assert_eq!(
+            plan.lamport_changes,
+            vec![
+                AccountLamportsSettlement {
+                    account: first,
+                    lamports: 7,
+                },
+                AccountLamportsSettlement {
+                    account: second,
+                    lamports: 23,
+                },
+            ]
+        );
+        assert_eq!(plan.unsupported_changes, vec![]);
+    }
+
+    #[test]
+    fn receipt_payout_covering_delegated_lamport_increase_is_supported() {
+        let er_source = Pubkey::new_unique();
+        let delegated = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let diff = diff_for_account(
+            delegated,
+            Some(account(&[], 10, &owner)),
+            account(&[], 15, &owner),
+        );
+        let delegated_accounts = HashSet::from([delegated]);
+        let receipt = ReceiptBalanceSettlement {
+            er_source,
+            l1_recipient: delegated,
+            balance: 95,
+            withdrawn: 5,
+            payout_lamports: 5,
+        };
+
+        let plan =
+            build_settlement_plan(&diff, &delegated_accounts, 5, vec![receipt.clone()]).unwrap();
+
+        assert_eq!(plan.lamport_changes, vec![]);
+        assert_eq!(plan.receipt_balances, vec![receipt]);
+        assert_eq!(plan.unsupported_changes, vec![]);
+    }
+
+    #[test]
+    fn receipt_payout_must_exactly_cover_delegated_lamport_delta() {
+        let er_source = Pubkey::new_unique();
+        let delegated = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let delegated_accounts = HashSet::from([delegated]);
+
+        for (er_lamports, payout_lamports) in [(16, 5), (14, 5)] {
+            let diff = diff_for_account(
+                delegated,
+                Some(account(&[], 10, &owner)),
+                account(&[], er_lamports, &owner),
+            );
+            let plan = build_settlement_plan(
+                &diff,
+                &delegated_accounts,
+                5,
+                vec![ReceiptBalanceSettlement {
+                    er_source,
+                    l1_recipient: delegated,
+                    balance: 95,
+                    withdrawn: payout_lamports,
+                    payout_lamports,
+                }],
+            )
+            .unwrap();
+
+            assert_eq!(plan.chunks, vec![]);
+            assert_eq!(plan.lamport_changes, vec![]);
+            assert_eq!(
+                plan.unsupported_changes,
+                vec![SettlementUnsupportedChange::LamportsChanged {
+                    account: delegated,
+                    l1_lamports: 10,
+                    er_lamports,
+                }]
+            );
+        }
     }
 
     #[test]
@@ -609,14 +966,13 @@ mod tests {
                 er_lamports: 11,
             }]
         );
-        assert!(
-            plan.portal_instructions(
+        assert!(plan
+            .portal_instructions(
                 Pubkey::new_unique(),
                 Pubkey::new_unique(),
                 Pubkey::new_unique()
             )
-            .is_empty()
-        );
+            .is_empty());
     }
 
     #[test]
@@ -662,22 +1018,49 @@ mod tests {
     }
 
     #[test]
+    fn receipt_checksum_changes_with_l1_recipient() {
+        let er_source = Pubkey::new_unique();
+        let balance = 10;
+        let withdrawn = 3;
+        let payout_lamports = 3;
+        let checksum_a = accumulate_receipt_checksum(
+            initial_settlement_checksum(1),
+            &er_source,
+            &Pubkey::new_unique(),
+            balance,
+            withdrawn,
+            payout_lamports,
+        );
+        let checksum_b = accumulate_receipt_checksum(
+            initial_settlement_checksum(1),
+            &er_source,
+            &Pubkey::new_unique(),
+            balance,
+            withdrawn,
+            payout_lamports,
+        );
+
+        assert_ne!(checksum_a, checksum_b);
+    }
+
+    #[test]
     fn empty_plan_emits_no_instructions() {
         let plan = SettlementPlan {
             er_slot: 1,
             checksum: [0; 32],
             chunks: vec![],
+            owner_changes: vec![],
+            lamport_changes: vec![],
             receipt_balances: vec![],
             unsupported_changes: vec![],
         };
-        assert!(
-            plan.portal_instructions(
+        assert!(plan
+            .portal_instructions(
                 Pubkey::new_unique(),
                 Pubkey::new_unique(),
                 Pubkey::new_unique()
             )
-            .is_empty()
-        );
+            .is_empty());
     }
 
     #[test]
@@ -691,6 +1074,8 @@ mod tests {
                 account_data_offset: 0,
                 data: vec![1],
             }],
+            owner_changes: vec![],
+            lamport_changes: vec![],
             receipt_balances: vec![],
             unsupported_changes: vec![SettlementUnsupportedChange::LamportsChanged {
                 account,
@@ -702,19 +1087,17 @@ mod tests {
         let session_pda = Pubkey::new_unique();
         let validator = Keypair::new();
 
-        assert!(
-            plan.portal_instructions(portal_program_id, session_pda, validator.pubkey())
-                .is_empty()
-        );
-        assert!(
-            plan.portal_transactions(
+        assert!(plan
+            .portal_instructions(portal_program_id, session_pda, validator.pubkey())
+            .is_empty());
+        assert!(plan
+            .portal_transactions(
                 portal_program_id,
                 session_pda,
                 &validator,
                 Hash::new_unique()
             )
-            .is_empty()
-        );
+            .is_empty());
     }
 
     #[test]
@@ -747,6 +1130,8 @@ mod tests {
                     data: vec![index as u8; MAX_SETTLEMENT_CHUNK],
                 })
                 .collect(),
+            owner_changes: vec![],
+            lamport_changes: vec![],
             receipt_balances: vec![],
             unsupported_changes: vec![],
         };
@@ -791,9 +1176,14 @@ mod tests {
                     data: vec![4],
                 },
             ],
+            owner_changes: vec![],
+            lamport_changes: vec![],
             receipt_balances: vec![ReceiptBalanceSettlement {
-                recipient: Pubkey::new_unique(),
+                er_source: Pubkey::new_unique(),
+                l1_recipient: Pubkey::new_unique(),
                 balance: 9,
+                withdrawn: 0,
+                payout_lamports: 0,
             }],
             unsupported_changes: vec![],
         };
@@ -804,11 +1194,9 @@ mod tests {
             &validator,
             Hash::new_unique(),
         );
-        assert!(
-            transactions
-                .iter()
-                .all(|transaction| transaction.signatures.len() == 1)
-        );
+        assert!(transactions
+            .iter()
+            .all(|transaction| transaction.signatures.len() == 1));
         let instructions = transactions
             .iter()
             .flat_map(|transaction| transaction.message.instructions.iter())

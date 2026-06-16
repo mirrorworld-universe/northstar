@@ -1,9 +1,10 @@
 use {
+    crate::settlement::WithdrawalPayoutEvent,
     log::{debug, trace, warn},
     solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
     solana_keypair::Keypair,
     solana_ledger::transaction_balances::compile_collected_balances,
-    solana_message::{AddressLoader, VersionedMessage, v0::LoadedAddresses},
+    solana_message::{v0::LoadedAddresses, AddressLoader, VersionedMessage},
     solana_pubkey::Pubkey,
     solana_rpc::{er_history::ErHistoryStore, rpc_subscriptions::RpcSubscriptions},
     solana_runtime::{
@@ -24,14 +25,14 @@ use {
     solana_tls_utils::NotifyKeyUpdate,
     solana_transaction::versioned::VersionedTransaction,
     solana_transaction_status::{
-        TransactionStatusMeta, VersionedTransactionWithStatusMeta, map_inner_instructions,
+        map_inner_instructions, TransactionStatusMeta, VersionedTransactionWithStatusMeta,
     },
     std::{
         collections::{HashMap, HashSet},
         error::Error,
         sync::{
-            Arc, Mutex, RwLock,
             atomic::{AtomicBool, Ordering},
+            Arc, Mutex, RwLock,
         },
     },
 };
@@ -62,6 +63,9 @@ pub struct EphemeralTransactionClient {
     /// continue to advance through the slot advancer's frozen-bank path.
     block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
     transaction_max_age: usize,
+    portal_program_id: Pubkey,
+    session_pda: Arc<RwLock<Option<Pubkey>>>,
+    withdrawal_payout_events: Arc<RwLock<Vec<WithdrawalPayoutEvent>>>,
 }
 
 impl Clone for EphemeralTransactionClient {
@@ -77,7 +81,55 @@ impl Clone for EphemeralTransactionClient {
             rpc_subscriptions: Arc::clone(&self.rpc_subscriptions),
             block_commitment_cache: Arc::clone(&self.block_commitment_cache),
             transaction_max_age: self.transaction_max_age,
+            portal_program_id: self.portal_program_id,
+            session_pda: Arc::clone(&self.session_pda),
+            withdrawal_payout_events: Arc::clone(&self.withdrawal_payout_events),
         }
+    }
+}
+
+pub(crate) struct EphemeralTransactionClientOptions {
+    er_account_overlay: Arc<RwLock<HashMap<Pubkey, AccountSharedData>>>,
+    er_history_store: Arc<ErHistoryStore>,
+    block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
+    transaction_max_age: usize,
+    portal_program_id: Pubkey,
+    session_pda: Arc<RwLock<Option<Pubkey>>>,
+    withdrawal_payout_events: Arc<RwLock<Vec<WithdrawalPayoutEvent>>>,
+}
+
+impl EphemeralTransactionClientOptions {
+    pub(crate) fn new(
+        er_account_overlay: Arc<RwLock<HashMap<Pubkey, AccountSharedData>>>,
+        er_history_store: Arc<ErHistoryStore>,
+        block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
+    ) -> Self {
+        Self {
+            er_account_overlay,
+            er_history_store,
+            block_commitment_cache,
+            transaction_max_age: crate::DEFAULT_ER_TRANSACTION_MAX_AGE,
+            portal_program_id: Pubkey::default(),
+            session_pda: Arc::new(RwLock::new(None)),
+            withdrawal_payout_events: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    pub(crate) fn with_transaction_max_age(mut self, transaction_max_age: usize) -> Self {
+        self.transaction_max_age = transaction_max_age;
+        self
+    }
+
+    pub(crate) fn with_withdrawal_payout_events(
+        mut self,
+        portal_program_id: Pubkey,
+        session_pda: Arc<RwLock<Option<Pubkey>>>,
+        withdrawal_payout_events: Arc<RwLock<Vec<WithdrawalPayoutEvent>>>,
+    ) -> Self {
+        self.portal_program_id = portal_program_id;
+        self.session_pda = session_pda;
+        self.withdrawal_payout_events = withdrawal_payout_events;
+        self
     }
 }
 
@@ -190,41 +242,42 @@ impl EphemeralTransactionClient {
         er_history_store: Arc<ErHistoryStore>,
         block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
     ) -> Self {
-        Self::new_with_history_overlay_commitment_cache_and_transaction_max_age(
+        Self::new_with_options(
             bank_forks,
             bank_operation_lock,
             delegated_accounts,
             touched_accounts,
             active,
-            er_account_overlay,
-            er_history_store,
-            block_commitment_cache,
-            crate::DEFAULT_ER_TRANSACTION_MAX_AGE,
+            EphemeralTransactionClientOptions::new(
+                er_account_overlay,
+                er_history_store,
+                block_commitment_cache,
+            ),
         )
     }
 
-    pub(crate) fn new_with_history_overlay_commitment_cache_and_transaction_max_age(
+    pub(crate) fn new_with_options(
         bank_forks: Arc<RwLock<BankForks>>,
         bank_operation_lock: Arc<Mutex<()>>,
         delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
         touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
         active: Arc<AtomicBool>,
-        er_account_overlay: Arc<RwLock<HashMap<Pubkey, AccountSharedData>>>,
-        er_history_store: Arc<ErHistoryStore>,
-        block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
-        transaction_max_age: usize,
+        options: EphemeralTransactionClientOptions,
     ) -> Self {
         Self {
             bank_forks,
             bank_operation_lock,
             delegated_accounts,
             touched_accounts,
-            er_account_overlay,
+            er_account_overlay: options.er_account_overlay,
             active,
-            er_history_store,
+            er_history_store: options.er_history_store,
             rpc_subscriptions: Arc::new(RwLock::new(None)),
-            block_commitment_cache,
-            transaction_max_age,
+            block_commitment_cache: options.block_commitment_cache,
+            transaction_max_age: options.transaction_max_age,
+            portal_program_id: options.portal_program_id,
+            session_pda: options.session_pda,
+            withdrawal_payout_events: options.withdrawal_payout_events,
         }
     }
 
@@ -259,6 +312,7 @@ impl EphemeralTransactionClient {
         bank: &Bank,
         tx: &VersionedTransaction,
         delegated_accounts: &HashSet<Pubkey>,
+        touched_accounts: &HashSet<Pubkey>,
     ) -> bool {
         // If delegation set is empty, allow everything (unrestricted mode)
         if delegated_accounts.is_empty() {
@@ -279,17 +333,20 @@ impl EphemeralTransactionClient {
                 continue;
             }
             if message.is_maybe_writable(i, None)
-                && !Self::is_allowed_writable_on_bank(bank, key, delegated_accounts)
+                && !Self::is_allowed_writable_on_bank(
+                    bank,
+                    key,
+                    delegated_accounts,
+                    touched_accounts,
+                )
             {
                 return false;
             }
         }
 
-        if !loaded_addresses
-            .writable
-            .iter()
-            .all(|key| Self::is_allowed_writable_on_bank(bank, key, delegated_accounts))
-        {
+        if !loaded_addresses.writable.iter().all(|key| {
+            Self::is_allowed_writable_on_bank(bank, key, delegated_accounts, touched_accounts)
+        }) {
             return false;
         }
 
@@ -300,6 +357,7 @@ impl EphemeralTransactionClient {
         bank: &Bank,
         key: &Pubkey,
         delegated_accounts: &HashSet<Pubkey>,
+        touched_accounts: &HashSet<Pubkey>,
     ) -> bool {
         // Always allow native programs and sysvars
         if system_program::check_id(key)
@@ -310,8 +368,9 @@ impl EphemeralTransactionClient {
             return true;
         }
 
-        // Allow delegated accounts
-        if delegated_accounts.contains(key) {
+        // Allow delegated accounts and ER bridge accounts materialized by
+        // deposit/withdrawal setup.
+        if delegated_accounts.contains(key) || touched_accounts.contains(key) {
             return true;
         }
 
@@ -358,10 +417,16 @@ impl TransactionClient for EphemeralTransactionClient {
         let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
         let bank = self.bank();
         let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
+        let touched_accounts = self.touched_accounts.read().unwrap().clone();
         let txs: Vec<_> = txs
             .into_iter()
             .filter(|tx| {
-                let allowed = Self::is_transaction_allowed_on_bank(&bank, tx, &delegated_accounts);
+                let allowed = Self::is_transaction_allowed_on_bank(
+                    &bank,
+                    tx,
+                    &delegated_accounts,
+                    &touched_accounts,
+                );
                 if !allowed {
                     warn!(
                         "Transaction rejected: writes to non-delegated accounts. sig={}",
@@ -476,6 +541,26 @@ impl EphemeralTransactionClient {
             );
         }
 
+        let (valid_txs, expired_txs): (Vec<_>, Vec<_>) = txs.into_iter().partition(|tx| {
+            let recent_blockhash = tx.message.recent_blockhash();
+            bank.get_hash_age(recent_blockhash)
+                .is_some_and(|age| age <= self.transaction_max_age as u64)
+        });
+
+        for tx in expired_txs {
+            self.record_failed_transaction(
+                bank,
+                tx,
+                solana_transaction::TransactionError::BlockhashNotFound,
+            );
+        }
+
+        if valid_txs.is_empty() {
+            return Err(solana_transaction::TransactionError::BlockhashNotFound.into());
+        }
+
+        let txs = valid_txs;
+
         let batch = match bank.prepare_entry_batch(txs.clone()) {
             Ok(batch) => batch,
             Err(e) => {
@@ -490,13 +575,13 @@ impl EphemeralTransactionClient {
         };
         let (commit_results, balance_collector) = bank.load_execute_and_commit_transactions(
             &batch,
-            self.transaction_max_age,
             Self::history_recording_config(),
             &mut ExecuteTimings::default(),
             None,
         );
 
         self.record_transaction_history_for_batch(bank, &txs, &commit_results, balance_collector);
+        self.record_withdrawal_payout_events_for_batch(bank, &txs, &commit_results);
         self.notify_transaction_subscribers(bank, &txs);
 
         for (tx_idx, result) in commit_results.iter().enumerate() {
@@ -509,6 +594,158 @@ impl EphemeralTransactionClient {
         }
 
         Ok(())
+    }
+
+    fn record_withdrawal_payout_events_for_batch(
+        &self,
+        bank: &Bank,
+        txs: &[VersionedTransaction],
+        commit_results: &[TransactionCommitResult],
+    ) {
+        let Some(session_pda) = *self.session_pda.read().unwrap() else {
+            return;
+        };
+        let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
+        let mut events = Vec::new();
+
+        for (tx, commit_result) in txs.iter().zip(commit_results) {
+            let Ok(committed_tx) = commit_result else {
+                continue;
+            };
+            if committed_tx.status.is_err() {
+                continue;
+            }
+            let memo_l1_recipient = self.memo_l1_recipient(bank, tx);
+            let loaded_addresses = Self::load_transaction_addresses(bank, tx).unwrap_or_default();
+            let account_keys = Self::full_account_keys(tx, &loaded_addresses);
+            let Some(signature) = tx.signatures.first().copied() else {
+                continue;
+            };
+
+            for ix in tx.message.instructions() {
+                let Some(program_id) = account_keys.get(ix.program_id_index as usize) else {
+                    continue;
+                };
+                if !system_program::check_id(program_id) {
+                    continue;
+                }
+                let Some(lamports) = Self::system_transfer_lamports(&ix.data) else {
+                    continue;
+                };
+                if lamports == 0 || ix.accounts.len() < 2 {
+                    continue;
+                }
+                let from_index = ix.accounts[0] as usize;
+                let to_index = ix.accounts[1] as usize;
+                let Some(er_source) = account_keys.get(from_index).copied() else {
+                    continue;
+                };
+                let Some(destination) = account_keys.get(to_index) else {
+                    continue;
+                };
+                if from_index >= tx.message.static_account_keys().len()
+                    || !tx.message.is_signer(from_index)
+                {
+                    continue;
+                }
+                let expected_sink =
+                    crate::withdrawal_sink_pda(&self.portal_program_id, &session_pda, &er_source);
+                let l1_recipient = if destination == &expected_sink {
+                    let Some(l1_recipient) = memo_l1_recipient else {
+                        continue;
+                    };
+                    l1_recipient
+                } else if delegated_accounts.contains(destination)
+                    && !delegated_accounts.contains(&er_source)
+                {
+                    *destination
+                } else {
+                    continue;
+                };
+
+                debug!(
+                    "recorded ER SOL withdrawal payout event: sig={}, er_source={}, \
+                     l1_recipient={}, lamports={}, er_slot={}",
+                    signature,
+                    er_source,
+                    l1_recipient,
+                    lamports,
+                    bank.slot()
+                );
+                events.push(WithdrawalPayoutEvent {
+                    er_source,
+                    l1_recipient,
+                    lamports,
+                    signature,
+                    er_slot: bank.slot(),
+                });
+            }
+        }
+
+        if !events.is_empty() {
+            self.withdrawal_payout_events
+                .write()
+                .unwrap()
+                .extend(events);
+        }
+    }
+
+    fn memo_l1_recipient(&self, bank: &Bank, tx: &VersionedTransaction) -> Option<Pubkey> {
+        let loaded_addresses = Self::load_transaction_addresses(bank, tx).unwrap_or_default();
+        let account_keys = Self::full_account_keys(tx, &loaded_addresses);
+        let mut memo_recipient = None;
+
+        for ix in tx.message.instructions() {
+            let Some(program_id) = account_keys.get(ix.program_id_index as usize) else {
+                continue;
+            };
+            if program_id != &spl_memo_interface::v3::id()
+                && program_id != &spl_memo_interface::v4::id()
+            {
+                continue;
+            }
+            let Some(recipient) = Self::decode_l1_recipient_memo(&ix.data) else {
+                warn!(
+                    "ignoring ER SOL withdrawal intent with invalid L1 recipient memo: sig={}",
+                    tx.signatures
+                        .first()
+                        .map(|signature| signature.to_string())
+                        .unwrap_or_default()
+                );
+                return None;
+            };
+            if memo_recipient.replace(recipient).is_some() {
+                warn!(
+                    "ignoring ER SOL withdrawal intent with multiple recipient memos: sig={}",
+                    tx.signatures
+                        .first()
+                        .map(|signature| signature.to_string())
+                        .unwrap_or_default()
+                );
+                return None;
+            }
+        }
+
+        memo_recipient
+    }
+
+    fn system_transfer_lamports(data: &[u8]) -> Option<u64> {
+        if data.len() != 12 || u32::from_le_bytes(data[0..4].try_into().ok()?) != 2 {
+            return None;
+        }
+        Some(u64::from_le_bytes(data[4..12].try_into().ok()?))
+    }
+
+    fn decode_l1_recipient_memo(data: &[u8]) -> Option<Pubkey> {
+        let memo = std::str::from_utf8(data).ok()?.trim();
+        memo.parse::<Pubkey>().ok()
+    }
+
+    fn full_account_keys(tx: &VersionedTransaction, loaded: &LoadedAddresses) -> Vec<Pubkey> {
+        let mut account_keys = tx.message.static_account_keys().to_vec();
+        account_keys.extend(loaded.writable.iter().copied());
+        account_keys.extend(loaded.readonly.iter().copied());
+        account_keys
     }
 
     /// Record a transaction that failed before it could even be prepared
@@ -598,6 +835,9 @@ impl EphemeralTransactionClient {
                     }
                 }
             }
+            // Sonic: V1 currently has no ALT lookups on the ER history path; if
+            // that changes, mirror the V0 load_addresses path before recording meta.
+            VersionedMessage::V1(_) => Some(LoadedAddresses::default()),
         }
     }
 
@@ -845,13 +1085,14 @@ mod tests {
         },
         solana_fee_structure::FeeDetails,
         solana_keypair::{Keypair, Signer},
+        solana_leader_schedule::SlotLeader,
         solana_message::{
-            Message, MessageHeader,
             v0::{self, MessageAddressTableLookup},
+            Message, MessageHeader,
         },
         solana_sdk_ids::system_program,
         solana_svm::transaction_execution_result::TransactionLoadedAccountsStats,
-        solana_transaction::{Transaction, versioned::VersionedTransaction},
+        solana_transaction::{versioned::VersionedTransaction, Transaction},
         solana_transaction_context::transaction::TransactionReturnData,
         std::{borrow::Cow, sync::Arc},
     };
@@ -1249,9 +1490,7 @@ mod tests {
             bank.register_unique_recent_blockhash_for_test();
         }
         assert!(bank.is_hash_valid_for_age(&old_blockhash, usize::MAX));
-        assert!(
-            !bank.is_hash_valid_for_age(&old_blockhash, crate::DEFAULT_ER_TRANSACTION_MAX_AGE,)
-        );
+        assert!(!bank.is_hash_valid_for_age(&old_blockhash, crate::DEFAULT_ER_TRANSACTION_MAX_AGE,));
 
         let bank_forks = BankForks::new_rw_arc(bank);
         let bank = bank_forks.read().unwrap().root_bank();
@@ -1273,6 +1512,75 @@ mod tests {
             status.err,
             Some(solana_transaction::TransactionError::BlockhashNotFound),
         );
+    }
+
+    #[test]
+    fn test_send_transactions_in_batch_records_expired_blockhash_and_executes_valid_siblings() {
+        let expired_fee_payer = Keypair::new();
+        let valid_fee_payer = Keypair::new();
+        let expired_recipient = Pubkey::new_unique();
+        let valid_recipient = Pubkey::new_unique();
+        let mut bank = create_test_bank();
+        fund_account(&bank, &expired_fee_payer.pubkey(), 10_000_000);
+        fund_account(&bank, &valid_fee_payer.pubkey(), 10_000_000);
+
+        let old_blockhash = bank.last_blockhash();
+        let expired_tx = create_transfer_tx(
+            &expired_fee_payer,
+            expired_fee_payer.pubkey(),
+            expired_recipient,
+            old_blockhash,
+        );
+        let expired_signature = expired_tx.signatures[0];
+
+        let recent_blockhash_max_age =
+            crate::er_recent_blockhash_max_age_for_slot_duration(crate::DEFAULT_ER_SLOT_DURATION);
+        bank.configure_er(
+            &crate::EphemeralRollupSettings::zero_fee_structure(),
+            recent_blockhash_max_age,
+        );
+        for _ in 0..=crate::DEFAULT_ER_TRANSACTION_MAX_AGE {
+            bank.register_unique_recent_blockhash_for_test();
+        }
+        assert!(!bank.is_hash_valid_for_age(&old_blockhash, crate::DEFAULT_ER_TRANSACTION_MAX_AGE,));
+
+        let valid_tx = create_transfer_tx(
+            &valid_fee_payer,
+            valid_fee_payer.pubkey(),
+            valid_recipient,
+            bank.last_blockhash(),
+        );
+        let valid_signature = valid_tx.signatures[0];
+
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let bank = bank_forks.read().unwrap().root_bank();
+        let er_history_store = Arc::new(ErHistoryStore::default());
+        let client = create_client_with_history(bank_forks, vec![], er_history_store.clone());
+
+        <EphemeralTransactionClient as TransactionClient>::send_transactions_in_batch(
+            &client,
+            vec![
+                bincode::serialize(&expired_tx).unwrap(),
+                bincode::serialize(&valid_tx).unwrap(),
+            ],
+            &SendTransactionServiceStats::default(),
+        );
+
+        assert_eq!(bank.get_balance(&expired_recipient), 0);
+        assert_eq!(bank.get_balance(&valid_recipient), 1_000_000);
+        er_history_store.finalize_slot(&bank);
+
+        let expired_status = er_history_store
+            .get_signature_status(&expired_signature)
+            .expect("expired tx should be recorded in ER history");
+        assert_eq!(
+            expired_status.err,
+            Some(solana_transaction::TransactionError::BlockhashNotFound),
+        );
+        let valid_status = er_history_store
+            .get_signature_status(&valid_signature)
+            .expect("valid sibling tx should be recorded in ER history");
+        assert_eq!(valid_status.err, None);
     }
 
     #[test]
@@ -1393,7 +1701,7 @@ mod tests {
         );
         root_bank.store_account(&address_table_key, &address_table_account);
         root_bank.freeze();
-        let bank = Bank::new_from_parent(Arc::new(root_bank), &Pubkey::new_unique(), 1);
+        let bank = Bank::new_from_parent(Arc::new(root_bank), SlotLeader::new_unique(), 1);
         let bank_forks = BankForks::new_rw_arc(bank);
         let bank = bank_forks.read().unwrap().root_bank();
 
@@ -1477,7 +1785,8 @@ mod tests {
         assert!(EphemeralTransactionClient::is_transaction_allowed_on_bank(
             &bank,
             &tx,
-            &client.delegated_accounts.read().unwrap()
+            &client.delegated_accounts.read().unwrap(),
+            &HashSet::new()
         ));
     }
 
@@ -1509,7 +1818,8 @@ mod tests {
         assert!(!EphemeralTransactionClient::is_transaction_allowed_on_bank(
             &bank,
             &tx,
-            &client.delegated_accounts.read().unwrap()
+            &client.delegated_accounts.read().unwrap(),
+            &HashSet::new()
         ));
     }
 
@@ -1536,7 +1846,8 @@ mod tests {
         assert!(EphemeralTransactionClient::is_transaction_allowed_on_bank(
             &bank,
             &tx,
-            &client.delegated_accounts.read().unwrap()
+            &client.delegated_accounts.read().unwrap(),
+            &HashSet::new()
         ));
     }
 
@@ -1562,7 +1873,8 @@ mod tests {
         assert!(EphemeralTransactionClient::is_transaction_allowed_on_bank(
             &bank,
             &tx,
-            &client.delegated_accounts.read().unwrap()
+            &client.delegated_accounts.read().unwrap(),
+            &HashSet::new()
         ));
     }
 
@@ -1595,7 +1907,8 @@ mod tests {
         assert!(EphemeralTransactionClient::is_transaction_allowed_on_bank(
             &bank,
             &tx,
-            &client.delegated_accounts.read().unwrap()
+            &client.delegated_accounts.read().unwrap(),
+            &HashSet::new()
         ));
     }
 
@@ -1622,7 +1935,8 @@ mod tests {
         assert!(EphemeralTransactionClient::is_transaction_allowed_on_bank(
             &bank,
             &tx,
-            &client.delegated_accounts.read().unwrap()
+            &client.delegated_accounts.read().unwrap(),
+            &HashSet::new()
         ));
     }
 
@@ -1654,7 +1968,8 @@ mod tests {
         assert!(EphemeralTransactionClient::is_transaction_allowed_on_bank(
             &bank,
             &tx,
-            &client.delegated_accounts.read().unwrap()
+            &client.delegated_accounts.read().unwrap(),
+            &HashSet::new()
         ));
     }
 
@@ -1691,7 +2006,8 @@ mod tests {
         assert!(!EphemeralTransactionClient::is_transaction_allowed_on_bank(
             &bank,
             &tx,
-            &client.delegated_accounts.read().unwrap()
+            &client.delegated_accounts.read().unwrap(),
+            &HashSet::new()
         ));
     }
 
@@ -1726,7 +2042,7 @@ mod tests {
         );
         root_bank.store_account(&address_table_key, &address_table_account);
         root_bank.freeze();
-        let bank = Bank::new_from_parent(Arc::new(root_bank), &Pubkey::new_unique(), 1);
+        let bank = Bank::new_from_parent(Arc::new(root_bank), SlotLeader::new_unique(), 1);
         let bank_forks = BankForks::new_rw_arc(bank);
         let bank = bank_forks.read().unwrap().root_bank();
         let client = create_client_with_delegated(bank_forks, vec![delegated_a]);
@@ -1754,7 +2070,8 @@ mod tests {
         assert!(!EphemeralTransactionClient::is_transaction_allowed_on_bank(
             &bank,
             &tx,
-            &client.delegated_accounts.read().unwrap()
+            &client.delegated_accounts.read().unwrap(),
+            &HashSet::new()
         ));
     }
 
@@ -1787,7 +2104,8 @@ mod tests {
         assert!(!EphemeralTransactionClient::is_transaction_allowed_on_bank(
             &bank,
             &tx,
-            &client.delegated_accounts.read().unwrap()
+            &client.delegated_accounts.read().unwrap(),
+            &HashSet::new()
         ));
     }
 

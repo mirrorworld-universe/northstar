@@ -6,12 +6,12 @@ use {
     },
     borsh::{BorshDeserialize, BorshSerialize},
     pinocchio::{
-        ProgramResult,
         account_info::AccountInfo,
         instruction::{Seed, Signer},
         program_error::ProgramError,
         pubkey::Pubkey,
-        sysvars::{Sysvar, rent::Rent},
+        sysvars::{rent::Rent, Sysvar},
+        ProgramResult,
     },
     pinocchio_system::instructions::CreateAccount,
 };

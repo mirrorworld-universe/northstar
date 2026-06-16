@@ -9,13 +9,14 @@ mod state;
 use {
     borsh::BorshDeserialize,
     pinocchio::{
-        MAX_TX_ACCOUNTS, ProgramResult, SUCCESS, account_info::AccountInfo,
-        entrypoint::deserialize, no_allocator, program_error::ProgramError,
+        account_info::AccountInfo, entrypoint::deserialize, no_allocator,
+        program_error::ProgramError, ProgramResult, SUCCESS,
     },
 };
 pub use {error::*, instruction::*, pda::*, state::*};
 
 pub const MAX_SETTLEMENT_CHUNK: usize = 700;
+pub const MAX_SETTLEMENT_LAMPORT_ACCOUNTS: usize = 10;
 
 no_allocator!();
 
@@ -68,25 +69,35 @@ fn process_instruction(
             instructions::process_finish_settlement(program_id, accounts, finish)
         }),
         Ok((8, _)) => instructions::process_abort_settlement(program_id, accounts),
-        Ok((9, payload)) => deserialize_args::<u64>(payload).and_then(|lamports| {
-            instructions::process_withdraw_fee(program_id, accounts, lamports)
-        }),
-        Ok((10, payload)) => deserialize_args(payload).and_then(|settle| {
+        Ok((9, payload)) => deserialize_args(payload).and_then(|settle| {
             instructions::process_settle_deposit_receipt(program_id, accounts, settle)
         }),
-        Ok((11, _)) => instructions::process_undelegate_handoff(program_id, accounts),
+        Ok((10, _)) => instructions::process_undelegate_handoff(program_id, accounts),
+        Ok((11, payload)) => deserialize_args(payload).and_then(|owner| {
+            instructions::process_settle_account_owner(program_id, accounts, owner)
+        }),
+        Ok((12, payload)) => deserialize_args(payload).and_then(|lamports| {
+            instructions::process_settle_account_lamports(program_id, accounts, lamports)
+        }),
         Ok((_, _)) | Err(_) => Err(ProgramError::InvalidInstructionData),
     }
 }
 
+// Sonic: Portal instructions need far fewer accounts than the transaction-wide
+// maximum. Keeping the Pinocchio account scratch array at MAX_TX_ACCOUNTS burns
+// the SBF stack before dispatch and causes live-validator Portal calls to exhaust
+// compute units without logs. Sixteen accounts covers current Portal instructions,
+// including batched Delegate calls, while keeping the stack scratch space small.
 #[no_mangle]
 /// # Safety
 /// `input` must be a valid pointer to a serialized Solana program input buffer.
 pub unsafe extern "C" fn entrypoint(input: *mut u8) -> u64 {
+    const MAX_PORTAL_ACCOUNTS: usize = 16;
     const UNINIT: core::mem::MaybeUninit<AccountInfo> = core::mem::MaybeUninit::uninit();
-    let mut accounts_arr = [UNINIT; MAX_TX_ACCOUNTS];
+    let mut accounts_arr = [UNINIT; MAX_PORTAL_ACCOUNTS];
 
-    let (program_id, count, instruction_data) = deserialize(input, &mut accounts_arr);
+    let (program_id, count, instruction_data) =
+        deserialize::<MAX_PORTAL_ACCOUNTS>(input, &mut accounts_arr);
 
     let accounts: &[AccountInfo] =
         core::slice::from_raw_parts(accounts_arr.as_ptr() as *const AccountInfo, count);

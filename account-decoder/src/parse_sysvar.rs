@@ -161,17 +161,13 @@ impl From<Fees> for UiFees {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct UiRent {
-    pub lamports_per_byte_year: StringAmount,
-    pub exemption_threshold: f64,
-    pub burn_percent: u8,
+    pub lamports_per_byte: StringAmount,
 }
 
 impl From<Rent> for UiRent {
     fn from(rent: Rent) -> Self {
         Self {
-            lamports_per_byte_year: rent.lamports_per_byte_year.to_string(),
-            exemption_threshold: rent.exemption_threshold,
-            burn_percent: rent.burn_percent,
+            lamports_per_byte: rent.lamports_per_byte.to_string(),
         }
     }
 }
@@ -270,8 +266,11 @@ mod test {
     #[allow(deprecated)]
     use solana_sysvar::recent_blockhashes::IterItem;
     use {
-        super::*, solana_account::create_account_for_test, solana_fee_calculator::FeeCalculator,
+        super::*,
+        solana_account::{Account, create_account_for_test},
+        solana_fee_calculator::FeeCalculator,
         solana_hash::Hash,
+        solana_stake_interface::stake_history::SIZE,
     };
 
     #[test]
@@ -322,9 +321,8 @@ mod test {
         }
 
         let rent = Rent {
-            lamports_per_byte_year: 10,
-            exemption_threshold: 2.0,
-            burn_percent: 5,
+            lamports_per_byte: 10,
+            ..Default::default()
         };
         let rent_sysvar = create_account_for_test(&rent);
         assert_eq!(
@@ -367,7 +365,8 @@ mod test {
             deactivating: 3,
         };
         stake_history.add(1, stake_history_entry.clone());
-        let stake_history_sysvar = create_account_for_test(&stake_history);
+        let stake_history_sysvar =
+            Account::new_data_with_space(1, &stake_history, SIZE, &sysvar::id()).unwrap();
         assert_eq!(
             parse_sysvar(&stake_history_sysvar.data, &sysvar::stake_history::id()).unwrap(),
             SysvarAccountType::StakeHistory(vec![UiStakeHistoryEntry {

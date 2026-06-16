@@ -1595,7 +1595,7 @@ mod tests {
         const RANDOM2: u64 = 0x60AE_DA87_48E9_A887;
 
         let ix1 = Bucket::<()>::bucket_index_ix(&PUBKEY, RANDOM1);
-        assert_eq!(ix1, 0x0CAD_75DB_E472_9589);
+        assert_eq!(ix1, 0x19A9_4992_B297_4DE5);
 
         let ix2 = Bucket::<()>::bucket_index_ix(&PUBKEY, RANDOM2);
         assert_ne!(ix2, ix1);

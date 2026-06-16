@@ -6,7 +6,7 @@ use {
     },
     borsh::BorshDeserialize,
     pinocchio::{
-        ProgramResult, account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey,
+        account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, ProgramResult,
     },
 };
 
