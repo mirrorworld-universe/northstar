@@ -1751,6 +1751,105 @@ mod portal_e2e_tests {
     }
 
     #[test]
+    fn test_portal_settles_owner_and_net_zero_lamport_changes() {
+        setup();
+
+        let (bank, _bank_forks, program_id, mint_keypair) = setup_bank_with_portal();
+        let owner_keypair = Keypair::new();
+        let owner_pubkey = owner_keypair.pubkey();
+        bank.transfer(100_000_000_000, &mint_keypair, &owner_pubkey)
+            .unwrap();
+
+        let grid_id = 1u64;
+        let (session_pda, _) = find_session_pda(&program_id);
+        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id);
+        let open_session_ix = build_open_session_ix(
+            program_id,
+            owner_pubkey,
+            session_pda,
+            fee_vault_pda,
+            grid_id,
+            1000,
+            5_000_000_000,
+        );
+        let tx = Transaction::new_signed_with_payer(
+            &[open_session_ix],
+            Some(&owner_pubkey),
+            &[&owner_keypair],
+            bank.last_blockhash(),
+        );
+        bank.process_transaction(&tx).unwrap();
+
+        let first_delegated = Pubkey::new_unique();
+        let second_delegated = Pubkey::new_unique();
+        let old_owner = Pubkey::new_unique();
+        let new_owner = Pubkey::new_unique();
+        let first_l1_account = AccountSharedData::new(10_000_000, 1, &old_owner);
+        let second_l1_account = AccountSharedData::new(20_000_000, 1, &old_owner);
+        let first_portal_account = AccountSharedData::new(10_000_000, 1, &program_id);
+        let second_portal_account = AccountSharedData::new(20_000_000, 1, &program_id);
+        bank.store_account(&first_delegated, &first_portal_account);
+        bank.store_account(&second_delegated, &second_portal_account);
+        store_delegation_record(&bank, &program_id, &first_delegated, &old_owner, grid_id);
+        store_delegation_record(&bank, &program_id, &second_delegated, &old_owner, grid_id);
+
+        bank.freeze();
+        let settlement_bank = Bank::new_from_parent(
+            bank.clone(),
+            &Pubkey::default(),
+            bank.slot().saturating_add(11),
+        );
+        let first_er_account = AccountSharedData::new(9_000_000, 1, &new_owner);
+        let second_er_account = AccountSharedData::new(21_000_000, 1, &old_owner);
+        let diff = ErStateDiff {
+            accounts: vec![
+                ErStateDiffAccount {
+                    pubkey: first_delegated,
+                    l1_account: Some(first_l1_account),
+                    er_account: first_er_account,
+                    l1_lt_hash: LtHash::identity(),
+                    er_lt_hash: LtHash::identity(),
+                },
+                ErStateDiffAccount {
+                    pubkey: second_delegated,
+                    l1_account: Some(second_l1_account),
+                    er_account: second_er_account,
+                    l1_lt_hash: LtHash::identity(),
+                    er_lt_hash: LtHash::identity(),
+                },
+            ],
+            lt_hash: LtHash::identity(),
+        };
+        let delegated_accounts = HashSet::from([first_delegated, second_delegated]);
+        let plan = build_settlement_plan(&diff, &delegated_accounts, 7, vec![]).unwrap();
+        assert_eq!(plan.owner_changes.len(), 1);
+        assert_eq!(plan.lamport_changes.len(), 2);
+
+        let transactions = plan.portal_transactions(
+            program_id,
+            session_pda,
+            &owner_keypair,
+            settlement_bank.last_blockhash(),
+        );
+        assert_eq!(transactions.len(), 1);
+        settlement_bank
+            .process_transaction(&transactions[0])
+            .unwrap();
+
+        assert_eq!(settlement_bank.get_balance(&first_delegated), 9_000_000);
+        assert_eq!(settlement_bank.get_balance(&second_delegated), 21_000_000);
+
+        let (record_pda, _) = find_delegation_record_pda(&program_id, &first_delegated);
+        let record_account = settlement_bank.get_account(&record_pda).unwrap();
+        let Some(PortalAccount::DelegationRecord(record)) =
+            try_parse_raw_portal_account(record_account.data())
+        else {
+            panic!("delegation record should deserialize");
+        };
+        assert_eq!(record.owner_program, new_owner.to_bytes());
+    }
+
+    #[test]
     fn test_portal_rejects_settlement_chunk_not_matching_checksum() {
         setup();
 

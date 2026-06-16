@@ -1,5 +1,5 @@
 use {
-    crate::MAX_SETTLEMENT_CHUNK,
+    crate::{MAX_SETTLEMENT_CHUNK, MAX_SETTLEMENT_LAMPORT_ACCOUNTS},
     borsh::{BorshDeserialize, BorshSerialize},
     pinocchio::pubkey::Pubkey,
 };
@@ -75,6 +75,16 @@ pub enum PortalInstruction {
     #[cfg_attr(feature = "idl", account(4, name = "system_program"))]
     #[cfg_attr(feature = "idl", account(5, name = "session"))]
     UndelegateHandoff,
+
+    #[cfg_attr(feature = "idl", account(0, name = "validator", sig))]
+    #[cfg_attr(feature = "idl", account(1, name = "session", mut))]
+    #[cfg_attr(feature = "idl", account(2, name = "delegated_account", mut))]
+    #[cfg_attr(feature = "idl", account(3, name = "delegation_record", mut))]
+    SettleAccountOwner(SettleAccountOwner),
+
+    #[cfg_attr(feature = "idl", account(0, name = "validator", sig))]
+    #[cfg_attr(feature = "idl", account(1, name = "session", mut))]
+    SettleAccountLamports(SettleAccountLamports),
 }
 
 #[cfg_attr(feature = "idl", derive(shank::ShankType))]
@@ -118,4 +128,21 @@ pub struct SettleDepositReceipt {
     pub checksum: [u8; 32],
     pub balance: u64,
     pub withdrawn: u64,
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+pub struct SettleAccountOwner {
+    pub er_slot: u64,
+    pub checksum: [u8; 32],
+    pub owner: Pubkey,
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+pub struct SettleAccountLamports {
+    pub er_slot: u64,
+    pub checksum: [u8; 32],
+    pub account_count: u8,
+    pub lamports: [u64; MAX_SETTLEMENT_LAMPORT_ACCOUNTS],
 }
