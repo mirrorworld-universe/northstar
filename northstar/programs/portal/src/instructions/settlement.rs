@@ -11,13 +11,14 @@ use {
         account_info::AccountInfo,
         program_error::ProgramError,
         pubkey::Pubkey,
-        sysvars::{Sysvar, clock::Clock},
+        sysvars::{Sysvar, clock::Clock, rent::Rent},
     },
     solana_sha256_hasher::hashv,
 };
 
 const SETTLEMENT_CHECKSUM_DOMAIN: &[u8] = b"northstar-settlement-v0";
 
+// Sonic: Must stay byte-identical to northstar/src/settlement.rs helpers.
 pub(crate) fn initial_settlement_checksum(er_slot: u64) -> [u8; 32] {
     hashv(&[SETTLEMENT_CHECKSUM_DOMAIN, &er_slot.to_le_bytes()]).to_bytes()
 }
@@ -339,6 +340,7 @@ pub fn process_settle_account_lamports(
         }
     }
 
+    let rent = Rent::get()?;
     let mut current_total = 0u128;
     let mut target_total = 0u128;
     let mut already_settled = true;
@@ -351,6 +353,9 @@ pub fn process_settle_account_lamports(
         target_total = target_total
             .checked_add(target_lamports as u128)
             .ok_or(PortalError::ArithmeticOverflow)?;
+        if account.data_len() > 0 && target_lamports < rent.minimum_balance(account.data_len()) {
+            return Err(PortalError::SettlementLamportsBelowRentExempt.into());
+        }
         already_settled &= account.lamports() == target_lamports;
     }
 

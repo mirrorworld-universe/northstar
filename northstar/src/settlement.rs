@@ -631,6 +631,7 @@ fn checksum_settlement(
     checksum
 }
 
+// Sonic: Must stay byte-identical to programs/portal/src/instructions/settlement.rs helpers.
 fn initial_settlement_checksum(er_slot: Slot) -> [u8; 32] {
     hashv(&[SETTLEMENT_CHECKSUM_DOMAIN, &er_slot.to_le_bytes()]).to_bytes()
 }

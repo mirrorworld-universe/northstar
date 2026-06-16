@@ -33,6 +33,7 @@ pub enum PortalError {
     DelegationRecordAccountMismatch = 28,
     DelegatedAccountDataNotEmpty = 29,
     SettlementLamportsNotConserved = 30,
+    SettlementLamportsBelowRentExempt = 31,
 }
 
 impl From<PortalError> for ProgramError {
