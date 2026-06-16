@@ -30,11 +30,22 @@ pub struct SettlementChunk {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceiptBalanceSettlement {
-    pub recipient: Pubkey,
+    pub er_source: Pubkey,
+    pub l1_recipient: Pubkey,
     pub balance: u64,
-    /// Cumulative lamports moved by ER withdrawal transactions into the
-    /// recipient's withdrawal sink PDA.
+    /// Cumulative lamports withdrawn from this ER source's DepositReceipt.
     pub withdrawn: u64,
+    /// Lamports paid to `l1_recipient` by this settlement item.
+    pub payout_lamports: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WithdrawalPayoutEvent {
+    pub er_source: Pubkey,
+    pub l1_recipient: Pubkey,
+    pub lamports: u64,
+    pub signature: solana_signature::Signature,
+    pub er_slot: Slot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,7 +322,7 @@ impl SettlementPlan {
                 &[
                     b"deposit_receipt",
                     session_pda.as_ref(),
-                    receipt.recipient.as_ref(),
+                    receipt.er_source.as_ref(),
                 ],
                 &portal_program_id,
             )
@@ -322,7 +333,8 @@ impl SettlementPlan {
                     AccountMeta::new_readonly(validator, true),
                     AccountMeta::new(session_pda, false),
                     AccountMeta::new(deposit_receipt, false),
-                    AccountMeta::new(receipt.recipient, false),
+                    AccountMeta::new_readonly(receipt.er_source, false),
+                    AccountMeta::new(receipt.l1_recipient, false),
                 ],
                 data: borsh::to_vec(&PortalInstruction::SettleDepositReceipt(
                     SettleDepositReceipt {
@@ -330,6 +342,8 @@ impl SettlementPlan {
                         checksum: self.checksum,
                         balance: receipt.balance,
                         withdrawn: receipt.withdrawn,
+                        payout_lamports: receipt.payout_lamports,
+                        l1_recipient: receipt.l1_recipient.to_bytes(),
                     },
                 ))
                 .unwrap(),
@@ -623,9 +637,11 @@ fn checksum_settlement(
     for receipt in receipt_balances {
         checksum = accumulate_receipt_checksum(
             checksum,
-            &receipt.recipient,
+            &receipt.er_source,
+            &receipt.l1_recipient,
             receipt.balance,
             receipt.withdrawn,
+            receipt.payout_lamports,
         );
     }
     checksum
@@ -673,16 +689,20 @@ fn accumulate_lamports_checksum(
 
 fn accumulate_receipt_checksum(
     accumulator: [u8; 32],
-    recipient: &Pubkey,
+    er_source: &Pubkey,
+    l1_recipient: &Pubkey,
     balance: u64,
     withdrawn: u64,
+    payout_lamports: u64,
 ) -> [u8; 32] {
     hashv(&[
         &accumulator,
         b"receipt",
-        recipient.as_ref(),
+        er_source.as_ref(),
+        l1_recipient.as_ref(),
         &balance.to_le_bytes(),
         &withdrawn.to_le_bytes(),
+        &payout_lamports.to_le_bytes(),
     ])
     .to_bytes()
 }
@@ -915,6 +935,32 @@ mod tests {
     }
 
     #[test]
+    fn receipt_checksum_changes_with_l1_recipient() {
+        let er_source = Pubkey::new_unique();
+        let balance = 10;
+        let withdrawn = 3;
+        let payout_lamports = 3;
+        let checksum_a = accumulate_receipt_checksum(
+            initial_settlement_checksum(1),
+            &er_source,
+            &Pubkey::new_unique(),
+            balance,
+            withdrawn,
+            payout_lamports,
+        );
+        let checksum_b = accumulate_receipt_checksum(
+            initial_settlement_checksum(1),
+            &er_source,
+            &Pubkey::new_unique(),
+            balance,
+            withdrawn,
+            payout_lamports,
+        );
+
+        assert_ne!(checksum_a, checksum_b);
+    }
+
+    #[test]
     fn empty_plan_emits_no_instructions() {
         let plan = SettlementPlan {
             er_slot: 1,
@@ -1053,9 +1099,11 @@ mod tests {
             owner_changes: vec![],
             lamport_changes: vec![],
             receipt_balances: vec![ReceiptBalanceSettlement {
-                recipient: Pubkey::new_unique(),
+                er_source: Pubkey::new_unique(),
+                l1_recipient: Pubkey::new_unique(),
                 balance: 9,
                 withdrawn: 0,
+                payout_lamports: 0,
             }],
             unsupported_changes: vec![],
         };

@@ -58,16 +58,20 @@ pub(crate) fn accumulate_lamports_checksum(
 
 pub(crate) fn accumulate_receipt_checksum(
     accumulator: [u8; 32],
-    recipient: &Pubkey,
+    er_source: &Pubkey,
+    l1_recipient: &Pubkey,
     balance: u64,
     withdrawn: u64,
+    payout_lamports: u64,
 ) -> [u8; 32] {
     hashv(&[
         &accumulator,
         b"receipt",
-        recipient,
+        er_source,
+        l1_recipient,
         &balance.to_le_bytes(),
         &withdrawn.to_le_bytes(),
+        &payout_lamports.to_le_bytes(),
     ])
     .to_bytes()
 }

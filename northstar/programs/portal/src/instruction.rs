@@ -65,7 +65,8 @@ pub enum PortalInstruction {
     #[cfg_attr(feature = "idl", account(0, name = "validator", sig))]
     #[cfg_attr(feature = "idl", account(1, name = "session", mut))]
     #[cfg_attr(feature = "idl", account(2, name = "deposit_receipt", mut))]
-    #[cfg_attr(feature = "idl", account(3, name = "recipient", mut))]
+    #[cfg_attr(feature = "idl", account(3, name = "er_source"))]
+    #[cfg_attr(feature = "idl", account(4, name = "l1_recipient", mut))]
     SettleDepositReceipt(SettleDepositReceipt),
 
     #[cfg_attr(feature = "idl", account(0, name = "authority", sig, mut))]
@@ -128,6 +129,8 @@ pub struct SettleDepositReceipt {
     pub checksum: [u8; 32],
     pub balance: u64,
     pub withdrawn: u64,
+    pub payout_lamports: u64,
+    pub l1_recipient: Pubkey,
 }
 
 #[cfg_attr(feature = "idl", derive(shank::ShankType))]

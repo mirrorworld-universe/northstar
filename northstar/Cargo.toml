@@ -23,6 +23,7 @@ solana-signer.workspace = true
 solana-system-interface.workspace = true
 solana-send-transaction-service.workspace = true
 solana-sha256-hasher = { workspace = true, features = ["sha2"] }
+solana-signature.workspace = true
 solana-svm-timings.workspace = true
 solana-svm.workspace = true
 solana-transaction.workspace = true
@@ -55,6 +56,7 @@ northstar-portal.workspace = true
 
 borsh = { workspace = true }
 solana-rent.workspace = true
+spl-memo-interface.workspace = true
 
 [dev-dependencies]
 agave-snapshots.workspace = true
@@ -65,4 +67,5 @@ serde_json = { workspace = true }
 solana-ledger = { workspace = true, features = ["agave-unstable-api"] }
 solana-runtime = { workspace = true, features = ["agave-unstable-api", "dev-context-only-utils"] }
 solana-instruction = { workspace = true }
+solana-program-binaries.workspace = true
 solana-transaction-context.workspace = true

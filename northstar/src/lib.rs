@@ -1671,6 +1671,7 @@ mod portal_e2e_tests {
         bank.process_transaction(&tx).unwrap();
         bank.freeze();
 
+        let l1_recipient = Pubkey::new_unique();
         let validator = owner_keypair;
         let first_settlement_bank = Bank::new_from_parent(
             bank.clone(),
@@ -1685,9 +1686,11 @@ mod portal_e2e_tests {
             &HashSet::new(),
             7,
             vec![crate::settlement::ReceiptBalanceSettlement {
-                recipient: owner_pubkey,
+                er_source: owner_pubkey,
+                l1_recipient: owner_pubkey,
                 balance: deposit_amount,
                 withdrawn: 0,
+                payout_lamports: 0,
             }],
         )
         .unwrap();
@@ -1708,7 +1711,7 @@ mod portal_e2e_tests {
             &Pubkey::default(),
             bank.slot().saturating_add(22),
         );
-        let balance_before = second_settlement_bank.get_balance(&owner_pubkey);
+        let balance_before = second_settlement_bank.get_balance(&l1_recipient);
         let second_plan = build_settlement_plan(
             &ErStateDiff {
                 accounts: vec![],
@@ -1717,9 +1720,11 @@ mod portal_e2e_tests {
             &HashSet::new(),
             8,
             vec![crate::settlement::ReceiptBalanceSettlement {
-                recipient: owner_pubkey,
+                er_source: owner_pubkey,
+                l1_recipient,
                 balance: deposit_amount - withdraw_amount,
                 withdrawn: withdraw_amount,
+                payout_lamports: withdraw_amount,
             }],
         )
         .unwrap();
@@ -1733,8 +1738,9 @@ mod portal_e2e_tests {
             .process_transaction(&second_tx)
             .unwrap();
 
-        let balance_after = second_settlement_bank.get_balance(&owner_pubkey);
+        let balance_after = second_settlement_bank.get_balance(&l1_recipient);
         assert_eq!(balance_after - balance_before, withdraw_amount);
+        assert_ne!(owner_pubkey, l1_recipient);
 
         let (receipt_pda, _) = find_deposit_receipt_pda(&program_id, &session_pda, &owner_pubkey);
         let receipt_account = second_settlement_bank.get_account(&receipt_pda).unwrap();
@@ -2019,9 +2025,11 @@ mod portal_e2e_tests {
             &delegated_accounts,
             7,
             vec![crate::settlement::ReceiptBalanceSettlement {
-                recipient: owner_pubkey,
+                er_source: owner_pubkey,
+                l1_recipient: owner_pubkey,
                 balance: settled_receipt_balance,
                 withdrawn: 0,
+                payout_lamports: 0,
             }],
         )
         .unwrap();
