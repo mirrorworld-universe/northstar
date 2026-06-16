@@ -365,6 +365,9 @@ impl AccountsCache {
             // `min_slot..=index_max_slot` can spin forever. Iterate actual
             // ancestor slots instead, highest first.
             let mut ancestor_slots = ancestors.keys();
+            // Sonic: This preserves upstream lookup order by checking the newest
+            // visible ancestor first. Long-lived ER sessions should trim/re-anchor
+            // ancestry or pass a pre-sorted view before this becomes hot.
             ancestor_slots.sort_unstable_by(|a, b| b.cmp(a));
             // Grab a read lock on flushing roots once before the loop to avoid locking/unlocking
             // on every iteration. This lock ensures that the load call in the loop correctly

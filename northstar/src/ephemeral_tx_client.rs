@@ -629,6 +629,8 @@ impl EphemeralTransactionClient {
                     }
                 }
             }
+            // Sonic: V1 currently has no ALT lookups on the ER history path; if
+            // that changes, mirror the V0 load_addresses path before recording meta.
             VersionedMessage::V1(_) => Some(LoadedAddresses::default()),
         }
     }
