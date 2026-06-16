@@ -900,6 +900,11 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             drop(global_program_cache);
 
             let program_to_store = program_to_load.map(|key| {
+                let loader = missing_programs
+                    .iter()
+                    .find(|program| *program.program_id == key)
+                    .map(|program| program.loader)
+                    .unwrap_or_default();
                 // Load, verify and compile one program.
                 let (program, last_modification_slot) = load_program_with_pubkey(
                     account_loader,
@@ -910,11 +915,12 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                 )
                 .unwrap_or_else(|| {
                     // Sonic: ER banks can be sparse while L1 program hydration catches up.
-                    // Cache a tombstone instead of panicking so the tx fails retryably.
+                    // Cache a tombstone under the requested loader so the tx fails retryably
+                    // instead of looping on a loader-mismatched tombstone.
                     (
                         Arc::new(ProgramCacheEntry::new_tombstone(
                             self.slot,
-                            ProgramCacheEntryOwner::default(),
+                            loader,
                             ProgramCacheEntryType::Closed,
                         )),
                         self.slot,
@@ -1766,7 +1772,7 @@ mod tests {
     }
 
     #[test]
-    fn test_replenish_program_cache_with_nonexistent_accounts_does_not_panic() {
+    fn northstar_replenish_program_cache_with_nonexistent_accounts_does_not_panic() {
         let mock_bank = MockBankCallback::default();
         let account_loader = (&mock_bank).into();
         let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
@@ -1774,7 +1780,7 @@ mod tests {
             TransactionBatchProcessor::new(0, 0, Arc::downgrade(&fork_graph), None);
         let program_runtime_environment_for_execution =
             batch_processor.program_runtime_environment_for_epoch(0);
-        let key = Pubkey::new_unique();
+        let key = Pubkey::new_from_array([42; 32]);
 
         let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::new(batch_processor.slot);
 
@@ -2089,7 +2095,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_from_isolated_cache_preserves_builtin_entries() {
+    fn northstar_new_from_isolated_cache_preserves_builtin_entries() {
         let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
         let parent = TransactionBatchProcessor::new(0, 0, Arc::downgrade(&fork_graph), None);
 
