@@ -16,7 +16,7 @@ use {
     solana_sha256_hasher::hashv,
     solana_signer::Signer,
     solana_transaction::Transaction,
-    std::collections::HashSet,
+    std::collections::{HashMap, HashSet},
 };
 
 const SETTLEMENT_CHECKSUM_DOMAIN: &[u8] = b"northstar-settlement-v0";
@@ -434,6 +434,12 @@ pub fn build_settlement_plan(
     let mut owner_changes = vec![];
     let mut lamport_candidates = vec![];
     let mut unsupported_changes = vec![];
+    let mut receipt_payouts_by_recipient = HashMap::<Pubkey, u128>::new();
+    for receipt in &receipt_balances {
+        *receipt_payouts_by_recipient
+            .entry(receipt.l1_recipient)
+            .or_default() += receipt.payout_lamports as u128;
+    }
 
     for account_diff in &diff.accounts {
         if !delegated_accounts.contains(&account_diff.pubkey) {
@@ -457,12 +463,23 @@ pub fn build_settlement_plan(
                 owner: *er_account.owner(),
             });
         }
-        if l1_account.lamports() != er_account.lamports() {
-            lamport_candidates.push((
-                account_diff.pubkey,
-                l1_account.lamports(),
-                er_account.lamports(),
-            ));
+        let l1_lamports = l1_account.lamports();
+        let er_lamports = er_account.lamports();
+        let receipt_payout = receipt_payouts_by_recipient
+            .get(&account_diff.pubkey)
+            .copied()
+            .unwrap_or(0);
+        let post_receipt_l1_lamports = (l1_lamports as u128).saturating_add(receipt_payout);
+        if post_receipt_l1_lamports != er_lamports as u128 {
+            if receipt_payout > 0 {
+                unsupported_changes.push(SettlementUnsupportedChange::LamportsChanged {
+                    account: account_diff.pubkey,
+                    l1_lamports,
+                    er_lamports,
+                });
+            } else {
+                lamport_candidates.push((account_diff.pubkey, l1_lamports, er_lamports));
+            }
         }
         chunks.extend(data_chunks_for_account(
             account_diff.pubkey,
@@ -858,6 +875,73 @@ mod tests {
             ]
         );
         assert_eq!(plan.unsupported_changes, vec![]);
+    }
+
+    #[test]
+    fn receipt_payout_covering_delegated_lamport_increase_is_supported() {
+        let er_source = Pubkey::new_unique();
+        let delegated = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let diff = diff_for_account(
+            delegated,
+            Some(account(&[], 10, &owner)),
+            account(&[], 15, &owner),
+        );
+        let delegated_accounts = HashSet::from([delegated]);
+        let receipt = ReceiptBalanceSettlement {
+            er_source,
+            l1_recipient: delegated,
+            balance: 95,
+            withdrawn: 5,
+            payout_lamports: 5,
+        };
+
+        let plan =
+            build_settlement_plan(&diff, &delegated_accounts, 5, vec![receipt.clone()]).unwrap();
+
+        assert_eq!(plan.lamport_changes, vec![]);
+        assert_eq!(plan.receipt_balances, vec![receipt]);
+        assert_eq!(plan.unsupported_changes, vec![]);
+    }
+
+    #[test]
+    fn receipt_payout_must_exactly_cover_delegated_lamport_delta() {
+        let er_source = Pubkey::new_unique();
+        let delegated = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let delegated_accounts = HashSet::from([delegated]);
+
+        for (er_lamports, payout_lamports) in [(16, 5), (14, 5)] {
+            let diff = diff_for_account(
+                delegated,
+                Some(account(&[], 10, &owner)),
+                account(&[], er_lamports, &owner),
+            );
+            let plan = build_settlement_plan(
+                &diff,
+                &delegated_accounts,
+                5,
+                vec![ReceiptBalanceSettlement {
+                    er_source,
+                    l1_recipient: delegated,
+                    balance: 95,
+                    withdrawn: payout_lamports,
+                    payout_lamports,
+                }],
+            )
+            .unwrap();
+
+            assert_eq!(plan.chunks, vec![]);
+            assert_eq!(plan.lamport_changes, vec![]);
+            assert_eq!(
+                plan.unsupported_changes,
+                vec![SettlementUnsupportedChange::LamportsChanged {
+                    account: delegated,
+                    l1_lamports: 10,
+                    er_lamports,
+                }]
+            );
+        }
     }
 
     #[test]

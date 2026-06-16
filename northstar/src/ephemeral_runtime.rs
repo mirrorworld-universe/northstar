@@ -1454,13 +1454,26 @@ impl EphemeralRuntime {
         drop(payout_events_guard);
 
         let mut receipt_balances = Vec::new();
+        let mut stale_payout_events = Vec::new();
         for (er_source, er_balance, receipt_balance, receipt_withdrawn) in receipts {
             let mut cumulative_withdrawn = receipt_withdrawn;
             let mut current_withdrawn = receipt_withdrawn;
+            let mut remaining_net_payout = receipt_balance.saturating_sub(er_balance);
             for event in payout_events
                 .iter()
                 .filter(|event| event.er_source == er_source)
             {
+                if event.lamports > remaining_net_payout {
+                    warn!(
+                        "dropping stale ER SOL payout event not covered by source net delta: \
+                         er_source={}, l1_recipient={}, lamports={}, remaining_net_payout={}",
+                        er_source, event.l1_recipient, event.lamports, remaining_net_payout
+                    );
+                    stale_payout_events.push(event.clone());
+                    continue;
+                }
+                remaining_net_payout = remaining_net_payout.saturating_sub(event.lamports);
+
                 let Some(next_withdrawn) = cumulative_withdrawn.checked_add(event.lamports) else {
                     warn!("withdrawal payout counter overflow for {er_source}");
                     break;
@@ -1510,6 +1523,13 @@ impl EphemeralRuntime {
                     payout_lamports: withdrawn.saturating_sub(receipt_withdrawn),
                 });
             }
+        }
+
+        if !stale_payout_events.is_empty() {
+            self.withdrawal_payout_events
+                .write()
+                .unwrap()
+                .retain(|event| !stale_payout_events.contains(event));
         }
 
         receipt_balances.sort_by(|a, b| {
@@ -1924,11 +1944,13 @@ mod tests {
     fn create_test_bank() -> Bank {
         use solana_genesis_config::GenesisConfig;
         let mut genesis_config = GenesisConfig::new(&[], &[]);
-        if let Some((pubkey, account)) =
-            solana_program_binaries::by_id(&spl_memo_interface::v3::id(), &genesis_config.rent)
-                .and_then(|mut accounts| accounts.pop())
-        {
-            genesis_config.add_account(pubkey, account);
+        for memo_program_id in [spl_memo_interface::v3::id(), spl_memo_interface::v4::id()] {
+            if let Some((pubkey, account)) =
+                solana_program_binaries::by_id(&memo_program_id, &genesis_config.rent)
+                    .and_then(|mut accounts| accounts.pop())
+            {
+                genesis_config.add_account(pubkey, account);
+            }
         }
         Bank::new_for_tests(&genesis_config)
     }
@@ -2369,6 +2391,249 @@ mod tests {
         assert_eq!(receipt_balances[0].withdrawn, withdraw_amount);
         assert_eq!(receipt_balances[0].payout_lamports, withdraw_amount);
         assert_ne!(er_source, l1_recipient);
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_er_transfer_to_delegated_account_settles_from_deposit_receipt() {
+        let parent_bank = create_test_bank();
+        let portal_program_id = Pubkey::new_unique();
+        let session_pda = Pubkey::new_unique();
+        let er_source_keypair = Keypair::new();
+        let er_source = er_source_keypair.pubkey();
+        let delegated_account = Pubkey::new_unique();
+        let deposit_amount = 1_000u64;
+        let transfer_amount = 250u64;
+        store_deposit_receipt(
+            &parent_bank,
+            &portal_program_id,
+            &session_pda,
+            &er_source,
+            deposit_amount,
+            0,
+        );
+        let delegated_lamports = solana_rent::Rent::default().minimum_balance(0);
+        parent_bank.store_account(
+            &delegated_account,
+            &AccountSharedData::new(delegated_lamports, 0, &portal_program_id),
+        );
+        store_delegation_record(
+            &parent_bank,
+            &portal_program_id,
+            &delegated_account,
+            &system_program::id(),
+            0,
+        );
+        parent_bank.freeze();
+
+        let settings = EphemeralRollupSettings {
+            session_pda,
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![delegated_account],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            portal_program_id,
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.set_session_pda(session_pda);
+        runtime.activate();
+        runtime.credit_deposit(&er_source, deposit_amount);
+
+        let transfer_ix = transfer(&er_source, &delegated_account, transfer_amount);
+        let tx = Transaction::new_signed_with_payer(
+            &[transfer_ix],
+            Some(&er_source),
+            &[&er_source_keypair],
+            runtime.bank().last_blockhash(),
+        );
+        let wire_tx = bincode::serialize(&VersionedTransaction::from(tx)).unwrap();
+        TransactionClient::send_transactions_in_batch(
+            &runtime._tx_client,
+            vec![wire_tx],
+            &SendTransactionServiceStats::default(),
+        );
+
+        let receipt_balances = runtime.settlement_receipt_balances(session_pda);
+        assert_eq!(receipt_balances.len(), 1);
+        assert_eq!(receipt_balances[0].er_source, er_source);
+        assert_eq!(receipt_balances[0].l1_recipient, delegated_account);
+        assert_eq!(
+            receipt_balances[0].balance,
+            deposit_amount - transfer_amount
+        );
+        assert_eq!(receipt_balances[0].withdrawn, transfer_amount);
+        assert_eq!(receipt_balances[0].payout_lamports, transfer_amount);
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_refunded_delegated_transfer_does_not_wedge_receipt_payout() {
+        let parent_bank = create_test_bank();
+        let portal_program_id = Pubkey::new_unique();
+        let session_pda = Pubkey::new_unique();
+        let er_source_keypair = Keypair::new();
+        let er_source = er_source_keypair.pubkey();
+        let delegated_keypair = Keypair::new();
+        let delegated_account = delegated_keypair.pubkey();
+        let deposit_amount = 1_000u64;
+        let transfer_amount = 250u64;
+        let delegated_lamports = solana_rent::Rent::default().minimum_balance(0);
+        store_deposit_receipt(
+            &parent_bank,
+            &portal_program_id,
+            &session_pda,
+            &er_source,
+            deposit_amount,
+            0,
+        );
+        parent_bank.store_account(
+            &delegated_account,
+            &AccountSharedData::new(delegated_lamports, 0, &portal_program_id),
+        );
+        store_delegation_record(
+            &parent_bank,
+            &portal_program_id,
+            &delegated_account,
+            &system_program::id(),
+            0,
+        );
+        parent_bank.freeze();
+
+        let settings = EphemeralRollupSettings {
+            session_pda,
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![delegated_account],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            portal_program_id,
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.set_session_pda(session_pda);
+        runtime.activate();
+        runtime.credit_deposit(&er_source, deposit_amount);
+
+        let transfer_ix = transfer(&er_source, &delegated_account, transfer_amount);
+        let refund_ix = transfer(&delegated_account, &er_source, transfer_amount);
+        let tx = Transaction::new_signed_with_payer(
+            &[transfer_ix, refund_ix],
+            Some(&er_source),
+            &[&er_source_keypair, &delegated_keypair],
+            runtime.bank().last_blockhash(),
+        );
+        let wire_tx = bincode::serialize(&VersionedTransaction::from(tx)).unwrap();
+        TransactionClient::send_transactions_in_batch(
+            &runtime._tx_client,
+            vec![wire_tx],
+            &SendTransactionServiceStats::default(),
+        );
+
+        assert!(runtime.settlement_receipt_balances(session_pda).is_empty());
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_delegated_source_transfer_does_not_create_receipt_payout() {
+        let parent_bank = create_test_bank();
+        let portal_program_id = Pubkey::new_unique();
+        let session_pda = Pubkey::new_unique();
+        let source_keypair = Keypair::new();
+        let source = source_keypair.pubkey();
+        let destination = Pubkey::new_unique();
+        let source_lamports = 1_000u64;
+        let destination_lamports = solana_rent::Rent::default().minimum_balance(0);
+        let transfer_amount = 250u64;
+        store_deposit_receipt(
+            &parent_bank,
+            &portal_program_id,
+            &session_pda,
+            &source,
+            source_lamports,
+            0,
+        );
+        parent_bank.store_account(
+            &source,
+            &AccountSharedData::new(source_lamports, 0, &portal_program_id),
+        );
+        parent_bank.store_account(
+            &destination,
+            &AccountSharedData::new(destination_lamports, 0, &portal_program_id),
+        );
+        store_delegation_record(
+            &parent_bank,
+            &portal_program_id,
+            &source,
+            &system_program::id(),
+            0,
+        );
+        store_delegation_record(
+            &parent_bank,
+            &portal_program_id,
+            &destination,
+            &system_program::id(),
+            0,
+        );
+        parent_bank.freeze();
+
+        let settings = EphemeralRollupSettings {
+            session_pda,
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![source, destination],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            portal_program_id,
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.set_session_pda(session_pda);
+        runtime.activate();
+
+        let transfer_ix = transfer(&source, &destination, transfer_amount);
+        let tx = Transaction::new_signed_with_payer(
+            &[transfer_ix],
+            Some(&source),
+            &[&source_keypair],
+            runtime.bank().last_blockhash(),
+        );
+        let wire_tx = bincode::serialize(&VersionedTransaction::from(tx)).unwrap();
+        TransactionClient::send_transactions_in_batch(
+            &runtime._tx_client,
+            vec![wire_tx],
+            &SendTransactionServiceStats::default(),
+        );
+
+        assert!(runtime.settlement_receipt_balances(session_pda).is_empty());
 
         runtime.shutdown();
     }
