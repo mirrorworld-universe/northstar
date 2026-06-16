@@ -605,6 +605,7 @@ impl EphemeralTransactionClient {
         let Some(session_pda) = *self.session_pda.read().unwrap() else {
             return;
         };
+        let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
         let mut events = Vec::new();
 
         for (tx, commit_result) in txs.iter().zip(commit_results) {
@@ -614,9 +615,7 @@ impl EphemeralTransactionClient {
             if committed_tx.status.is_err() {
                 continue;
             }
-            let Some(l1_recipient) = self.memo_l1_recipient(bank, tx) else {
-                continue;
-            };
+            let memo_l1_recipient = self.memo_l1_recipient(bank, tx);
             let loaded_addresses = Self::load_transaction_addresses(bank, tx).unwrap_or_default();
             let account_keys = Self::full_account_keys(tx, &loaded_addresses);
             let Some(signature) = tx.signatures.first().copied() else {
@@ -651,9 +650,18 @@ impl EphemeralTransactionClient {
                 }
                 let expected_sink =
                     crate::withdrawal_sink_pda(&self.portal_program_id, &session_pda, &er_source);
-                if destination != &expected_sink {
+                let l1_recipient = if destination == &expected_sink {
+                    let Some(l1_recipient) = memo_l1_recipient else {
+                        continue;
+                    };
+                    l1_recipient
+                } else if delegated_accounts.contains(destination)
+                    && !delegated_accounts.contains(&er_source)
+                {
+                    *destination
+                } else {
                     continue;
-                }
+                };
 
                 debug!(
                     "recorded ER SOL withdrawal payout event: sig={}, er_source={}, \
@@ -691,7 +699,9 @@ impl EphemeralTransactionClient {
             let Some(program_id) = account_keys.get(ix.program_id_index as usize) else {
                 continue;
             };
-            if program_id != &spl_memo_interface::v3::id() {
+            if program_id != &spl_memo_interface::v3::id()
+                && program_id != &spl_memo_interface::v4::id()
+            {
                 continue;
             }
             let Some(recipient) = Self::decode_l1_recipient_memo(&ix.data) else {

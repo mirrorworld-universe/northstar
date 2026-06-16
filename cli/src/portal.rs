@@ -973,12 +973,22 @@ pub async fn process_portal_subcommand(
             let session_pda = find_session_pda(&portal_program_id);
             let withdrawal_sink_pda =
                 find_withdrawal_sink_pda(&portal_program_id, &session_pda, &recipient.pubkey());
-            let instruction =
-                system_instruction::transfer(&recipient.pubkey(), &withdrawal_sink_pda, *lamports);
-            process_portal_instruction(
+            // Sonic: ER settlement reads the memo as the L1 recipient for the
+            // withdrawal payout. Keep CLI parity with the TypeScript SDK by
+            // defaulting the L1 recipient to the withdrawing signer.
+            let instructions = vec![
+                system_instruction::transfer(&recipient.pubkey(), &withdrawal_sink_pda, *lamports),
+                Instruction {
+                    program_id: Pubkey::from(spl_memo_interface::v3::id().to_bytes()),
+                    accounts: vec![],
+                    data: recipient.pubkey().to_string().into_bytes(),
+                },
+            ];
+            process_portal_instructions(
                 rpc_client,
                 config,
-                instruction,
+                instructions,
+                &[],
                 *sign_only,
                 *dump_transaction_message,
                 blockhash_query,
