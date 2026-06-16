@@ -16,6 +16,7 @@ use {
 pub use {error::*, instruction::*, pda::*, state::*};
 
 pub const MAX_SETTLEMENT_CHUNK: usize = 700;
+pub const MAX_SETTLEMENT_LAMPORT_ACCOUNTS: usize = 10;
 
 no_allocator!();
 
@@ -72,6 +73,12 @@ fn process_instruction(
             instructions::process_settle_deposit_receipt(program_id, accounts, settle)
         }),
         Ok((10, _)) => instructions::process_undelegate_handoff(program_id, accounts),
+        Ok((11, payload)) => deserialize_args(payload).and_then(|owner| {
+            instructions::process_settle_account_owner(program_id, accounts, owner)
+        }),
+        Ok((12, payload)) => deserialize_args(payload).and_then(|lamports| {
+            instructions::process_settle_account_lamports(program_id, accounts, lamports)
+        }),
         Ok((_, _)) | Err(_) => Err(ProgramError::InvalidInstructionData),
     }
 }
