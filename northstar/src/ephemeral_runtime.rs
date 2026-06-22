@@ -831,7 +831,11 @@ impl EphemeralRuntime {
 
     /// Sonic: Set the current session PDA.
     pub fn set_session_pda(&self, pda: Pubkey) {
-        *self.session_pda.write().unwrap() = Some(pda);
+        let mut session_pda = self.session_pda.write().unwrap();
+        if session_pda.is_some_and(|current| current != pda) {
+            self.withdrawal_payout_events.write().unwrap().clear();
+        }
+        *session_pda = Some(pda);
     }
 
     /// Sonic: Apply settings from the active L1 session before resetting ER state.
@@ -2391,6 +2395,82 @@ mod tests {
         assert_eq!(receipt_balances[0].withdrawn, withdraw_amount);
         assert_eq!(receipt_balances[0].payout_lamports, withdraw_amount);
         assert_ne!(er_source, l1_recipient);
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_withdrawal_payout_events_are_cleared_when_session_changes() {
+        let parent_bank = create_test_bank();
+        let portal_program_id = Pubkey::new_unique();
+        let session_pda = Pubkey::new_unique();
+        let next_session_pda = Pubkey::new_unique();
+        let er_source_keypair = Keypair::new();
+        let er_source = er_source_keypair.pubkey();
+        let l1_recipient = Pubkey::new_unique();
+        let deposit_amount = 1_000u64;
+        let withdraw_amount = 250u64;
+        store_deposit_receipt(
+            &parent_bank,
+            &portal_program_id,
+            &session_pda,
+            &er_source,
+            deposit_amount,
+            0,
+        );
+        store_withdrawal_sink(&parent_bank, &portal_program_id, &session_pda, &er_source);
+        parent_bank.freeze();
+
+        let settings = EphemeralRollupSettings {
+            session_pda,
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            portal_program_id,
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.set_session_pda(session_pda);
+        runtime.activate();
+        runtime.credit_deposit(&er_source, deposit_amount);
+
+        let withdrawal_ix = crate::er_withdrawal_instruction(
+            &portal_program_id,
+            &session_pda,
+            &er_source,
+            withdraw_amount,
+        );
+        let memo_ix = Instruction {
+            program_id: spl_memo_interface::v3::id(),
+            accounts: vec![],
+            data: l1_recipient.to_string().into_bytes(),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[withdrawal_ix, memo_ix],
+            Some(&er_source),
+            &[&er_source_keypair],
+            runtime.bank().last_blockhash(),
+        );
+        let wire_tx = bincode::serialize(&VersionedTransaction::from(tx)).unwrap();
+        TransactionClient::send_transactions_in_batch(
+            &runtime._tx_client,
+            vec![wire_tx],
+            &SendTransactionServiceStats::default(),
+        );
+
+        assert_eq!(runtime.withdrawal_payout_events.read().unwrap().len(), 1);
+        runtime.set_session_pda(next_session_pda);
+        assert!(runtime.withdrawal_payout_events.read().unwrap().is_empty());
 
         runtime.shutdown();
     }
