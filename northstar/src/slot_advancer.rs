@@ -184,30 +184,33 @@ impl SlotAdvancer {
 
                 let next_bank_arc = {
                     let mut bank_forks_write = bank_forks.write().unwrap();
-                    let inserted = bank_forks_write.insert(next_bank);
+                    let inserted = bank_forks_write.insert_ephemeral(next_bank);
+                    let next_bank_arc = inserted.clone_without_scheduler();
 
-                    // NOTE: We intentionally do NOT call set_root() here.
+                    // NOTE: We intentionally do NOT call BankForks::set_root() here.
                     // The ER shares an AccountsDb with the L1 validator.
                     // Bank::squash() (called by set_root) walks the entire parent
                     // chain and calls add_root() for each slot — including the L1
                     // parent.  Because the L1 concurrently advances its own roots
                     // on the same AccountsDb, this causes a "Roots must be added
-                    // in order" panic.  The ER is short-lived so rooting is not
-                    // required for correctness; the commitment cache update below
-                    // is sufficient for RPC queries.
+                    // in order" panic.  Instead, set_root_ephemeral() advances only
+                    // BankForks root metadata and prunes old ER banks.
 
-                    inserted.clone_without_scheduler()
-                };
-
-                // Sonic: ER account lookup uses `ancestors`, not recursive parent
-                // traversal. Once child exists, older ER banks no longer need to
-                // keep their own parent links alive. Clear only ER->ER links; do
-                // not mutate the L1 anchor bank.
-                if let Some(parent) = frozen_bank.parent() {
-                    if parent.slot() >= ER_SLOT_OFFSET {
-                        parent.disconnect_from_parent();
+                    // Sonic: ER account lookup uses `ancestors`, not recursive parent
+                    // traversal. Once child exists, the frozen ER bank no longer
+                    // needs to keep an Arc to its ER parent alive. Do not mutate the
+                    // initial ER bank's L1 anchor parent.
+                    if frozen_bank
+                        .parent()
+                        .is_some_and(|parent| parent.slot() >= ER_SLOT_OFFSET)
+                    {
+                        frozen_bank.disconnect_from_parent();
                     }
-                }
+
+                    drop(bank_forks_write.set_root_ephemeral(current_bank_slot));
+
+                    next_bank_arc
+                };
 
                 (
                     current_bank_slot,
@@ -636,6 +639,75 @@ mod tests {
             working_bank.parents().len() <= 2,
             "ER working bank parent chain grew too deep: {}",
             working_bank.parents().len()
+        );
+    }
+
+    #[test]
+    fn test_ephemeral_slot_advancer_prunes_old_bank_forks() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        parent_bank.freeze();
+        let parent_bank = Arc::new(parent_bank);
+
+        let initial_slot = 1u64 << 40;
+        let initial_bank = Bank::new_from_parent_ephemeral_isolated(
+            parent_bank,
+            SlotLeader::default(),
+            initial_slot,
+        );
+        let ticks_per_slot = initial_bank.ticks_per_slot();
+        initial_bank.set_tick_height(initial_bank.max_tick_height() - ticks_per_slot);
+
+        let bank_forks = BankForks::new_rw_arc_ephemeral(initial_bank);
+        let initial_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
+        let exit = Arc::new(AtomicBool::new(false));
+        let block_commitment_cache = create_block_commitment_cache(initial_bank.slot());
+        let optimistically_confirmed_bank =
+            create_optimistically_confirmed_bank(initial_bank.clone());
+
+        let advancer = SlotAdvancer::new(
+            bank_forks.clone(),
+            Arc::new(Mutex::new(())),
+            block_commitment_cache,
+            optimistically_confirmed_bank,
+            initial_bank,
+            Config {
+                slot_duration: Duration::from_millis(5),
+                manager_account: Pubkey::default(),
+                er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            },
+            exit.clone(),
+            None,
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            let latest_slot = bank_forks.read().unwrap().working_bank().slot();
+            if latest_slot > initial_slot + 8 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        exit.store(true, Ordering::Relaxed);
+        advancer.join();
+
+        let bank_forks = bank_forks.read().unwrap();
+        assert!(
+            bank_forks.working_bank().slot() > initial_slot + 8,
+            "slot advancer did not run enough slots"
+        );
+        assert!(
+            bank_forks.len() <= 3,
+            "old ER banks should not accumulate in BankForks; retained {} banks",
+            bank_forks.len()
+        );
+        let descendant_entries = bank_forks.descendants().len();
+        assert!(
+            descendant_entries <= 3,
+            "old ER ancestry should not accumulate in BankForks descendants; retained \
+             {descendant_entries} entries",
         );
     }
 
