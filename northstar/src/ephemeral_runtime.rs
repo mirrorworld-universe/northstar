@@ -64,6 +64,8 @@ impl DropCallback for NoopDropCallback {
     }
 }
 
+const MAX_WITHDRAWAL_PAYOUT_EVENTS: usize = 10_000;
+
 struct RetiredBankForks {
     bank_forks: BankForks,
     purge_slots: Vec<(Slot, BankId)>,
@@ -1454,6 +1456,11 @@ impl EphemeralRuntime {
                 .map(|withdrawn| next_cumulative > *withdrawn)
                 .unwrap_or(true)
         });
+        if payout_events_guard.len() > MAX_WITHDRAWAL_PAYOUT_EVENTS {
+            let dropped = payout_events_guard.len() - MAX_WITHDRAWAL_PAYOUT_EVENTS;
+            warn!("dropping {dropped} old withdrawal payout events to keep retention bounded");
+            payout_events_guard.drain(..dropped);
+        }
         let payout_events = payout_events_guard.clone();
         drop(payout_events_guard);
 
@@ -2471,6 +2478,53 @@ mod tests {
         assert_eq!(runtime.withdrawal_payout_events.read().unwrap().len(), 1);
         runtime.set_session_pda(next_session_pda);
         assert!(runtime.withdrawal_payout_events.read().unwrap().is_empty());
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_withdrawal_payout_events_are_bounded_within_session() {
+        let parent_bank = create_test_bank();
+        parent_bank.freeze();
+        let portal_program_id = Pubkey::new_unique();
+        let session_pda = Pubkey::new_unique();
+        let settings = EphemeralRollupSettings {
+            session_pda,
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            portal_program_id,
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+
+        let er_source = Pubkey::new_unique();
+        let l1_recipient = Pubkey::new_unique();
+        runtime.withdrawal_payout_events.write().unwrap().extend(
+            (0..MAX_WITHDRAWAL_PAYOUT_EVENTS + 5).map(|index| WithdrawalPayoutEvent {
+                er_source,
+                l1_recipient,
+                lamports: 1,
+                signature: solana_signature::Signature::default(),
+                er_slot: index as Slot,
+            }),
+        );
+
+        assert!(runtime.settlement_receipt_balances(session_pda).is_empty());
+        let events = runtime.withdrawal_payout_events.read().unwrap();
+        assert_eq!(events.len(), MAX_WITHDRAWAL_PAYOUT_EVENTS);
+        assert_eq!(events.first().unwrap().er_slot, 5);
+        drop(events);
 
         runtime.shutdown();
     }

@@ -16,7 +16,7 @@ use {
     solana_runtime::bank::Bank,
     solana_signer::Signer,
     solana_transaction::Transaction,
-    std::{net::SocketAddr, sync::Arc, time::Duration},
+    std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration},
     thiserror::Error,
 };
 
@@ -640,6 +640,133 @@ impl Manager {
         }
     }
 
+    fn active_l1_session(&self, bank: &Bank) -> Option<(Pubkey, northstar_portal::Session)> {
+        let (session_pda, _) =
+            northstar_portal::find_session_pda(&self.config.portal_program_id.to_bytes());
+        let session_pda = Pubkey::new_from_array(session_pda);
+        let account = bank.get_account(&session_pda)?;
+        if account.owner() != &self.config.portal_program_id {
+            return None;
+        }
+        let PortalAccount::Session(session) = try_parse_raw_portal_account(account.data())? else {
+            return None;
+        };
+        if !session.is_valid()
+            || session.is_expired(bank.slot())
+            || session.validator != self.config.manager_account.pubkey().to_bytes()
+        {
+            return None;
+        }
+        Some((session_pda, session))
+    }
+
+    fn l1_delegations_for_grid(
+        &self,
+        bank: &Bank,
+        grid_id: u64,
+    ) -> Vec<(Pubkey, AccountSharedData, Pubkey)> {
+        let program_accounts = match bank.get_program_accounts(&self.config.portal_program_id) {
+            Ok(accounts) => accounts,
+            Err(err) => {
+                warn!("Failed to scan Portal accounts for startup resume: {err:?}");
+                return vec![];
+            }
+        };
+
+        let records = program_accounts
+            .iter()
+            .filter_map(|(record_pubkey, account)| {
+                let PortalAccount::DelegationRecord(record) =
+                    try_parse_raw_portal_account(account.data())?
+                else {
+                    return None;
+                };
+                (record.is_valid() && record.grid_id == grid_id).then_some((*record_pubkey, record))
+            })
+            .collect::<Vec<_>>();
+
+        let program_id = self.config.portal_program_id.to_bytes();
+        let delegated_by_record = program_accounts
+            .iter()
+            .map(|(candidate, account)| {
+                let (record_pubkey, _) =
+                    find_portal_delegation_record_pda(&program_id, &candidate.to_bytes());
+                (
+                    Pubkey::new_from_array(record_pubkey),
+                    (*candidate, account.clone()),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        records
+            .into_iter()
+            .filter_map(|(record_pubkey, record)| {
+                delegated_by_record
+                    .get(&record_pubkey)
+                    .map(|(delegated, account)| {
+                        (
+                            *delegated,
+                            account.clone(),
+                            Pubkey::new_from_array(record.owner_program),
+                        )
+                    })
+            })
+            .collect()
+    }
+
+    /// Resume an active ER session from current L1 state at validator startup.
+    pub fn resume_active_session_from_l1(&mut self, root_bank: Arc<Bank>) -> bool {
+        if self.runtime.is_none() {
+            warn!("Cannot resume session from L1: runtime not initialized");
+            return false;
+        }
+        if self.has_active_runtime() {
+            return false;
+        }
+
+        let Some((session_pda, session)) = self.active_l1_session(&root_bank) else {
+            return false;
+        };
+        let delegations = self.l1_delegations_for_grid(&root_bank, session.grid_id);
+        if session.settlement_status == SettlementStatus::InProgress {
+            warn!(
+                "Resuming ER while Portal settlement is InProgress: PDA={}, er_slot={}, \
+                 checksum={:?}. New settlements stay blocked until the existing settlement \
+                 finishes or aborts on L1.",
+                session_pda, session.settlement_er_slot, session.settlement_checksum,
+            );
+        }
+
+        self.activate_session(
+            root_bank.clone(),
+            session_pda,
+            session.grid_id,
+            session.ttl_slots,
+            session.fee_cap,
+        );
+        for (delegated_account, account, owner_program) in &delegations {
+            if let Some(runtime) = &self.runtime {
+                runtime.handle_delegation_inner(
+                    delegated_account,
+                    account.clone(),
+                    Some(*owner_program),
+                    Some(&root_bank),
+                );
+            }
+        }
+        self.mark_synced_through(root_bank.slot());
+
+        info!(
+            "Resumed ephemeral session from L1 at slot {}, PDA={}, grid_id={}, \
+             delegated_accounts={}",
+            root_bank.slot(),
+            session_pda,
+            session.grid_id,
+            delegations.len(),
+        );
+        true
+    }
+
     /// Create and store an EphemeralRuntime from the root bank
     ///
     /// This creates a fully functional ephemeral rollup with its own RPC server.
@@ -761,7 +888,7 @@ mod portal_e2e_tests {
     use {
         super::*,
         agave_logger::setup,
-        northstar_portal::{DelegationRecord, OpenSession, PortalInstruction},
+        northstar_portal::{DelegationRecord, OpenSession, PortalInstruction, Session},
         solana_account::{AccountSharedData, WritableAccount},
         solana_gossip::contact_info::ContactInfo,
         solana_instruction::{AccountMeta, Instruction},
@@ -1461,6 +1588,99 @@ mod portal_e2e_tests {
         assert_eq!(rpc_balance, 5_000_000_000, "RPC balance should match");
 
         runtime.shutdown();
+    }
+
+    #[test]
+    fn test_startup_resume_hydrates_delegated_accounts_from_l1_in_progress() {
+        setup();
+
+        let (bank, _bank_forks, program_id, _mint_keypair) = setup_bank_with_portal();
+        let manager_account = Arc::new(Keypair::new());
+        let owner_program = Pubkey::new_unique();
+        let delegated_account_pubkey = Pubkey::new_unique();
+        let committed_data = vec![0xC0, 0xFF, 0xEE, 0x42];
+        let committed_lamports = 5_000_000_000;
+        let grid_id = 7;
+        let ttl_slots = 1_000;
+        let fee_cap = 123_456;
+        let (session_pda, session_bump) = find_session_pda(&program_id);
+
+        let session = Session {
+            discriminator: Session::DISCRIMINATOR,
+            grid_id,
+            ttl_slots,
+            fee_cap,
+            created_at: bank.slot(),
+            nonce: 1,
+            authority: Pubkey::new_unique().to_bytes(),
+            validator: manager_account.pubkey().to_bytes(),
+            settlement_interval_slots: 10,
+            last_settled_l1_slot: bank.slot(),
+            last_settled_er_slot: 55,
+            settlement_status: SettlementStatus::InProgress,
+            settlement_er_slot: 55,
+            settlement_checksum: [9; 32],
+            settlement_accumulator: [0; 32],
+            settlement_started_l1_slot: 0,
+            bump: session_bump,
+        };
+        let session_data = borsh::to_vec(&session).unwrap();
+        let mut session_account =
+            AccountSharedData::new(1_000_000, session_data.len(), &program_id);
+        session_account
+            .data_as_mut_slice()
+            .copy_from_slice(&session_data);
+        bank.store_account(&session_pda, &session_account);
+
+        let mut delegated_account =
+            AccountSharedData::new(committed_lamports, committed_data.len(), &program_id);
+        delegated_account
+            .data_as_mut_slice()
+            .copy_from_slice(&committed_data);
+        bank.store_account(&delegated_account_pubkey, &delegated_account);
+        store_delegation_record(
+            &bank,
+            &program_id,
+            &delegated_account_pubkey,
+            &owner_program,
+            grid_id,
+        );
+        bank.freeze();
+
+        let mut manager = Manager::new(ManagerConfig {
+            portal_program_id: program_id,
+            manager_account,
+        });
+        manager
+            .init_runtime(
+                bank.clone(),
+                create_test_cluster_info(),
+                find_free_addr(),
+                find_free_addr(),
+                find_free_addr(),
+            )
+            .expect("runtime should initialize");
+
+        assert!(
+            manager.resume_active_session_from_l1(bank.clone()),
+            "startup should resume active L1 session"
+        );
+        assert!(manager.has_active_runtime());
+
+        let runtime = manager.runtime.as_ref().expect("runtime should exist");
+        assert_eq!(*runtime.session_pda().read().unwrap(), Some(session_pda));
+        assert!(runtime
+            .delegated_accounts()
+            .contains(&delegated_account_pubkey));
+        let er_account = runtime
+            .bank()
+            .get_account(&delegated_account_pubkey)
+            .expect("delegated account should be hydrated into ER");
+        assert_eq!(er_account.owner(), &owner_program);
+        assert_eq!(er_account.data(), committed_data.as_slice());
+        assert_eq!(er_account.lamports(), committed_lamports);
+
+        manager.shutdown_runtime();
     }
 
     #[test]
