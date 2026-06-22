@@ -325,6 +325,39 @@ impl BankForks {
         self.insert_with_scheduling_mode(SchedulingMode::BlockVerification, bank)
     }
 
+    /// Insert a Northstar ephemeral bank without tracking ancestry below the ER root.
+    ///
+    /// Sonic: ER banks keep full `Bank::ancestors` for AccountsDb lookup, but
+    /// BankForks only needs fork graph edges at or above its current root.
+    /// Tracking all historical ER ancestors here makes `descendants` grow forever.
+    pub fn insert_ephemeral(&mut self, bank: Bank) -> BankWithScheduler {
+        let bank = Arc::new(bank);
+        let bank = if let Some(scheduler_pool) = &self.scheduler_pool {
+            Self::install_scheduler_into_bank(
+                scheduler_pool,
+                SchedulingMode::BlockVerification,
+                bank,
+            )
+        } else {
+            BankWithScheduler::new_without_scheduler(bank)
+        };
+        let prev = self.banks.insert(bank.slot(), bank.clone_with_scheduler());
+        assert!(prev.is_none());
+        let slot = bank.slot();
+        self.descendants.entry(slot).or_default();
+        for parent in bank
+            .proper_ancestors()
+            .filter(|parent| *parent >= self.root)
+        {
+            self.descendants.entry(parent).or_default().insert(slot);
+        }
+
+        self.working_slot = self.find_highest_slot();
+        self.sharable_banks.working_bank.store(self.working_bank());
+
+        bank
+    }
+
     pub fn insert_with_scheduling_mode(
         &mut self,
         mode: SchedulingMode,
@@ -400,6 +433,24 @@ impl BankForks {
 
         // Update sharable working bank and cached slot.
         // The previous working bank (highest slot) may have been removed.
+        self.working_slot = self.find_highest_slot();
+        self.sharable_banks.working_bank.store(self.working_bank());
+
+        Some(bank)
+    }
+
+    fn remove_ephemeral(&mut self, slot: Slot) -> Option<BankWithScheduler> {
+        let bank = self.banks.remove(&slot)?;
+        for parent in bank.proper_ancestors() {
+            if let Entry::Occupied(mut entry) = self.descendants.entry(parent) {
+                entry.get_mut().remove(&slot);
+                if entry.get().is_empty() && !self.banks.contains_key(&parent) {
+                    entry.remove_entry();
+                }
+            }
+        }
+        self.descendants.remove(&slot);
+
         self.working_slot = self.find_highest_slot();
         self.sharable_banks.working_bank.store(self.working_bank());
 
@@ -669,6 +720,29 @@ impl BankForks {
             ("dropped_banks_len", set_root_metrics.dropped_banks_len, i64),
             ("accounts_data_len", set_root_metrics.accounts_data_len, i64),
         );
+        removed_banks
+    }
+
+    /// Advance the Northstar ephemeral root without calling `Bank::squash()`.
+    ///
+    /// Sonic: ER shares AccountsDb with L1, so normal `set_root()` can add old L1
+    /// roots out of order. ER commitment/rooting is local metadata here; account
+    /// lookup remains driven by each bank's `ancestors`.
+    pub fn set_root_ephemeral(&mut self, root: Slot) -> Vec<BankWithScheduler> {
+        let root_bank = self
+            .get(root)
+            .expect("ephemeral root bank didn't exist in bank_forks");
+
+        self.root = root;
+        self.sharable_banks.root_bank.store(root_bank);
+
+        let prune_slots: Vec<_> = self.get_non_rooted(root, Some(root)).collect();
+        let mut removed_banks = Vec::with_capacity(prune_slots.len());
+        for slot in prune_slots {
+            if let Some(bank) = self.remove_ephemeral(slot) {
+                removed_banks.push(bank);
+            }
+        }
         removed_banks
     }
 

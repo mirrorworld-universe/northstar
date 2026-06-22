@@ -46,18 +46,37 @@ pub struct ErPerfSample {
     pub sample_period_secs: u16,
 }
 
+const DEFAULT_MAX_RETAINED_SLOTS: usize = 10_000;
+
 #[derive(Default)]
 struct ErHistoryInner {
     slots: BTreeMap<Slot, ErSlotHistory>,
     transactions: HashMap<Signature, ConfirmedTransactionWithStatusMeta>,
 }
 
-#[derive(Default)]
 pub struct ErHistoryStore {
     inner: RwLock<ErHistoryInner>,
+    max_retained_slots: usize,
+}
+
+impl Default for ErHistoryStore {
+    fn default() -> Self {
+        Self {
+            inner: RwLock::new(ErHistoryInner::default()),
+            max_retained_slots: DEFAULT_MAX_RETAINED_SLOTS,
+        }
+    }
 }
 
 impl ErHistoryStore {
+    #[cfg(test)]
+    fn new_for_tests(max_retained_slots: usize) -> Self {
+        Self {
+            inner: RwLock::new(ErHistoryInner::default()),
+            max_retained_slots,
+        }
+    }
+
     fn populate_slot_from_bank(slot_history: &mut ErSlotHistory, bank: &Bank) {
         slot_history.blockhash = Some(bank.last_blockhash().to_string());
         slot_history.previous_blockhash = Some(bank.parent_hash().to_string());
@@ -96,8 +115,22 @@ impl ErHistoryStore {
                 index,
             },
         );
+        self.prune_excess_slots(&mut inner);
 
         Some(index)
+    }
+
+    fn prune_excess_slots(&self, inner: &mut ErHistoryInner) {
+        while inner.slots.len() > self.max_retained_slots {
+            let Some(slot) = inner.slots.keys().next().copied() else {
+                break;
+            };
+            if let Some(slot_history) = inner.slots.remove(&slot) {
+                for signature in slot_history.signatures {
+                    inner.transactions.remove(&signature);
+                }
+            }
+        }
     }
 
     pub fn finalize_slot(&self, bank: &Bank) {
@@ -114,6 +147,7 @@ impl ErHistoryStore {
                 transaction.block_time = block_time;
             }
         }
+        self.prune_excess_slots(&mut inner);
     }
 
     pub fn get_transaction(
@@ -648,5 +682,50 @@ mod tests {
             .unwrap();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].signature, signature);
+    }
+
+    #[test]
+    fn test_history_prunes_slots_and_transactions_past_retention_limit() {
+        let store = ErHistoryStore::new_for_tests(3);
+        let payer = Keypair::new();
+        let recipient = Pubkey::new_unique();
+        let mut bank = Arc::new(create_test_bank());
+        let mut signatures = Vec::new();
+
+        for slot in 0..5u64 {
+            if slot > 0 {
+                bank = Arc::new(Bank::new_from_parent(bank, SlotLeader::new_unique(), slot));
+            }
+
+            let mut tx = create_test_tx(&bank, &payer, &recipient);
+            tx.transaction.signatures[0] = Signature::from([slot as u8 + 1; 64]);
+            signatures.push(tx.transaction.signatures[0]);
+            assert_eq!(store.record_transaction(&bank, tx), Some(0));
+            store.finalize_slot(&bank);
+        }
+
+        // Retention is slot-count based and deterministic. Once slots 0 and 1
+        // fall out, their full transaction metadata must fall out too; this is
+        // the invariant that prevents unbounded ER history memory growth.
+        assert_eq!(store.get_first_available_block(), Some(2));
+        assert_eq!(
+            store.get_blocks(0, 10, CommitmentConfig::finalized()),
+            vec![2, 3, 4]
+        );
+        assert!(
+            store
+                .get_transaction(&signatures[0], CommitmentConfig::confirmed())
+                .is_none()
+        );
+        assert!(
+            store
+                .get_transaction(&signatures[1], CommitmentConfig::confirmed())
+                .is_none()
+        );
+        assert!(
+            store
+                .get_transaction(&signatures[2], CommitmentConfig::confirmed())
+                .is_some()
+        );
     }
 }

@@ -484,13 +484,15 @@ impl NorthStarService {
         {
             let root_bank = bank_forks.read().unwrap().root_bank();
             if let Err(e) = manager.init_runtime(
-                root_bank,
+                root_bank.clone(),
                 cluster_info.clone(),
                 config.listen_addr,
                 config.ws_addr,
                 config.tpu_addr,
             ) {
                 error!("Failed to initialize ephemeral runtime: {e}");
+            } else {
+                manager.resume_active_session_from_l1(root_bank);
             }
         }
 
@@ -1214,7 +1216,7 @@ mod tests {
     }
 
     #[test]
-    fn test_service_slot_advancer_only_runs_while_session_active() {
+    fn test_service_resumes_active_session_on_startup_and_stops_on_close() {
         agave_logger::setup();
 
         let (root_bank, bank_forks, program_id, mint_keypair) = setup_bank_with_portal();
@@ -1265,7 +1267,7 @@ mod tests {
             receiver,
             northstar::ManagerConfig {
                 portal_program_id: program_id,
-                manager_account: Arc::new(Keypair::new()),
+                manager_account: Arc::new(owner.insecure_clone()),
             },
             cluster_info,
             config.clone(),
@@ -1296,25 +1298,12 @@ mod tests {
             .get_slot_with_commitment(CommitmentConfig::processed())
             .unwrap();
         std::thread::sleep(Duration::from_millis(900));
-        let slot_still_before = rpc
-            .get_slot_with_commitment(CommitmentConfig::processed())
-            .unwrap();
-        assert_eq!(
-            slot_before, slot_still_before,
-            "ER slot should not advance before session activation"
-        );
-
-        sender
-            .send((BankNotification::Frozen(bank_for_open.clone()), None))
-            .unwrap();
-        std::thread::sleep(Duration::from_millis(1200));
-
-        let slot_after_activate = rpc
+        let slot_after_resume = rpc
             .get_slot_with_commitment(CommitmentConfig::processed())
             .unwrap();
         assert!(
-            slot_after_activate > slot_still_before,
-            "ER slot should advance after session activation"
+            slot_after_resume > slot_before,
+            "ER slot should advance after startup resume activates session"
         );
 
         let session_from_rpc: Option<String> = rpc
