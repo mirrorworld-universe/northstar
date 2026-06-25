@@ -69,6 +69,9 @@ const MAX_WITHDRAWAL_PAYOUT_EVENTS: usize = 10_000;
 #[cfg(test)]
 static REANCHOR_AFTER_BANK_FORKS_REPLACE_HOOK: Mutex<Option<(Pubkey, Box<dyn FnMut() + Send>)>> =
     Mutex::new(None);
+#[cfg(test)]
+static RESET_AFTER_BANK_FORKS_REPLACE_HOOK: Mutex<Option<(Pubkey, Box<dyn FnMut() + Send>)>> =
+    Mutex::new(None);
 
 struct RetiredBankForks {
     bank_forks: BankForks,
@@ -950,31 +953,14 @@ impl EphemeralRuntime {
             );
             Self::prepare_initial_working_bank(&bank);
 
-            // 3. Swap BankForks in-place — same Arc, new contents.
-            //    All holders (RPC service, tx_client) see the new bank.
             let new_bf_arc = BankForks::new_rw_arc_ephemeral(bank);
-            let new_bf = Arc::try_unwrap(new_bf_arc)
-                .unwrap_or_else(|_| panic!("just created, refcount must be 1"))
-                .into_inner()
-                .expect("lock not poisoned");
-            let old_bf = std::mem::replace(&mut *self.bank_forks.write().unwrap(), new_bf);
-            self.retire_bank_forks(old_bf);
 
-            // `new_rw_arc_ephemeral()` installed a Weak fork graph pointing at
-            // the temporary Arc we just unwrapped. Rebind the isolated ER
-            // ProgramCache to the long-lived Arc shared by RPC/TPU/tx client.
-            self.bank_forks
-                .read()
-                .unwrap()
-                .root_bank()
-                .set_fork_graph_in_program_cache(Arc::downgrade(&self.bank_forks));
-
-            // 4. Keep new L1 anchor alive even if ER root later severs its
+            // 3. Keep new L1 anchor alive even if ER root later severs its
             // parent link to keep ER chains shallow.
             self.l1_anchor_bank = parent_bank;
 
-            // 5. Clear and rehydrate session state from existing L1
-            // delegations before publishing RPC commitments. `AccountDelegated`
+            // 4. Clear and rehydrate session state from existing L1
+            // delegations before publishing the new BankForks. `AccountDelegated`
             // events are emitted only when the record is created, so close/open
             // reset must not depend on seeing those historical events again.
             self.initial_account_snapshots.clear();
@@ -1073,49 +1059,59 @@ impl EphemeralRuntime {
                 })
                 .collect::<Vec<_>>();
 
-            let er_bank = self.bank();
-            let mut seen_owner_programs = HashSet::new();
+            {
+                let er_bank = new_bf_arc.read().unwrap().working_bank();
+                let mut seen_owner_programs = HashSet::new();
 
-            let account_writes = hydrated_delegations
-                .iter()
-                .flat_map(
-                    |(pubkey, _account, effective_account, owner_program_account)| {
-                        let owner_program_accounts = owner_program_account
-                            .as_ref()
-                            .filter(|(owner_program, _, _)| {
-                                seen_owner_programs.insert(*owner_program)
-                            })
-                            .into_iter()
-                            .flat_map(|(owner_program, program_account, programdata)| {
-                                std::iter::once((owner_program, program_account)).chain(
-                                    programdata.as_ref().map(
-                                        |(programdata_address, programdata_account)| {
-                                            (programdata_address, programdata_account)
-                                        },
-                                    ),
-                                )
-                            });
-
-                        std::iter::once((pubkey, effective_account)).chain(owner_program_accounts)
-                    },
-                )
-                .collect::<Vec<_>>();
-            if !account_writes.is_empty() {
-                er_bank.store_accounts((er_bank.slot(), account_writes.as_slice()));
-            }
-            Self::remove_reloadable_programs_from_cache(
-                &er_bank,
-                "reset hydration",
-                hydrated_delegations
+                let account_writes = hydrated_delegations
                     .iter()
-                    .filter_map(|(_, _, _, owner_program_account)| {
-                        owner_program_account
-                            .as_ref()
-                            .map(|(owner_program, program_account, _)| {
-                                (*owner_program, program_account)
-                            })
-                    }),
-            );
+                    .flat_map(
+                        |(pubkey, _account, effective_account, owner_program_account)| {
+                            let owner_program_accounts = owner_program_account
+                                .as_ref()
+                                .filter(|(owner_program, _, _)| {
+                                    seen_owner_programs.insert(*owner_program)
+                                })
+                                .into_iter()
+                                .flat_map(|(owner_program, program_account, programdata)| {
+                                    std::iter::once((owner_program, program_account)).chain(
+                                        programdata.as_ref().map(
+                                            |(programdata_address, programdata_account)| {
+                                                (programdata_address, programdata_account)
+                                            },
+                                        ),
+                                    )
+                                });
+
+                            std::iter::once((pubkey, effective_account))
+                                .chain(owner_program_accounts)
+                        },
+                    )
+                    .collect::<Vec<_>>();
+                if !account_writes.is_empty() {
+                    er_bank.store_accounts((er_bank.slot(), account_writes.as_slice()));
+                }
+                Self::remove_reloadable_programs_from_cache(
+                    &er_bank,
+                    "reset hydration",
+                    hydrated_delegations
+                        .iter()
+                        .filter_map(|(_, _, _, owner_program_account)| {
+                            owner_program_account.as_ref().map(
+                                |(owner_program, program_account, _)| {
+                                    (*owner_program, program_account)
+                                },
+                            )
+                        }),
+                );
+
+                // Sonic: RPC bank lookup can fall back to BankForks::root_bank while
+                // the commitment cache still points at an old ER slot during reset.
+                // Publish only a frozen root so sendTransaction preflight simulation
+                // never observes an unfrozen bank.
+                er_bank.freeze();
+                self.er_history_store.finalize_slot(&er_bank);
+            }
 
             self.initial_account_snapshots.extend(
                 hydrated_delegations
@@ -1139,6 +1135,33 @@ impl EphemeralRuntime {
             let hydrated = hydrated_delegations.len();
             if hydrated > 0 {
                 info!("Hydrated {hydrated} existing delegated account(s) from L1 after reset");
+            }
+
+            // 5. Swap BankForks in-place — same Arc, new contents.
+            //    All holders (RPC service, tx_client) see the new frozen root.
+            let new_bf = Arc::try_unwrap(new_bf_arc)
+                .unwrap_or_else(|_| panic!("just created, refcount must be 1"))
+                .into_inner()
+                .expect("lock not poisoned");
+            let old_bf = std::mem::replace(&mut *self.bank_forks.write().unwrap(), new_bf);
+            self.retire_bank_forks(old_bf);
+
+            // `new_rw_arc_ephemeral()` installed a Weak fork graph pointing at
+            // the temporary Arc we just unwrapped. Rebind the isolated ER
+            // ProgramCache to the long-lived Arc shared by RPC/TPU/tx client.
+            self.bank_forks
+                .read()
+                .unwrap()
+                .root_bank()
+                .set_fork_graph_in_program_cache(Arc::downgrade(&self.bank_forks));
+
+            #[cfg(test)]
+            if let Some((session_pda, hook)) =
+                RESET_AFTER_BANK_FORKS_REPLACE_HOOK.lock().unwrap().as_mut()
+            {
+                if *session_pda == self.settings.session_pda {
+                    hook();
+                }
             }
 
             // 6. Publish frozen ER bank for RPC/preflight, keep fresh child as working bank.
@@ -1933,7 +1956,9 @@ mod tests {
         solana_message::{Message, SanitizedMessage},
         solana_net_utils::SocketAddrSpace,
         solana_rpc_client::rpc_client::RpcClient,
-        solana_rpc_client_types::config::{CommitmentConfig, RpcSendTransactionConfig},
+        solana_rpc_client_types::config::{
+            CommitmentConfig, RpcSendTransactionConfig, RpcSimulateTransactionConfig,
+        },
         solana_sdk_ids::{bpf_loader_upgradeable, system_program},
         solana_send_transaction_service::{
             send_transaction_service_stats::SendTransactionServiceStats,
@@ -3178,6 +3203,166 @@ mod tests {
     }
 
     #[test]
+    fn test_send_transaction_preflight_processed_after_processed_write() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        let sender_keypair = Keypair::new();
+        let sender_pubkey = sender_keypair.pubkey();
+        let first_receiver = Pubkey::new_unique();
+        let second_receiver = Pubkey::new_unique();
+        fund_account(&parent_bank, &sender_pubkey, 100_000_000_000);
+        parent_bank.freeze();
+
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.activate();
+        let rpc_client = rpc_client(&runtime);
+
+        std::thread::sleep(Duration::from_secs(2));
+
+        let first_blockhash = rpc_client
+            .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
+            .unwrap()
+            .0;
+        let first_tx = Transaction::new_signed_with_payer(
+            &[transfer(&sender_pubkey, &first_receiver, 1_000_000)],
+            Some(&sender_pubkey),
+            &[&sender_keypair],
+            first_blockhash,
+        );
+        rpc_client
+            .send_transaction_with_config(
+                &first_tx,
+                RpcSendTransactionConfig {
+                    skip_preflight: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let second_blockhash = rpc_client
+            .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
+            .unwrap()
+            .0;
+        let second_tx = Transaction::new_signed_with_payer(
+            &[transfer(&sender_pubkey, &second_receiver, 1_000_000)],
+            Some(&sender_pubkey),
+            &[&sender_keypair],
+            second_blockhash,
+        );
+        rpc_client
+            .send_transaction_with_config(
+                &second_tx,
+                RpcSendTransactionConfig {
+                    skip_preflight: false,
+                    preflight_commitment: Some(CommitmentConfig::processed().commitment),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_simulate_transaction_processed_after_processed_write() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        let sender_keypair = Keypair::new();
+        let sender_pubkey = sender_keypair.pubkey();
+        let first_receiver = Pubkey::new_unique();
+        let simulated_receiver = Pubkey::new_unique();
+        fund_account(&parent_bank, &sender_pubkey, 100_000_000_000);
+        parent_bank.freeze();
+
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.activate();
+        let rpc_client = rpc_client(&runtime);
+
+        std::thread::sleep(Duration::from_secs(2));
+
+        let first_blockhash = rpc_client
+            .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
+            .unwrap()
+            .0;
+        let first_tx = Transaction::new_signed_with_payer(
+            &[transfer(&sender_pubkey, &first_receiver, 1_000_000)],
+            Some(&sender_pubkey),
+            &[&sender_keypair],
+            first_blockhash,
+        );
+        rpc_client
+            .send_transaction_with_config(
+                &first_tx,
+                RpcSendTransactionConfig {
+                    skip_preflight: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let simulate_blockhash = rpc_client
+            .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
+            .unwrap()
+            .0;
+        let simulated_tx = Transaction::new_signed_with_payer(
+            &[transfer(&sender_pubkey, &simulated_receiver, 1_000_000)],
+            Some(&sender_pubkey),
+            &[&sender_keypair],
+            simulate_blockhash,
+        );
+        let simulation = rpc_client
+            .simulate_transaction_with_config(
+                &simulated_tx,
+                RpcSimulateTransactionConfig {
+                    commitment: Some(CommitmentConfig::processed()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(simulation.value.err, None);
+
+        runtime.shutdown();
+    }
+
+    #[test]
     fn test_er_history_get_transaction_and_signature_status_after_reset() {
         agave_logger::setup();
 
@@ -3660,6 +3845,68 @@ mod tests {
             "ER blockhash minted before L1 reanchor must remain usable after reanchor"
         );
         runtime.shutdown();
+    }
+
+    #[test]
+    fn test_reset_to_new_parent_publishes_only_frozen_rpc_root() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        parent_bank.freeze();
+        let parent_bank = Arc::new(parent_bank);
+
+        let session_pda = Pubkey::new_unique();
+        let settings = EphemeralRollupSettings {
+            session_pda,
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            parent_bank.clone(),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+
+        let bank_forks = runtime.bank_forks.clone();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        *RESET_AFTER_BANK_FORKS_REPLACE_HOOK.lock().unwrap() = Some((
+            session_pda,
+            Box::new(move || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }),
+        ));
+
+        let new_parent = Bank::new_from_parent(parent_bank, SlotLeader::default(), 1);
+        new_parent.freeze();
+        let handle = std::thread::spawn(move || {
+            runtime.reset_to_new_parent(Arc::new(new_parent));
+            runtime
+        });
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("reset hook should run after BankForks replacement");
+        let root_was_frozen = bank_forks.read().unwrap().root_bank().is_frozen();
+        release_tx.send(()).unwrap();
+        let mut runtime = handle.join().unwrap();
+        *RESET_AFTER_BANK_FORKS_REPLACE_HOOK.lock().unwrap() = None;
+        runtime.shutdown();
+
+        assert!(
+            root_was_frozen,
+            "RPC fallback root must be frozen during reset so preflight simulation cannot panic"
+        );
     }
 
     #[test]
