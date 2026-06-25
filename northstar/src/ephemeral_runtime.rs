@@ -3131,6 +3131,83 @@ mod tests {
     }
 
     #[test]
+    fn test_send_transaction_rejects_non_delegated_l1_writes() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        let sender_keypair = Keypair::new();
+        let sender_pubkey = sender_keypair.pubkey();
+        let delegated_pubkey = Pubkey::new_unique();
+        let non_delegated_receiver = Pubkey::new_unique();
+        let portal_program_id = Pubkey::new_unique();
+        fund_account(&parent_bank, &sender_pubkey, 100_000_000_000);
+        parent_bank.store_account(
+            &delegated_pubkey,
+            &AccountSharedData::new(1_000_000, 0, &portal_program_id),
+        );
+        store_delegation_record(
+            &parent_bank,
+            &portal_program_id,
+            &delegated_pubkey,
+            &system_program::id(),
+            0,
+        );
+        fund_account(&parent_bank, &non_delegated_receiver, 1_000_000);
+        parent_bank.freeze();
+
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![delegated_pubkey],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            portal_program_id,
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.activate();
+        let rpc_client = rpc_client(&runtime);
+
+        std::thread::sleep(Duration::from_secs(2));
+
+        let blockhash = rpc_client
+            .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
+            .unwrap()
+            .0;
+        let tx = Transaction::new_signed_with_payer(
+            &[transfer(&sender_pubkey, &non_delegated_receiver, 1_000_000)],
+            Some(&sender_pubkey),
+            &[&sender_keypair],
+            blockhash,
+        );
+
+        let err = rpc_client
+            .send_transaction_with_config(
+                &tx,
+                RpcSendTransactionConfig {
+                    skip_preflight: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("non-delegated"),
+            "unexpected non-delegated write error: {err}"
+        );
+
+        runtime.shutdown();
+    }
+
+    #[test]
     fn test_send_transaction_result_is_immediately_visible_at_processed_commitment() {
         agave_logger::setup();
 

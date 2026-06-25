@@ -293,6 +293,7 @@ pub struct JsonRpcRequestProcessor {
 #[derive(Debug)]
 pub enum ErTxError {
     NotActive,
+    Rejected(String),
 }
 
 /// Sonic: Synchronous executor used by ER `sendTransaction` to bypass
@@ -4281,6 +4282,11 @@ pub mod rpc_full {
                         ErTxError::NotActive => {
                             Error::from(RpcCustomError::EphemeralRollupNotActive)
                         }
+                        ErTxError::Rejected(message) => Error {
+                            code: error::ErrorCode::InvalidRequest,
+                            message,
+                            data: None,
+                        },
                     })?;
                 return Ok(signature.to_string());
             }
