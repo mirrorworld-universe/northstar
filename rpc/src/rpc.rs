@@ -293,6 +293,7 @@ pub struct JsonRpcRequestProcessor {
 #[derive(Debug)]
 pub enum ErTxError {
     NotActive,
+    Rejected(String),
 }
 
 /// Sonic: Synchronous executor used by ER `sendTransaction` to bypass
@@ -4213,6 +4214,11 @@ pub mod rpc_full {
 
                 let simulation_result = if let Some(err) = verification_error {
                     TransactionSimulationResult::new_error(err)
+                } else if meta.er_tx_executor.is_some() && !preflight_bank.is_frozen() {
+                    // Sonic: ER processed commitment can point at the live working bank so
+                    // processed reads observe writes immediately. Preflight still needs to
+                    // simulate against that bank when clients request processed commitment.
+                    preflight_bank.simulate_transaction_unchecked(&transaction, false)
                 } else {
                     preflight_bank.simulate_transaction(&transaction, false)
                 };
@@ -4276,6 +4282,11 @@ pub mod rpc_full {
                         ErTxError::NotActive => {
                             Error::from(RpcCustomError::EphemeralRollupNotActive)
                         }
+                        ErTxError::Rejected(message) => Error {
+                            code: error::ErrorCode::InvalidRequest,
+                            message,
+                            data: None,
+                        },
                     })?;
                 return Ok(signature.to_string());
             }
@@ -4366,6 +4377,10 @@ pub mod rpc_full {
 
             let simulation_result = if let Some(err) = verification_error {
                 TransactionSimulationResult::new_error(err)
+            } else if meta.er_node_info.is_some() && !bank.is_frozen() {
+                // Sonic: ER processed commitment can point at the live working bank so
+                // processed simulateTransaction sees the same state as processed reads.
+                bank.simulate_transaction_unchecked(&transaction, enable_cpi_recording)
             } else {
                 bank.simulate_transaction(&transaction, enable_cpi_recording)
             };

@@ -328,10 +328,6 @@ impl EphemeralTransactionClient {
         let static_keys = message.static_account_keys();
 
         for (i, key) in static_keys.iter().enumerate() {
-            // Skip fee payer (index 0) — always allowed
-            if i == 0 {
-                continue;
-            }
             if message.is_maybe_writable(i, None)
                 && !Self::is_allowed_writable_on_bank(
                     bank,
@@ -461,7 +457,7 @@ impl TransactionClient for EphemeralTransactionClient {
         self.publish_processed_slot(&bank);
 
         // Mark writable accounts as touched (even on failure, since fee payers may be debited)
-        Self::mark_writable_as_touched_for_batch(&txs, &self.touched_accounts);
+        Self::mark_writable_as_touched_for_batch(&bank, &txs, &self.touched_accounts);
     }
 }
 
@@ -1030,6 +1026,7 @@ impl EphemeralTransactionClient {
 
     /// Mark all writable accounts in a transaction batch as touched.
     fn mark_writable_as_touched_for_batch(
+        bank: &Bank,
         txs: &[VersionedTransaction],
         touched: &RwLock<HashSet<Pubkey>>,
     ) {
@@ -1043,6 +1040,10 @@ impl EphemeralTransactionClient {
                 if message.is_maybe_writable(i, None) {
                     touched_write.insert(*key);
                 }
+            }
+
+            if let Some(loaded_addresses) = Self::load_transaction_addresses(bank, tx) {
+                touched_write.extend(loaded_addresses.writable);
             }
         }
     }
@@ -1064,12 +1065,48 @@ impl solana_rpc::rpc::ErTxExecutor for EphemeralTransactionClient {
             return Err(solana_rpc::rpc::ErTxError::NotActive);
         }
 
-        let stats = SendTransactionServiceStats::default();
-        <Self as TransactionClient>::send_transactions_in_batch(
-            self,
-            vec![wire_transaction],
-            &stats,
+        let tx =
+            bincode::deserialize::<VersionedTransaction>(&wire_transaction).map_err(|err| {
+                solana_rpc::rpc::ErTxError::Rejected(format!(
+                    "failed to deserialize ER transaction: {err}"
+                ))
+            })?;
+
+        let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
+        let bank = self.bank();
+        let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
+        let touched_accounts = self.touched_accounts.read().unwrap().clone();
+        if !Self::is_transaction_allowed_on_bank(&bank, &tx, &delegated_accounts, &touched_accounts)
+        {
+            let signature = tx
+                .signatures
+                .first()
+                .map(|signature| signature.to_string())
+                .unwrap_or_default();
+            warn!("Transaction rejected: writes to non-delegated accounts. sig={signature}");
+            return Err(solana_rpc::rpc::ErTxError::Rejected(
+                "transaction writes to non-delegated accounts".to_string(),
+            ));
+        }
+
+        let txs = vec![tx];
+        let writable_accounts = Self::writable_accounts_for_batch(&bank, &txs);
+        Self::zero_untouched_writable_accounts_for_batch(
+            &bank,
+            &txs,
+            &self.touched_accounts,
+            &delegated_accounts,
         );
+        self.execute_transactions(&bank, txs.clone())
+            .map_err(|err| {
+                solana_rpc::rpc::ErTxError::Rejected(format!(
+                    "ER transaction execution failed: {err}"
+                ))
+            })?;
+        self.capture_overlay_accounts(&bank, &writable_accounts);
+        self.publish_processed_slot(&bank);
+        Self::mark_writable_as_touched_for_batch(&bank, &txs, &self.touched_accounts);
+
         Ok(())
     }
 }
@@ -1670,6 +1707,64 @@ mod tests {
         assert_eq!(meta.inner_instructions.as_ref(), Some(&expected_inner));
         assert_eq!(meta.return_data.as_ref(), Some(&expected_return_data));
         assert_eq!(meta.compute_units_consumed, Some(321));
+    }
+
+    #[test]
+    fn test_mark_writable_as_touched_includes_loaded_addresses() {
+        let fee_payer = Keypair::new();
+        let loaded_address = Pubkey::new_unique();
+        let address_table_key = Pubkey::new_unique();
+        let touched = RwLock::new(HashSet::new());
+
+        use solana_genesis_config::GenesisConfig;
+        let genesis_config = GenesisConfig::new(&[], &[]);
+        let bank = Bank::new_for_tests(&genesis_config);
+        let address_table_state = AddressLookupTable {
+            meta: LookupTableMeta {
+                last_extended_slot_start_index: 1,
+                ..LookupTableMeta::default()
+            },
+            addresses: Cow::Owned(vec![loaded_address]),
+        };
+        let address_table_data = Arc::new(address_table_state.serialize_for_tests().unwrap());
+        let address_table_account = AccountSharedData::create_from_existing_shared_data(
+            bank.get_minimum_balance_for_rent_exemption(address_table_data.len()),
+            address_table_data,
+            address_lookup_table::program::id(),
+            false,
+            0,
+        );
+        bank.store_account(&address_table_key, &address_table_account);
+        bank.freeze();
+        let bank = Bank::new_from_parent(Arc::new(bank), SlotLeader::new_unique(), 1);
+        assert!(bank.get_account(&address_table_key).is_some());
+
+        let tx = VersionedTransaction::try_new(
+            VersionedMessage::V0(v0::Message {
+                header: MessageHeader {
+                    num_required_signatures: 1,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 0,
+                },
+                recent_blockhash: solana_hash::Hash::default(),
+                account_keys: vec![fee_payer.pubkey()],
+                instructions: vec![],
+                address_table_lookups: vec![MessageAddressTableLookup {
+                    account_key: address_table_key,
+                    writable_indexes: vec![0],
+                    readonly_indexes: vec![],
+                }],
+            }),
+            &[&fee_payer],
+        )
+        .unwrap();
+
+        EphemeralTransactionClient::mark_writable_as_touched_for_batch(&bank, &[tx], &touched);
+
+        assert!(
+            touched.read().unwrap().contains(&loaded_address),
+            "writable loaded addresses must be marked touched after execution"
+        );
     }
 
     #[test]
