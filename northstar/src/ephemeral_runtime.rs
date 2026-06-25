@@ -67,9 +67,11 @@ impl DropCallback for NoopDropCallback {
 const MAX_WITHDRAWAL_PAYOUT_EVENTS: usize = 10_000;
 
 #[cfg(test)]
+#[allow(clippy::type_complexity)]
 static REANCHOR_AFTER_BANK_FORKS_REPLACE_HOOK: Mutex<Option<(Pubkey, Box<dyn FnMut() + Send>)>> =
     Mutex::new(None);
 #[cfg(test)]
+#[allow(clippy::type_complexity)]
 static RESET_AFTER_BANK_FORKS_REPLACE_HOOK: Mutex<Option<(Pubkey, Box<dyn FnMut() + Send>)>> =
     Mutex::new(None);
 
