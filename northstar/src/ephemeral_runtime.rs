@@ -66,6 +66,10 @@ impl DropCallback for NoopDropCallback {
 
 const MAX_WITHDRAWAL_PAYOUT_EVENTS: usize = 10_000;
 
+#[cfg(test)]
+static REANCHOR_AFTER_BANK_FORKS_REPLACE_HOOK: Mutex<Option<(Pubkey, Box<dyn FnMut() + Send>)>> =
+    Mutex::new(None);
+
 struct RetiredBankForks {
     bank_forks: BankForks,
     purge_slots: Vec<(Slot, BankId)>,
@@ -1247,6 +1251,31 @@ impl EphemeralRuntime {
         Self::prepare_initial_working_bank(&bank);
 
         let new_bf_arc = BankForks::new_rw_arc_ephemeral(bank);
+        {
+            let er_bank = new_bf_arc.read().unwrap().working_bank();
+            let overlaid = self.apply_er_account_overlay_to_bank(&er_bank);
+            if overlaid > 0 {
+                info!("Rehydrated {overlaid} ER overlay account(s) after L1 reanchor");
+            }
+            let refreshed_owner_programs = self.hydrate_delegated_owner_programs_from_l1(
+                &parent_bank,
+                &er_bank,
+                "reanchor hydration",
+            );
+            if refreshed_owner_programs > 0 {
+                info!(
+                    "Rehydrated {refreshed_owner_programs} delegated owner program(s) after L1 \
+                     reanchor"
+                );
+            }
+
+            // Sonic: RPC bank lookup can fall back to BankForks::root_bank while
+            // the commitment cache still points at an old ER slot during reanchor.
+            // Publish only a frozen root so sendTransaction preflight simulation
+            // never observes an unfrozen bank.
+            er_bank.freeze();
+            self.er_history_store.finalize_slot(&er_bank);
+        }
         let new_bf = Arc::try_unwrap(new_bf_arc)
             .unwrap_or_else(|_| panic!("just created, refcount must be 1"))
             .into_inner()
@@ -1260,24 +1289,18 @@ impl EphemeralRuntime {
             .root_bank()
             .set_fork_graph_in_program_cache(Arc::downgrade(&self.bank_forks));
 
-        self.l1_anchor_bank = parent_bank;
+        #[cfg(test)]
+        if let Some((session_pda, hook)) = REANCHOR_AFTER_BANK_FORKS_REPLACE_HOOK
+            .lock()
+            .unwrap()
+            .as_mut()
+        {
+            if *session_pda == self.settings.session_pda {
+                hook();
+            }
+        }
 
-        let er_bank = self.bank();
-        let overlaid = self.apply_er_account_overlay_to_bank(&er_bank);
-        if overlaid > 0 {
-            info!("Rehydrated {overlaid} ER overlay account(s) after L1 reanchor");
-        }
-        let refreshed_owner_programs = self.hydrate_delegated_owner_programs_from_l1(
-            &self.l1_anchor_bank,
-            &er_bank,
-            "reanchor hydration",
-        );
-        if refreshed_owner_programs > 0 {
-            info!(
-                "Rehydrated {refreshed_owner_programs} delegated owner program(s) after L1 \
-                 reanchor"
-            );
-        }
+        self.l1_anchor_bank = parent_bank;
 
         let initial_bank = Self::freeze_and_rotate_bank_for_rpc(
             &self.bank_forks,
@@ -1920,7 +1943,12 @@ mod tests {
         solana_system_interface::instruction::transfer,
         solana_transaction::{versioned::VersionedTransaction, Transaction},
         solana_transaction_status::{TransactionConfirmationStatus, UiTransactionEncoding},
-        std::{collections::HashSet, net::TcpListener, sync::atomic::AtomicU64, time::Duration},
+        std::{
+            collections::HashSet,
+            net::TcpListener,
+            sync::{atomic::AtomicU64, mpsc},
+            time::Duration,
+        },
     };
 
     #[derive(Debug, Clone)]
@@ -3517,6 +3545,69 @@ mod tests {
         runtime.reanchor_to_l1_parent(Arc::new(new_parent));
 
         assert_eq!(runtime.bank().get_balance(&readonly_account), 2_000_000);
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_reanchor_publishes_only_frozen_rpc_root() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        parent_bank.freeze();
+        let parent_bank = Arc::new(parent_bank);
+
+        let session_pda = Pubkey::new_unique();
+        let settings = EphemeralRollupSettings {
+            session_pda,
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            parent_bank.clone(),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.active.store(true, Ordering::Relaxed);
+
+        let bank_forks = runtime.bank_forks.clone();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        *REANCHOR_AFTER_BANK_FORKS_REPLACE_HOOK.lock().unwrap() = Some((
+            session_pda,
+            Box::new(move || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }),
+        ));
+
+        let new_parent = Bank::new_from_parent(parent_bank, SlotLeader::default(), 1);
+        new_parent.freeze();
+        let handle = std::thread::spawn(move || {
+            runtime.reanchor_to_l1_parent(Arc::new(new_parent));
+            runtime
+        });
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("reanchor hook should run after BankForks replacement");
+        let root_was_frozen = bank_forks.read().unwrap().root_bank().is_frozen();
+        release_tx.send(()).unwrap();
+        let mut runtime = handle.join().unwrap();
+        *REANCHOR_AFTER_BANK_FORKS_REPLACE_HOOK.lock().unwrap() = None;
+
+        assert!(
+            root_was_frozen,
+            "RPC fallback root must be frozen during reanchor so preflight simulation cannot panic"
+        );
         runtime.shutdown();
     }
 
