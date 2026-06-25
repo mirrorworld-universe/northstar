@@ -492,7 +492,15 @@ impl NorthStarService {
             ) {
                 error!("Failed to initialize ephemeral runtime: {e}");
             } else {
-                manager.resume_active_session_from_l1(root_bank);
+                // Sonic: Hotfix: do not resume historical sessions on the validator
+                // startup hot path. Resume scans Portal-owned accounts from the L1
+                // bank, which can devolve into an AccountsDB-wide scan without a
+                // program-id index and stall NorthStar sync reporting. Operators can
+                // reopen sessions until resume has a bounded/indexed recovery path.
+                info!(
+                    "NorthStar historical session resume skipped; reopen the Portal session to \
+                     activate ER"
+                );
             }
         }
 
@@ -1032,26 +1040,6 @@ mod tests {
         }
     }
 
-    fn build_close_session_ix(
-        program_id: Pubkey,
-        owner: Pubkey,
-        session_pda: Pubkey,
-        fee_vault_pda: Pubkey,
-    ) -> Instruction {
-        let ix = PortalInstruction::CloseSession;
-        let data = borsh::to_vec(&ix).unwrap();
-        Instruction {
-            program_id,
-            accounts: vec![
-                AccountMeta::new(owner, true),
-                AccountMeta::new(session_pda, false),
-                AccountMeta::new(fee_vault_pda, false),
-                AccountMeta::new_readonly(system_program::id(), false),
-            ],
-            data,
-        }
-    }
-
     #[test]
     fn test_service_creates_runtime_on_notification() {
         agave_logger::setup();
@@ -1216,7 +1204,7 @@ mod tests {
     }
 
     #[test]
-    fn test_service_resumes_active_session_on_startup_and_stops_on_close() {
+    fn test_service_does_not_resume_historical_l1_session_on_startup() {
         agave_logger::setup();
 
         let (root_bank, bank_forks, program_id, mint_keypair) = setup_bank_with_portal();
@@ -1251,7 +1239,7 @@ mod tests {
         let bank_for_open = bank_forks.read().unwrap().root_bank();
 
         let cluster_info = create_test_cluster_info();
-        let (sender, receiver) = unbounded();
+        let (_sender, receiver) = unbounded();
         let exit = Arc::new(AtomicBool::new(false));
         let config = NorthStarServiceConfig {
             listen_addr: find_free_addr(),
@@ -1275,9 +1263,9 @@ mod tests {
         );
 
         let rpc = RpcClient::new(format!("http://{}", config.listen_addr));
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(Duration::from_millis(300));
 
-        let initial_sync_status: RpcNorthStarSyncStatus = rpc
+        let sync_status: RpcNorthStarSyncStatus = rpc
             .send(
                 RpcRequest::Custom {
                     method: "northstarSysGetSyncStatus",
@@ -1286,7 +1274,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            initial_sync_status,
+            sync_status,
             RpcNorthStarSyncStatus {
                 is_syncing: false,
                 latest_synced_slot: bank_for_open.slot(),
@@ -1297,13 +1285,13 @@ mod tests {
         let slot_before = rpc
             .get_slot_with_commitment(CommitmentConfig::processed())
             .unwrap();
-        std::thread::sleep(Duration::from_millis(900));
-        let slot_after_resume = rpc
+        std::thread::sleep(Duration::from_millis(300));
+        let slot_after = rpc
             .get_slot_with_commitment(CommitmentConfig::processed())
             .unwrap();
-        assert!(
-            slot_after_resume > slot_before,
-            "ER slot should advance after startup resume activates session"
+        assert_eq!(
+            slot_after, slot_before,
+            "ER slot must not advance for a historical L1 session skipped by startup hotfix"
         );
 
         let session_from_rpc: Option<String> = rpc
@@ -1314,77 +1302,7 @@ mod tests {
                 serde_json::Value::Null,
             )
             .unwrap();
-        assert_eq!(session_from_rpc, Some(session_pda.to_string()));
-
-        let sync_status_after_activate: RpcNorthStarSyncStatus = rpc
-            .send(
-                RpcRequest::Custom {
-                    method: "northstarSysGetSyncStatus",
-                },
-                serde_json::Value::Null,
-            )
-            .unwrap();
-        assert_eq!(
-            sync_status_after_activate,
-            RpcNorthStarSyncStatus {
-                is_syncing: false,
-                latest_synced_slot: bank_for_open.slot(),
-                latest_l1_slot: bank_for_open.slot(),
-            }
-        );
-
-        let close_bank = Bank::new_from_parent(
-            bank_for_open.clone(),
-            SlotLeader::new_unique(),
-            bank_for_open.slot() + 3,
-        );
-        let close_ix =
-            build_close_session_ix(program_id, owner.pubkey(), session_pda, fee_vault_pda);
-        let blockhash = close_bank.last_blockhash();
-        let close_tx = Transaction::new_signed_with_payer(
-            &[close_ix],
-            Some(&owner.pubkey()),
-            &[&owner],
-            blockhash,
-        );
-        close_bank.process_transaction(&close_tx).unwrap();
-        close_bank.freeze();
-
-        sender
-            .send((BankNotification::Frozen(Arc::new(close_bank)), None))
-            .unwrap();
-        // Wait until SessionClosed is processed and RPC reports no active session.
-        let mut session_after_close = Some(String::new());
-        for _ in 0..10 {
-            std::thread::sleep(Duration::from_millis(300));
-            session_after_close = rpc
-                .send(
-                    RpcRequest::Custom {
-                        method: "getSessionPda",
-                    },
-                    serde_json::Value::Null,
-                )
-                .unwrap();
-            if session_after_close.is_none() {
-                break;
-            }
-        }
-        assert_eq!(
-            session_after_close, None,
-            "session PDA should clear after SessionClosed"
-        );
-
-        let slot_before_stop = rpc
-            .get_slot_with_commitment(CommitmentConfig::processed())
-            .unwrap();
-        std::thread::sleep(Duration::from_millis(900));
-        let slot_after_stop = rpc
-            .get_slot_with_commitment(CommitmentConfig::processed())
-            .unwrap();
-        assert_eq!(
-            slot_before_stop, slot_after_stop,
-            "ER slot should stop advancing after session close"
-        );
+        assert_eq!(session_from_rpc, None);
 
         exit.store(true, Ordering::Relaxed);
         service.join().expect("service should join");

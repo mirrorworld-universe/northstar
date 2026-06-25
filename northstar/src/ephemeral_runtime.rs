@@ -969,18 +969,11 @@ impl EphemeralRuntime {
             self.delegated_accounts.write().unwrap().clear();
             self.touched_accounts.write().unwrap().clear();
             self.er_account_overlay.write().unwrap().clear();
-            let mut accounts = Vec::new();
-            if self
-                .l1_anchor_bank
-                .scan_all_accounts(|entry| {
-                    if let Some((pubkey, account, slot)) = entry {
-                        accounts.push((*pubkey, account, slot));
-                    }
-                })
-                .is_err()
-            {
-                warn!("Cannot hydrate existing delegations from L1: account scan failed");
-            }
+            // Sonic: Hotfix: skip historical delegation hydration on the reset hot path.
+            // Scanning all L1 accounts can stall the NorthStar thread on devnet-sized
+            // AccountsDB when no program-id index is available. Fresh AccountDelegated
+            // events still hydrate newly delegated accounts after the session is reopened.
+            let accounts: Vec<(Pubkey, AccountSharedData, Slot)> = Vec::new();
 
             let hydrated_delegations = accounts
                 .into_iter()
@@ -4993,7 +4986,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reset_to_new_parent_rehydrates_existing_delegations_from_l1() {
+    fn test_reset_to_new_parent_skips_historical_delegation_scan_on_hot_path() {
         agave_logger::setup();
 
         let (parent_bank, mut runtime) = create_runtime();
@@ -5031,19 +5024,12 @@ mod tests {
         runtime.reset_to_new_parent(Arc::new(l1_bank));
 
         assert!(
-            runtime.delegated_accounts().contains(&delegated_pubkey),
-            "reset should hydrate delegated set from existing L1 DelegationRecord accounts"
+            !runtime.delegated_accounts().contains(&delegated_pubkey),
+            "hotfix: reset must not scan historical L1 DelegationRecord accounts"
         );
-        let er_delegated_account = runtime
-            .bank()
-            .get_account(&delegated_pubkey)
-            .expect("delegated account should be restored into ER after reset");
-        assert_eq!(er_delegated_account.owner(), &owner_program);
-        assert_eq!(er_delegated_account.data(), delegated_l1_snapshot.data());
         assert!(runtime
             .initial_account_snapshot(&delegated_pubkey)
-            .is_some());
-        assert!(runtime.bank().get_account(&programdata_address).is_some());
+            .is_none());
 
         runtime.shutdown();
     }
