@@ -1873,12 +1873,16 @@ impl EphemeralRuntime {
     pub fn credit_deposit(&self, depositor: &Pubkey, lamports: u64) {
         let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
         let bank = self.bank();
-        let mut account = bank.get_account(depositor).unwrap_or_default();
         let was_delegated = self.delegated_accounts.read().unwrap().contains(depositor);
         let was_touched = self.touched_accounts.read().unwrap().contains(depositor);
+        let mut account = if was_delegated || was_touched {
+            bank.get_account(depositor).unwrap_or_default()
+        } else {
+            AccountSharedData::new(0, 0, &solana_sdk_ids::system_program::id())
+        };
 
-        // Untouched, non-delegated accounts inherit L1 lamports into the ER bank.
-        // Deposits must materialize only the deposited amount, not L1 balance + deposit.
+        // Untouched, non-delegated accounts may exist on the L1 parent, but an ER deposit
+        // materializes only the deposited balance, not inherited L1 owner/data/lamports.
         let base_balance = if was_delegated || was_touched {
             account.lamports()
         } else {
@@ -2267,6 +2271,45 @@ mod tests {
         expected_lt_hash.mix_in(&account_diff.er_lt_hash);
         assert_eq!(diff.lt_hash, expected_lt_hash);
         assert_ne!(diff.checksum(), LtHash::identity().checksum());
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_credit_deposit_does_not_inherit_untouched_l1_account_owner() {
+        let parent_bank = create_test_bank();
+        let depositor = Pubkey::new_unique();
+        let l1_owner = Pubkey::new_unique();
+        let l1_account = AccountSharedData::new(1_000_000, 4, &l1_owner);
+        parent_bank.store_account(&depositor, &l1_account);
+        parent_bank.freeze();
+
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+
+        runtime.credit_deposit(&depositor, 7);
+        let er_account = runtime.bank().get_account(&depositor).unwrap();
+
+        assert_eq!(er_account.lamports(), 7);
+        assert_eq!(er_account.owner(), &system_program::id());
+        assert!(er_account.data().is_empty());
 
         runtime.shutdown();
     }
@@ -3126,6 +3169,82 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(receiver_balance, transfer_amount);
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_send_transaction_rejects_untouched_l1_fee_payer() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        let sender_keypair = Keypair::new();
+        let sender_pubkey = sender_keypair.pubkey();
+        let delegated_pubkey = Pubkey::new_unique();
+        let receiver_pubkey = Pubkey::new_unique();
+        let portal_program_id = Pubkey::new_unique();
+        fund_account(&parent_bank, &sender_pubkey, 100_000_000_000);
+        parent_bank.store_account(
+            &delegated_pubkey,
+            &AccountSharedData::new(1_000_000, 0, &portal_program_id),
+        );
+        store_delegation_record(
+            &parent_bank,
+            &portal_program_id,
+            &delegated_pubkey,
+            &system_program::id(),
+            0,
+        );
+        parent_bank.freeze();
+
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![delegated_pubkey],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            portal_program_id,
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.activate();
+        let rpc_client = rpc_client(&runtime);
+
+        std::thread::sleep(Duration::from_secs(2));
+
+        let blockhash = rpc_client
+            .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
+            .unwrap()
+            .0;
+        let tx = Transaction::new_signed_with_payer(
+            &[transfer(&sender_pubkey, &receiver_pubkey, 1_000_000)],
+            Some(&sender_pubkey),
+            &[&sender_keypair],
+            blockhash,
+        );
+
+        let err = rpc_client
+            .send_transaction_with_config(
+                &tx,
+                RpcSendTransactionConfig {
+                    skip_preflight: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("non-delegated"),
+            "unexpected untouched L1 fee payer error: {err}"
+        );
 
         runtime.shutdown();
     }

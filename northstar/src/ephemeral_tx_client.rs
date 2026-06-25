@@ -328,10 +328,6 @@ impl EphemeralTransactionClient {
         let static_keys = message.static_account_keys();
 
         for (i, key) in static_keys.iter().enumerate() {
-            // Skip fee payer (index 0) — always allowed
-            if i == 0 {
-                continue;
-            }
             if message.is_maybe_writable(i, None)
                 && !Self::is_allowed_writable_on_bank(
                     bank,
