@@ -1,7 +1,7 @@
 use {
     crate::banking_trace::BankingPacketSender,
     agave_banking_stage_ingress_types::BankingPacketBatch,
-    crossbeam_channel::{RecvTimeoutError, Sender, TrySendError},
+    crossbeam_channel::{RecvTimeoutError, SendError, Sender, TrySendError},
     log::*,
     northstar::{
         L1Event,
@@ -51,27 +51,44 @@ pub struct NorthStarService {
     thread_hdl: JoinHandle<()>,
 }
 
+#[derive(Debug)]
+enum SettlementSubmitError {
+    Local(SendError<BankingPacketBatch>),
+    ForwardFull,
+    ForwardDisconnected,
+}
+
+impl std::fmt::Display for SettlementSubmitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Local(err) => write!(f, "local banking enqueue failed: {err}"),
+            Self::ForwardFull => write!(f, "forwarding channel is full"),
+            Self::ForwardDisconnected => write!(f, "forwarding channel disconnected"),
+        }
+    }
+}
+
 fn submit_settlement_transactions(
     sender: &BankingPacketSender,
     forward_sender: Option<&Sender<(BankingPacketBatch, bool)>>,
     transactions: &[Transaction],
-) -> Result<(), crossbeam_channel::SendError<BankingPacketBatch>> {
+) -> Result<(), SettlementSubmitError> {
     if transactions.is_empty() {
         return Ok(());
     }
 
     let batch = BankingPacketBatch::new(to_packet_batches(transactions, NUM_PACKETS));
-    sender.send(batch.clone())?;
+    sender
+        .send(batch.clone())
+        .map_err(SettlementSubmitError::Local)?;
 
     if let Some(forward_sender) = forward_sender {
         match forward_sender.try_send((batch, false)) {
             Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
-                warn!("Settlement forwarding channel is full, settlement txs remain queued locally")
+            Err(TrySendError::Full(_)) => return Err(SettlementSubmitError::ForwardFull),
+            Err(TrySendError::Disconnected(_)) => {
+                return Err(SettlementSubmitError::ForwardDisconnected);
             }
-            Err(TrySendError::Disconnected(_)) => warn!(
-                "Settlement forwarding channel disconnected, settlement txs remain queued locally"
-            ),
         }
     }
 
@@ -648,7 +665,7 @@ impl NorthStarService {
 mod tests {
     use {
         super::*,
-        crossbeam_channel::unbounded,
+        crossbeam_channel::{bounded, unbounded},
         northstar_portal::{OpenSession, PortalInstruction, Session, SettlementStatus},
         solana_account::{AccountSharedData, WritableAccount},
         solana_client::rpc_client::RpcClient,
@@ -748,6 +765,27 @@ mod tests {
         let (forward_batch, is_tpu_vote_batch) = forward_receiver.try_recv().unwrap();
         assert!(!is_tpu_vote_batch);
         assert_eq!(packet_count(&forward_batch), 1);
+    }
+
+    #[test]
+    fn settlement_submission_fails_when_forwarding_path_is_unavailable() {
+        let bank = create_processable_test_bank();
+        let payer = Keypair::new();
+        fund_test_payer(&bank, &payer);
+        let transaction = signed_test_transfer(&bank, &payer);
+        let (settlement_sender, _local_receiver) =
+            crate::banking_trace::BankingTracer::channel_for_test();
+        let (forward_sender, forward_receiver) = bounded(0);
+        drop(forward_receiver);
+
+        let err = submit_settlement_transactions(
+            &settlement_sender,
+            Some(&forward_sender),
+            std::slice::from_ref(&transaction),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, SettlementSubmitError::ForwardDisconnected));
     }
 
     #[test]
