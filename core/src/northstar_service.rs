@@ -182,14 +182,17 @@ impl PendingSettlementSubmission {
         self.submitted_l1_slot = bank.slot();
     }
 
-    fn failed_signature(&self, bank: &Bank) -> Option<(Signature, String)> {
-        self.signatures.iter().find_map(|signature| {
-            if let Some(Err(err)) = bank.get_signature_status(signature) {
-                Some((*signature, format!("{err:?}")))
-            } else {
-                None
-            }
-        })
+    fn failed_signature_reasons(&self, bank: &Bank) -> Vec<(Signature, String)> {
+        self.signatures
+            .iter()
+            .filter_map(|signature| {
+                if let Some(Err(err)) = bank.get_signature_status(signature) {
+                    Some((*signature, format!("{err:?}")))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 }
 
@@ -240,17 +243,17 @@ fn pending_settlement_allows_submission(
             true
         }
         PendingSettlementStatus::Failed => {
-            let failed = pending.failed_signature(bank);
+            let failure_reasons = pending.failed_signature_reasons(bank);
             warn!(
                 "Portal settlement transaction failed for er_slot={} checksum={:?} attempts={} \
-                 submitted_l1_slot={} current_l1_slot={} failed={:?}; retrying if session state \
-                 permits",
+                 submitted_l1_slot={} current_l1_slot={} failure_reasons={:?}; retrying if \
+                 session state permits",
                 pending.er_slot,
                 pending.checksum,
                 pending.attempts,
                 pending.submitted_l1_slot,
                 bank.slot(),
-                failed,
+                failure_reasons,
             );
             *pending_settlement = None;
             true
@@ -465,17 +468,17 @@ fn submit_next_pending_settlement_if_ready(
             false
         }
         PendingSettlementStatus::Failed => {
-            let failed = pending.failed_signature(bank);
+            let failure_reasons = pending.failed_signature_reasons(bank);
             warn!(
                 "Portal settlement transaction failed for er_slot={} checksum={:?} attempts={} \
-                 submitted_l1_slot={} current_l1_slot={} failed={:?}; retrying if session state \
-                 permits",
+                 submitted_l1_slot={} current_l1_slot={} failure_reasons={:?}; retrying if \
+                 session state permits",
                 pending.er_slot,
                 pending.checksum,
                 pending.attempts,
                 pending.submitted_l1_slot,
                 bank.slot(),
-                failed,
+                failure_reasons,
             );
             *pending_settlement = None;
             false
@@ -891,17 +894,19 @@ mod tests {
         let payer = Keypair::new();
         fund_test_payer(&bank, &payer);
         let transaction = signed_test_transfer(&bank, &payer);
+        let signature = transaction.signatures[0];
         bank.status_cache.write().unwrap().insert(
             &bank.last_blockhash(),
-            transaction.signatures[0],
+            signature,
             bank.slot(),
             Err(solana_transaction_error::TransactionError::AccountNotFound),
         );
-        let mut pending_settlement = Some(pending_test_submission(
-            &bank,
-            bank.last_blockhash(),
-            transaction,
-        ));
+        let pending = pending_test_submission(&bank, bank.last_blockhash(), transaction);
+        assert_eq!(
+            pending.failed_signature_reasons(&bank),
+            vec![(signature, "AccountNotFound".to_string())]
+        );
+        let mut pending_settlement = Some(pending);
 
         assert!(pending_settlement_allows_submission(
             &mut pending_settlement,
