@@ -117,6 +117,7 @@ struct PendingSettlementSubmission {
     recent_blockhash: Hash,
     submitted_l1_slot: u64,
     attempts: u64,
+    current_transaction: Transaction,
     remaining_transactions: Vec<Transaction>,
 }
 
@@ -145,6 +146,7 @@ impl PendingSettlementSubmission {
                 recent_blockhash,
                 submitted_l1_slot,
                 attempts,
+                current_transaction: current_transaction.clone(),
                 remaining_transactions: transactions,
             },
             current_transaction,
@@ -185,6 +187,19 @@ impl PendingSettlementSubmission {
             .into_iter()
             .collect();
         self.recent_blockhash = transaction.message.recent_blockhash;
+        self.submitted_l1_slot = bank.slot();
+        self.current_transaction = transaction.clone();
+    }
+
+    fn should_rebroadcast(&self, bank: &Bank) -> bool {
+        const SETTLEMENT_REBROADCAST_INTERVAL_SLOTS: u64 = 10;
+        bank.slot()
+            >= self
+                .submitted_l1_slot
+                .saturating_add(SETTLEMENT_REBROADCAST_INTERVAL_SLOTS)
+    }
+
+    fn mark_rebroadcasted(&mut self, bank: &Bank) {
         self.submitted_l1_slot = bank.slot();
     }
 
@@ -419,11 +434,42 @@ fn submit_next_pending_settlement_if_ready(
 
     match pending.status(bank) {
         PendingSettlementStatus::Pending => {
-            debug!(
-                "Portal settlement still unconfirmed for er_slot={} checksum={:?} attempts={} \
-                 signatures={:?}",
-                pending.er_slot, pending.checksum, pending.attempts, pending.signatures,
-            );
+            if pending.should_rebroadcast(bank) {
+                let transaction = pending.current_transaction.clone();
+                match submit_settlement_transactions(
+                    sender,
+                    forward_sender,
+                    std::slice::from_ref(&transaction),
+                ) {
+                    Ok(()) => {
+                        pending.mark_rebroadcasted(bank);
+                        info!(
+                            "Rebroadcast Portal settlement transaction for er_slot={} \
+                             checksum={:?} attempts={} l1_slot={} signatures={:?}",
+                            pending.er_slot,
+                            pending.checksum,
+                            pending.attempts,
+                            bank.slot(),
+                            pending.signatures,
+                        );
+                    }
+                    Err(err) => warn!(
+                        "Failed to rebroadcast Portal settlement transaction for er_slot={} \
+                         checksum={:?} attempts={} l1_slot={} signatures={:?}: {err}",
+                        pending.er_slot,
+                        pending.checksum,
+                        pending.attempts,
+                        bank.slot(),
+                        pending.signatures,
+                    ),
+                }
+            } else {
+                debug!(
+                    "Portal settlement still unconfirmed for er_slot={} checksum={:?} attempts={} \
+                     signatures={:?}",
+                    pending.er_slot, pending.checksum, pending.attempts, pending.signatures,
+                );
+            }
             true
         }
         PendingSettlementStatus::Confirmed => {
@@ -902,6 +948,46 @@ mod tests {
         assert_eq!(pending.recent_blockhash, fresh_blockhash);
         assert_ne!(transaction.signatures[0], old_next_signature);
         assert_eq!(pending.signatures, vec![transaction.signatures[0]]);
+    }
+
+    #[test]
+    fn pending_settlement_rebroadcasts_before_expiry() {
+        let root_bank = create_processable_test_bank();
+        let bank = Bank::new_from_parent(root_bank, SlotLeader::new_unique(), 20);
+        let payer = Arc::new(Keypair::new());
+        fund_test_payer(&bank, &payer);
+        let transaction = signed_test_transfer(&bank, &payer);
+        let mut pending_settlement = Some(
+            PendingSettlementSubmission::new(
+                7,
+                [3; 32],
+                bank.last_blockhash(),
+                0,
+                1,
+                vec![transaction],
+            )
+            .unwrap()
+            .0,
+        );
+        let manager = northstar::Manager::new(northstar::ManagerConfig {
+            portal_program_id: Pubkey::new_unique(),
+            manager_account: Arc::clone(&payer),
+        });
+        let (settlement_sender, local_receiver) =
+            crate::banking_trace::BankingTracer::channel_for_test();
+        let (forward_sender, forward_receiver) = unbounded();
+
+        assert!(submit_next_pending_settlement_if_ready(
+            &manager,
+            &bank,
+            &settlement_sender,
+            Some(&forward_sender),
+            &mut pending_settlement,
+        ));
+
+        assert_eq!(packet_count(&local_receiver.try_recv().unwrap()), 1);
+        assert_eq!(packet_count(&forward_receiver.try_recv().unwrap().0), 1);
+        assert_eq!(pending_settlement.unwrap().submitted_l1_slot, bank.slot());
     }
 
     #[test]
