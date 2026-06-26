@@ -721,6 +721,35 @@ mod tests {
         .0
     }
 
+    fn packet_count(batch: &BankingPacketBatch) -> usize {
+        batch.iter().map(|packets| packets.len()).sum()
+    }
+
+    #[test]
+    fn settlement_submission_forwards_transactions_to_leader_path() {
+        let bank = create_processable_test_bank();
+        let payer = Keypair::new();
+        fund_test_payer(&bank, &payer);
+        let transaction = signed_test_transfer(&bank, &payer);
+        let (settlement_sender, local_receiver) =
+            crate::banking_trace::BankingTracer::channel_for_test();
+        let (forward_sender, forward_receiver) = unbounded();
+
+        submit_settlement_transactions(
+            &settlement_sender,
+            Some(&forward_sender),
+            std::slice::from_ref(&transaction),
+        )
+        .unwrap();
+
+        let local_batch = local_receiver.try_recv().unwrap();
+        assert_eq!(packet_count(&local_batch), 1);
+
+        let (forward_batch, is_tpu_vote_batch) = forward_receiver.try_recv().unwrap();
+        assert!(!is_tpu_vote_batch);
+        assert_eq!(packet_count(&forward_batch), 1);
+    }
+
     #[test]
     fn pending_settlement_waits_for_confirmation_before_duplicate_submission() {
         let bank = create_processable_test_bank();
