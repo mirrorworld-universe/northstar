@@ -11,7 +11,7 @@ use {
     solana_account::ReadableAccount,
     solana_gossip::cluster_info::ClusterInfo,
     solana_hash::Hash,
-    solana_perf::packet::{NUM_PACKETS, to_packet_batches},
+    solana_perf::packet::{NUM_PACKETS, PacketFlags, to_packet_batches},
     solana_rpc::optimistically_confirmed_bank_tracker::{
         BankNotification, BankNotificationReceiver,
     },
@@ -77,7 +77,13 @@ fn submit_settlement_transactions(
         return Ok(());
     }
 
-    let batch = BankingPacketBatch::new(to_packet_batches(transactions, NUM_PACKETS));
+    let mut packet_batches = to_packet_batches(transactions, NUM_PACKETS);
+    for packet_batch in packet_batches.iter_mut() {
+        for mut packet in packet_batch.iter_mut() {
+            packet.meta_mut().flags |= PacketFlags::FROM_STAKED_NODE;
+        }
+    }
+    let batch = BankingPacketBatch::new(packet_batches);
     sender
         .send(batch.clone())
         .map_err(SettlementSubmitError::Local)?;
@@ -745,6 +751,14 @@ mod tests {
         batch.iter().map(|packets| packets.len()).sum()
     }
 
+    fn all_packets_marked_from_staked_node(batch: &BankingPacketBatch) -> bool {
+        batch.iter().all(|packets| {
+            packets
+                .iter()
+                .all(|packet| packet.meta().flags.contains(PacketFlags::FROM_STAKED_NODE))
+        })
+    }
+
     #[test]
     fn settlement_submission_forwards_transactions_to_leader_path() {
         let bank = create_processable_test_bank();
@@ -764,10 +778,12 @@ mod tests {
 
         let local_batch = local_receiver.try_recv().unwrap();
         assert_eq!(packet_count(&local_batch), 1);
+        assert!(all_packets_marked_from_staked_node(&local_batch));
 
         let (forward_batch, is_tpu_vote_batch) = forward_receiver.try_recv().unwrap();
         assert!(!is_tpu_vote_batch);
         assert_eq!(packet_count(&forward_batch), 1);
+        assert!(all_packets_marked_from_staked_node(&forward_batch));
     }
 
     #[test]
