@@ -84,6 +84,15 @@ fn process_instruction(
         }),
         Ok((13, payload)) => deserialize_args::<u64>(payload)
             .and_then(|lamports| instructions::process_start_withdrawal(accounts, lamports)),
+        Ok((14, payload)) => deserialize_args(payload).and_then(|checkpoint| {
+            instructions::process_propose_checkpoint(program_id, accounts, checkpoint)
+        }),
+        Ok((15, payload)) => deserialize_args(payload).and_then(|checkpoint| {
+            instructions::process_commit_checkpoint(program_id, accounts, checkpoint)
+        }),
+        Ok((16, payload)) => deserialize_args(payload).and_then(|checkpoint| {
+            instructions::process_cancel_checkpoint(program_id, accounts, checkpoint)
+        }),
         Ok((_, _)) | Err(_) => Err(ProgramError::InvalidInstructionData),
     }
 }

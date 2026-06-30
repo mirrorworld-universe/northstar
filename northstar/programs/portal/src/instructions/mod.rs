@@ -1,3 +1,4 @@
+pub mod checkpoint;
 pub mod close_session;
 pub mod delegate;
 pub mod deposit_fee;
@@ -8,6 +9,9 @@ pub mod start_withdrawal;
 pub mod undelegate;
 
 pub use {
+    checkpoint::{
+        process_cancel_checkpoint, process_commit_checkpoint, process_propose_checkpoint,
+    },
     close_session::process_close_session,
     delegate::process_delegate,
     deposit_fee::process_deposit_fee,

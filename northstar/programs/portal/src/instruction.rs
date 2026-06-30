@@ -93,6 +93,24 @@ pub enum PortalInstruction {
     #[cfg_attr(feature = "idl", account(3, name = "system_program"))]
     #[cfg_attr(feature = "idl", account(4, name = "clock"))]
     StartWithdrawal { lamports: u64 },
+
+    #[cfg_attr(feature = "idl", account(0, name = "proposer", sig, mut))]
+    #[cfg_attr(feature = "idl", account(1, name = "session"))]
+    #[cfg_attr(feature = "idl", account(2, name = "checkpoint", mut))]
+    #[cfg_attr(feature = "idl", account(3, name = "checkpoint_cursor", mut))]
+    #[cfg_attr(feature = "idl", account(4, name = "system_program"))]
+    ProposeCheckpoint(ProposeCheckpoint),
+
+    #[cfg_attr(feature = "idl", account(0, name = "committer", sig))]
+    #[cfg_attr(feature = "idl", account(1, name = "session"))]
+    #[cfg_attr(feature = "idl", account(2, name = "checkpoint", mut))]
+    #[cfg_attr(feature = "idl", account(3, name = "checkpoint_cursor", mut))]
+    CommitCheckpoint(CommitCheckpoint),
+
+    #[cfg_attr(feature = "idl", account(0, name = "proposer", sig))]
+    #[cfg_attr(feature = "idl", account(1, name = "session"))]
+    #[cfg_attr(feature = "idl", account(2, name = "checkpoint", mut))]
+    CancelCheckpoint(CancelCheckpoint),
 }
 
 #[cfg_attr(feature = "idl", derive(shank::ShankType))]
@@ -155,4 +173,26 @@ pub struct SettleAccountLamports {
     pub checksum: [u8; 32],
     pub account_count: u8,
     pub lamports: [u64; MAX_SETTLEMENT_LAMPORT_ACCOUNTS],
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+pub struct ProposeCheckpoint {
+    pub er_slot: u64,
+    pub previous_state_root: [u8; 32],
+    pub new_state_root: [u8; 32],
+    pub effect_commitment: [u8; 32],
+    pub challenge_window_slots: u64,
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+pub struct CommitCheckpoint {
+    pub er_slot: u64,
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+pub struct CancelCheckpoint {
+    pub er_slot: u64,
 }

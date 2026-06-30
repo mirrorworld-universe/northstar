@@ -40,6 +40,64 @@ pub enum SettlementStatus {
     InProgress = 1,
 }
 
+#[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct Checkpoint {
+    pub discriminator: u8,
+    pub session: Pubkey,
+    pub er_slot: u64,
+    pub previous_state_root: [u8; 32],
+    pub new_state_root: [u8; 32],
+    pub effect_commitment: [u8; 32],
+    pub proposer: Pubkey,
+    pub proposed_at_l1_slot: u64,
+    pub challenge_deadline_l1_slot: u64,
+    pub status: CheckpointStatus,
+    pub bump: u8,
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[borsh(use_discriminant = true)]
+#[repr(u8)]
+pub enum CheckpointStatus {
+    Pending = 0,
+    Committed = 1,
+    Cancelled = 2,
+}
+
+impl Checkpoint {
+    pub const LEN: usize = 187;
+    pub const SEED_PREFIX: &[u8] = b"checkpoint";
+    pub const DISCRIMINATOR: u8 = 5;
+
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        self.discriminator == Self::DISCRIMINATOR
+    }
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct CheckpointCursor {
+    pub discriminator: u8,
+    pub session: Pubkey,
+    pub latest_finalized_checkpoint: Pubkey,
+    pub latest_finalized_er_slot: u64,
+    pub bump: u8,
+}
+
+impl CheckpointCursor {
+    pub const LEN: usize = 74;
+    pub const SEED_PREFIX: &[u8] = b"checkpoint_cursor";
+    pub const DISCRIMINATOR: u8 = 6;
+
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        self.discriminator == Self::DISCRIMINATOR
+    }
+}
+
 impl Session {
     pub const LEN: usize = 219;
     pub const SEED_PREFIX: &[u8] = b"session";
@@ -183,6 +241,38 @@ mod tests {
         };
         let serialized = borsh::to_vec(&record).unwrap();
         assert_eq!(serialized.len(), DelegationRecord::LEN);
+    }
+
+    #[test]
+    fn test_checkpoint_len() {
+        let checkpoint = Checkpoint {
+            discriminator: Checkpoint::DISCRIMINATOR,
+            session: [0x10; 32],
+            er_slot: 10,
+            previous_state_root: [0x11; 32],
+            new_state_root: [0x12; 32],
+            effect_commitment: [0x13; 32],
+            proposer: [0x14; 32],
+            proposed_at_l1_slot: 100,
+            challenge_deadline_l1_slot: 110,
+            status: CheckpointStatus::Pending,
+            bump: 99,
+        };
+        let serialized = borsh::to_vec(&checkpoint).unwrap();
+        assert_eq!(serialized.len(), Checkpoint::LEN);
+    }
+
+    #[test]
+    fn test_checkpoint_cursor_len() {
+        let cursor = CheckpointCursor {
+            discriminator: CheckpointCursor::DISCRIMINATOR,
+            session: [0x10; 32],
+            latest_finalized_checkpoint: [0x11; 32],
+            latest_finalized_er_slot: 10,
+            bump: 99,
+        };
+        let serialized = borsh::to_vec(&cursor).unwrap();
+        assert_eq!(serialized.len(), CheckpointCursor::LEN);
     }
 
     #[test]

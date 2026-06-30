@@ -35,6 +35,13 @@ pub enum PortalError {
     SettlementLamportsNotConserved = 30,
     SettlementLamportsBelowRentExempt = 31,
     WithdrawalSinkMismatch = 32,
+    CheckpointCommitTooEarly = 33,
+    CheckpointStateInvalid = 34,
+    CheckpointUnauthorizedCancel = 35,
+    CheckpointErSlotNotAdvanced = 36,
+    CheckpointDeserializeFailed = 37,
+    CheckpointCursorStateInvalid = 38,
+    CheckpointCursorDeserializeFailed = 39,
 }
 
 impl From<PortalError> for ProgramError {
