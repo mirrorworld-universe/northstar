@@ -1,8 +1,9 @@
 use {
     crate::{
-        find_delegation_record_pda, find_session_pda, state::DelegationRecord, BeginSettlement,
-        FinishSettlement, PortalError, Session, SettleAccountLamports, SettleAccountOwner,
-        SettlementStatus, WriteSettlementChunk, MAX_SETTLEMENT_CHUNK,
+        find_checkpoint_pda, find_delegation_record_pda, find_session_pda,
+        state::{Checkpoint, CheckpointStatus, DelegationRecord},
+        BeginSettlement, FinishSettlement, PortalError, Session, SettleAccountLamports,
+        SettleAccountOwner, SettlementStatus, WriteSettlementChunk, MAX_SETTLEMENT_CHUNK,
         MAX_SETTLEMENT_LAMPORT_ACCOUNTS,
     },
     borsh::{BorshDeserialize, BorshSerialize},
@@ -122,6 +123,49 @@ fn require_active_settlement(
     Ok(())
 }
 
+fn load_checkpoint_for_settlement(
+    program_id: &Pubkey,
+    session_key: &Pubkey,
+    er_slot: u64,
+    checksum: [u8; 32],
+    checkpoint: &AccountInfo,
+) -> Result<Checkpoint, ProgramError> {
+    let (expected_checkpoint_key, _) = find_checkpoint_pda(program_id, session_key, er_slot);
+    if checkpoint.key() != &expected_checkpoint_key {
+        return Err(PortalError::InvalidPdaSeeds.into());
+    }
+    if checkpoint.owner() != program_id {
+        return Err(PortalError::CheckpointStateInvalid.into());
+    }
+
+    let checkpoint_state = Checkpoint::try_from_slice(&checkpoint.try_borrow_data()?)
+        .map_err(|_| PortalError::CheckpointDeserializeFailed)?;
+    if !checkpoint_state.is_valid()
+        || checkpoint_state.session != *session_key
+        || checkpoint_state.er_slot != er_slot
+    {
+        return Err(PortalError::CheckpointStateInvalid.into());
+    }
+    if checkpoint_state.status != CheckpointStatus::Committed {
+        return Err(PortalError::CheckpointStateInvalid.into());
+    }
+    if checkpoint_state.effect_commitment != checksum {
+        return Err(PortalError::SettlementChecksumMismatch.into());
+    }
+
+    Ok(checkpoint_state)
+}
+
+fn store_checkpoint(checkpoint: &AccountInfo, checkpoint_state: &Checkpoint) -> ProgramResult {
+    let mut checkpoint_data = checkpoint.try_borrow_mut_data()?;
+    BorshSerialize::serialize(
+        checkpoint_state,
+        &mut &mut checkpoint_data[..Checkpoint::LEN],
+    )
+    .unwrap();
+    Ok(())
+}
+
 fn load_delegation_record(
     program_id: &Pubkey,
     session_state: &Session,
@@ -157,12 +201,13 @@ pub fn process_begin_settlement(
 ) -> ProgramResult {
     pinocchio_log::log!("Instruction: BeginSettlement, er_slot={}", er_slot);
 
-    if accounts.len() < 2 {
+    if accounts.len() < 3 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
     let validator = &accounts[0];
     let session = &accounts[1];
+    let checkpoint = &accounts[2];
     let mut session_state = load_session(program_id, session)?;
     require_validator(validator, &session_state)?;
 
@@ -181,6 +226,8 @@ pub fn process_begin_settlement(
     if er_slot <= session_state.last_settled_er_slot {
         return Err(PortalError::SettlementErSlotNotAdvanced.into());
     }
+
+    load_checkpoint_for_settlement(program_id, session.key(), er_slot, checksum, checkpoint)?;
 
     session_state.settlement_status = SettlementStatus::InProgress;
     session_state.settlement_er_slot = er_slot;
@@ -392,12 +439,13 @@ pub fn process_finish_settlement(
 ) -> ProgramResult {
     pinocchio_log::log!("Instruction: FinishSettlement, er_slot={}", er_slot);
 
-    if accounts.len() < 2 {
+    if accounts.len() < 3 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
     let validator = &accounts[0];
     let session = &accounts[1];
+    let checkpoint = &accounts[2];
     let mut session_state = load_session(program_id, session)?;
     require_validator(validator, &session_state)?;
 
@@ -412,6 +460,11 @@ pub fn process_finish_settlement(
     {
         return Err(PortalError::SettlementChecksumMismatch.into());
     }
+
+    let mut checkpoint_state =
+        load_checkpoint_for_settlement(program_id, session.key(), er_slot, checksum, checkpoint)?;
+    checkpoint_state.status = CheckpointStatus::Settled;
+    store_checkpoint(checkpoint, &checkpoint_state)?;
 
     session_state.last_settled_l1_slot = Clock::get()?.slot;
     session_state.last_settled_er_slot = er_slot;

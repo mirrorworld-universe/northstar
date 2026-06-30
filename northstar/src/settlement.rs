@@ -2,9 +2,9 @@ use {
     crate::{ErStateDiff, ErStateDiffAccount},
     log::warn,
     northstar_portal::{
-        find_delegation_record_pda, BeginSettlement, FinishSettlement, PortalInstruction,
-        SettleAccountLamports, SettleAccountOwner, SettleDepositReceipt, WriteSettlementChunk,
-        MAX_SETTLEMENT_CHUNK, MAX_SETTLEMENT_LAMPORT_ACCOUNTS,
+        find_checkpoint_pda, find_delegation_record_pda, BeginSettlement, FinishSettlement,
+        PortalInstruction, SettleAccountLamports, SettleAccountOwner, SettleDepositReceipt,
+        WriteSettlementChunk, MAX_SETTLEMENT_CHUNK, MAX_SETTLEMENT_LAMPORT_ACCOUNTS,
     },
     solana_account::ReadableAccount,
     solana_clock::Slot,
@@ -211,6 +211,12 @@ impl SettlementPlan {
             return vec![];
         }
 
+        let (checkpoint, _) = find_checkpoint_pda(
+            &portal_program_id.to_bytes(),
+            &session_pda.to_bytes(),
+            self.er_slot,
+        );
+        let checkpoint = Pubkey::new_from_array(checkpoint);
         let mut instructions = Vec::with_capacity(
             self.chunks.len()
                 + self.owner_changes.len()
@@ -224,6 +230,7 @@ impl SettlementPlan {
                 accounts: vec![
                     AccountMeta::new_readonly(validator, true),
                     AccountMeta::new(session_pda, false),
+                    AccountMeta::new_readonly(checkpoint, false),
                 ],
                 data: borsh::to_vec(&PortalInstruction::BeginSettlement(BeginSettlement {
                     er_slot: self.er_slot,
@@ -354,6 +361,7 @@ impl SettlementPlan {
             accounts: vec![
                 AccountMeta::new_readonly(validator, true),
                 AccountMeta::new(session_pda, false),
+                AccountMeta::new(checkpoint, false),
             ],
             data: borsh::to_vec(&PortalInstruction::FinishSettlement(FinishSettlement {
                 er_slot: self.er_slot,

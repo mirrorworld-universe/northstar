@@ -64,6 +64,7 @@ pub enum CheckpointStatus {
     Pending = 0,
     Committed = 1,
     Cancelled = 2,
+    Settled = 3,
 }
 
 impl Checkpoint {

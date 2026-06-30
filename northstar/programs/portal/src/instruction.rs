@@ -46,6 +46,7 @@ pub enum PortalInstruction {
 
     #[cfg_attr(feature = "idl", account(0, name = "validator", sig))]
     #[cfg_attr(feature = "idl", account(1, name = "session", mut))]
+    #[cfg_attr(feature = "idl", account(2, name = "checkpoint"))]
     BeginSettlement(BeginSettlement),
 
     #[cfg_attr(feature = "idl", account(0, name = "validator", sig))]
@@ -56,6 +57,7 @@ pub enum PortalInstruction {
 
     #[cfg_attr(feature = "idl", account(0, name = "validator", sig))]
     #[cfg_attr(feature = "idl", account(1, name = "session", mut))]
+    #[cfg_attr(feature = "idl", account(2, name = "checkpoint", mut))]
     FinishSettlement(FinishSettlement),
 
     #[cfg_attr(feature = "idl", account(0, name = "authority_or_validator", sig))]

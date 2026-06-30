@@ -1,4 +1,6 @@
-use northstar_portal::{DelegationRecord, DepositReceipt, FeeVault, Session};
+use northstar_portal::{
+    Checkpoint, CheckpointCursor, DelegationRecord, DepositReceipt, FeeVault, Session,
+};
 
 /// Enum representing any portal program account type.
 #[derive(Debug, Clone)]
@@ -7,6 +9,8 @@ pub enum PortalAccount {
     FeeVault(FeeVault),
     DelegationRecord(DelegationRecord),
     DepositReceipt(DepositReceipt),
+    Checkpoint(Checkpoint),
+    CheckpointCursor(CheckpointCursor),
 }
 
 pub fn try_parse_raw_portal_account(data: &[u8]) -> Option<PortalAccount> {
@@ -26,6 +30,12 @@ pub fn try_parse_raw_portal_account(data: &[u8]) -> Option<PortalAccount> {
         DepositReceipt::DISCRIMINATOR => borsh::from_slice::<DepositReceipt>(data)
             .ok()
             .map(PortalAccount::DepositReceipt),
+        Checkpoint::DISCRIMINATOR => borsh::from_slice::<Checkpoint>(data)
+            .ok()
+            .map(PortalAccount::Checkpoint),
+        CheckpointCursor::DISCRIMINATOR => borsh::from_slice::<CheckpointCursor>(data)
+            .ok()
+            .map(PortalAccount::CheckpointCursor),
         _ => None,
     }
 }
