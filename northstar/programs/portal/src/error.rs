@@ -46,6 +46,18 @@ pub enum PortalError {
     CheckpointBondAlreadyResolved = 41,
     CheckpointChallenged = 42,
     CheckpointChallengeWindowClosed = 43,
+    StepProofStateInvalid = 44,
+    StepProofDeserializeFailed = 45,
+    StepProofAlreadySealed = 46,
+    StepProofNotSealed = 47,
+    StepProofChunkOutOfBounds = 48,
+    StepProofCheckpointMismatch = 49,
+    StepProofVerifierUnavailable = 50,
+    StepProofHashMismatch = 51,
+    CheckpointCancelWindowClosed = 52,
+    CheckpointPreviousRootMismatch = 53,
+    CheckpointActiveExists = 54,
+    StepProofPublicInputMismatch = 55,
 }
 
 impl From<PortalError> for ProgramError {

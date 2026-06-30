@@ -1,5 +1,5 @@
 use {
-    crate::{MAX_SETTLEMENT_CHUNK, MAX_SETTLEMENT_LAMPORT_ACCOUNTS},
+    crate::{MAX_SETTLEMENT_CHUNK, MAX_SETTLEMENT_LAMPORT_ACCOUNTS, MAX_STEP_PROOF_CHUNK},
     borsh::{BorshDeserialize, BorshSerialize},
     pinocchio::pubkey::Pubkey,
 };
@@ -18,6 +18,7 @@ pub enum PortalInstruction {
     #[cfg_attr(feature = "idl", account(1, name = "session", mut))]
     #[cfg_attr(feature = "idl", account(2, name = "fee_vault", mut))]
     #[cfg_attr(feature = "idl", account(3, name = "system_program"))]
+    #[cfg_attr(feature = "idl", account(4, name = "checkpoint_cursor", mut))]
     CloseSession,
 
     #[cfg_attr(feature = "idl", account(0, name = "depositor", sig, mut))]
@@ -58,6 +59,7 @@ pub enum PortalInstruction {
     #[cfg_attr(feature = "idl", account(0, name = "validator", sig))]
     #[cfg_attr(feature = "idl", account(1, name = "session", mut))]
     #[cfg_attr(feature = "idl", account(2, name = "checkpoint", mut))]
+    #[cfg_attr(feature = "idl", account(3, name = "checkpoint_cursor", mut))]
     FinishSettlement(FinishSettlement),
 
     #[cfg_attr(feature = "idl", account(0, name = "authority_or_validator", sig))]
@@ -113,12 +115,40 @@ pub enum PortalInstruction {
     #[cfg_attr(feature = "idl", account(0, name = "proposer", sig, mut))]
     #[cfg_attr(feature = "idl", account(1, name = "session"))]
     #[cfg_attr(feature = "idl", account(2, name = "checkpoint", mut))]
+    #[cfg_attr(feature = "idl", account(3, name = "checkpoint_cursor", mut))]
     CancelCheckpoint(CancelCheckpoint),
 
     #[cfg_attr(feature = "idl", account(0, name = "challenger", sig))]
     #[cfg_attr(feature = "idl", account(1, name = "session"))]
     #[cfg_attr(feature = "idl", account(2, name = "checkpoint", mut))]
     ChallengeCheckpoint(ChallengeCheckpoint),
+
+    #[cfg_attr(feature = "idl", account(0, name = "authority", sig, mut))]
+    #[cfg_attr(feature = "idl", account(1, name = "session"))]
+    #[cfg_attr(feature = "idl", account(2, name = "checkpoint"))]
+    #[cfg_attr(feature = "idl", account(3, name = "step_proof", mut))]
+    #[cfg_attr(feature = "idl", account(4, name = "system_program"))]
+    CreateStepProof(CreateStepProof),
+
+    #[cfg_attr(feature = "idl", account(0, name = "authority", sig))]
+    #[cfg_attr(feature = "idl", account(1, name = "session"))]
+    #[cfg_attr(feature = "idl", account(2, name = "checkpoint"))]
+    #[cfg_attr(feature = "idl", account(3, name = "step_proof", mut))]
+    WriteStepProof(WriteStepProof),
+
+    #[cfg_attr(feature = "idl", account(0, name = "authority", sig))]
+    #[cfg_attr(feature = "idl", account(1, name = "session"))]
+    #[cfg_attr(feature = "idl", account(2, name = "checkpoint"))]
+    #[cfg_attr(feature = "idl", account(3, name = "step_proof", mut))]
+    SealStepProof(SealStepProof),
+
+    #[cfg_attr(feature = "idl", account(0, name = "submitter", sig))]
+    #[cfg_attr(feature = "idl", account(1, name = "session"))]
+    #[cfg_attr(feature = "idl", account(2, name = "checkpoint", mut))]
+    #[cfg_attr(feature = "idl", account(3, name = "step_proof"))]
+    #[cfg_attr(feature = "idl", account(4, name = "bond_recipient", mut))]
+    #[cfg_attr(feature = "idl", account(5, name = "checkpoint_cursor", mut))]
+    SubmitStepProof(SubmitStepProof),
 }
 
 #[cfg_attr(feature = "idl", derive(shank::ShankType))]
@@ -209,4 +239,45 @@ pub struct CancelCheckpoint {
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
 pub struct ChallengeCheckpoint {
     pub er_slot: u64,
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+pub struct CreateStepProof {
+    pub er_slot: u64,
+    pub proof_kind: u8,
+    pub proof_version: u8,
+    pub step_index: u64,
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+pub struct WriteStepProof {
+    pub er_slot: u64,
+    pub offset: u32,
+    pub chunk_len: u16,
+    pub chunk: [u8; MAX_STEP_PROOF_CHUNK],
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+pub struct SealStepProof {
+    pub er_slot: u64,
+    pub proof_len: u32,
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+#[borsh(use_discriminant = true)]
+#[repr(u8)]
+pub enum StepProofVerifierMode {
+    Production = 0,
+    TestOnly = 1,
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+pub struct SubmitStepProof {
+    pub er_slot: u64,
+    pub verifier_mode: StepProofVerifierMode,
 }

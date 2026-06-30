@@ -6,7 +6,14 @@ use std::{
 fn main() {
     println!("cargo:rerun-if-env-changed=BPF_OUT_DIR");
     println!("cargo:rerun-if-env-changed=SBF_OUT_DIR");
+    println!("cargo:rerun-if-env-changed=NORTHSTAR_ALLOW_TEST_VERIFIER_SBF");
     println!("cargo:rerun-if-changed=Cargo.toml");
+
+    if env::var_os("NORTHSTAR_ALLOW_TEST_VERIFIER_SBF").as_deref()
+        == Some(std::ffi::OsStr::new("1"))
+    {
+        println!("cargo:rustc-cfg=northstar_allow_test_verifier_sbf");
+    }
 
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let workspace_root = find_workspace_root(&manifest_dir);

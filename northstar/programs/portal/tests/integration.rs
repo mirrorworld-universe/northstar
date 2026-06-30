@@ -5,15 +5,18 @@ use {
     borsh::BorshDeserialize,
     northstar_portal::{
         BeginSettlement, CancelCheckpoint, ChallengeCheckpoint, Checkpoint, CheckpointBondStatus,
-        CheckpointCursor, CheckpointStatus, CommitCheckpoint, DepositReceipt, FeeVault,
-        NorthstarTransferEvent, OpenSession, PortalInstruction, ProposeCheckpoint, Session,
-        TransferEventKind, CHECKPOINT_PROPOSER_BOND_LAMPORTS, WITHDRAWAL_SINK,
+        CheckpointCursor, CheckpointStatus, CommitCheckpoint, CreateStepProof, DepositReceipt,
+        FeeVault, FinishSettlement, NorthstarTransferEvent, OpenSession, PortalInstruction,
+        ProposeCheckpoint, SealStepProof, Session, StepProofAccount, StepProofVerifierMode,
+        SubmitStepProof, TransferEventKind, WriteStepProof, CHECKPOINT_PROPOSER_BOND_LAMPORTS,
+        MAX_STEP_PROOF_CHUNK, WITHDRAWAL_SINK,
     },
     solana_account::Account,
     solana_instruction::{AccountMeta, Instruction},
     solana_keypair::Keypair,
     solana_program_test::{BanksClient, ProgramTest, ProgramTestContext},
     solana_pubkey::Pubkey,
+    solana_sha256_hasher::hashv,
     solana_signer::Signer,
     solana_system_interface::{instruction::transfer, program as system_program},
     solana_transaction::Transaction,
@@ -36,6 +39,10 @@ fn find_checkpoint_pda(program_id: &Pubkey, session: &Pubkey, er_slot: u64) -> (
 
 fn find_checkpoint_cursor_pda(program_id: &Pubkey, session: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[b"checkpoint_cursor", session.as_ref()], program_id)
+}
+
+fn find_step_proof_pda(program_id: &Pubkey, checkpoint: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[b"step_proof", checkpoint.as_ref()], program_id)
 }
 
 fn find_deposit_receipt_pda(
@@ -107,6 +114,7 @@ fn build_close_session_ix(
     session_pda: &Pubkey,
     fee_vault_pda: &Pubkey,
 ) -> Instruction {
+    let (cursor_pda, _) = find_checkpoint_cursor_pda(program_id, session_pda);
     let ix = PortalInstruction::CloseSession;
     let data = borsh::to_vec(&ix).unwrap();
 
@@ -117,6 +125,7 @@ fn build_close_session_ix(
             AccountMeta::new(*session_pda, false),
             AccountMeta::new(*fee_vault_pda, false),
             AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new(cursor_pda, false),
         ],
         data,
     }
@@ -129,13 +138,35 @@ fn build_propose_checkpoint_ix(
     er_slot: u64,
     challenge_window_slots: u64,
 ) -> Instruction {
+    build_propose_checkpoint_with_roots_ix(
+        program_id,
+        proposer,
+        session_pda,
+        er_slot,
+        challenge_window_slots,
+        [0; 32],
+        [2; 32],
+        [3; 32],
+    )
+}
+
+fn build_propose_checkpoint_with_roots_ix(
+    program_id: &Pubkey,
+    proposer: &Pubkey,
+    session_pda: &Pubkey,
+    er_slot: u64,
+    challenge_window_slots: u64,
+    previous_state_root: [u8; 32],
+    new_state_root: [u8; 32],
+    effect_commitment: [u8; 32],
+) -> Instruction {
     let (checkpoint_pda, _) = find_checkpoint_pda(program_id, session_pda, er_slot);
     let (checkpoint_cursor_pda, _) = find_checkpoint_cursor_pda(program_id, session_pda);
     let ix = PortalInstruction::ProposeCheckpoint(ProposeCheckpoint {
         er_slot,
-        previous_state_root: [1; 32],
-        new_state_root: [2; 32],
-        effect_commitment: [3; 32],
+        previous_state_root,
+        new_state_root,
+        effect_commitment,
         challenge_window_slots,
     });
     let data = borsh::to_vec(&ix).unwrap();
@@ -185,6 +216,7 @@ fn build_cancel_checkpoint_ix(
     er_slot: u64,
 ) -> Instruction {
     let (checkpoint_pda, _) = find_checkpoint_pda(program_id, session_pda, er_slot);
+    let (cursor_pda, _) = find_checkpoint_cursor_pda(program_id, session_pda);
     let ix = PortalInstruction::CancelCheckpoint(CancelCheckpoint { er_slot });
     let data = borsh::to_vec(&ix).unwrap();
 
@@ -194,6 +226,7 @@ fn build_cancel_checkpoint_ix(
             AccountMeta::new(*proposer, true),
             AccountMeta::new_readonly(*session_pda, false),
             AccountMeta::new(checkpoint_pda, false),
+            AccountMeta::new(cursor_pda, false),
         ],
         data,
     }
@@ -237,6 +270,145 @@ fn build_begin_settlement_ix(
             AccountMeta::new_readonly(*validator, true),
             AccountMeta::new(*session_pda, false),
             AccountMeta::new_readonly(checkpoint_pda, false),
+        ],
+        data,
+    }
+}
+
+fn build_finish_settlement_ix(
+    program_id: &Pubkey,
+    validator: &Pubkey,
+    session_pda: &Pubkey,
+    er_slot: u64,
+    checksum: [u8; 32],
+) -> Instruction {
+    let (checkpoint_pda, _) = find_checkpoint_pda(program_id, session_pda, er_slot);
+    let (cursor_pda, _) = find_checkpoint_cursor_pda(program_id, session_pda);
+    let ix = PortalInstruction::FinishSettlement(FinishSettlement { er_slot, checksum });
+    let data = borsh::to_vec(&ix).unwrap();
+
+    Instruction {
+        program_id: *program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(*validator, true),
+            AccountMeta::new(*session_pda, false),
+            AccountMeta::new(checkpoint_pda, false),
+            AccountMeta::new(cursor_pda, false),
+        ],
+        data,
+    }
+}
+
+fn build_create_step_proof_ix(
+    program_id: &Pubkey,
+    authority: &Pubkey,
+    session_pda: &Pubkey,
+    er_slot: u64,
+) -> Instruction {
+    let (checkpoint_pda, _) = find_checkpoint_pda(program_id, session_pda, er_slot);
+    let (proof_pda, _) = find_step_proof_pda(program_id, &checkpoint_pda);
+    let ix = PortalInstruction::CreateStepProof(CreateStepProof {
+        er_slot,
+        proof_kind: 1,
+        proof_version: 1,
+        step_index: 0,
+    });
+    let data = borsh::to_vec(&ix).unwrap();
+
+    Instruction {
+        program_id: *program_id,
+        accounts: vec![
+            AccountMeta::new(*authority, true),
+            AccountMeta::new_readonly(*session_pda, false),
+            AccountMeta::new_readonly(checkpoint_pda, false),
+            AccountMeta::new(proof_pda, false),
+            AccountMeta::new_readonly(system_program::id(), false),
+        ],
+        data,
+    }
+}
+
+fn build_write_step_proof_ix(
+    program_id: &Pubkey,
+    authority: &Pubkey,
+    session_pda: &Pubkey,
+    er_slot: u64,
+    bytes: &[u8],
+) -> Instruction {
+    let (checkpoint_pda, _) = find_checkpoint_pda(program_id, session_pda, er_slot);
+    let (proof_pda, _) = find_step_proof_pda(program_id, &checkpoint_pda);
+    let mut chunk = [0u8; MAX_STEP_PROOF_CHUNK];
+    chunk[..bytes.len()].copy_from_slice(bytes);
+    let ix = PortalInstruction::WriteStepProof(WriteStepProof {
+        er_slot,
+        offset: 0,
+        chunk_len: bytes.len() as u16,
+        chunk,
+    });
+    let data = borsh::to_vec(&ix).unwrap();
+
+    Instruction {
+        program_id: *program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(*authority, true),
+            AccountMeta::new_readonly(*session_pda, false),
+            AccountMeta::new_readonly(checkpoint_pda, false),
+            AccountMeta::new(proof_pda, false),
+        ],
+        data,
+    }
+}
+
+fn build_seal_step_proof_ix(
+    program_id: &Pubkey,
+    authority: &Pubkey,
+    session_pda: &Pubkey,
+    er_slot: u64,
+    proof_len: u32,
+) -> Instruction {
+    let (checkpoint_pda, _) = find_checkpoint_pda(program_id, session_pda, er_slot);
+    let (proof_pda, _) = find_step_proof_pda(program_id, &checkpoint_pda);
+    let ix = PortalInstruction::SealStepProof(SealStepProof { er_slot, proof_len });
+    let data = borsh::to_vec(&ix).unwrap();
+
+    Instruction {
+        program_id: *program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(*authority, true),
+            AccountMeta::new_readonly(*session_pda, false),
+            AccountMeta::new_readonly(checkpoint_pda, false),
+            AccountMeta::new(proof_pda, false),
+        ],
+        data,
+    }
+}
+
+fn build_submit_step_proof_ix(
+    program_id: &Pubkey,
+    submitter: &Pubkey,
+    bond_recipient: &Pubkey,
+    session_pda: &Pubkey,
+    er_slot: u64,
+    verifier_mode: StepProofVerifierMode,
+) -> Instruction {
+    let (checkpoint_pda, _) = find_checkpoint_pda(program_id, session_pda, er_slot);
+    let (proof_pda, _) = find_step_proof_pda(program_id, &checkpoint_pda);
+    let (cursor_pda, _) = find_checkpoint_cursor_pda(program_id, session_pda);
+    let ix = PortalInstruction::SubmitStepProof(SubmitStepProof {
+        er_slot,
+        verifier_mode,
+    });
+    let data = borsh::to_vec(&ix).unwrap();
+
+    Instruction {
+        program_id: *program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(*submitter, true),
+            AccountMeta::new_readonly(*session_pda, false),
+            AccountMeta::new(checkpoint_pda, false),
+            AccountMeta::new_readonly(proof_pda, false),
+            AccountMeta::new(*bond_recipient, false),
+            AccountMeta::new(cursor_pda, false),
         ],
         data,
     }
@@ -294,6 +466,113 @@ async fn get_lamports(banks: &mut BanksClient, pubkey: &Pubkey) -> u64 {
 }
 
 #[tokio::test]
+async fn prefunded_portal_pdas_can_be_initialized() {
+    let mut context = setup().await;
+    let payer = context.payer.insecure_clone();
+    let payer_pubkey = payer.pubkey();
+    let challenger = Keypair::new();
+    let recipient = Pubkey::new_unique();
+    let er_slot = 44;
+    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID);
+    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID);
+    let (checkpoint_cursor_pda, _) = find_checkpoint_cursor_pda(&PORTAL_PROGRAM_ID, &session_pda);
+    let (checkpoint_pda, _) = find_checkpoint_pda(&PORTAL_PROGRAM_ID, &session_pda, er_slot);
+    let (proof_pda, _) = find_step_proof_pda(&PORTAL_PROGRAM_ID, &checkpoint_pda);
+    let (receipt_pda, _) = find_deposit_receipt_pda(&PORTAL_PROGRAM_ID, &session_pda, &recipient);
+
+    let open_ix = build_open_session_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        &fee_vault_pda,
+        1,
+        100,
+        5_000_000_000,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[
+            transfer(&payer_pubkey, &session_pda, 1),
+            transfer(&payer_pubkey, &fee_vault_pda, 1),
+            transfer(&payer_pubkey, &challenger.pubkey(), 20_000_000),
+            open_ix,
+        ],
+        Some(&payer_pubkey),
+        &[&payer],
+        blockhash,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let deposit_ix = build_deposit_fee_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        &recipient,
+        10_000,
+    );
+    let propose_ix =
+        build_propose_checkpoint_ix(&PORTAL_PROGRAM_ID, &payer_pubkey, &session_pda, er_slot, 10);
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[
+            transfer(&payer_pubkey, &receipt_pda, 1),
+            deposit_ix,
+            transfer(&payer_pubkey, &checkpoint_cursor_pda, 1),
+            transfer(&payer_pubkey, &checkpoint_pda, 1),
+            propose_ix,
+        ],
+        Some(&payer_pubkey),
+        &[&payer],
+        blockhash,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let receipt_data = get_account_data(&mut context.banks_client, &receipt_pda)
+        .await
+        .unwrap();
+    let receipt = DepositReceipt::try_from_slice(&receipt_data).unwrap();
+    assert!(receipt.is_valid());
+    assert_eq!(receipt.session, session_pda.to_bytes());
+
+    let cursor_data = get_account_data(&mut context.banks_client, &checkpoint_cursor_pda)
+        .await
+        .unwrap();
+    let cursor = CheckpointCursor::try_from_slice(&cursor_data).unwrap();
+    assert_eq!(cursor.active_checkpoint, checkpoint_pda.to_bytes());
+
+    let challenge_ix = build_challenge_checkpoint_ix(
+        &PORTAL_PROGRAM_ID,
+        &challenger.pubkey(),
+        &session_pda,
+        er_slot,
+    );
+    let create_proof_ix = build_create_step_proof_ix(
+        &PORTAL_PROGRAM_ID,
+        &challenger.pubkey(),
+        &session_pda,
+        er_slot,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[
+            challenge_ix,
+            transfer(&payer_pubkey, &proof_pda, 1),
+            create_proof_ix,
+        ],
+        Some(&payer_pubkey),
+        &[&payer, &challenger],
+        blockhash,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let proof_data = get_account_data(&mut context.banks_client, &proof_pda)
+        .await
+        .unwrap();
+    let proof = StepProofAccount::try_from_slice(&proof_data).unwrap();
+    assert_eq!(proof.checkpoint, checkpoint_pda.to_bytes());
+}
+
+#[tokio::test]
 async fn checkpoint_proposal_commit_deadline_flow() {
     let delegated_account = Pubkey::new_unique();
     let delegated_data = vec![9, 8, 7, 6];
@@ -338,12 +617,17 @@ async fn checkpoint_proposal_commit_deadline_flow() {
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
-    let propose_ix = build_propose_checkpoint_ix(
+    let settlement_checksum =
+        hashv(&[b"northstar-settlement-v0", &er_slot.to_le_bytes()]).to_bytes();
+    let propose_ix = build_propose_checkpoint_with_roots_ix(
         &PORTAL_PROGRAM_ID,
         &payer_pubkey,
         &session_pda,
         er_slot,
         challenge_window_slots,
+        [0; 32],
+        [2; 32],
+        settlement_checksum,
     );
     let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
@@ -394,6 +678,20 @@ async fn checkpoint_proposal_commit_deadline_flow() {
         .warp_to_slot(current_slot + challenge_window_slots + 1)
         .unwrap();
 
+    let late_cancel_ix =
+        build_cancel_checkpoint_ix(&PORTAL_PROGRAM_ID, &payer_pubkey, &session_pda, er_slot);
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[late_cancel_ix],
+        Some(&payer_pubkey),
+        &[&payer],
+        blockhash,
+    );
+    assert!(
+        context.banks_client.process_transaction(tx).await.is_err(),
+        "cancel after challenge deadline must fail"
+    );
+
     let commit_ix = build_commit_checkpoint_ix(
         &PORTAL_PROGRAM_ID,
         &committer.pubkey(),
@@ -421,9 +719,57 @@ async fn checkpoint_proposal_commit_deadline_flow() {
         .unwrap();
     let cursor = CheckpointCursor::try_from_slice(&cursor_data).unwrap();
     assert_eq!(cursor.latest_finalized_er_slot, er_slot);
+    assert_eq!(cursor.latest_finalized_state_root, [2; 32]);
     assert_eq!(
         cursor.latest_finalized_checkpoint.as_ref(),
         checkpoint_pda.as_ref()
+    );
+
+    let current_slot = context.banks_client.get_root_slot().await.unwrap();
+    context.warp_to_slot(current_slot + 10).unwrap();
+    let begin_ix = build_begin_settlement_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        er_slot,
+        settlement_checksum,
+    );
+    let finish_ix = build_finish_settlement_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        er_slot,
+        settlement_checksum,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[begin_ix, finish_ix],
+        Some(&payer_pubkey),
+        &[&payer],
+        blockhash,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let stale_root_propose_ix = build_propose_checkpoint_with_roots_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        er_slot + 1,
+        challenge_window_slots,
+        [9; 32],
+        [4; 32],
+        [3; 32],
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[stale_root_propose_ix],
+        Some(&payer_pubkey),
+        &[&payer],
+        blockhash,
+    );
+    assert!(
+        context.banks_client.process_transaction(tx).await.is_err(),
+        "checkpoint with stale previous root must fail"
     );
     assert_eq!(
         get_account_data(&mut context.banks_client, &delegated_account)
@@ -431,6 +777,414 @@ async fn checkpoint_proposal_commit_deadline_flow() {
             .unwrap(),
         delegated_data
     );
+}
+
+#[tokio::test]
+async fn committed_checkpoint_blocks_next_proposal_until_settled() {
+    let mut context = setup().await;
+    let payer = context.payer.insecure_clone();
+    let payer_pubkey = payer.pubkey();
+    let committer = Keypair::new();
+    let challenge_window_slots = 5;
+    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID);
+    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID);
+
+    let open_ix = build_open_session_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        &fee_vault_pda,
+        1,
+        100,
+        5_000_000_000,
+    );
+    let fund_committer_ix = transfer(&payer_pubkey, &committer.pubkey(), 1_000_000);
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[open_ix, fund_committer_ix],
+        Some(&payer_pubkey),
+        &[&payer],
+        blockhash,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let settlement_checksum = hashv(&[b"northstar-settlement-v0", &10u64.to_le_bytes()]).to_bytes();
+    let propose_ix = build_propose_checkpoint_with_roots_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        10,
+        challenge_window_slots,
+        [0; 32],
+        [2; 32],
+        settlement_checksum,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[propose_ix],
+        Some(&payer_pubkey),
+        &[&payer],
+        blockhash,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let close_ix = build_close_session_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        &fee_vault_pda,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx =
+        Transaction::new_signed_with_payer(&[close_ix], Some(&payer_pubkey), &[&payer], blockhash);
+    assert!(
+        context.banks_client.process_transaction(tx).await.is_err(),
+        "pending checkpoint must block session close"
+    );
+
+    let current_slot = context.banks_client.get_root_slot().await.unwrap();
+    context
+        .warp_to_slot(current_slot + challenge_window_slots + 1)
+        .unwrap();
+
+    let commit_ix = build_commit_checkpoint_ix(
+        &PORTAL_PROGRAM_ID,
+        &committer.pubkey(),
+        &payer_pubkey,
+        &session_pda,
+        10,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[commit_ix],
+        Some(&payer_pubkey),
+        &[&payer, &committer],
+        blockhash,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let close_ix = build_close_session_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        &fee_vault_pda,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx =
+        Transaction::new_signed_with_payer(&[close_ix], Some(&payer_pubkey), &[&payer], blockhash);
+    assert!(
+        context.banks_client.process_transaction(tx).await.is_err(),
+        "committed checkpoint must block session close until settlement"
+    );
+
+    let next_propose_ix = build_propose_checkpoint_with_roots_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        20,
+        challenge_window_slots,
+        [2; 32],
+        [4; 32],
+        [5; 32],
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[next_propose_ix],
+        Some(&payer_pubkey),
+        &[&payer],
+        blockhash,
+    );
+    assert!(
+        context.banks_client.process_transaction(tx).await.is_err(),
+        "committed checkpoint must stay active until settlement finishes"
+    );
+
+    let current_slot = context.banks_client.get_root_slot().await.unwrap();
+    context.warp_to_slot(current_slot + 10).unwrap();
+    let begin_ix = build_begin_settlement_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        10,
+        settlement_checksum,
+    );
+    let finish_ix = build_finish_settlement_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        10,
+        settlement_checksum,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[begin_ix, finish_ix],
+        Some(&payer_pubkey),
+        &[&payer],
+        blockhash,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let next_propose_ix = build_propose_checkpoint_with_roots_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        20,
+        challenge_window_slots,
+        [2; 32],
+        [4; 32],
+        [5; 32],
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[next_propose_ix],
+        Some(&payer_pubkey),
+        &[&payer],
+        blockhash,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let close_ix = build_close_session_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        &fee_vault_pda,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx =
+        Transaction::new_signed_with_payer(&[close_ix], Some(&payer_pubkey), &[&payer], blockhash);
+    assert!(
+        context.banks_client.process_transaction(tx).await.is_err(),
+        "new pending checkpoint must block session close"
+    );
+
+    let cancel_ix = build_cancel_checkpoint_ix(&PORTAL_PROGRAM_ID, &payer_pubkey, &session_pda, 20);
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx =
+        Transaction::new_signed_with_payer(&[cancel_ix], Some(&payer_pubkey), &[&payer], blockhash);
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let close_ix = build_close_session_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        &fee_vault_pda,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx =
+        Transaction::new_signed_with_payer(&[close_ix], Some(&payer_pubkey), &[&payer], blockhash);
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let open_ix = build_open_session_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        &fee_vault_pda,
+        1,
+        100,
+        5_000_000_000,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx =
+        Transaction::new_signed_with_payer(&[open_ix], Some(&payer_pubkey), &[&payer], blockhash);
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let low_slot_propose_ix = build_propose_checkpoint_with_roots_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        10,
+        challenge_window_slots,
+        [0; 32],
+        [6; 32],
+        [7; 32],
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[low_slot_propose_ix],
+        Some(&payer_pubkey),
+        &[&payer],
+        blockhash,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+}
+
+#[tokio::test]
+async fn late_challenge_extends_commit_timeout() {
+    let mut context = setup().await;
+    let payer = context.payer.insecure_clone();
+    let payer_pubkey = payer.pubkey();
+    let challenger = Keypair::new();
+    let committer = Keypair::new();
+    let er_slot = 40;
+    let challenge_window_slots = 5;
+    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID);
+    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID);
+    let (checkpoint_pda, _) = find_checkpoint_pda(&PORTAL_PROGRAM_ID, &session_pda, er_slot);
+
+    let open_ix = build_open_session_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        &fee_vault_pda,
+        1,
+        100,
+        5_000_000_000,
+    );
+    let fund_challenger_ix = transfer(&payer_pubkey, &challenger.pubkey(), 1_000_000);
+    let fund_committer_ix = transfer(&payer_pubkey, &committer.pubkey(), 1_000_000);
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[open_ix, fund_challenger_ix, fund_committer_ix],
+        Some(&payer_pubkey),
+        &[&payer],
+        blockhash,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let propose_ix = build_propose_checkpoint_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        er_slot,
+        challenge_window_slots,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[propose_ix],
+        Some(&payer_pubkey),
+        &[&payer],
+        blockhash,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let checkpoint_data = get_account_data(&mut context.banks_client, &checkpoint_pda)
+        .await
+        .unwrap();
+    let checkpoint = Checkpoint::try_from_slice(&checkpoint_data).unwrap();
+    context
+        .warp_to_slot(checkpoint.challenge_deadline_l1_slot - 1)
+        .unwrap();
+
+    let challenge_ix = build_challenge_checkpoint_ix(
+        &PORTAL_PROGRAM_ID,
+        &challenger.pubkey(),
+        &session_pda,
+        er_slot,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[challenge_ix],
+        Some(&payer_pubkey),
+        &[&payer, &challenger],
+        blockhash,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    context
+        .warp_to_slot(checkpoint.challenge_deadline_l1_slot)
+        .unwrap();
+    let commit_ix = build_commit_checkpoint_ix(
+        &PORTAL_PROGRAM_ID,
+        &committer.pubkey(),
+        &payer_pubkey,
+        &session_pda,
+        er_slot,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[commit_ix.clone()],
+        Some(&payer_pubkey),
+        &[&payer, &committer],
+        blockhash,
+    );
+    assert!(
+        context.banks_client.process_transaction(tx).await.is_err(),
+        "original deadline must not commit away a fresh challenge"
+    );
+
+    context
+        .warp_to_slot(checkpoint.challenge_deadline_l1_slot + challenge_window_slots)
+        .unwrap();
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[commit_ix],
+        Some(&payer_pubkey),
+        &[&payer, &committer],
+        blockhash,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+}
+
+#[tokio::test]
+async fn checkpoint_rejects_second_active_proposal() {
+    let mut context = setup().await;
+    let payer = context.payer.insecure_clone();
+    let payer_pubkey = payer.pubkey();
+    let challenge_window_slots = 5;
+    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID);
+    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID);
+    let (cursor_pda, _) = find_checkpoint_cursor_pda(&PORTAL_PROGRAM_ID, &session_pda);
+
+    let open_ix = build_open_session_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        &fee_vault_pda,
+        1,
+        100,
+        5_000_000_000,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx =
+        Transaction::new_signed_with_payer(&[open_ix], Some(&payer_pubkey), &[&payer], blockhash);
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let first_propose_ix = build_propose_checkpoint_with_roots_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        10,
+        challenge_window_slots,
+        [0; 32],
+        [10; 32],
+        [3; 32],
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[first_propose_ix],
+        Some(&payer_pubkey),
+        &[&payer],
+        blockhash,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let second_propose_ix = build_propose_checkpoint_with_roots_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        20,
+        challenge_window_slots,
+        [0; 32],
+        [20; 32],
+        [3; 32],
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[second_propose_ix],
+        Some(&payer_pubkey),
+        &[&payer],
+        blockhash,
+    );
+    assert!(
+        context.banks_client.process_transaction(tx).await.is_err(),
+        "second checkpoint proposal must fail while first is active"
+    );
+
+    let cursor_data = get_account_data(&mut context.banks_client, &cursor_pda)
+        .await
+        .unwrap();
+    let cursor = CheckpointCursor::try_from_slice(&cursor_data).unwrap();
+    assert_eq!(cursor.active_er_slot, 10);
 }
 
 #[tokio::test]
@@ -715,7 +1469,6 @@ async fn checkpoint_challenge_blocks_commit_and_settlement() {
     let challenger = Keypair::new();
     let challenge_window_slots = 5;
     let er_slot = 20;
-    let effect_commitment = [3; 32];
     let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID);
     let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID);
     let (checkpoint_pda, _) = find_checkpoint_pda(&PORTAL_PROGRAM_ID, &session_pda, er_slot);
@@ -729,7 +1482,7 @@ async fn checkpoint_challenge_blocks_commit_and_settlement() {
         100,
         5_000_000_000,
     );
-    let fund_challenger_ix = transfer(&payer_pubkey, &challenger.pubkey(), 1_000_000);
+    let fund_challenger_ix = transfer(&payer_pubkey, &challenger.pubkey(), 20_000_000);
     let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
         &[open_ix, fund_challenger_ix],
@@ -778,6 +1531,20 @@ async fn checkpoint_challenge_blocks_commit_and_settlement() {
     assert_eq!(checkpoint.challenger.as_ref(), challenger.pubkey().as_ref());
     assert_eq!(checkpoint.bond_status, CheckpointBondStatus::Locked);
 
+    let close_ix = build_close_session_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        &fee_vault_pda,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx =
+        Transaction::new_signed_with_payer(&[close_ix], Some(&payer_pubkey), &[&payer], blockhash);
+    assert!(
+        context.banks_client.process_transaction(tx).await.is_err(),
+        "challenged checkpoint must block session close"
+    );
+
     let current_slot = context.banks_client.get_root_slot().await.unwrap();
     context
         .warp_to_slot(current_slot + challenge_window_slots + 10)
@@ -797,32 +1564,19 @@ async fn checkpoint_challenge_blocks_commit_and_settlement() {
         &[&payer, &challenger],
         blockhash,
     );
-    assert!(context.banks_client.process_transaction(tx).await.is_err());
-
-    let begin_ix = build_begin_settlement_ix(
-        &PORTAL_PROGRAM_ID,
-        &payer_pubkey,
-        &session_pda,
-        er_slot,
-        effect_commitment,
-    );
-    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
-    let tx =
-        Transaction::new_signed_with_payer(&[begin_ix], Some(&payer_pubkey), &[&payer], blockhash);
-    assert!(context.banks_client.process_transaction(tx).await.is_err());
+    context.banks_client.process_transaction(tx).await.unwrap();
+    let checkpoint_data = get_account_data(&mut context.banks_client, &checkpoint_pda)
+        .await
+        .unwrap();
+    let checkpoint = Checkpoint::try_from_slice(&checkpoint_data).unwrap();
+    assert_eq!(checkpoint.status, CheckpointStatus::Committed);
+    assert!(checkpoint.challenge_resolved);
     assert_eq!(
         get_account_data(&mut context.banks_client, &delegated_account)
             .await
             .unwrap(),
         delegated_data
     );
-
-    let cancel_ix =
-        build_cancel_checkpoint_ix(&PORTAL_PROGRAM_ID, &payer_pubkey, &session_pda, er_slot);
-    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
-    let tx =
-        Transaction::new_signed_with_payer(&[cancel_ix], Some(&payer_pubkey), &[&payer], blockhash);
-    assert!(context.banks_client.process_transaction(tx).await.is_err());
 
     let mut unchallenged_context = setup().await;
     let unchallenged_payer = unchallenged_context.payer.insecure_clone();
@@ -914,6 +1668,472 @@ async fn checkpoint_challenge_blocks_commit_and_settlement() {
         .process_transaction(tx)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn submit_step_proof_default_verifier_is_safe() {
+    let mut context = setup().await;
+    let payer = context.payer.insecure_clone();
+    let payer_pubkey = payer.pubkey();
+    let challenger = Keypair::new();
+    let er_slot = 30;
+    let challenge_window_slots = 5;
+    let proof_bytes = [9u8; 64];
+    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID);
+    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID);
+    let (checkpoint_pda, _) = find_checkpoint_pda(&PORTAL_PROGRAM_ID, &session_pda, er_slot);
+    let (proof_pda, _) = find_step_proof_pda(&PORTAL_PROGRAM_ID, &checkpoint_pda);
+
+    let open_ix = build_open_session_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        &fee_vault_pda,
+        1,
+        100,
+        5_000_000_000,
+    );
+    let fund_challenger_ix = transfer(&payer_pubkey, &challenger.pubkey(), 20_000_000);
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[open_ix, fund_challenger_ix],
+        Some(&payer_pubkey),
+        &[&payer],
+        blockhash,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let propose_ix = build_propose_checkpoint_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        er_slot,
+        challenge_window_slots,
+    );
+    let challenge_ix = build_challenge_checkpoint_ix(
+        &PORTAL_PROGRAM_ID,
+        &challenger.pubkey(),
+        &session_pda,
+        er_slot,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[propose_ix, challenge_ix],
+        Some(&payer_pubkey),
+        &[&payer, &challenger],
+        blockhash,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let wrong_creator_ix =
+        build_create_step_proof_ix(&PORTAL_PROGRAM_ID, &payer_pubkey, &session_pda, er_slot);
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[wrong_creator_ix],
+        Some(&payer_pubkey),
+        &[&payer],
+        blockhash,
+    );
+    assert!(
+        context.banks_client.process_transaction(tx).await.is_err(),
+        "non-challenger must not be able to squat proof PDA"
+    );
+
+    let create_proof_ix = build_create_step_proof_ix(
+        &PORTAL_PROGRAM_ID,
+        &challenger.pubkey(),
+        &session_pda,
+        er_slot,
+    );
+    let write_proof_ix = build_write_step_proof_ix(
+        &PORTAL_PROGRAM_ID,
+        &challenger.pubkey(),
+        &session_pda,
+        er_slot,
+        &proof_bytes,
+    );
+    let seal_proof_ix = build_seal_step_proof_ix(
+        &PORTAL_PROGRAM_ID,
+        &challenger.pubkey(),
+        &session_pda,
+        er_slot,
+        proof_bytes.len() as u32,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[create_proof_ix, write_proof_ix, seal_proof_ix],
+        Some(&payer_pubkey),
+        &[&payer, &challenger],
+        blockhash,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let checkpoint_before = context
+        .banks_client
+        .get_account(checkpoint_pda)
+        .await
+        .unwrap()
+        .unwrap();
+    let proof_before = context
+        .banks_client
+        .get_account(proof_pda)
+        .await
+        .unwrap()
+        .unwrap();
+    let proof_state = StepProofAccount::try_from_slice(&proof_before.data).unwrap();
+    assert!(proof_state.sealed);
+    assert_eq!(proof_state.proof_kind, 1);
+    assert_eq!(proof_state.proof_version, 1);
+    assert_ne!(proof_state.public_input_hash, [0; 32]);
+    let recipient_before = get_lamports(&mut context.banks_client, &challenger.pubkey()).await;
+
+    let submit_ix = build_submit_step_proof_ix(
+        &PORTAL_PROGRAM_ID,
+        &challenger.pubkey(),
+        &challenger.pubkey(),
+        &session_pda,
+        er_slot,
+        StepProofVerifierMode::Production,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[submit_ix],
+        Some(&payer_pubkey),
+        &[&payer, &challenger],
+        blockhash,
+    );
+    assert!(context.banks_client.process_transaction(tx).await.is_err());
+
+    let checkpoint_after = context
+        .banks_client
+        .get_account(checkpoint_pda)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint_after.data, checkpoint_before.data);
+    assert_eq!(checkpoint_after.lamports, checkpoint_before.lamports);
+    assert_eq!(
+        get_lamports(&mut context.banks_client, &challenger.pubkey()).await,
+        recipient_before
+    );
+}
+
+#[cfg(feature = "test-verifier")]
+#[tokio::test]
+async fn submit_step_proof_invalid_slashes_and_blocks_settlement() {
+    let delegated_account = Pubkey::new_unique();
+    let delegated_data = vec![7, 7, 7, 7];
+    let mut context = setup_with_account(
+        delegated_account,
+        Account {
+            lamports: 1_000_000_000,
+            data: delegated_data.clone(),
+            owner: PORTAL_PROGRAM_ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .await;
+
+    let payer = context.payer.insecure_clone();
+    let payer_pubkey = payer.pubkey();
+    let challenger = Keypair::new();
+    let er_slot = 31;
+    let challenge_window_slots = 5;
+    let effect_commitment = [3; 32];
+    let proof_bytes = [1u8; 64];
+    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID);
+    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID);
+    let (checkpoint_pda, _) = find_checkpoint_pda(&PORTAL_PROGRAM_ID, &session_pda, er_slot);
+
+    let open_ix = build_open_session_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        &fee_vault_pda,
+        1,
+        100,
+        5_000_000_000,
+    );
+    let fund_challenger_ix = transfer(&payer_pubkey, &challenger.pubkey(), 20_000_000);
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[open_ix, fund_challenger_ix],
+        Some(&payer_pubkey),
+        &[&payer],
+        blockhash,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let propose_ix = build_propose_checkpoint_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        er_slot,
+        challenge_window_slots,
+    );
+    let challenge_ix = build_challenge_checkpoint_ix(
+        &PORTAL_PROGRAM_ID,
+        &challenger.pubkey(),
+        &session_pda,
+        er_slot,
+    );
+    let create_proof_ix = build_create_step_proof_ix(
+        &PORTAL_PROGRAM_ID,
+        &challenger.pubkey(),
+        &session_pda,
+        er_slot,
+    );
+    let write_proof_ix = build_write_step_proof_ix(
+        &PORTAL_PROGRAM_ID,
+        &challenger.pubkey(),
+        &session_pda,
+        er_slot,
+        &proof_bytes,
+    );
+    let seal_proof_ix = build_seal_step_proof_ix(
+        &PORTAL_PROGRAM_ID,
+        &challenger.pubkey(),
+        &session_pda,
+        er_slot,
+        proof_bytes.len() as u32,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[
+            propose_ix,
+            challenge_ix,
+            create_proof_ix,
+            write_proof_ix,
+            seal_proof_ix,
+        ],
+        Some(&payer_pubkey),
+        &[&payer, &challenger],
+        blockhash,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let wrong_recipient_submit_ix = build_submit_step_proof_ix(
+        &PORTAL_PROGRAM_ID,
+        &challenger.pubkey(),
+        &payer_pubkey,
+        &session_pda,
+        er_slot,
+        StepProofVerifierMode::TestOnly,
+    );
+    let checkpoint_before_wrong_submit = context
+        .banks_client
+        .get_account(checkpoint_pda)
+        .await
+        .unwrap()
+        .unwrap();
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[wrong_recipient_submit_ix],
+        Some(&payer_pubkey),
+        &[&payer, &challenger],
+        blockhash,
+    );
+    assert!(context.banks_client.process_transaction(tx).await.is_err());
+    let checkpoint_after_wrong_submit = context
+        .banks_client
+        .get_account(checkpoint_pda)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        checkpoint_after_wrong_submit.data,
+        checkpoint_before_wrong_submit.data
+    );
+    assert_eq!(
+        checkpoint_after_wrong_submit.lamports,
+        checkpoint_before_wrong_submit.lamports
+    );
+
+    let recipient_before = get_lamports(&mut context.banks_client, &challenger.pubkey()).await;
+    let submit_ix = build_submit_step_proof_ix(
+        &PORTAL_PROGRAM_ID,
+        &challenger.pubkey(),
+        &challenger.pubkey(),
+        &session_pda,
+        er_slot,
+        StepProofVerifierMode::TestOnly,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[submit_ix.clone()],
+        Some(&payer_pubkey),
+        &[&payer, &challenger],
+        blockhash,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let recipient_after = get_lamports(&mut context.banks_client, &challenger.pubkey()).await;
+    assert_eq!(
+        recipient_after - recipient_before,
+        CHECKPOINT_PROPOSER_BOND_LAMPORTS
+    );
+    let checkpoint_data = get_account_data(&mut context.banks_client, &checkpoint_pda)
+        .await
+        .unwrap();
+    let checkpoint = Checkpoint::try_from_slice(&checkpoint_data).unwrap();
+    assert_eq!(checkpoint.status, CheckpointStatus::Invalid);
+    assert_eq!(checkpoint.bond_status, CheckpointBondStatus::Slashed);
+
+    let recipient_before_repeat =
+        get_lamports(&mut context.banks_client, &challenger.pubkey()).await;
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[submit_ix],
+        Some(&payer_pubkey),
+        &[&payer, &challenger],
+        blockhash,
+    );
+    assert!(context.banks_client.process_transaction(tx).await.is_err());
+    assert_eq!(
+        get_lamports(&mut context.banks_client, &challenger.pubkey()).await,
+        recipient_before_repeat
+    );
+
+    let current_slot = context.banks_client.get_root_slot().await.unwrap();
+    context
+        .warp_to_slot(current_slot + challenge_window_slots + 10)
+        .unwrap();
+    let begin_ix = build_begin_settlement_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        er_slot,
+        effect_commitment,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx =
+        Transaction::new_signed_with_payer(&[begin_ix], Some(&payer_pubkey), &[&payer], blockhash);
+    assert!(context.banks_client.process_transaction(tx).await.is_err());
+    assert_eq!(
+        get_account_data(&mut context.banks_client, &delegated_account)
+            .await
+            .unwrap(),
+        delegated_data
+    );
+}
+
+#[cfg(feature = "test-verifier")]
+#[tokio::test]
+async fn valid_step_proof_prevents_second_challenge() {
+    let mut context = setup().await;
+    let payer = context.payer.insecure_clone();
+    let payer_pubkey = payer.pubkey();
+    let challenger = Keypair::new();
+    let second_challenger = Keypair::new();
+    let er_slot = 32;
+    let challenge_window_slots = 20;
+    let proof_bytes = [2u8; 8];
+    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID);
+    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID);
+    let (checkpoint_pda, _) = find_checkpoint_pda(&PORTAL_PROGRAM_ID, &session_pda, er_slot);
+
+    let open_ix = build_open_session_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        &fee_vault_pda,
+        1,
+        100,
+        5_000_000_000,
+    );
+    let fund_challenger_ix = transfer(&payer_pubkey, &challenger.pubkey(), 20_000_000);
+    let fund_second_challenger_ix = transfer(&payer_pubkey, &second_challenger.pubkey(), 1_000_000);
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[open_ix, fund_challenger_ix, fund_second_challenger_ix],
+        Some(&payer_pubkey),
+        &[&payer],
+        blockhash,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let propose_ix = build_propose_checkpoint_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &session_pda,
+        er_slot,
+        challenge_window_slots,
+    );
+    let challenge_ix = build_challenge_checkpoint_ix(
+        &PORTAL_PROGRAM_ID,
+        &challenger.pubkey(),
+        &session_pda,
+        er_slot,
+    );
+    let create_proof_ix = build_create_step_proof_ix(
+        &PORTAL_PROGRAM_ID,
+        &challenger.pubkey(),
+        &session_pda,
+        er_slot,
+    );
+    let write_proof_ix = build_write_step_proof_ix(
+        &PORTAL_PROGRAM_ID,
+        &challenger.pubkey(),
+        &session_pda,
+        er_slot,
+        &proof_bytes,
+    );
+    let seal_proof_ix = build_seal_step_proof_ix(
+        &PORTAL_PROGRAM_ID,
+        &challenger.pubkey(),
+        &session_pda,
+        er_slot,
+        proof_bytes.len() as u32,
+    );
+    let submit_proof_ix = build_submit_step_proof_ix(
+        &PORTAL_PROGRAM_ID,
+        &challenger.pubkey(),
+        &challenger.pubkey(),
+        &session_pda,
+        er_slot,
+        StepProofVerifierMode::TestOnly,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[
+            propose_ix,
+            challenge_ix,
+            create_proof_ix,
+            write_proof_ix,
+            seal_proof_ix,
+            submit_proof_ix,
+        ],
+        Some(&payer_pubkey),
+        &[&payer, &challenger],
+        blockhash,
+    );
+    context.banks_client.process_transaction(tx).await.unwrap();
+
+    let checkpoint_data = get_account_data(&mut context.banks_client, &checkpoint_pda)
+        .await
+        .unwrap();
+    let checkpoint = Checkpoint::try_from_slice(&checkpoint_data).unwrap();
+    assert_eq!(checkpoint.status, CheckpointStatus::Pending);
+    assert!(checkpoint.challenge_resolved);
+
+    let second_challenge_ix = build_challenge_checkpoint_ix(
+        &PORTAL_PROGRAM_ID,
+        &second_challenger.pubkey(),
+        &session_pda,
+        er_slot,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[second_challenge_ix],
+        Some(&payer_pubkey),
+        &[&payer, &second_challenger],
+        blockhash,
+    );
+    assert!(
+        context.banks_client.process_transaction(tx).await.is_err(),
+        "valid proof resolution makes the checkpoint unchallengeable for v1"
+    );
 }
 
 #[tokio::test]
@@ -1052,6 +2272,42 @@ async fn test_can_close_active_session() {
     let tx =
         Transaction::new_signed_with_payer(&[open_ix], Some(&payer.pubkey()), &[payer], blockhash);
     banks.process_transaction(tx).await.unwrap();
+
+    let attacker = Keypair::new();
+    let fund_attacker_ix = transfer(&payer.pubkey(), &attacker.pubkey(), 1_000_000);
+    let blockhash = banks.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[fund_attacker_ix],
+        Some(&payer.pubkey()),
+        &[payer],
+        blockhash,
+    );
+    banks.process_transaction(tx).await.unwrap();
+
+    let session_before = banks.get_account(session_pda).await.unwrap().unwrap();
+    let vault_before = banks.get_account(fee_vault_pda).await.unwrap().unwrap();
+    let attacker_close_ix = build_close_session_ix(
+        &PORTAL_PROGRAM_ID,
+        &attacker.pubkey(),
+        &session_pda,
+        &fee_vault_pda,
+    );
+    let blockhash = banks.get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[attacker_close_ix],
+        Some(&payer.pubkey()),
+        &[payer, &attacker],
+        blockhash,
+    );
+    assert!(banks.process_transaction(tx).await.is_err());
+    assert_eq!(
+        banks.get_account(session_pda).await.unwrap().unwrap(),
+        session_before
+    );
+    assert_eq!(
+        banks.get_account(fee_vault_pda).await.unwrap().unwrap(),
+        vault_before
+    );
 
     let close_ix = build_close_session_ix(
         &PORTAL_PROGRAM_ID,

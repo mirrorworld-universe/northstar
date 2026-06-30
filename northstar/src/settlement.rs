@@ -121,6 +121,16 @@ impl SettlementPlan {
         !self.unsupported_changes.is_empty()
     }
 
+    pub fn recomputed_checksum(&self) -> [u8; 32] {
+        checksum_settlement(
+            self.er_slot,
+            &self.chunks,
+            &self.owner_changes,
+            &self.lamport_changes,
+            &self.receipt_balances,
+        )
+    }
+
     pub fn checkpoint_proposal_transaction(
         &self,
         portal_program_id: Pubkey,
@@ -128,6 +138,7 @@ impl SettlementPlan {
         validator: &Keypair,
         recent_blockhash: Hash,
         challenge_window_slots: u64,
+        previous_state_root: [u8; 32],
     ) -> Option<Transaction> {
         (!self.is_empty() && !self.has_unsupported_changes()).then(|| {
             sign_settlement_transaction(
@@ -136,6 +147,7 @@ impl SettlementPlan {
                     session_pda,
                     validator.pubkey(),
                     challenge_window_slots,
+                    previous_state_root,
                 )],
                 validator,
                 recent_blockhash,
@@ -242,6 +254,7 @@ impl SettlementPlan {
         session_pda: Pubkey,
         validator: Pubkey,
         challenge_window_slots: u64,
+        previous_state_root: [u8; 32],
     ) -> Instruction {
         let (checkpoint, _) = find_checkpoint_pda(
             &portal_program_id.to_bytes(),
@@ -261,7 +274,7 @@ impl SettlementPlan {
             ],
             data: borsh::to_vec(&PortalInstruction::ProposeCheckpoint(ProposeCheckpoint {
                 er_slot: self.er_slot,
-                previous_state_root: [0; 32],
+                previous_state_root,
                 new_state_root: self.checksum,
                 effect_commitment: self.checksum,
                 challenge_window_slots,
@@ -322,6 +335,9 @@ impl SettlementPlan {
             self.er_slot,
         );
         let checkpoint = Pubkey::new_from_array(checkpoint);
+        let (checkpoint_cursor, _) =
+            find_checkpoint_cursor_pda(&portal_program_id.to_bytes(), &session_pda.to_bytes());
+        let checkpoint_cursor = Pubkey::new_from_array(checkpoint_cursor);
         let mut instructions = Vec::with_capacity(
             self.chunks.len()
                 + self.owner_changes.len()
@@ -467,6 +483,7 @@ impl SettlementPlan {
                 AccountMeta::new_readonly(validator, true),
                 AccountMeta::new(session_pda, false),
                 AccountMeta::new(checkpoint, false),
+                AccountMeta::new(checkpoint_cursor, false),
             ],
             data: borsh::to_vec(&PortalInstruction::FinishSettlement(FinishSettlement {
                 er_slot: self.er_slot,

@@ -1,4 +1,5 @@
 use {
+    super::initialize_pda_account,
     crate::{
         error::PortalError,
         events::{emit_transfer_event, NorthstarTransferEvent, TransferEventKind},
@@ -95,14 +96,14 @@ pub fn process_deposit_fee(
         let receipt_signer = Signer::from(receipt_seeds);
 
         // Create account — depositor pays rent
-        CreateAccount {
-            from: depositor,
-            to: deposit_receipt,
-            lamports: receipt_lamports,
-            space: DepositReceipt::LEN as u64,
-            owner: program_id,
-        }
-        .invoke_signed(&[receipt_signer])?;
+        initialize_pda_account(
+            depositor,
+            deposit_receipt,
+            receipt_lamports,
+            DepositReceipt::LEN as u64,
+            program_id,
+            receipt_signer,
+        )?;
 
         let receipt_state = DepositReceipt {
             discriminator: DepositReceipt::DISCRIMINATOR,

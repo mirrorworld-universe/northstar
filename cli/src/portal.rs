@@ -616,6 +616,10 @@ fn find_fee_vault_pda(program_id: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"fee_vault"], program_id).0
 }
 
+fn find_checkpoint_cursor_pda(program_id: &Pubkey, session: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"checkpoint_cursor", session.as_ref()], program_id).0
+}
+
 fn find_delegation_record_pda(program_id: &Pubkey, delegated_account: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"delegation", delegated_account.as_ref()], program_id).0
 }
@@ -875,6 +879,8 @@ pub async fn process_portal_subcommand(
             let owner = config.signers[*owner];
             let session_pda = find_session_pda(&portal_program_id);
             let fee_vault_pda = find_fee_vault_pda(&portal_program_id);
+            let checkpoint_cursor_pda =
+                find_checkpoint_cursor_pda(&portal_program_id, &session_pda);
             let instruction = Instruction {
                 program_id: portal_program_id,
                 accounts: vec![
@@ -882,6 +888,7 @@ pub async fn process_portal_subcommand(
                     AccountMeta::new(session_pda, false),
                     AccountMeta::new(fee_vault_pda, false),
                     AccountMeta::new_readonly(system_program::id(), false),
+                    AccountMeta::new(checkpoint_cursor_pda, false),
                 ],
                 data: borsh::to_vec(&PortalInstruction::CloseSession).unwrap(),
             };

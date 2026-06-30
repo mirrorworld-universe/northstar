@@ -1,9 +1,11 @@
 use {
+    super::initialize_pda_account,
     crate::{
-        find_checkpoint_cursor_pda, find_checkpoint_pda, find_session_pda, CancelCheckpoint,
-        ChallengeCheckpoint, Checkpoint, CheckpointBondStatus, CheckpointCursor, CheckpointStatus,
-        CommitCheckpoint, PortalError, ProposeCheckpoint, Session,
-        CHECKPOINT_PROPOSER_BOND_LAMPORTS,
+        find_checkpoint_cursor_pda, find_checkpoint_pda, find_session_pda, find_step_proof_pda,
+        CancelCheckpoint, ChallengeCheckpoint, Checkpoint, CheckpointBondStatus, CheckpointCursor,
+        CheckpointStatus, CommitCheckpoint, CreateStepProof, PortalError, ProposeCheckpoint,
+        SealStepProof, Session, StepProofAccount, StepProofVerifierMode, SubmitStepProof,
+        WriteStepProof, CHECKPOINT_PROPOSER_BOND_LAMPORTS, MAX_STEP_PROOF_BYTES,
     },
     borsh::{BorshDeserialize, BorshSerialize},
     pinocchio::{
@@ -14,7 +16,8 @@ use {
         sysvars::{clock::Clock, rent::Rent, Sysvar},
         ProgramResult,
     },
-    pinocchio_system::instructions::CreateAccount,
+    pinocchio_system::instructions::Transfer,
+    solana_sha256_hasher::hashv,
 };
 
 fn load_session(program_id: &Pubkey, session: &AccountInfo) -> Result<Session, ProgramError> {
@@ -48,6 +51,32 @@ fn store_cursor(cursor: &AccountInfo, cursor_state: &CheckpointCursor) -> Progra
     BorshSerialize::serialize(cursor_state, &mut &mut cursor_data[..CheckpointCursor::LEN])
         .unwrap();
     Ok(())
+}
+
+fn store_step_proof(proof: &AccountInfo, proof_state: &StepProofAccount) -> ProgramResult {
+    let mut proof_data = proof.try_borrow_mut_data()?;
+    BorshSerialize::serialize(proof_state, &mut &mut proof_data[..StepProofAccount::LEN]).unwrap();
+    Ok(())
+}
+
+fn load_step_proof(
+    program_id: &Pubkey,
+    checkpoint_key: &Pubkey,
+    proof: &AccountInfo,
+) -> Result<StepProofAccount, ProgramError> {
+    let (expected_proof_key, _) = find_step_proof_pda(program_id, checkpoint_key);
+    if proof.key() != &expected_proof_key {
+        return Err(PortalError::InvalidPdaSeeds.into());
+    }
+    if proof.owner() != program_id {
+        return Err(PortalError::StepProofStateInvalid.into());
+    }
+    let proof_state = StepProofAccount::try_from_slice(&proof.try_borrow_data()?)
+        .map_err(|_| PortalError::StepProofDeserializeFailed)?;
+    if !proof_state.is_valid() || proof_state.checkpoint != *checkpoint_key {
+        return Err(PortalError::StepProofStateInvalid.into());
+    }
+    Ok(proof_state)
 }
 
 fn resolve_checkpoint_bond(
@@ -183,20 +212,23 @@ fn create_cursor(
     ];
     let cursor_signer = Signer::from(cursor_seeds);
 
-    CreateAccount {
-        from: payer,
-        to: cursor,
-        lamports: cursor_lamports,
-        space: CheckpointCursor::LEN as u64,
-        owner: program_id,
-    }
-    .invoke_signed(&[cursor_signer])?;
+    initialize_pda_account(
+        payer,
+        cursor,
+        cursor_lamports,
+        CheckpointCursor::LEN as u64,
+        program_id,
+        cursor_signer,
+    )?;
 
     let cursor_state = CheckpointCursor {
         discriminator: CheckpointCursor::DISCRIMINATOR,
         session: *session_key,
         latest_finalized_checkpoint: [0; 32],
         latest_finalized_er_slot: 0,
+        latest_finalized_state_root: [0; 32],
+        active_checkpoint: [0; 32],
+        active_er_slot: 0,
         bump: cursor_bump,
     };
     store_cursor(cursor, &cursor_state)?;
@@ -227,6 +259,63 @@ fn require_advancing_checkpoint(
         return Err(PortalError::CheckpointErSlotNotAdvanced.into());
     }
     Ok(())
+}
+
+fn require_no_active_checkpoint(cursor_state: &CheckpointCursor) -> ProgramResult {
+    if cursor_state.active_checkpoint != [0; 32] {
+        return Err(PortalError::CheckpointActiveExists.into());
+    }
+    Ok(())
+}
+
+fn require_active_checkpoint(
+    cursor_state: &CheckpointCursor,
+    checkpoint_key: &Pubkey,
+    er_slot: u64,
+) -> ProgramResult {
+    if cursor_state.active_checkpoint != *checkpoint_key || cursor_state.active_er_slot != er_slot {
+        return Err(PortalError::CheckpointStateInvalid.into());
+    }
+    Ok(())
+}
+
+fn clear_active_checkpoint(cursor_state: &mut CheckpointCursor) {
+    cursor_state.active_checkpoint = [0; 32];
+    cursor_state.active_er_slot = 0;
+}
+
+fn challenge_resolution_deadline(checkpoint_state: &Checkpoint) -> Result<u64, ProgramError> {
+    let challenge_window_slots = checkpoint_state
+        .challenge_deadline_l1_slot
+        .checked_sub(checkpoint_state.proposed_at_l1_slot)
+        .ok_or(PortalError::ArithmeticOverflow)?;
+    checkpoint_state
+        .challenged_at_l1_slot
+        .checked_add(challenge_window_slots)
+        .ok_or(PortalError::ArithmeticOverflow.into())
+}
+
+fn step_proof_public_input_hash(
+    session_key: &Pubkey,
+    checkpoint_key: &Pubkey,
+    checkpoint_state: &Checkpoint,
+    proof_kind: u8,
+    proof_version: u8,
+    step_index: u64,
+) -> [u8; 32] {
+    hashv(&[
+        b"northstar-step-proof-input-v1",
+        session_key,
+        checkpoint_key,
+        &[proof_kind],
+        &[proof_version],
+        &checkpoint_state.er_slot.to_le_bytes(),
+        &step_index.to_le_bytes(),
+        &checkpoint_state.previous_state_root,
+        &checkpoint_state.new_state_root,
+        &checkpoint_state.effect_commitment,
+    ])
+    .to_bytes()
 }
 
 pub fn process_propose_checkpoint(
@@ -270,11 +359,11 @@ pub fn process_propose_checkpoint(
     }
 
     let session_key = session.key();
-    let cursor_state = load_or_create_cursor(program_id, proposer, session_key, cursor)?;
+    let mut cursor_state = load_or_create_cursor(program_id, proposer, session_key, cursor)?;
+    require_no_active_checkpoint(&cursor_state)?;
     require_advancing_checkpoint(&session_state, &cursor_state, er_slot)?;
-
-    if !checkpoint.data_is_empty() {
-        return Err(PortalError::CheckpointStateInvalid.into());
+    if previous_state_root != cursor_state.latest_finalized_state_root {
+        return Err(PortalError::CheckpointPreviousRootMismatch.into());
     }
 
     let (expected_checkpoint_key, checkpoint_bump) =
@@ -284,28 +373,50 @@ pub fn process_propose_checkpoint(
     }
 
     let rent = Rent::get()?;
-    let checkpoint_lamports = rent
-        .minimum_balance(Checkpoint::LEN)
-        .checked_add(CHECKPOINT_PROPOSER_BOND_LAMPORTS)
-        .ok_or(PortalError::ArithmeticOverflow)?;
-    let er_slot_bytes = er_slot.to_le_bytes();
-    let checkpoint_bump_bytes = [checkpoint_bump];
-    let checkpoint_seeds = &[
-        Seed::from(Checkpoint::SEED_PREFIX),
-        Seed::from(session_key.as_ref()),
-        Seed::from(er_slot_bytes.as_ref()),
-        Seed::from(checkpoint_bump_bytes.as_ref()),
-    ];
-    let checkpoint_signer = Signer::from(checkpoint_seeds);
+    let checkpoint_rent_lamports = rent.minimum_balance(Checkpoint::LEN);
+    if checkpoint.data_is_empty() {
+        let checkpoint_lamports = checkpoint_rent_lamports
+            .checked_add(CHECKPOINT_PROPOSER_BOND_LAMPORTS)
+            .ok_or(PortalError::ArithmeticOverflow)?;
+        let er_slot_bytes = er_slot.to_le_bytes();
+        let checkpoint_bump_bytes = [checkpoint_bump];
+        let checkpoint_seeds = &[
+            Seed::from(Checkpoint::SEED_PREFIX),
+            Seed::from(session_key.as_ref()),
+            Seed::from(er_slot_bytes.as_ref()),
+            Seed::from(checkpoint_bump_bytes.as_ref()),
+        ];
+        let checkpoint_signer = Signer::from(checkpoint_seeds);
 
-    CreateAccount {
-        from: proposer,
-        to: checkpoint,
-        lamports: checkpoint_lamports,
-        space: Checkpoint::LEN as u64,
-        owner: program_id,
+        initialize_pda_account(
+            proposer,
+            checkpoint,
+            checkpoint_lamports,
+            Checkpoint::LEN as u64,
+            program_id,
+            checkpoint_signer,
+        )?;
+    } else {
+        let previous_checkpoint = load_checkpoint(program_id, session_key, er_slot, checkpoint)?;
+        if !matches!(
+            previous_checkpoint.status,
+            CheckpointStatus::Settled | CheckpointStatus::Cancelled | CheckpointStatus::Invalid
+        ) || cursor_state.latest_finalized_checkpoint != [0; 32]
+            || cursor_state.latest_finalized_er_slot != 0
+            || cursor_state.latest_finalized_state_root != [0; 32]
+        {
+            return Err(PortalError::CheckpointStateInvalid.into());
+        }
+        if checkpoint.lamports() < checkpoint_rent_lamports {
+            return Err(PortalError::CheckpointBondInsufficient.into());
+        }
+        Transfer {
+            from: proposer,
+            to: checkpoint,
+            lamports: CHECKPOINT_PROPOSER_BOND_LAMPORTS,
+        }
+        .invoke()?;
     }
-    .invoke_signed(&[checkpoint_signer])?;
 
     let checkpoint_state = Checkpoint {
         discriminator: Checkpoint::DISCRIMINATOR,
@@ -324,9 +435,14 @@ pub fn process_propose_checkpoint(
         bond_status: CheckpointBondStatus::Locked,
         challenger: [0; 32],
         challenged_at_l1_slot: 0,
+        challenge_resolved: false,
         bump: checkpoint_bump,
     };
     store_checkpoint(checkpoint, &checkpoint_state)?;
+
+    cursor_state.active_checkpoint = *checkpoint.key();
+    cursor_state.active_er_slot = er_slot;
+    store_cursor(cursor, &cursor_state)?;
 
     Ok(())
 }
@@ -357,19 +473,29 @@ pub fn process_commit_checkpoint(
     let mut checkpoint_state = load_checkpoint(program_id, session_key, er_slot, checkpoint)?;
     let mut cursor_state = load_cursor(program_id, session_key, cursor)?;
 
-    if checkpoint_state.status == CheckpointStatus::Challenged {
-        return Err(PortalError::CheckpointChallenged.into());
-    }
-    if checkpoint_state.status != CheckpointStatus::Pending {
-        return Err(PortalError::CheckpointStateInvalid.into());
+    let current_slot = Clock::get()?.slot;
+    match checkpoint_state.status {
+        CheckpointStatus::Pending => {}
+        CheckpointStatus::Challenged
+            if current_slot >= challenge_resolution_deadline(&checkpoint_state)? =>
+        {
+            checkpoint_state.challenger = [0; 32];
+            checkpoint_state.challenged_at_l1_slot = 0;
+            checkpoint_state.challenge_resolved = true;
+        }
+        CheckpointStatus::Challenged => return Err(PortalError::CheckpointChallenged.into()),
+        _ => return Err(PortalError::CheckpointStateInvalid.into()),
     }
 
-    let current_slot = Clock::get()?.slot;
     if current_slot < checkpoint_state.challenge_deadline_l1_slot {
         return Err(PortalError::CheckpointCommitTooEarly.into());
     }
 
     require_advancing_checkpoint(&session_state, &cursor_state, er_slot)?;
+    require_active_checkpoint(&cursor_state, checkpoint.key(), er_slot)?;
+    if checkpoint_state.previous_state_root != cursor_state.latest_finalized_state_root {
+        return Err(PortalError::CheckpointPreviousRootMismatch.into());
+    }
 
     checkpoint_state.status = CheckpointStatus::Committed;
     release_checkpoint_bond(checkpoint, proposer, &mut checkpoint_state)?;
@@ -377,6 +503,7 @@ pub fn process_commit_checkpoint(
 
     cursor_state.latest_finalized_checkpoint = *checkpoint.key();
     cursor_state.latest_finalized_er_slot = er_slot;
+    cursor_state.latest_finalized_state_root = checkpoint_state.new_state_root;
     store_cursor(cursor, &cursor_state)?;
 
     Ok(())
@@ -389,13 +516,14 @@ pub fn process_cancel_checkpoint(
 ) -> ProgramResult {
     pinocchio_log::log!("Instruction: CancelCheckpoint, er_slot={}", er_slot);
 
-    if accounts.len() < 3 {
+    if accounts.len() < 4 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
     let proposer = &accounts[0];
     let session = &accounts[1];
     let checkpoint = &accounts[2];
+    let cursor = &accounts[3];
 
     if !proposer.is_signer() {
         return Err(PortalError::Unauthorized.into());
@@ -404,6 +532,7 @@ pub fn process_cancel_checkpoint(
     load_session(program_id, session)?;
     let session_key = session.key();
     let mut checkpoint_state = load_checkpoint(program_id, session_key, er_slot, checkpoint)?;
+    let mut cursor_state = load_cursor(program_id, session_key, cursor)?;
 
     if checkpoint_state.status == CheckpointStatus::Challenged {
         return Err(PortalError::CheckpointChallenged.into());
@@ -414,10 +543,16 @@ pub fn process_cancel_checkpoint(
     if proposer.key() != &checkpoint_state.proposer {
         return Err(PortalError::CheckpointUnauthorizedCancel.into());
     }
+    if Clock::get()?.slot >= checkpoint_state.challenge_deadline_l1_slot {
+        return Err(PortalError::CheckpointCancelWindowClosed.into());
+    }
+    require_active_checkpoint(&cursor_state, checkpoint.key(), er_slot)?;
 
     checkpoint_state.status = CheckpointStatus::Cancelled;
     release_checkpoint_bond(checkpoint, proposer, &mut checkpoint_state)?;
     store_checkpoint(checkpoint, &checkpoint_state)?;
+    clear_active_checkpoint(&mut cursor_state);
+    store_cursor(cursor, &cursor_state)?;
 
     Ok(())
 }
@@ -450,6 +585,9 @@ pub fn process_challenge_checkpoint(
         CheckpointStatus::Challenged => return Err(PortalError::CheckpointChallenged.into()),
         _ => return Err(PortalError::CheckpointStateInvalid.into()),
     }
+    if checkpoint_state.challenge_resolved {
+        return Err(PortalError::CheckpointStateInvalid.into());
+    }
 
     let current_slot = Clock::get()?.slot;
     if current_slot >= checkpoint_state.challenge_deadline_l1_slot {
@@ -462,4 +600,318 @@ pub fn process_challenge_checkpoint(
     store_checkpoint(checkpoint, &checkpoint_state)?;
 
     Ok(())
+}
+
+pub fn process_create_step_proof(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    CreateStepProof {
+        er_slot,
+        proof_kind,
+        proof_version,
+        step_index,
+    }: CreateStepProof,
+) -> ProgramResult {
+    pinocchio_log::log!("Instruction: CreateStepProof, er_slot={}", er_slot);
+
+    if accounts.len() < 5 {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
+
+    let authority = &accounts[0];
+    let session = &accounts[1];
+    let checkpoint = &accounts[2];
+    let proof = &accounts[3];
+    let _system_program = &accounts[4];
+
+    if !authority.is_signer() {
+        return Err(PortalError::Unauthorized.into());
+    }
+
+    load_session(program_id, session)?;
+    let session_key = session.key();
+    let checkpoint_state = load_checkpoint(program_id, session_key, er_slot, checkpoint)?;
+    if checkpoint_state.status != CheckpointStatus::Challenged {
+        return Err(PortalError::CheckpointStateInvalid.into());
+    }
+    if proof_kind == 0 || proof_version == 0 {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    if authority.key() != &checkpoint_state.challenger {
+        return Err(PortalError::Unauthorized.into());
+    }
+
+    let (expected_proof_key, proof_bump) = find_step_proof_pda(program_id, checkpoint.key());
+    if proof.key() != &expected_proof_key {
+        return Err(PortalError::InvalidPdaSeeds.into());
+    }
+
+    let rent = Rent::get()?;
+    let proof_lamports = rent.minimum_balance(StepProofAccount::LEN);
+    if proof.data_is_empty() {
+        let proof_bump_bytes = [proof_bump];
+        let proof_seeds = &[
+            Seed::from(StepProofAccount::SEED_PREFIX),
+            Seed::from(checkpoint.key().as_ref()),
+            Seed::from(proof_bump_bytes.as_ref()),
+        ];
+        let proof_signer = Signer::from(proof_seeds);
+
+        initialize_pda_account(
+            authority,
+            proof,
+            proof_lamports,
+            StepProofAccount::LEN as u64,
+            program_id,
+            proof_signer,
+        )?;
+    } else if proof.owner() != program_id || proof.lamports() < proof_lamports {
+        return Err(PortalError::StepProofStateInvalid.into());
+    }
+
+    let proof_state = StepProofAccount {
+        discriminator: StepProofAccount::DISCRIMINATOR,
+        checkpoint: *checkpoint.key(),
+        authority: *authority.key(),
+        proof_kind,
+        proof_version,
+        step_index,
+        public_input_hash: step_proof_public_input_hash(
+            session_key,
+            checkpoint.key(),
+            &checkpoint_state,
+            proof_kind,
+            proof_version,
+            step_index,
+        ),
+        written_len: 0,
+        sealed: false,
+        proof_hash: [0; 32],
+        bump: proof_bump,
+        data: [0; MAX_STEP_PROOF_BYTES],
+    };
+    store_step_proof(proof, &proof_state)?;
+
+    Ok(())
+}
+
+pub fn process_write_step_proof(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    WriteStepProof {
+        er_slot,
+        offset,
+        chunk_len,
+        chunk,
+    }: WriteStepProof,
+) -> ProgramResult {
+    pinocchio_log::log!("Instruction: WriteStepProof, er_slot={}", er_slot);
+
+    if accounts.len() < 4 {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
+
+    let authority = &accounts[0];
+    let session = &accounts[1];
+    let checkpoint = &accounts[2];
+    let proof = &accounts[3];
+
+    if !authority.is_signer() {
+        return Err(PortalError::Unauthorized.into());
+    }
+
+    load_session(program_id, session)?;
+    let checkpoint_state = load_checkpoint(program_id, session.key(), er_slot, checkpoint)?;
+    if checkpoint_state.status != CheckpointStatus::Challenged {
+        return Err(PortalError::CheckpointStateInvalid.into());
+    }
+
+    let mut proof_state = load_step_proof(program_id, checkpoint.key(), proof)?;
+    if proof_state.authority != *authority.key() {
+        return Err(PortalError::Unauthorized.into());
+    }
+    if proof_state.sealed {
+        return Err(PortalError::StepProofAlreadySealed.into());
+    }
+
+    let chunk_len = chunk_len as usize;
+    let offset = offset as usize;
+    let end = offset
+        .checked_add(chunk_len)
+        .ok_or(PortalError::StepProofChunkOutOfBounds)?;
+    if end > MAX_STEP_PROOF_BYTES || chunk_len > chunk.len() {
+        return Err(PortalError::StepProofChunkOutOfBounds.into());
+    }
+    proof_state.data[offset..end].copy_from_slice(&chunk[..chunk_len]);
+    proof_state.written_len = proof_state.written_len.max(end as u32);
+    store_step_proof(proof, &proof_state)?;
+
+    Ok(())
+}
+
+pub fn process_seal_step_proof(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    SealStepProof { er_slot, proof_len }: SealStepProof,
+) -> ProgramResult {
+    pinocchio_log::log!("Instruction: SealStepProof, er_slot={}", er_slot);
+
+    if accounts.len() < 4 {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
+
+    let authority = &accounts[0];
+    let session = &accounts[1];
+    let checkpoint = &accounts[2];
+    let proof = &accounts[3];
+
+    if !authority.is_signer() {
+        return Err(PortalError::Unauthorized.into());
+    }
+
+    load_session(program_id, session)?;
+    let checkpoint_state = load_checkpoint(program_id, session.key(), er_slot, checkpoint)?;
+    if checkpoint_state.status != CheckpointStatus::Challenged {
+        return Err(PortalError::CheckpointStateInvalid.into());
+    }
+
+    let mut proof_state = load_step_proof(program_id, checkpoint.key(), proof)?;
+    if proof_state.authority != *authority.key() {
+        return Err(PortalError::Unauthorized.into());
+    }
+    if proof_state.sealed {
+        return Err(PortalError::StepProofAlreadySealed.into());
+    }
+    if proof_len == 0 || proof_len > proof_state.written_len {
+        return Err(PortalError::StepProofChunkOutOfBounds.into());
+    }
+
+    proof_state.written_len = proof_len;
+    proof_state.sealed = true;
+    proof_state.proof_hash = hashv(&[&proof_state.data[..proof_len as usize]]).to_bytes();
+    store_step_proof(proof, &proof_state)?;
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+enum StepProofVerification {
+    Valid,
+    Invalid,
+    Unavailable,
+}
+
+fn verify_step_proof(
+    verifier_mode: StepProofVerifierMode,
+    proof_state: &StepProofAccount,
+) -> StepProofVerification {
+    match verifier_mode {
+        StepProofVerifierMode::Production => StepProofVerification::Unavailable,
+        StepProofVerifierMode::TestOnly => verify_step_proof_test_only(proof_state),
+    }
+}
+
+fn verify_step_proof_test_only(proof_state: &StepProofAccount) -> StepProofVerification {
+    // Dummy verifier is for program-test only. Solana/SBF builds need the explicit
+    // build-script escape hatch, otherwise `test-verifier` fails compilation.
+    #[cfg(feature = "test-verifier")]
+    {
+        match proof_state.data.first().copied() {
+            Some(2) => StepProofVerification::Valid,
+            Some(1) => StepProofVerification::Invalid,
+            _ => StepProofVerification::Unavailable,
+        }
+    }
+    #[cfg(not(feature = "test-verifier"))]
+    {
+        let _ = proof_state;
+        StepProofVerification::Unavailable
+    }
+}
+
+pub fn process_submit_step_proof(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    SubmitStepProof {
+        er_slot,
+        verifier_mode,
+    }: SubmitStepProof,
+) -> ProgramResult {
+    pinocchio_log::log!("Instruction: SubmitStepProof, er_slot={}", er_slot);
+
+    if accounts.len() < 6 {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
+
+    let submitter = &accounts[0];
+    let session = &accounts[1];
+    let checkpoint = &accounts[2];
+    let proof = &accounts[3];
+    let bond_recipient = &accounts[4];
+    let cursor = &accounts[5];
+
+    if !submitter.is_signer() {
+        return Err(PortalError::Unauthorized.into());
+    }
+
+    load_session(program_id, session)?;
+    let session_key = session.key();
+    let mut checkpoint_state = load_checkpoint(program_id, session_key, er_slot, checkpoint)?;
+    if checkpoint_state.status != CheckpointStatus::Challenged {
+        return Err(PortalError::CheckpointStateInvalid.into());
+    }
+    let mut cursor_state = load_cursor(program_id, session_key, cursor)?;
+    require_active_checkpoint(&cursor_state, checkpoint.key(), er_slot)?;
+
+    let proof_state = load_step_proof(program_id, checkpoint.key(), proof)?;
+    if proof_state.checkpoint != *checkpoint.key() {
+        return Err(PortalError::StepProofCheckpointMismatch.into());
+    }
+    if proof_state.authority != checkpoint_state.challenger {
+        return Err(PortalError::Unauthorized.into());
+    }
+    if !proof_state.sealed {
+        return Err(PortalError::StepProofNotSealed.into());
+    }
+    let proof_len = proof_state.written_len as usize;
+    if proof_len == 0 || proof_len > MAX_STEP_PROOF_BYTES {
+        return Err(PortalError::StepProofChunkOutOfBounds.into());
+    }
+    let proof_hash = hashv(&[&proof_state.data[..proof_len]]).to_bytes();
+    if proof_hash != proof_state.proof_hash {
+        return Err(PortalError::StepProofHashMismatch.into());
+    }
+    if proof_state.public_input_hash
+        != step_proof_public_input_hash(
+            session_key,
+            checkpoint.key(),
+            &checkpoint_state,
+            proof_state.proof_kind,
+            proof_state.proof_version,
+            proof_state.step_index,
+        )
+    {
+        return Err(PortalError::StepProofPublicInputMismatch.into());
+    }
+
+    match verify_step_proof(verifier_mode, &proof_state) {
+        StepProofVerification::Unavailable => Err(PortalError::StepProofVerifierUnavailable.into()),
+        StepProofVerification::Invalid => {
+            if bond_recipient.key() != &checkpoint_state.challenger {
+                return Err(PortalError::Unauthorized.into());
+            }
+            slash_checkpoint_bond(checkpoint, bond_recipient, &mut checkpoint_state)?;
+            checkpoint_state.status = CheckpointStatus::Invalid;
+            store_checkpoint(checkpoint, &checkpoint_state)?;
+            clear_active_checkpoint(&mut cursor_state);
+            store_cursor(cursor, &cursor_state)
+        }
+        StepProofVerification::Valid => {
+            checkpoint_state.status = CheckpointStatus::Pending;
+            checkpoint_state.challenger = [0; 32];
+            checkpoint_state.challenged_at_l1_slot = 0;
+            checkpoint_state.challenge_resolved = true;
+            store_checkpoint(checkpoint, &checkpoint_state)
+        }
+    }
 }
