@@ -2,9 +2,10 @@ use {
     crate::{ErStateDiff, ErStateDiffAccount},
     log::warn,
     northstar_portal::{
-        find_checkpoint_pda, find_delegation_record_pda, BeginSettlement, FinishSettlement,
-        PortalInstruction, SettleAccountLamports, SettleAccountOwner, SettleDepositReceipt,
-        WriteSettlementChunk, MAX_SETTLEMENT_CHUNK, MAX_SETTLEMENT_LAMPORT_ACCOUNTS,
+        find_checkpoint_cursor_pda, find_checkpoint_pda, find_delegation_record_pda,
+        BeginSettlement, CommitCheckpoint, FinishSettlement, PortalInstruction, ProposeCheckpoint,
+        SettleAccountLamports, SettleAccountOwner, SettleDepositReceipt, WriteSettlementChunk,
+        MAX_SETTLEMENT_CHUNK, MAX_SETTLEMENT_LAMPORT_ACCOUNTS,
     },
     solana_account::ReadableAccount,
     solana_clock::Slot,
@@ -13,6 +14,7 @@ use {
     solana_keypair::Keypair,
     solana_packet::PACKET_DATA_SIZE,
     solana_pubkey::Pubkey,
+    solana_sdk_ids::system_program,
     solana_sha256_hasher::hashv,
     solana_signer::Signer,
     solana_transaction::Transaction,
@@ -119,6 +121,46 @@ impl SettlementPlan {
         !self.unsupported_changes.is_empty()
     }
 
+    pub fn checkpoint_proposal_transaction(
+        &self,
+        portal_program_id: Pubkey,
+        session_pda: Pubkey,
+        validator: &Keypair,
+        recent_blockhash: Hash,
+        challenge_window_slots: u64,
+    ) -> Option<Transaction> {
+        (!self.is_empty() && !self.has_unsupported_changes()).then(|| {
+            sign_settlement_transaction(
+                &[self.checkpoint_proposal_instruction(
+                    portal_program_id,
+                    session_pda,
+                    validator.pubkey(),
+                    challenge_window_slots,
+                )],
+                validator,
+                recent_blockhash,
+            )
+        })
+    }
+
+    pub fn checkpoint_commit_transaction(
+        &self,
+        portal_program_id: Pubkey,
+        session_pda: Pubkey,
+        validator: &Keypair,
+        recent_blockhash: Hash,
+    ) -> Transaction {
+        sign_settlement_transaction(
+            &[self.checkpoint_commit_instruction(
+                portal_program_id,
+                session_pda,
+                validator.pubkey(),
+            )],
+            validator,
+            recent_blockhash,
+        )
+    }
+
     pub fn portal_transactions(
         &self,
         portal_program_id: Pubkey,
@@ -192,6 +234,68 @@ impl SettlementPlan {
         validator: Pubkey,
     ) -> Vec<Instruction> {
         self.portal_instructions_inner(portal_program_id, session_pda, validator, true)
+    }
+
+    pub fn checkpoint_proposal_instruction(
+        &self,
+        portal_program_id: Pubkey,
+        session_pda: Pubkey,
+        validator: Pubkey,
+        challenge_window_slots: u64,
+    ) -> Instruction {
+        let (checkpoint, _) = find_checkpoint_pda(
+            &portal_program_id.to_bytes(),
+            &session_pda.to_bytes(),
+            self.er_slot,
+        );
+        let (cursor, _) =
+            find_checkpoint_cursor_pda(&portal_program_id.to_bytes(), &session_pda.to_bytes());
+        Instruction {
+            program_id: portal_program_id,
+            accounts: vec![
+                AccountMeta::new(validator, true),
+                AccountMeta::new_readonly(session_pda, false),
+                AccountMeta::new(Pubkey::new_from_array(checkpoint), false),
+                AccountMeta::new(Pubkey::new_from_array(cursor), false),
+                AccountMeta::new_readonly(system_program::id(), false),
+            ],
+            data: borsh::to_vec(&PortalInstruction::ProposeCheckpoint(ProposeCheckpoint {
+                er_slot: self.er_slot,
+                previous_state_root: [0; 32],
+                new_state_root: self.checksum,
+                effect_commitment: self.checksum,
+                challenge_window_slots,
+            }))
+            .unwrap(),
+        }
+    }
+
+    pub fn checkpoint_commit_instruction(
+        &self,
+        portal_program_id: Pubkey,
+        session_pda: Pubkey,
+        validator: Pubkey,
+    ) -> Instruction {
+        let (checkpoint, _) = find_checkpoint_pda(
+            &portal_program_id.to_bytes(),
+            &session_pda.to_bytes(),
+            self.er_slot,
+        );
+        let (cursor, _) =
+            find_checkpoint_cursor_pda(&portal_program_id.to_bytes(), &session_pda.to_bytes());
+        Instruction {
+            program_id: portal_program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(validator, true),
+                AccountMeta::new_readonly(session_pda, false),
+                AccountMeta::new(Pubkey::new_from_array(checkpoint), false),
+                AccountMeta::new(Pubkey::new_from_array(cursor), false),
+            ],
+            data: borsh::to_vec(&PortalInstruction::CommitCheckpoint(CommitCheckpoint {
+                er_slot: self.er_slot,
+            }))
+            .unwrap(),
+        }
     }
 
     fn portal_instructions_inner(
