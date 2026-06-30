@@ -1953,7 +1953,7 @@ mod tests {
         solana_keypair::{Keypair, Signer},
         solana_lattice_hash::lt_hash::LtHash,
         solana_message::{Message, SanitizedMessage},
-        solana_net_utils::SocketAddrSpace,
+        solana_net_utils::{sockets::bind_to, SocketAddrSpace},
         solana_rpc_client::rpc_client::RpcClient,
         solana_rpc_client_types::config::{
             CommitmentConfig, RpcSendTransactionConfig, RpcSimulateTransactionConfig,
@@ -1969,9 +1969,9 @@ mod tests {
         solana_transaction_status::{TransactionConfirmationStatus, UiTransactionEncoding},
         std::{
             collections::HashSet,
-            net::TcpListener,
+            net::{IpAddr, Ipv4Addr, TcpListener},
             sync::{atomic::AtomicU64, mpsc},
-            time::Duration,
+            time::{Duration, Instant},
         },
     };
 
@@ -2000,8 +2000,30 @@ mod tests {
     }
 
     fn find_free_addr() -> SocketAddr {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap()
+        loop {
+            let udp = bind_to(IpAddr::V4(Ipv4Addr::LOCALHOST), 0).unwrap();
+            let addr = udp.local_addr().unwrap();
+            if TcpListener::bind(addr).is_ok() {
+                return addr;
+            }
+        }
+    }
+
+    fn wait_for_rpc_ready(rpc_client: &RpcClient) {
+        wait_for("RPC to accept requests", Duration::from_secs(2), || {
+            rpc_client.get_latest_blockhash().is_ok()
+        });
+    }
+
+    fn wait_for(label: &str, timeout: Duration, mut condition: impl FnMut() -> bool) {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if condition() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(condition(), "timed out waiting for {label}");
     }
 
     fn create_test_bank() -> Bank {
@@ -3100,8 +3122,11 @@ mod tests {
     fn test_nonzero_er_fee_structure_survives_slot_advancement() {
         let lamports_per_signature = 5_000;
         let mut runtime = create_runtime_with_fee(lamports_per_signature);
+        let initial_slot = runtime.bank().slot();
         runtime.activate();
-        std::thread::sleep(Duration::from_millis(900));
+        wait_for("slot advancement", Duration::from_secs(2), || {
+            runtime.bank().slot() > initial_slot
+        });
         let bank = runtime.bank();
         let fee_payer = Pubkey::new_unique();
         let message = sanitized_transfer_message(&bank, &fee_payer);
@@ -3124,7 +3149,7 @@ mod tests {
         let (_, mut runtime) = create_runtime();
         let rpc_client = rpc_client(&runtime);
 
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         let blockhash = rpc_client.get_latest_blockhash().unwrap();
         assert_ne!(blockhash, solana_hash::Hash::default());
@@ -3164,7 +3189,7 @@ mod tests {
         .unwrap();
         let rpc_client = rpc_client(&runtime);
 
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         let balance = rpc_client.get_balance(&funded_pubkey).unwrap();
         assert_eq!(balance, initial_balance);
@@ -3209,7 +3234,7 @@ mod tests {
         let rpc_client = rpc_client(&runtime);
 
         // Wait for the slot advancer to advance past the initial slots
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         // Refresh blockhash using processed commitment (heaviest slot) before sending transaction
         let blockhash = rpc_client
@@ -3233,7 +3258,7 @@ mod tests {
             .unwrap();
 
         // Wait for transaction to be processed (longer sleep for slower slot advancement)
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         // Use processed commitment to read from the working bank, not the root
         let receiver_balance = rpc_client
@@ -3291,7 +3316,7 @@ mod tests {
         runtime.activate();
         let rpc_client = rpc_client(&runtime);
 
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         let blockhash = rpc_client
             .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
@@ -3368,7 +3393,7 @@ mod tests {
         runtime.activate();
         let rpc_client = rpc_client(&runtime);
 
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         let blockhash = rpc_client
             .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
@@ -3434,7 +3459,7 @@ mod tests {
         runtime.activate();
         let rpc_client = rpc_client(&runtime);
 
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         let blockhash = rpc_client
             .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
@@ -3504,7 +3529,7 @@ mod tests {
         runtime.activate();
         let rpc_client = rpc_client(&runtime);
 
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         let first_blockhash = rpc_client
             .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
@@ -3584,7 +3609,7 @@ mod tests {
         runtime.activate();
         let rpc_client = rpc_client(&runtime);
 
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         let first_blockhash = rpc_client
             .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
@@ -3667,7 +3692,7 @@ mod tests {
         runtime.activate();
         let rpc_client = rpc_client(&runtime);
 
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         let blockhash = rpc_client
             .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
@@ -3689,11 +3714,19 @@ mod tests {
             .send_transaction_with_config(&tx, config)
             .unwrap();
 
-        std::thread::sleep(Duration::from_secs(2));
-
-        let confirmed_tx = rpc_client
-            .get_transaction(&signature, UiTransactionEncoding::Json)
-            .unwrap();
+        let confirmed_tx = {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                match rpc_client.get_transaction(&signature, UiTransactionEncoding::Json) {
+                    Ok(tx) => break tx,
+                    Err(err) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(10));
+                        drop(err);
+                    }
+                    Err(err) => panic!("timed out waiting for transaction history: {err}"),
+                }
+            }
+        };
         assert_eq!(confirmed_tx.transaction_index, Some(0));
         let confirmed_meta = confirmed_tx
             .transaction
@@ -3774,7 +3807,7 @@ mod tests {
         assert!(!runtime.is_active());
         let rpc_client = rpc_client(&runtime);
 
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         // RPC reads should still work when inactive
         let blockhash = rpc_client
@@ -3802,7 +3835,7 @@ mod tests {
             "unexpected inactive sendTransaction error: {err}"
         );
 
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         // Receiver should have 0 balance — transaction was rejected
         let receiver_balance = rpc_client
@@ -4386,8 +4419,6 @@ mod tests {
         runtime.reset_to_new_parent(new_parent);
         runtime.activate();
 
-        std::thread::sleep(Duration::from_millis(500));
-
         // Account B (created after startup) should now be visible
         assert_eq!(runtime.bank().get_balance(&account_b), 20_000_000_000);
 
@@ -4659,7 +4690,7 @@ mod tests {
         let rpc_client = rpc_client(&runtime);
 
         // Wait for the slot advancer to advance past the initial slots
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         // Refresh blockhash using processed commitment (heaviest slot) before sending transaction
         let blockhash = rpc_client
@@ -4683,7 +4714,7 @@ mod tests {
             .unwrap();
 
         // Wait for transaction to be processed (longer sleep for slower slot advancement)
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         // Use processed commitment to read from the working bank, not the root
         let receiver_balance = rpc_client
@@ -4702,8 +4733,6 @@ mod tests {
         let rpc_client = rpc_client(&runtime);
 
         let old_blockhash = rpc_client.get_latest_blockhash().unwrap();
-
-        std::thread::sleep(Duration::from_secs(3));
 
         let result = rpc_client.send_transaction(&Transaction::new_unsigned(
             Message::new_with_blockhash(&[], None, &old_blockhash),
@@ -4749,7 +4778,7 @@ mod tests {
         runtime.activate();
         let rpc_client = rpc_client(&runtime);
 
-        std::thread::sleep(Duration::from_millis(500));
+        wait_for_rpc_ready(&rpc_client);
 
         let mut results = Vec::new();
         for _ in 0..100 {
@@ -4768,8 +4797,6 @@ mod tests {
             };
             results.push(rpc_client.send_transaction_with_config(&tx, config));
         }
-
-        std::thread::sleep(Duration::from_millis(500));
 
         let successes = results.iter().filter(|r| r.is_ok()).count();
         assert!(
@@ -5578,10 +5605,9 @@ mod tests {
         )
         .unwrap();
 
-        std::thread::sleep(Duration::from_secs(2));
-
         // Call getDelegatedAccounts via RPC
         let rpc_client = rpc_client(&runtime);
+        wait_for_rpc_ready(&rpc_client);
         let accounts: Vec<String> = rpc_client
             .send(
                 solana_rpc_client_types::request::RpcRequest::Custom {
