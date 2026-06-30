@@ -1,8 +1,8 @@
 use {
     crate::{
         find_checkpoint_cursor_pda, find_checkpoint_pda, find_session_pda, CancelCheckpoint,
-        Checkpoint, CheckpointCursor, CheckpointStatus, CommitCheckpoint, PortalError,
-        ProposeCheckpoint, Session,
+        Checkpoint, CheckpointBondStatus, CheckpointCursor, CheckpointStatus, CommitCheckpoint,
+        PortalError, ProposeCheckpoint, Session, CHECKPOINT_PROPOSER_BOND_LAMPORTS,
     },
     borsh::{BorshDeserialize, BorshSerialize},
     pinocchio::{
@@ -47,6 +47,74 @@ fn store_cursor(cursor: &AccountInfo, cursor_state: &CheckpointCursor) -> Progra
     BorshSerialize::serialize(cursor_state, &mut &mut cursor_data[..CheckpointCursor::LEN])
         .unwrap();
     Ok(())
+}
+
+fn resolve_checkpoint_bond(
+    checkpoint: &AccountInfo,
+    recipient: &AccountInfo,
+    checkpoint_state: &mut Checkpoint,
+    next_status: CheckpointBondStatus,
+) -> ProgramResult {
+    if checkpoint_state.bond_status != CheckpointBondStatus::Locked {
+        return Err(PortalError::CheckpointBondAlreadyResolved.into());
+    }
+
+    let bond_lamports = checkpoint_state.bond_lamports;
+    if bond_lamports == 0 {
+        return Err(PortalError::CheckpointBondInsufficient.into());
+    }
+
+    let rent_lamports = Rent::get()?.minimum_balance(Checkpoint::LEN);
+    let minimum_locked_lamports = rent_lamports
+        .checked_add(bond_lamports)
+        .ok_or(PortalError::ArithmeticOverflow)?;
+    if checkpoint.lamports() < minimum_locked_lamports {
+        return Err(PortalError::CheckpointBondInsufficient.into());
+    }
+
+    {
+        let mut recipient_lamports = recipient.try_borrow_mut_lamports()?;
+        *recipient_lamports = recipient_lamports
+            .checked_add(bond_lamports)
+            .ok_or(PortalError::ArithmeticOverflow)?;
+    }
+    *checkpoint.try_borrow_mut_lamports()? = checkpoint
+        .lamports()
+        .checked_sub(bond_lamports)
+        .ok_or(PortalError::ArithmeticOverflow)?;
+    checkpoint_state.bond_status = next_status;
+
+    Ok(())
+}
+
+fn release_checkpoint_bond(
+    checkpoint: &AccountInfo,
+    proposer: &AccountInfo,
+    checkpoint_state: &mut Checkpoint,
+) -> ProgramResult {
+    if proposer.key() != &checkpoint_state.proposer {
+        return Err(PortalError::CheckpointStateInvalid.into());
+    }
+    resolve_checkpoint_bond(
+        checkpoint,
+        proposer,
+        checkpoint_state,
+        CheckpointBondStatus::Released,
+    )
+}
+
+#[allow(dead_code)]
+pub(crate) fn slash_checkpoint_bond(
+    checkpoint: &AccountInfo,
+    recipient: &AccountInfo,
+    checkpoint_state: &mut Checkpoint,
+) -> ProgramResult {
+    resolve_checkpoint_bond(
+        checkpoint,
+        recipient,
+        checkpoint_state,
+        CheckpointBondStatus::Slashed,
+    )
 }
 
 fn load_checkpoint(
@@ -215,7 +283,10 @@ pub fn process_propose_checkpoint(
     }
 
     let rent = Rent::get()?;
-    let checkpoint_lamports = rent.minimum_balance(Checkpoint::LEN);
+    let checkpoint_lamports = rent
+        .minimum_balance(Checkpoint::LEN)
+        .checked_add(CHECKPOINT_PROPOSER_BOND_LAMPORTS)
+        .ok_or(PortalError::ArithmeticOverflow)?;
     let er_slot_bytes = er_slot.to_le_bytes();
     let checkpoint_bump_bytes = [checkpoint_bump];
     let checkpoint_seeds = &[
@@ -248,6 +319,8 @@ pub fn process_propose_checkpoint(
             .checked_add(challenge_window_slots)
             .ok_or(PortalError::ArithmeticOverflow)?,
         status: CheckpointStatus::Pending,
+        bond_lamports: CHECKPOINT_PROPOSER_BOND_LAMPORTS,
+        bond_status: CheckpointBondStatus::Locked,
         bump: checkpoint_bump,
     };
     store_checkpoint(checkpoint, &checkpoint_state)?;
@@ -262,7 +335,7 @@ pub fn process_commit_checkpoint(
 ) -> ProgramResult {
     pinocchio_log::log!("Instruction: CommitCheckpoint, er_slot={}", er_slot);
 
-    if accounts.len() < 4 {
+    if accounts.len() < 5 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
@@ -270,6 +343,7 @@ pub fn process_commit_checkpoint(
     let session = &accounts[1];
     let checkpoint = &accounts[2];
     let cursor = &accounts[3];
+    let proposer = &accounts[4];
 
     if !committer.is_signer() {
         return Err(PortalError::Unauthorized.into());
@@ -292,6 +366,7 @@ pub fn process_commit_checkpoint(
     require_advancing_checkpoint(&session_state, &cursor_state, er_slot)?;
 
     checkpoint_state.status = CheckpointStatus::Committed;
+    release_checkpoint_bond(checkpoint, proposer, &mut checkpoint_state)?;
     store_checkpoint(checkpoint, &checkpoint_state)?;
 
     cursor_state.latest_finalized_checkpoint = *checkpoint.key();
@@ -332,6 +407,7 @@ pub fn process_cancel_checkpoint(
     }
 
     checkpoint_state.status = CheckpointStatus::Cancelled;
+    release_checkpoint_bond(checkpoint, proposer, &mut checkpoint_state)?;
     store_checkpoint(checkpoint, &checkpoint_state)?;
 
     Ok(())

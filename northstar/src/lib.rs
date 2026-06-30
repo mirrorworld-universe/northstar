@@ -1289,6 +1289,8 @@ mod portal_e2e_tests {
             proposed_at_l1_slot: bank.slot(),
             challenge_deadline_l1_slot: bank.slot(),
             status: CheckpointStatus::Committed,
+            bond_lamports: 0,
+            bond_status: northstar_portal::CheckpointBondStatus::Released,
             bump,
         };
         let data = borsh::to_vec(&checkpoint).unwrap();
@@ -1331,6 +1333,7 @@ mod portal_e2e_tests {
     fn build_commit_checkpoint_ix(
         program_id: Pubkey,
         committer: Pubkey,
+        proposer: Pubkey,
         session_pda: Pubkey,
         er_slot: u64,
     ) -> Instruction {
@@ -1344,6 +1347,7 @@ mod portal_e2e_tests {
                 AccountMeta::new_readonly(session_pda, false),
                 AccountMeta::new(checkpoint_pda, false),
                 AccountMeta::new(cursor_pda, false),
+                AccountMeta::new(proposer, false),
             ],
             data: borsh::to_vec(&ix).unwrap(),
         }
@@ -2799,8 +2803,13 @@ mod portal_e2e_tests {
             SlotLeader::default(),
             bank.slot().saturating_add(14),
         );
-        let commit_ix =
-            build_commit_checkpoint_ix(program_id, committer_pubkey, session_pda, plan.er_slot);
+        let commit_ix = build_commit_checkpoint_ix(
+            program_id,
+            committer_pubkey,
+            owner_pubkey,
+            session_pda,
+            plan.er_slot,
+        );
         let commit_tx = Transaction::new_signed_with_payer(
             &[commit_ix],
             Some(&committer_pubkey),

@@ -53,6 +53,8 @@ pub struct Checkpoint {
     pub proposed_at_l1_slot: u64,
     pub challenge_deadline_l1_slot: u64,
     pub status: CheckpointStatus,
+    pub bond_lamports: u64,
+    pub bond_status: CheckpointBondStatus,
     pub bump: u8,
 }
 
@@ -67,8 +69,18 @@ pub enum CheckpointStatus {
     Settled = 3,
 }
 
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[borsh(use_discriminant = true)]
+#[repr(u8)]
+pub enum CheckpointBondStatus {
+    Locked = 0,
+    Released = 1,
+    Slashed = 2,
+}
+
 impl Checkpoint {
-    pub const LEN: usize = 187;
+    pub const LEN: usize = 196;
     pub const SEED_PREFIX: &[u8] = b"checkpoint";
     pub const DISCRIMINATOR: u8 = 5;
 
@@ -257,6 +269,8 @@ mod tests {
             proposed_at_l1_slot: 100,
             challenge_deadline_l1_slot: 110,
             status: CheckpointStatus::Pending,
+            bond_lamports: 1_000_000,
+            bond_status: CheckpointBondStatus::Locked,
             bump: 99,
         };
         let serialized = borsh::to_vec(&checkpoint).unwrap();

@@ -290,6 +290,7 @@ impl SettlementPlan {
                 AccountMeta::new_readonly(session_pda, false),
                 AccountMeta::new(Pubkey::new_from_array(checkpoint), false),
                 AccountMeta::new(Pubkey::new_from_array(cursor), false),
+                AccountMeta::new(validator, false),
             ],
             data: borsh::to_vec(&PortalInstruction::CommitCheckpoint(CommitCheckpoint {
                 er_slot: self.er_slot,

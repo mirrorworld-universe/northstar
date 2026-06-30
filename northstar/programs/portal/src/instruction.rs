@@ -107,9 +107,10 @@ pub enum PortalInstruction {
     #[cfg_attr(feature = "idl", account(1, name = "session"))]
     #[cfg_attr(feature = "idl", account(2, name = "checkpoint", mut))]
     #[cfg_attr(feature = "idl", account(3, name = "checkpoint_cursor", mut))]
+    #[cfg_attr(feature = "idl", account(4, name = "proposer", mut))]
     CommitCheckpoint(CommitCheckpoint),
 
-    #[cfg_attr(feature = "idl", account(0, name = "proposer", sig))]
+    #[cfg_attr(feature = "idl", account(0, name = "proposer", sig, mut))]
     #[cfg_attr(feature = "idl", account(1, name = "session"))]
     #[cfg_attr(feature = "idl", account(2, name = "checkpoint", mut))]
     CancelCheckpoint(CancelCheckpoint),

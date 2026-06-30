@@ -20,6 +20,7 @@ pub use {error::*, events::*, instruction::*, pda::*, state::*};
 
 pub const MAX_SETTLEMENT_CHUNK: usize = 700;
 pub const MAX_SETTLEMENT_LAMPORT_ACCOUNTS: usize = 10;
+pub const CHECKPOINT_PROPOSER_BOND_LAMPORTS: u64 = 1_000_000;
 
 no_allocator!();
 
