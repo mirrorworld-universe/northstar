@@ -44,6 +44,8 @@ pub enum PortalError {
     CheckpointCursorDeserializeFailed = 39,
     CheckpointBondInsufficient = 40,
     CheckpointBondAlreadyResolved = 41,
+    CheckpointChallenged = 42,
+    CheckpointChallengeWindowClosed = 43,
 }
 
 impl From<PortalError> for ProgramError {

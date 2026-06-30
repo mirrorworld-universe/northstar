@@ -10,7 +10,8 @@ pub mod undelegate;
 
 pub use {
     checkpoint::{
-        process_cancel_checkpoint, process_commit_checkpoint, process_propose_checkpoint,
+        process_cancel_checkpoint, process_challenge_checkpoint, process_commit_checkpoint,
+        process_propose_checkpoint,
     },
     close_session::process_close_session,
     delegate::process_delegate,

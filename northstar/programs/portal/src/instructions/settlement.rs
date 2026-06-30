@@ -146,6 +146,9 @@ fn load_checkpoint_for_settlement(
     {
         return Err(PortalError::CheckpointStateInvalid.into());
     }
+    if checkpoint_state.status == CheckpointStatus::Challenged {
+        return Err(PortalError::CheckpointChallenged.into());
+    }
     if checkpoint_state.status != CheckpointStatus::Committed {
         return Err(PortalError::CheckpointStateInvalid.into());
     }

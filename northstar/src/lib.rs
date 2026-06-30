@@ -446,7 +446,9 @@ impl Manager {
                     && checkpoint.session == session_pda.to_bytes()
                     && matches!(
                         checkpoint.status,
-                        CheckpointStatus::Pending | CheckpointStatus::Committed
+                        CheckpointStatus::Pending
+                            | CheckpointStatus::Committed
+                            | CheckpointStatus::Challenged
                     ))
                 .then_some((pubkey, checkpoint))
             })
@@ -521,6 +523,13 @@ impl Manager {
                     self.config.manager_account.as_ref(),
                     recent_blockhash,
                 ))
+            }
+            CheckpointStatus::Challenged => {
+                warn!(
+                    "Portal checkpoint challenged; refusing settlement: er_slot={} checkpoint={}",
+                    plan.er_slot, checkpoint_pda,
+                );
+                None
             }
             CheckpointStatus::Settled => {
                 debug!(
@@ -1291,6 +1300,8 @@ mod portal_e2e_tests {
             status: CheckpointStatus::Committed,
             bond_lamports: 0,
             bond_status: northstar_portal::CheckpointBondStatus::Released,
+            challenger: [0; 32],
+            challenged_at_l1_slot: 0,
             bump,
         };
         let data = borsh::to_vec(&checkpoint).unwrap();

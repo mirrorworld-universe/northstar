@@ -114,6 +114,11 @@ pub enum PortalInstruction {
     #[cfg_attr(feature = "idl", account(1, name = "session"))]
     #[cfg_attr(feature = "idl", account(2, name = "checkpoint", mut))]
     CancelCheckpoint(CancelCheckpoint),
+
+    #[cfg_attr(feature = "idl", account(0, name = "challenger", sig))]
+    #[cfg_attr(feature = "idl", account(1, name = "session"))]
+    #[cfg_attr(feature = "idl", account(2, name = "checkpoint", mut))]
+    ChallengeCheckpoint(ChallengeCheckpoint),
 }
 
 #[cfg_attr(feature = "idl", derive(shank::ShankType))]
@@ -197,5 +202,11 @@ pub struct CommitCheckpoint {
 #[cfg_attr(feature = "idl", derive(shank::ShankType))]
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
 pub struct CancelCheckpoint {
+    pub er_slot: u64,
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+pub struct ChallengeCheckpoint {
     pub er_slot: u64,
 }

@@ -94,6 +94,9 @@ fn process_instruction(
         Ok((16, payload)) => deserialize_args(payload).and_then(|checkpoint| {
             instructions::process_cancel_checkpoint(program_id, accounts, checkpoint)
         }),
+        Ok((16, payload)) => deserialize_args(payload).and_then(|checkpoint| {
+            instructions::process_challenge_checkpoint(program_id, accounts, checkpoint)
+        }),
         Ok((_, _)) | Err(_) => Err(ProgramError::InvalidInstructionData),
     }
 }

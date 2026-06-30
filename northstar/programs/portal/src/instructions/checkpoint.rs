@@ -1,8 +1,9 @@
 use {
     crate::{
         find_checkpoint_cursor_pda, find_checkpoint_pda, find_session_pda, CancelCheckpoint,
-        Checkpoint, CheckpointBondStatus, CheckpointCursor, CheckpointStatus, CommitCheckpoint,
-        PortalError, ProposeCheckpoint, Session, CHECKPOINT_PROPOSER_BOND_LAMPORTS,
+        ChallengeCheckpoint, Checkpoint, CheckpointBondStatus, CheckpointCursor, CheckpointStatus,
+        CommitCheckpoint, PortalError, ProposeCheckpoint, Session,
+        CHECKPOINT_PROPOSER_BOND_LAMPORTS,
     },
     borsh::{BorshDeserialize, BorshSerialize},
     pinocchio::{
@@ -321,6 +322,8 @@ pub fn process_propose_checkpoint(
         status: CheckpointStatus::Pending,
         bond_lamports: CHECKPOINT_PROPOSER_BOND_LAMPORTS,
         bond_status: CheckpointBondStatus::Locked,
+        challenger: [0; 32],
+        challenged_at_l1_slot: 0,
         bump: checkpoint_bump,
     };
     store_checkpoint(checkpoint, &checkpoint_state)?;
@@ -354,6 +357,9 @@ pub fn process_commit_checkpoint(
     let mut checkpoint_state = load_checkpoint(program_id, session_key, er_slot, checkpoint)?;
     let mut cursor_state = load_cursor(program_id, session_key, cursor)?;
 
+    if checkpoint_state.status == CheckpointStatus::Challenged {
+        return Err(PortalError::CheckpointChallenged.into());
+    }
     if checkpoint_state.status != CheckpointStatus::Pending {
         return Err(PortalError::CheckpointStateInvalid.into());
     }
@@ -399,6 +405,9 @@ pub fn process_cancel_checkpoint(
     let session_key = session.key();
     let mut checkpoint_state = load_checkpoint(program_id, session_key, er_slot, checkpoint)?;
 
+    if checkpoint_state.status == CheckpointStatus::Challenged {
+        return Err(PortalError::CheckpointChallenged.into());
+    }
     if checkpoint_state.status != CheckpointStatus::Pending {
         return Err(PortalError::CheckpointStateInvalid.into());
     }
@@ -408,6 +417,48 @@ pub fn process_cancel_checkpoint(
 
     checkpoint_state.status = CheckpointStatus::Cancelled;
     release_checkpoint_bond(checkpoint, proposer, &mut checkpoint_state)?;
+    store_checkpoint(checkpoint, &checkpoint_state)?;
+
+    Ok(())
+}
+
+pub fn process_challenge_checkpoint(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    ChallengeCheckpoint { er_slot }: ChallengeCheckpoint,
+) -> ProgramResult {
+    pinocchio_log::log!("Instruction: ChallengeCheckpoint, er_slot={}", er_slot);
+
+    if accounts.len() < 3 {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
+
+    let challenger = &accounts[0];
+    let session = &accounts[1];
+    let checkpoint = &accounts[2];
+
+    if !challenger.is_signer() {
+        return Err(PortalError::Unauthorized.into());
+    }
+
+    load_session(program_id, session)?;
+    let session_key = session.key();
+    let mut checkpoint_state = load_checkpoint(program_id, session_key, er_slot, checkpoint)?;
+
+    match checkpoint_state.status {
+        CheckpointStatus::Pending => {}
+        CheckpointStatus::Challenged => return Err(PortalError::CheckpointChallenged.into()),
+        _ => return Err(PortalError::CheckpointStateInvalid.into()),
+    }
+
+    let current_slot = Clock::get()?.slot;
+    if current_slot >= checkpoint_state.challenge_deadline_l1_slot {
+        return Err(PortalError::CheckpointChallengeWindowClosed.into());
+    }
+
+    checkpoint_state.status = CheckpointStatus::Challenged;
+    checkpoint_state.challenger = *challenger.key();
+    checkpoint_state.challenged_at_l1_slot = current_slot;
     store_checkpoint(checkpoint, &checkpoint_state)?;
 
     Ok(())
