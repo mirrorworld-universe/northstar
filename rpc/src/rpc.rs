@@ -306,6 +306,13 @@ pub trait ErTxExecutor: std::marker::Send + std::marker::Sync {
 impl Metadata for JsonRpcRequestProcessor {}
 
 impl JsonRpcRequestProcessor {
+    /// Sonic: Returns whether this node is behind the cluster for NorthStar sync status.
+    /// Do not synthesize a future `latestL1Slot`: callers should only report real
+    /// local L1 slots observed by this node.
+    pub(crate) fn northstar_is_behind_cluster(&self) -> bool {
+        matches!(self.health.check(), RpcHealthStatus::Behind { .. })
+    }
+
     pub fn clone_without_bigtable(&self) -> JsonRpcRequestProcessor {
         Self {
             bigtable_ledger_storage: None, // Disable BigTable

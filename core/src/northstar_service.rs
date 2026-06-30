@@ -1,7 +1,7 @@
 use {
     crate::banking_trace::BankingPacketSender,
     agave_banking_stage_ingress_types::BankingPacketBatch,
-    crossbeam_channel::{RecvTimeoutError, Sender, TrySendError},
+    crossbeam_channel::{RecvTimeoutError, SendError, Sender, TrySendError},
     log::*,
     northstar::{
         L1Event,
@@ -11,7 +11,7 @@ use {
     solana_account::ReadableAccount,
     solana_gossip::cluster_info::ClusterInfo,
     solana_hash::Hash,
-    solana_perf::packet::{NUM_PACKETS, to_packet_batches},
+    solana_perf::packet::{NUM_PACKETS, PacketFlags, to_packet_batches},
     solana_rpc::optimistically_confirmed_bank_tracker::{
         BankNotification, BankNotificationReceiver,
     },
@@ -51,27 +51,50 @@ pub struct NorthStarService {
     thread_hdl: JoinHandle<()>,
 }
 
+#[derive(Debug)]
+enum SettlementSubmitError {
+    Local(SendError<BankingPacketBatch>),
+    ForwardFull,
+    ForwardDisconnected,
+}
+
+impl std::fmt::Display for SettlementSubmitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Local(err) => write!(f, "local banking enqueue failed: {err}"),
+            Self::ForwardFull => write!(f, "forwarding channel is full"),
+            Self::ForwardDisconnected => write!(f, "forwarding channel disconnected"),
+        }
+    }
+}
+
 fn submit_settlement_transactions(
     sender: &BankingPacketSender,
     forward_sender: Option<&Sender<(BankingPacketBatch, bool)>>,
     transactions: &[Transaction],
-) -> Result<(), crossbeam_channel::SendError<BankingPacketBatch>> {
+) -> Result<(), SettlementSubmitError> {
     if transactions.is_empty() {
         return Ok(());
     }
 
-    let batch = BankingPacketBatch::new(to_packet_batches(transactions, NUM_PACKETS));
-    sender.send(batch.clone())?;
+    let mut packet_batches = to_packet_batches(transactions, NUM_PACKETS);
+    for packet_batch in packet_batches.iter_mut() {
+        for mut packet in packet_batch.iter_mut() {
+            packet.meta_mut().flags |= PacketFlags::FROM_STAKED_NODE;
+        }
+    }
+    let batch = BankingPacketBatch::new(packet_batches);
+    sender
+        .send(batch.clone())
+        .map_err(SettlementSubmitError::Local)?;
 
     if let Some(forward_sender) = forward_sender {
         match forward_sender.try_send((batch, false)) {
             Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
-                warn!("Settlement forwarding channel is full, settlement txs remain queued locally")
+            Err(TrySendError::Full(_)) => return Err(SettlementSubmitError::ForwardFull),
+            Err(TrySendError::Disconnected(_)) => {
+                return Err(SettlementSubmitError::ForwardDisconnected);
             }
-            Err(TrySendError::Disconnected(_)) => warn!(
-                "Settlement forwarding channel disconnected, settlement txs remain queued locally"
-            ),
         }
     }
 
@@ -94,6 +117,7 @@ struct PendingSettlementSubmission {
     recent_blockhash: Hash,
     submitted_l1_slot: u64,
     attempts: u64,
+    current_transaction: Transaction,
     remaining_transactions: Vec<Transaction>,
 }
 
@@ -122,6 +146,7 @@ impl PendingSettlementSubmission {
                 recent_blockhash,
                 submitted_l1_slot,
                 attempts,
+                current_transaction: current_transaction.clone(),
                 remaining_transactions: transactions,
             },
             current_transaction,
@@ -163,16 +188,32 @@ impl PendingSettlementSubmission {
             .collect();
         self.recent_blockhash = transaction.message.recent_blockhash;
         self.submitted_l1_slot = bank.slot();
+        self.current_transaction = transaction.clone();
     }
 
-    fn failed_signature(&self, bank: &Bank) -> Option<(Signature, String)> {
-        self.signatures.iter().find_map(|signature| {
-            if let Some(Err(err)) = bank.get_signature_status(signature) {
-                Some((*signature, format!("{err:?}")))
-            } else {
-                None
-            }
-        })
+    fn should_rebroadcast(&self, bank: &Bank) -> bool {
+        const SETTLEMENT_REBROADCAST_INTERVAL_SLOTS: u64 = 10;
+        bank.slot()
+            >= self
+                .submitted_l1_slot
+                .saturating_add(SETTLEMENT_REBROADCAST_INTERVAL_SLOTS)
+    }
+
+    fn mark_rebroadcasted(&mut self, bank: &Bank) {
+        self.submitted_l1_slot = bank.slot();
+    }
+
+    fn failed_signature_reasons(&self, bank: &Bank) -> Vec<(Signature, String)> {
+        self.signatures
+            .iter()
+            .filter_map(|signature| {
+                if let Some(Err(err)) = bank.get_signature_status(signature) {
+                    Some((*signature, format!("{err:?}")))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 }
 
@@ -223,17 +264,17 @@ fn pending_settlement_allows_submission(
             true
         }
         PendingSettlementStatus::Failed => {
-            let failed = pending.failed_signature(bank);
+            let failure_reasons = pending.failed_signature_reasons(bank);
             warn!(
                 "Portal settlement transaction failed for er_slot={} checksum={:?} attempts={} \
-                 submitted_l1_slot={} current_l1_slot={} failed={:?}; retrying if session state \
-                 permits",
+                 submitted_l1_slot={} current_l1_slot={} failure_reasons={:?}; retrying if \
+                 session state permits",
                 pending.er_slot,
                 pending.checksum,
                 pending.attempts,
                 pending.submitted_l1_slot,
                 bank.slot(),
-                failed,
+                failure_reasons,
             );
             *pending_settlement = None;
             true
@@ -393,11 +434,42 @@ fn submit_next_pending_settlement_if_ready(
 
     match pending.status(bank) {
         PendingSettlementStatus::Pending => {
-            debug!(
-                "Portal settlement still unconfirmed for er_slot={} checksum={:?} attempts={} \
-                 signatures={:?}",
-                pending.er_slot, pending.checksum, pending.attempts, pending.signatures,
-            );
+            if pending.should_rebroadcast(bank) {
+                let transaction = pending.current_transaction.clone();
+                match submit_settlement_transactions(
+                    sender,
+                    forward_sender,
+                    std::slice::from_ref(&transaction),
+                ) {
+                    Ok(()) => {
+                        pending.mark_rebroadcasted(bank);
+                        info!(
+                            "Rebroadcast Portal settlement transaction for er_slot={} \
+                             checksum={:?} attempts={} l1_slot={} signatures={:?}",
+                            pending.er_slot,
+                            pending.checksum,
+                            pending.attempts,
+                            bank.slot(),
+                            pending.signatures,
+                        );
+                    }
+                    Err(err) => warn!(
+                        "Failed to rebroadcast Portal settlement transaction for er_slot={} \
+                         checksum={:?} attempts={} l1_slot={} signatures={:?}: {err}",
+                        pending.er_slot,
+                        pending.checksum,
+                        pending.attempts,
+                        bank.slot(),
+                        pending.signatures,
+                    ),
+                }
+            } else {
+                debug!(
+                    "Portal settlement still unconfirmed for er_slot={} checksum={:?} attempts={} \
+                     signatures={:?}",
+                    pending.er_slot, pending.checksum, pending.attempts, pending.signatures,
+                );
+            }
             true
         }
         PendingSettlementStatus::Confirmed => {
@@ -448,17 +520,17 @@ fn submit_next_pending_settlement_if_ready(
             false
         }
         PendingSettlementStatus::Failed => {
-            let failed = pending.failed_signature(bank);
+            let failure_reasons = pending.failed_signature_reasons(bank);
             warn!(
                 "Portal settlement transaction failed for er_slot={} checksum={:?} attempts={} \
-                 submitted_l1_slot={} current_l1_slot={} failed={:?}; retrying if session state \
-                 permits",
+                 submitted_l1_slot={} current_l1_slot={} failure_reasons={:?}; retrying if \
+                 session state permits",
                 pending.er_slot,
                 pending.checksum,
                 pending.attempts,
                 pending.submitted_l1_slot,
                 bank.slot(),
-                failed,
+                failure_reasons,
             );
             *pending_settlement = None;
             false
@@ -492,7 +564,15 @@ impl NorthStarService {
             ) {
                 error!("Failed to initialize ephemeral runtime: {e}");
             } else {
-                manager.resume_active_session_from_l1(root_bank);
+                // Sonic: Hotfix: do not resume historical sessions on the validator
+                // startup hot path. Resume scans Portal-owned accounts from the L1
+                // bank, which can devolve into an AccountsDB-wide scan without a
+                // program-id index and stall NorthStar sync reporting. Operators can
+                // reopen sessions until resume has a bounded/indexed recovery path.
+                info!(
+                    "NorthStar historical session resume skipped; reopen the Portal session to \
+                     activate ER"
+                );
             }
         }
 
@@ -640,7 +720,7 @@ impl NorthStarService {
 mod tests {
     use {
         super::*,
-        crossbeam_channel::unbounded,
+        crossbeam_channel::{bounded, unbounded},
         northstar_portal::{OpenSession, PortalInstruction, Session, SettlementStatus},
         solana_account::{AccountSharedData, WritableAccount},
         solana_client::rpc_client::RpcClient,
@@ -711,6 +791,66 @@ mod tests {
         )
         .unwrap()
         .0
+    }
+
+    fn packet_count(batch: &BankingPacketBatch) -> usize {
+        batch.iter().map(|packets| packets.len()).sum()
+    }
+
+    fn all_packets_marked_from_staked_node(batch: &BankingPacketBatch) -> bool {
+        batch.iter().all(|packets| {
+            packets
+                .iter()
+                .all(|packet| packet.meta().flags.contains(PacketFlags::FROM_STAKED_NODE))
+        })
+    }
+
+    #[test]
+    fn settlement_submission_forwards_transactions_to_leader_path() {
+        let bank = create_processable_test_bank();
+        let payer = Keypair::new();
+        fund_test_payer(&bank, &payer);
+        let transaction = signed_test_transfer(&bank, &payer);
+        let (settlement_sender, local_receiver) =
+            crate::banking_trace::BankingTracer::channel_for_test();
+        let (forward_sender, forward_receiver) = unbounded();
+
+        submit_settlement_transactions(
+            &settlement_sender,
+            Some(&forward_sender),
+            std::slice::from_ref(&transaction),
+        )
+        .unwrap();
+
+        let local_batch = local_receiver.try_recv().unwrap();
+        assert_eq!(packet_count(&local_batch), 1);
+        assert!(all_packets_marked_from_staked_node(&local_batch));
+
+        let (forward_batch, is_tpu_vote_batch) = forward_receiver.try_recv().unwrap();
+        assert!(!is_tpu_vote_batch);
+        assert_eq!(packet_count(&forward_batch), 1);
+        assert!(all_packets_marked_from_staked_node(&forward_batch));
+    }
+
+    #[test]
+    fn settlement_submission_fails_when_forwarding_path_is_unavailable() {
+        let bank = create_processable_test_bank();
+        let payer = Keypair::new();
+        fund_test_payer(&bank, &payer);
+        let transaction = signed_test_transfer(&bank, &payer);
+        let (settlement_sender, _local_receiver) =
+            crate::banking_trace::BankingTracer::channel_for_test();
+        let (forward_sender, forward_receiver) = bounded(0);
+        drop(forward_receiver);
+
+        let err = submit_settlement_transactions(
+            &settlement_sender,
+            Some(&forward_sender),
+            std::slice::from_ref(&transaction),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, SettlementSubmitError::ForwardDisconnected));
     }
 
     #[test]
@@ -811,22 +951,64 @@ mod tests {
     }
 
     #[test]
+    fn pending_settlement_rebroadcasts_before_expiry() {
+        let root_bank = create_processable_test_bank();
+        let bank = Bank::new_from_parent(root_bank, SlotLeader::new_unique(), 20);
+        let payer = Arc::new(Keypair::new());
+        fund_test_payer(&bank, &payer);
+        let transaction = signed_test_transfer(&bank, &payer);
+        let mut pending_settlement = Some(
+            PendingSettlementSubmission::new(
+                7,
+                [3; 32],
+                bank.last_blockhash(),
+                0,
+                1,
+                vec![transaction],
+            )
+            .unwrap()
+            .0,
+        );
+        let manager = northstar::Manager::new(northstar::ManagerConfig {
+            portal_program_id: Pubkey::new_unique(),
+            manager_account: Arc::clone(&payer),
+        });
+        let (settlement_sender, local_receiver) =
+            crate::banking_trace::BankingTracer::channel_for_test();
+        let (forward_sender, forward_receiver) = unbounded();
+
+        assert!(submit_next_pending_settlement_if_ready(
+            &manager,
+            &bank,
+            &settlement_sender,
+            Some(&forward_sender),
+            &mut pending_settlement,
+        ));
+
+        assert_eq!(packet_count(&local_receiver.try_recv().unwrap()), 1);
+        assert_eq!(packet_count(&forward_receiver.try_recv().unwrap().0), 1);
+        assert_eq!(pending_settlement.unwrap().submitted_l1_slot, bank.slot());
+    }
+
+    #[test]
     fn failed_pending_settlement_allows_retry() {
         let bank = create_processable_test_bank();
         let payer = Keypair::new();
         fund_test_payer(&bank, &payer);
         let transaction = signed_test_transfer(&bank, &payer);
+        let signature = transaction.signatures[0];
         bank.status_cache.write().unwrap().insert(
             &bank.last_blockhash(),
-            transaction.signatures[0],
+            signature,
             bank.slot(),
             Err(solana_transaction_error::TransactionError::AccountNotFound),
         );
-        let mut pending_settlement = Some(pending_test_submission(
-            &bank,
-            bank.last_blockhash(),
-            transaction,
-        ));
+        let pending = pending_test_submission(&bank, bank.last_blockhash(), transaction);
+        assert_eq!(
+            pending.failed_signature_reasons(&bank),
+            vec![(signature, "AccountNotFound".to_string())]
+        );
+        let mut pending_settlement = Some(pending);
 
         assert!(pending_settlement_allows_submission(
             &mut pending_settlement,
@@ -1032,26 +1214,6 @@ mod tests {
         }
     }
 
-    fn build_close_session_ix(
-        program_id: Pubkey,
-        owner: Pubkey,
-        session_pda: Pubkey,
-        fee_vault_pda: Pubkey,
-    ) -> Instruction {
-        let ix = PortalInstruction::CloseSession;
-        let data = borsh::to_vec(&ix).unwrap();
-        Instruction {
-            program_id,
-            accounts: vec![
-                AccountMeta::new(owner, true),
-                AccountMeta::new(session_pda, false),
-                AccountMeta::new(fee_vault_pda, false),
-                AccountMeta::new_readonly(system_program::id(), false),
-            ],
-            data,
-        }
-    }
-
     #[test]
     fn test_service_creates_runtime_on_notification() {
         agave_logger::setup();
@@ -1216,7 +1378,7 @@ mod tests {
     }
 
     #[test]
-    fn test_service_resumes_active_session_on_startup_and_stops_on_close() {
+    fn test_service_does_not_resume_historical_l1_session_on_startup() {
         agave_logger::setup();
 
         let (root_bank, bank_forks, program_id, mint_keypair) = setup_bank_with_portal();
@@ -1251,7 +1413,7 @@ mod tests {
         let bank_for_open = bank_forks.read().unwrap().root_bank();
 
         let cluster_info = create_test_cluster_info();
-        let (sender, receiver) = unbounded();
+        let (_sender, receiver) = unbounded();
         let exit = Arc::new(AtomicBool::new(false));
         let config = NorthStarServiceConfig {
             listen_addr: find_free_addr(),
@@ -1275,9 +1437,9 @@ mod tests {
         );
 
         let rpc = RpcClient::new(format!("http://{}", config.listen_addr));
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(Duration::from_millis(300));
 
-        let initial_sync_status: RpcNorthStarSyncStatus = rpc
+        let sync_status: RpcNorthStarSyncStatus = rpc
             .send(
                 RpcRequest::Custom {
                     method: "northstarSysGetSyncStatus",
@@ -1286,7 +1448,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            initial_sync_status,
+            sync_status,
             RpcNorthStarSyncStatus {
                 is_syncing: false,
                 latest_synced_slot: bank_for_open.slot(),
@@ -1297,13 +1459,13 @@ mod tests {
         let slot_before = rpc
             .get_slot_with_commitment(CommitmentConfig::processed())
             .unwrap();
-        std::thread::sleep(Duration::from_millis(900));
-        let slot_after_resume = rpc
+        std::thread::sleep(Duration::from_millis(300));
+        let slot_after = rpc
             .get_slot_with_commitment(CommitmentConfig::processed())
             .unwrap();
-        assert!(
-            slot_after_resume > slot_before,
-            "ER slot should advance after startup resume activates session"
+        assert_eq!(
+            slot_after, slot_before,
+            "ER slot must not advance for a historical L1 session skipped by startup hotfix"
         );
 
         let session_from_rpc: Option<String> = rpc
@@ -1314,77 +1476,7 @@ mod tests {
                 serde_json::Value::Null,
             )
             .unwrap();
-        assert_eq!(session_from_rpc, Some(session_pda.to_string()));
-
-        let sync_status_after_activate: RpcNorthStarSyncStatus = rpc
-            .send(
-                RpcRequest::Custom {
-                    method: "northstarSysGetSyncStatus",
-                },
-                serde_json::Value::Null,
-            )
-            .unwrap();
-        assert_eq!(
-            sync_status_after_activate,
-            RpcNorthStarSyncStatus {
-                is_syncing: false,
-                latest_synced_slot: bank_for_open.slot(),
-                latest_l1_slot: bank_for_open.slot(),
-            }
-        );
-
-        let close_bank = Bank::new_from_parent(
-            bank_for_open.clone(),
-            SlotLeader::new_unique(),
-            bank_for_open.slot() + 3,
-        );
-        let close_ix =
-            build_close_session_ix(program_id, owner.pubkey(), session_pda, fee_vault_pda);
-        let blockhash = close_bank.last_blockhash();
-        let close_tx = Transaction::new_signed_with_payer(
-            &[close_ix],
-            Some(&owner.pubkey()),
-            &[&owner],
-            blockhash,
-        );
-        close_bank.process_transaction(&close_tx).unwrap();
-        close_bank.freeze();
-
-        sender
-            .send((BankNotification::Frozen(Arc::new(close_bank)), None))
-            .unwrap();
-        // Wait until SessionClosed is processed and RPC reports no active session.
-        let mut session_after_close = Some(String::new());
-        for _ in 0..10 {
-            std::thread::sleep(Duration::from_millis(300));
-            session_after_close = rpc
-                .send(
-                    RpcRequest::Custom {
-                        method: "getSessionPda",
-                    },
-                    serde_json::Value::Null,
-                )
-                .unwrap();
-            if session_after_close.is_none() {
-                break;
-            }
-        }
-        assert_eq!(
-            session_after_close, None,
-            "session PDA should clear after SessionClosed"
-        );
-
-        let slot_before_stop = rpc
-            .get_slot_with_commitment(CommitmentConfig::processed())
-            .unwrap();
-        std::thread::sleep(Duration::from_millis(900));
-        let slot_after_stop = rpc
-            .get_slot_with_commitment(CommitmentConfig::processed())
-            .unwrap();
-        assert_eq!(
-            slot_before_stop, slot_after_stop,
-            "ER slot should stop advancing after session close"
-        );
+        assert_eq!(session_from_rpc, None);
 
         exit.store(true, Ordering::Relaxed);
         service.join().expect("service should join");
