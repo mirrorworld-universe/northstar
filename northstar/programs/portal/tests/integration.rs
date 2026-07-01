@@ -1092,7 +1092,7 @@ async fn late_challenge_extends_commit_timeout() {
     );
     let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[commit_ix.clone()],
+        std::slice::from_ref(&commit_ix),
         Some(&payer_pubkey),
         &[&payer, &committer],
         blockhash,
@@ -1237,7 +1237,7 @@ async fn checkpoint_bond_locks_and_releases() {
     );
     let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[propose_ix.clone()],
+        std::slice::from_ref(&propose_ix),
         Some(&payer_pubkey),
         &[&payer, &proposer],
         blockhash,
@@ -1302,7 +1302,7 @@ async fn checkpoint_bond_locks_and_releases() {
     );
     let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[commit_ix.clone()],
+        std::slice::from_ref(&commit_ix),
         Some(&payer_pubkey),
         &[&payer, &committer],
         blockhash,
@@ -1327,11 +1327,19 @@ async fn checkpoint_bond_locks_and_releases() {
 
     let proposer_before_repeat = get_lamports(&mut context.banks_client, &proposer_pubkey).await;
     let checkpoint_before_repeat = get_lamports(&mut context.banks_client, &checkpoint_pda).await;
+    let repeat_committer = Keypair::new();
+    let repeat_commit_ix = build_commit_checkpoint_ix(
+        &PORTAL_PROGRAM_ID,
+        &repeat_committer.pubkey(),
+        &proposer_pubkey,
+        &session_pda,
+        er_slot,
+    );
     let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[commit_ix],
+        &[repeat_commit_ix],
         Some(&payer_pubkey),
-        &[&payer, &committer],
+        &[&payer, &repeat_committer],
         blockhash,
     );
     assert!(context.banks_client.process_transaction(tx).await.is_err());

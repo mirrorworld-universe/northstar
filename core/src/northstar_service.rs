@@ -1497,6 +1497,14 @@ mod tests {
         root_bank.process_transaction(&open_tx).unwrap();
         root_bank.freeze();
 
+        let expired_slot = root_bank.slot() + 2;
+        let expired_bank = Bank::new_from_parent(root_bank, SlotLeader::new_unique(), expired_slot);
+        expired_bank.freeze();
+        {
+            let mut bank_forks = bank_forks.write().unwrap();
+            bank_forks.insert(expired_bank);
+            bank_forks.set_root(expired_slot, None, None);
+        }
         let bank_for_open = bank_forks.read().unwrap().root_bank();
 
         let cluster_info = create_test_cluster_info();

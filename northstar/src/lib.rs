@@ -2945,7 +2945,7 @@ mod portal_e2e_tests {
         assert_eq!(record.owner_program, new_owner.to_bytes());
     }
 
-    fn setup_checkpoint_flow_fixture() -> (
+    type CheckpointFlowFixture = (
         Arc<Bank>,
         Manager,
         Pubkey,
@@ -2954,7 +2954,9 @@ mod portal_e2e_tests {
         Pubkey,
         Vec<u8>,
         Vec<u8>,
-    ) {
+    );
+
+    fn setup_checkpoint_flow_fixture() -> CheckpointFlowFixture {
         let (bank, _bank_forks, program_id, mint_keypair) = setup_bank_with_portal();
         let manager_account = Arc::new(Keypair::new());
         let checkpoint_plan_dir = std::env::temp_dir().join(format!(

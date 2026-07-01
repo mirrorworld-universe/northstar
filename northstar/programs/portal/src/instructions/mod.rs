@@ -41,7 +41,7 @@ fn initialize_pda_account(
         account: pda,
         space,
     }
-    .invoke_signed(&[signer.clone()])?;
+    .invoke_signed(core::slice::from_ref(&signer))?;
     Assign {
         account: pda,
         owner,
