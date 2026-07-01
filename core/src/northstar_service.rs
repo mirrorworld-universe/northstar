@@ -1,7 +1,7 @@
 use {
     crate::banking_trace::BankingPacketSender,
     agave_banking_stage_ingress_types::BankingPacketBatch,
-    crossbeam_channel::{RecvTimeoutError, SendError, Sender, TrySendError},
+    crossbeam_channel::{RecvTimeoutError, SendError, Sender, TryRecvError, TrySendError},
     log::*,
     northstar::{
         L1Event,
@@ -66,6 +66,27 @@ impl std::fmt::Display for SettlementSubmitError {
             Self::ForwardDisconnected => write!(f, "forwarding channel disconnected"),
         }
     }
+}
+
+fn recv_frozen_bank_batch(
+    receiver: &BankNotificationReceiver,
+    timeout: Duration,
+) -> Result<Vec<Arc<Bank>>, RecvTimeoutError> {
+    let (notification, _dep_work) = receiver.recv_timeout(timeout)?;
+    let mut banks = match notification {
+        BankNotification::Frozen(bank) => vec![bank],
+        _ => vec![],
+    };
+
+    loop {
+        match receiver.try_recv() {
+            Ok((BankNotification::Frozen(bank), _dep_work)) => banks.push(bank),
+            Ok((_notification, _dep_work)) => {}
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+        }
+    }
+
+    Ok(banks)
 }
 
 fn submit_settlement_transactions(
@@ -592,87 +613,107 @@ impl NorthStarService {
                         break;
                     }
 
-                    let (notification, _dep_work) =
-                        match receiver.recv_timeout(Duration::from_millis(500)) {
-                            Ok(notification) => notification,
+                    let frozen_banks =
+                        match recv_frozen_bank_batch(&receiver, Duration::from_millis(500)) {
+                            Ok(banks) => banks,
                             Err(RecvTimeoutError::Disconnected) => break,
                             Err(RecvTimeoutError::Timeout) => continue,
                         };
-
-                    // Only process Frozen notifications
-                    let BankNotification::Frozen(bank) = notification else {
+                    if frozen_banks.is_empty() {
                         continue;
-                    };
+                    }
+
+                    let latest_bank = frozen_banks.last().cloned().unwrap();
+                    if frozen_banks.len() > 1 {
+                        info!(
+                            "NorthStar coalescing {} frozen L1 bank notifications: {}..={}",
+                            frozen_banks.len(),
+                            frozen_banks.first().unwrap().slot(),
+                            latest_bank.slot(),
+                        );
+                    }
 
                     let latest_l1_slot = bank_forks
                         .read()
                         .unwrap()
                         .root_bank()
                         .slot()
-                        .max(bank.slot());
+                        .max(latest_bank.slot());
                     manager.update_latest_l1_slot(latest_l1_slot);
 
-                    // Check for L1 events from the portal program
-                    let l1_events = manager.get_l1_events(&bank);
+                    let mut latest_reanchor_bank = None;
+                    let mut latest_refresh_bank = None;
+                    for bank in frozen_banks {
+                        // Check for L1 events from the portal program. We still
+                        // walk every drained bank so coalescing does not skip
+                        // one-slot Portal transitions such as deposits or delegations.
+                        let l1_events = manager.get_l1_events(&bank);
 
-                    let mut reanchored_this_bank = false;
-                    for event in l1_events {
-                        match event {
-                            L1Event::SessionOpened {
-                                session_pda,
-                                grid_id,
-                                ttl_slots,
-                                fee_cap,
-                            } if !manager.has_active_runtime() => {
-                                info!(
-                                    "SessionOpened detected at slot {}, activating ephemeral \
-                                     runtime (PDA={session_pda})",
-                                    bank.slot()
-                                );
-                                trace!(
-                                    "L1 bank for ER activation: slot={}, epoch={}",
-                                    bank.slot(),
-                                    bank.epoch(),
-                                );
-                                manager.activate_session(
-                                    bank.clone(),
+                        let mut reanchored_this_bank = false;
+                        for event in l1_events {
+                            match event {
+                                L1Event::SessionOpened {
                                     session_pda,
                                     grid_id,
                                     ttl_slots,
                                     fee_cap,
-                                );
-                                reanchored_this_bank = true;
+                                } if !manager.has_active_runtime() => {
+                                    info!(
+                                        "SessionOpened detected at slot {}, activating ephemeral \
+                                         runtime (PDA={session_pda})",
+                                        bank.slot()
+                                    );
+                                    trace!(
+                                        "L1 bank for ER activation: slot={}, epoch={}",
+                                        bank.slot(),
+                                        bank.epoch(),
+                                    );
+                                    manager.activate_session(
+                                        bank.clone(),
+                                        session_pda,
+                                        grid_id,
+                                        ttl_slots,
+                                        fee_cap,
+                                    );
+                                    reanchored_this_bank = true;
+                                }
+                                L1Event::SessionClosed { session_pda, .. } => {
+                                    info!(
+                                        "SessionClosed at slot {}, deactivating ER (PDA={})",
+                                        bank.slot(),
+                                        session_pda,
+                                    );
+                                    manager.deactivate_session();
+                                }
+                                L1Event::AccountDelegated {
+                                    delegated_account, ..
+                                } => {
+                                    manager.handle_delegation(&bank, &delegated_account);
+                                }
+                                L1Event::FeeDeposited {
+                                    delta, depositor, ..
+                                } => {
+                                    manager.credit_deposit(&depositor, delta);
+                                }
+                                other => {
+                                    debug!("Unhandled L1 event: {other:?}");
+                                }
                             }
-                            L1Event::SessionClosed { session_pda, .. } => {
-                                info!(
-                                    "SessionClosed at slot {}, deactivating ER (PDA={})",
-                                    bank.slot(),
-                                    session_pda,
-                                );
-                                manager.deactivate_session();
-                            }
-                            L1Event::AccountDelegated {
-                                delegated_account, ..
-                            } => {
-                                manager.handle_delegation(&bank, &delegated_account);
-                            }
-                            L1Event::FeeDeposited {
-                                delta, depositor, ..
-                            } => {
-                                manager.credit_deposit(&depositor, delta);
-                            }
-                            other => {
-                                debug!("Unhandled L1 event: {other:?}");
-                            }
+                        }
+
+                        if manager.has_active_runtime() && !reanchored_this_bank {
+                            latest_reanchor_bank = Some(bank.clone());
+                        } else if !reanchored_this_bank {
+                            latest_refresh_bank = Some(bank.clone());
                         }
                     }
 
-                    // Rebase active ER state onto every new L1 frozen bank.
-                    // The ER-local overlay wins for touched/delegated accounts;
-                    // everything else is read from the new L1 parent.
-                    if manager.has_active_runtime() && !reanchored_this_bank {
-                        manager.reanchor_to_l1_parent(bank.clone());
-                    } else if !reanchored_this_bank {
+                    if let Some(bank) = latest_reanchor_bank {
+                        // Rebase once onto the newest drained L1 bank. The
+                        // ER-local overlay wins for touched/delegated accounts;
+                        // everything else is read from the new L1 parent.
+                        manager.reanchor_to_l1_parent(bank);
+                    } else if let Some(bank) = latest_refresh_bank {
                         // Program deploys update loader-owned accounts, not Portal
                         // accounts, so they produce no L1Event. Keep the legacy
                         // targeted refresh path for inactive/no-reanchor cases.
@@ -680,7 +721,7 @@ impl NorthStarService {
                     }
 
                     warn_stuck_settlement_if_due(
-                        &bank,
+                        &latest_bank,
                         &portal_program_id,
                         manager.session_pda().and_then(|pda| *pda.read().unwrap()),
                         &mut last_warned_stuck_settlement,
@@ -689,7 +730,7 @@ impl NorthStarService {
                     if let Some(sender) = settlement_sender.as_ref() {
                         submit_settlement_if_due(
                             &manager,
-                            &bank,
+                            &latest_bank,
                             sender,
                             settlement_forward_sender.as_ref(),
                             &mut pending_settlement,
@@ -697,7 +738,7 @@ impl NorthStarService {
                         );
                     }
 
-                    manager.mark_synced_through(bank.slot());
+                    manager.mark_synced_through(latest_bank.slot());
                 }
 
                 // Cleanup on exit
@@ -791,6 +832,47 @@ mod tests {
         )
         .unwrap()
         .0
+    }
+
+    #[test]
+    fn frozen_bank_batch_drains_ready_backlog_to_latest() {
+        let root_bank = create_processable_test_bank();
+        let bank1 = Arc::new(Bank::new_from_parent(
+            root_bank.clone(),
+            SlotLeader::new_unique(),
+            root_bank.slot() + 1,
+        ));
+        let bank2 = Arc::new(Bank::new_from_parent(
+            bank1.clone(),
+            SlotLeader::new_unique(),
+            bank1.slot() + 1,
+        ));
+        let bank3 = Arc::new(Bank::new_from_parent(
+            bank2.clone(),
+            SlotLeader::new_unique(),
+            bank2.slot() + 1,
+        ));
+        let (sender, receiver) = unbounded();
+        sender
+            .send((BankNotification::Frozen(bank1.clone()), None))
+            .unwrap();
+        sender
+            .send((
+                BankNotification::OptimisticallyConfirmed(bank2.slot()),
+                None,
+            ))
+            .unwrap();
+        sender
+            .send((BankNotification::Frozen(bank2.clone()), None))
+            .unwrap();
+        sender
+            .send((BankNotification::Frozen(bank3.clone()), None))
+            .unwrap();
+
+        let banks = recv_frozen_bank_batch(&receiver, Duration::from_secs(1)).unwrap();
+        let slots = banks.iter().map(|bank| bank.slot()).collect::<Vec<_>>();
+
+        assert_eq!(slots, vec![bank1.slot(), bank2.slot(), bank3.slot()]);
     }
 
     fn packet_count(batch: &BankingPacketBatch) -> usize {
