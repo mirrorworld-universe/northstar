@@ -3,6 +3,7 @@ use {
     log::{debug, trace, warn},
     solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
     solana_keypair::Keypair,
+    solana_leader_schedule::SlotLeader,
     solana_ledger::transaction_balances::compile_collected_balances,
     solana_message::{v0::LoadedAddresses, AddressLoader, VersionedMessage},
     solana_pubkey::Pubkey,
@@ -441,6 +442,10 @@ impl TransactionClient for EphemeralTransactionClient {
         }
 
         let writable_accounts = Self::writable_accounts_for_batch(&bank, &txs);
+        let rotate_after_batch = Self::batch_uses_upgradeable_loader(&txs);
+        if rotate_after_batch {
+            self.evict_loader_writes_from_program_cache(&bank, &writable_accounts);
+        }
 
         Self::zero_untouched_writable_accounts_for_batch(
             &bank,
@@ -454,7 +459,12 @@ impl TransactionClient for EphemeralTransactionClient {
         }
 
         self.capture_overlay_accounts(&bank, &writable_accounts);
-        self.publish_processed_slot(&bank);
+        if rotate_after_batch {
+            self.evict_loader_writes_from_program_cache(&bank, &writable_accounts);
+            self.freeze_and_rotate_bank(&bank);
+        } else {
+            self.publish_processed_slot(&bank);
+        }
 
         // Mark writable accounts as touched (even on failure, since fee payers may be debited)
         Self::mark_writable_as_touched_for_batch(&bank, &txs, &self.touched_accounts);
@@ -491,6 +501,74 @@ impl EphemeralTransactionClient {
                 ..current_slots
             },
         );
+    }
+
+    fn evict_loader_writes_from_program_cache(
+        &self,
+        bank: &Bank,
+        writable_accounts: &HashSet<Pubkey>,
+    ) {
+        if writable_accounts.is_empty() {
+            return;
+        }
+        debug!("ER loader tx: evicting writable accounts from ProgramCache: {writable_accounts:?}");
+        bank.remove_programs_from_cache(writable_accounts.iter().copied());
+    }
+
+    fn freeze_and_rotate_bank(&self, bank: &Arc<Bank>) {
+        let current_slot = bank.slot();
+        let next_slot = current_slot.saturating_add(1);
+        let fee_structure = bank.fee_structure().clone();
+        let max_processing_age = bank.max_processing_age();
+
+        debug!("ER loader tx: freezing slot {current_slot} and rotating to slot {next_slot}");
+        bank.freeze();
+        self.er_history_store.finalize_slot(bank);
+
+        let mut next_bank =
+            Bank::new_from_parent_ephemeral(Arc::clone(bank), SlotLeader::default(), next_slot);
+        next_bank.configure_er(&fee_structure, max_processing_age);
+
+        {
+            let mut bank_forks = self.bank_forks.write().unwrap();
+            bank_forks.insert_ephemeral(next_bank);
+
+            if bank
+                .parent()
+                .is_some_and(|parent| parent.slot() >= (1u64 << 40))
+            {
+                bank.disconnect_from_parent();
+            }
+
+            drop(bank_forks.set_root_ephemeral(current_slot));
+
+            *self.block_commitment_cache.write().unwrap() = BlockCommitmentCache::new(
+                HashMap::new(),
+                0,
+                CommitmentSlots {
+                    slot: current_slot,
+                    root: current_slot,
+                    highest_confirmed_slot: current_slot,
+                    highest_super_majority_root: current_slot,
+                },
+            );
+
+            if let Some(subscriptions) = self.rpc_subscriptions.read().unwrap().as_ref() {
+                subscriptions.notify_slot(next_slot, current_slot, next_slot);
+                subscriptions.notify_roots(vec![next_slot]);
+            }
+        }
+    }
+
+    fn batch_uses_upgradeable_loader(txs: &[VersionedTransaction]) -> bool {
+        txs.iter().any(|tx| {
+            tx.message.instructions().iter().any(|ix| {
+                tx.message
+                    .static_account_keys()
+                    .get(ix.program_id_index as usize)
+                    .is_some_and(bpf_loader_upgradeable::check_id)
+            })
+        })
     }
 
     fn execute_transactions(
@@ -1091,6 +1169,10 @@ impl solana_rpc::rpc::ErTxExecutor for EphemeralTransactionClient {
 
         let txs = vec![tx];
         let writable_accounts = Self::writable_accounts_for_batch(&bank, &txs);
+        let rotate_after_batch = Self::batch_uses_upgradeable_loader(&txs);
+        if rotate_after_batch {
+            self.evict_loader_writes_from_program_cache(&bank, &writable_accounts);
+        }
         Self::zero_untouched_writable_accounts_for_batch(
             &bank,
             &txs,
@@ -1104,7 +1186,12 @@ impl solana_rpc::rpc::ErTxExecutor for EphemeralTransactionClient {
                 ))
             })?;
         self.capture_overlay_accounts(&bank, &writable_accounts);
-        self.publish_processed_slot(&bank);
+        if rotate_after_batch {
+            self.evict_loader_writes_from_program_cache(&bank, &writable_accounts);
+            self.freeze_and_rotate_bank(&bank);
+        } else {
+            self.publish_processed_slot(&bank);
+        }
         Self::mark_writable_as_touched_for_batch(&bank, &txs, &self.touched_accounts);
 
         Ok(())
@@ -1496,6 +1583,37 @@ mod tests {
                 .is_some(),
             "second transaction should be recorded in ER history"
         );
+    }
+
+    #[test]
+    fn test_upgradeable_loader_batch_rotates_bank() {
+        let fee_payer = Keypair::new();
+        let bank = create_test_bank();
+        fund_account(&bank, &fee_payer.pubkey(), 10_000_000);
+        let start_slot = bank.slot();
+        let blockhash = bank.last_blockhash();
+        let bank_forks = BankForks::new_rw_arc_ephemeral(bank);
+        let client = create_client_with_delegated(bank_forks, vec![]);
+
+        let ix = solana_instruction::Instruction {
+            program_id: bpf_loader_upgradeable::id(),
+            accounts: vec![],
+            data: vec![u8::MAX],
+        };
+        let message = VersionedMessage::Legacy(Message::new_with_blockhash(
+            &[ix],
+            Some(&fee_payer.pubkey()),
+            &blockhash,
+        ));
+        let tx = VersionedTransaction::try_new(message, &[&fee_payer]).unwrap();
+
+        <EphemeralTransactionClient as TransactionClient>::send_transactions_in_batch(
+            &client,
+            vec![bincode::serialize(&tx).unwrap()],
+            &SendTransactionServiceStats::default(),
+        );
+
+        assert_eq!(client.bank().slot(), start_slot + 1);
     }
 
     #[test]
