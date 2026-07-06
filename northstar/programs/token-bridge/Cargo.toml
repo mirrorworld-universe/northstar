@@ -28,10 +28,15 @@ spl-token-interface = { workspace = true }
 [dev-dependencies]
 northstar-portal = { path = "../portal" }
 solana-account = { workspace = true }
+solana-commitment-config = { workspace = true }
 solana-hash = { workspace = true }
 solana-keypair = { workspace = true }
+solana-native-token = { workspace = true }
 solana-program-binaries = { workspace = true }
 solana-program-test = { workspace = true }
+solana-rpc-client = { workspace = true }
+solana-rpc-client-api = { workspace = true }
+solana-signature = { workspace = true }
 solana-signer = { workspace = true }
 solana-transaction = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
