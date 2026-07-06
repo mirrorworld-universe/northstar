@@ -490,7 +490,7 @@ fn load_session_bridge(
     session_bridge: &AccountInfo,
     portal_program: &AccountInfo,
 ) -> Result<SessionBridge, ProgramError> {
-    if session_bridge.owner != portal_program.key || !portal_program.executable {
+    if session_bridge.owner != portal_program.key {
         return Err(ProgramError::InvalidAccountOwner);
     }
     let bridge = SessionBridge::try_from_slice(&session_bridge.try_borrow_data()?)
@@ -661,7 +661,7 @@ fn require_signer(account: &AccountInfo) -> ProgramResult {
 }
 
 fn require_self_program(program_id: &Pubkey, account: &AccountInfo) -> ProgramResult {
-    if account.key != program_id || !account.executable {
+    if account.key != program_id {
         return Err(ProgramError::IncorrectProgramId);
     }
     Ok(())
