@@ -4753,6 +4753,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "northstar-token-bridge"
+version = "0.1.0"
+dependencies = [
+ "borsh",
+ "northstar-portal",
+ "solana-account 4.3.0",
+ "solana-account-info",
+ "solana-hash 4.3.0",
+ "solana-instruction",
+ "solana-keypair",
+ "solana-msg",
+ "solana-program",
+ "solana-program-binaries",
+ "solana-program-entrypoint",
+ "solana-program-error",
+ "solana-program-pack",
+ "solana-program-test",
+ "solana-pubkey 4.2.0",
+ "solana-rent",
+ "solana-sdk-ids",
+ "solana-signer",
+ "solana-system-interface 3.2.0",
+ "solana-transaction",
+ "spl-token-interface",
+ "tokio",
+]
+
+[[package]]
 name = "num"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
