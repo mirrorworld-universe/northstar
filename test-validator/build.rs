@@ -7,96 +7,140 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-const BUILD_SBF_GUARD: &str = "NORTHSTAR_PORTAL_BUILD_SBF_RUNNING";
-const PROGRAM_SO: &str = "northstar_portal.so";
-const SBF_BUILD_LOCK: &str = "northstar_portal_sbf_build.lock";
+const BUILD_SBF_GUARD: &str = "NORTHSTAR_TEST_VALIDATOR_BUILD_SBF_RUNNING";
+const SBF_BUILD_LOCK: &str = "northstar_test_validator_sbf_build.lock";
 const STALE_LOCK_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
+struct BundledProgram {
+    name: &'static str,
+    manifest: &'static str,
+    src: &'static str,
+    so: &'static str,
+    env: &'static str,
+    skip_cfg: &'static str,
+    target_subdir: &'static str,
+}
+
+const BUNDLED_PROGRAMS: &[BundledProgram] = &[
+    BundledProgram {
+        name: "portal",
+        manifest: "northstar/programs/portal/Cargo.toml",
+        src: "northstar/programs/portal/src",
+        so: "northstar_portal.so",
+        env: "NORTHSTAR_PORTAL_PROGRAM_SO",
+        skip_cfg: "northstar_skip_portal_program_binary",
+        target_subdir: "portal-sbf-target",
+    },
+    BundledProgram {
+        name: "token bridge",
+        manifest: "northstar/programs/token-bridge/Cargo.toml",
+        src: "northstar/programs/token-bridge/src",
+        so: "northstar_token_bridge.so",
+        env: "NORTHSTAR_TOKEN_BRIDGE_PROGRAM_SO",
+        skip_cfg: "northstar_skip_token_bridge_program_binary",
+        target_subdir: "token-bridge-sbf-target",
+    },
+];
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let workspace_root = find_workspace_root(&manifest_dir);
-    let portal_manifest = workspace_root.join("northstar/programs/portal/Cargo.toml");
-    let portal_src = workspace_root.join("northstar/programs/portal/src");
     let sbf_out_dir = env::var_os("BPF_OUT_DIR")
         .or_else(|| env::var_os("SBF_OUT_DIR"))
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace_root.join("target/deploy"));
     let sbf_out_dir = absolute_path(sbf_out_dir);
-    let program_so = sbf_out_dir.join(PROGRAM_SO);
 
     println!("cargo:rerun-if-env-changed=BPF_OUT_DIR");
     println!("cargo:rerun-if-env-changed=SBF_OUT_DIR");
-    println!("cargo:rerun-if-changed={}", portal_manifest.display());
-    println!("cargo:rerun-if-changed={}", portal_src.display());
-    println!("cargo:rerun-if-changed={}", program_so.display());
-    println!("cargo:rustc-check-cfg=cfg(northstar_skip_portal_program_binary)");
-    println!(
-        "cargo:rustc-env=NORTHSTAR_PORTAL_PROGRAM_SO={}",
-        program_so.display()
-    );
+
+    for program in BUNDLED_PROGRAMS {
+        let manifest = workspace_root.join(program.manifest);
+        let src = workspace_root.join(program.src);
+        let program_so = sbf_out_dir.join(program.so);
+
+        println!("cargo:rerun-if-changed={}", manifest.display());
+        println!("cargo:rerun-if-changed={}", src.display());
+        println!("cargo:rerun-if-changed={}", program_so.display());
+        println!("cargo:rustc-check-cfg=cfg({})", program.skip_cfg);
+        println!("cargo:rustc-env={}={}", program.env, program_so.display());
+    }
 
     if running_under_clippy() {
-        println!("cargo:rustc-cfg=northstar_skip_portal_program_binary");
+        for program in BUNDLED_PROGRAMS {
+            println!("cargo:rustc-cfg={}", program.skip_cfg);
+        }
         return;
     }
 
-    build_portal_if_needed(&portal_manifest, &portal_src, &sbf_out_dir, &program_so);
-
-    if !program_so.exists() {
-        panic!(
-            "portal program binary missing at {}; `cargo build-sbf --manifest-path {}` should \
-             have produced it",
-            program_so.display(),
-            portal_manifest.display()
-        );
-    }
-}
-
-fn build_portal_if_needed(
-    portal_manifest: &Path,
-    portal_src: &Path,
-    sbf_out_dir: &Path,
-    program_so: &Path,
-) {
-    fs::create_dir_all(sbf_out_dir).unwrap_or_else(|err| {
+    fs::create_dir_all(&sbf_out_dir).unwrap_or_else(|err| {
         panic!(
             "failed to create SBF output directory {}: {err}",
             sbf_out_dir.display()
         )
     });
 
-    let _lock = SbfBuildLock::acquire(sbf_out_dir);
-    if !needs_portal_build(portal_manifest, portal_src, program_so) {
+    let _lock = SbfBuildLock::acquire(&sbf_out_dir);
+    for program in BUNDLED_PROGRAMS {
+        let manifest = workspace_root.join(program.manifest);
+        let src = workspace_root.join(program.src);
+        let program_so = sbf_out_dir.join(program.so);
+
+        build_program_if_needed(program, &manifest, &src, &sbf_out_dir, &program_so);
+
+        if !program_so.exists() {
+            panic!(
+                "{} program binary missing at {}; `cargo build-sbf --manifest-path {}` should \
+                 have produced it",
+                program.name,
+                program_so.display(),
+                manifest.display()
+            );
+        }
+    }
+}
+
+fn build_program_if_needed(
+    program: &BundledProgram,
+    manifest: &Path,
+    src: &Path,
+    sbf_out_dir: &Path,
+    program_so: &Path,
+) {
+    if !needs_program_build(manifest, src, program_so) {
         return;
     }
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    let target_dir = out_dir.join("portal-sbf-target");
-    let output = run_cargo_build_sbf(portal_manifest, sbf_out_dir, &target_dir, false);
+    let target_dir = out_dir.join(program.target_subdir);
+    let output = run_cargo_build_sbf(manifest, sbf_out_dir, &target_dir, false);
     if !output.status.success() {
         emit_command_output(&output);
         if should_retry_with_force_tools_install(&output) {
             eprintln!(
-                "`cargo build-sbf` failed with status {}; retrying with `--force-tools-install` \
-                 in case cached Solana platform tools are corrupt",
-                output.status
+                "`cargo build-sbf` for {} failed with status {}; retrying with \
+                 `--force-tools-install` in case cached Solana platform tools are corrupt",
+                program.name, output.status
             );
-            let retry_output = run_cargo_build_sbf(portal_manifest, sbf_out_dir, &target_dir, true);
+            let retry_output = run_cargo_build_sbf(manifest, sbf_out_dir, &target_dir, true);
             if !retry_output.status.success() {
                 emit_command_output(&retry_output);
                 panic!(
-                    "`cargo build-sbf --force-tools-install` failed with status {}",
-                    retry_output.status
+                    "`cargo build-sbf --force-tools-install` for {} failed with status {}",
+                    program.name, retry_output.status
                 );
             }
         } else {
-            panic!("`cargo build-sbf` failed with status {}", output.status);
+            panic!(
+                "`cargo build-sbf` for {} failed with status {}",
+                program.name, output.status
+            );
         }
     }
 }
 
 fn run_cargo_build_sbf(
-    portal_manifest: &Path,
+    manifest: &Path,
     sbf_out_dir: &Path,
     target_dir: &Path,
     force_tools_install: bool,
@@ -109,7 +153,7 @@ fn run_cargo_build_sbf(
     }
     command
         .arg("--manifest-path")
-        .arg(portal_manifest)
+        .arg(manifest)
         .arg("--sbf-out-dir")
         .arg(sbf_out_dir)
         .arg("--")
@@ -140,12 +184,12 @@ fn should_retry_with_force_tools_install(output: &Output) -> bool {
                 || text.contains("corrupt")))
 }
 
-fn needs_portal_build(portal_manifest: &Path, portal_src: &Path, program_so: &Path) -> bool {
+fn needs_program_build(manifest: &Path, src: &Path, program_so: &Path) -> bool {
     let Ok(program_mtime) = mtime(program_so) else {
         return true;
     };
 
-    [portal_manifest, portal_src]
+    [manifest, src]
         .iter()
         .any(|path| newest_mtime(path).is_some_and(|input_mtime| input_mtime > program_mtime))
 }
