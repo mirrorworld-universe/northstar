@@ -118,6 +118,9 @@ fn process_instruction(
             .and_then(|proof| instructions::process_seal_step_proof(program_id, accounts, proof)),
         Ok((21, payload)) => deserialize_args(payload)
             .and_then(|proof| instructions::process_submit_step_proof(program_id, accounts, proof)),
+        Ok((22, payload)) => deserialize_args(payload).and_then(|register| {
+            instructions::process_register_session_bridge(program_id, accounts, register)
+        }),
         Ok((_, _)) | Err(_) => Err(ProgramError::InvalidInstructionData),
     }
 }

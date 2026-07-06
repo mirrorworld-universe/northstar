@@ -227,6 +227,29 @@ impl DepositReceipt {
     }
 }
 
+#[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct SessionBridge {
+    pub discriminator: u8,
+    pub session: Pubkey,
+    pub mint: Pubkey,
+    pub bridge_program: Pubkey,
+    pub vault: Pubkey,
+    pub token_program: Pubkey,
+    pub bump: u8,
+}
+
+impl SessionBridge {
+    pub const LEN: usize = 162; // 1 + 32 * 5 + 1
+    pub const SEED_PREFIX: &[u8] = b"session_bridge";
+    pub const DISCRIMINATOR: u8 = 8;
+
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        self.discriminator == Self::DISCRIMINATOR
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,6 +374,21 @@ mod tests {
         };
         let serialized = borsh::to_vec(&proof).unwrap();
         assert_eq!(serialized.len(), StepProofAccount::LEN);
+    }
+
+    #[test]
+    fn test_session_bridge_len() {
+        let bridge = SessionBridge {
+            discriminator: SessionBridge::DISCRIMINATOR,
+            session: [0x11; 32],
+            mint: [0x22; 32],
+            bridge_program: [0x33; 32],
+            vault: [0x44; 32],
+            token_program: [0x55; 32],
+            bump: 88,
+        };
+        let serialized = borsh::to_vec(&bridge).unwrap();
+        assert_eq!(serialized.len(), SessionBridge::LEN);
     }
 
     #[test]
