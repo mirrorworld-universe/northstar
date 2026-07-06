@@ -12,7 +12,6 @@ no-entrypoint = []
 
 [dependencies]
 borsh = { version = "1", default-features = false, features = ["derive"] }
-northstar-portal = { path = "../portal" }
 solana-account-info = { workspace = true }
 solana-instruction = { workspace = true }
 solana-msg = { workspace = true }
@@ -27,6 +26,7 @@ solana-system-interface = { workspace = true }
 spl-token-interface = { workspace = true }
 
 [dev-dependencies]
+northstar-portal = { path = "../portal" }
 solana-account = { workspace = true }
 solana-hash = { workspace = true }
 solana-keypair = { workspace = true }

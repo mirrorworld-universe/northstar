@@ -4,7 +4,6 @@ pub mod state;
 use {
     borsh::{BorshDeserialize, BorshSerialize},
     instruction::TokenBridgeInstruction,
-    northstar_portal::{PortalInstruction, SessionBridge},
     solana_account_info::{next_account_info, AccountInfo},
     solana_instruction::{AccountMeta, Instruction},
     solana_program::{
@@ -19,6 +18,25 @@ use {
     spl_token_interface::{instruction as token_instruction, state::Account as SplTokenAccount},
     state::{BridgeBuffer, ErTokenAccount, TokenVault},
 };
+
+#[derive(BorshDeserialize)]
+struct SessionBridge {
+    discriminator: u8,
+    _session: [u8; 32],
+    mint: [u8; 32],
+    bridge_program: [u8; 32],
+    vault: [u8; 32],
+    token_program: [u8; 32],
+    _bump: u8,
+}
+
+impl SessionBridge {
+    const DISCRIMINATOR: u8 = 5;
+
+    fn is_valid(&self) -> bool {
+        self.discriminator == Self::DISCRIMINATOR
+    }
+}
 
 solana_pubkey::declare_id!("HeVLVaSa9WnFai9aTRJ3UR2c4jwbMe5nbjagmDP1GbXR");
 
@@ -364,10 +382,7 @@ fn process_delegate_er_token_account(
     }
 
     let (expected_record, _) = Pubkey::find_program_address(
-        &[
-            northstar_portal::DelegationRecord::SEED_PREFIX,
-            er_token_account.key.as_ref(),
-        ],
+        &[b"delegation", er_token_account.key.as_ref()],
         portal_program.key,
     );
     if expected_record != *delegation_record.key {
@@ -403,8 +418,7 @@ fn process_delegate_er_token_account(
             AccountMeta::new(*delegation_record.key, false),
             AccountMeta::new_readonly(*buffer.key, false),
         ],
-        data: borsh::to_vec(&PortalInstruction::Delegate { grid_id })
-            .map_err(|_| ProgramError::InvalidInstructionData)?,
+        data: encode_portal_delegate(grid_id),
     };
     invoke_signed(
         &ix,
@@ -463,8 +477,7 @@ fn process_undelegate_er_token_account(
             AccountMeta::new_readonly(system_program::id(), false),
             AccountMeta::new_readonly(*session.key, false),
         ],
-        data: borsh::to_vec(&PortalInstruction::UndelegateHandoff)
-            .map_err(|_| ProgramError::InvalidInstructionData)?,
+        data: vec![10],
     };
     invoke(
         &ix,
@@ -676,4 +689,11 @@ fn require_system_program(account: &AccountInfo) -> ProgramResult {
 
 fn key_bytes(key: &Pubkey) -> [u8; 32] {
     key.to_bytes()
+}
+
+fn encode_portal_delegate(grid_id: u64) -> Vec<u8> {
+    let mut data = Vec::with_capacity(9);
+    data.push(3);
+    data.extend_from_slice(&grid_id.to_le_bytes());
+    data
 }
