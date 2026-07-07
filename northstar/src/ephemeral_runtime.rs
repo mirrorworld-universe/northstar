@@ -12,11 +12,13 @@ use {
     solana_accounts_db::accounts_db::AccountsDb,
     solana_clock::{BankId, Slot},
     solana_gossip::cluster_info::ClusterInfo,
+    solana_instruction::{AccountMeta, Instruction},
     solana_keypair::Keypair,
     solana_lattice_hash::lt_hash::{Checksum, LtHash},
     solana_leader_schedule::SlotLeader,
     solana_ledger::{blockstore::Blockstore, leader_schedule_cache::LeaderScheduleCache},
     solana_loader_v3_interface::state::UpgradeableLoaderState,
+    solana_message::{v0::LoadedAddresses, Message, VersionedMessage},
     solana_pubkey::Pubkey,
     solana_rpc::{
         er_history::ErHistoryStore,
@@ -37,6 +39,8 @@ use {
     solana_send_transaction_service::send_transaction_service,
     solana_signer::Signer,
     solana_svm::account_loader::PROGRAM_OWNERS,
+    solana_transaction::versioned::VersionedTransaction,
+    solana_transaction_status::{TransactionStatusMeta, VersionedTransactionWithStatusMeta},
     std::{
         collections::{HashMap, HashSet},
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -1863,6 +1867,69 @@ impl EphemeralRuntime {
         );
     }
 
+    fn record_deposit_history(
+        &self,
+        bank: &Bank,
+        depositor: &Pubkey,
+        lamports: u64,
+        base_balance: u64,
+        new_balance: u64,
+    ) {
+        let payer = Keypair::new();
+        let instruction = Instruction {
+            program_id: self.portal_program_id,
+            accounts: vec![AccountMeta::new(*depositor, false)],
+            data: format!("northstar:deposit:{lamports}:{new_balance}").into_bytes(),
+        };
+        let message = VersionedMessage::Legacy(Message::new_with_blockhash(
+            &[instruction],
+            Some(&payer.pubkey()),
+            &bank.last_blockhash(),
+        ));
+        let Ok(transaction) = VersionedTransaction::try_new(message, &[&payer]) else {
+            warn!("Failed to build ER deposit history transaction for {depositor}");
+            return;
+        };
+
+        let balances = |depositor_balance| {
+            transaction
+                .message
+                .static_account_keys()
+                .iter()
+                .map(|key| {
+                    if key == depositor {
+                        depositor_balance
+                    } else {
+                        bank.get_balance(key)
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let meta = TransactionStatusMeta {
+            status: Ok(()),
+            fee: 0,
+            pre_balances: balances(base_balance),
+            post_balances: balances(new_balance),
+            inner_instructions: None,
+            log_messages: Some(vec![format!(
+                "Northstar deposit credited {lamports} lamports to {depositor}"
+            )]),
+            pre_token_balances: Some(vec![]),
+            post_token_balances: Some(vec![]),
+            rewards: Some(vec![]),
+            loaded_addresses: LoadedAddresses::default(),
+            return_data: None,
+            compute_units_consumed: Some(0),
+            cost_units: None,
+        };
+
+        let _ = self.er_history_store.record_transaction(
+            bank,
+            VersionedTransactionWithStatusMeta { transaction, meta },
+        );
+    }
+
     /// Credit a deposit on the ephemeral bank. Called by NorthStarService
     /// when a FeeDeposited event is detected on L1.
     pub fn credit_deposit(&self, depositor: &Pubkey, lamports: u64) {
@@ -1918,6 +1985,7 @@ impl EphemeralRuntime {
             touched.insert(*depositor);
         }
 
+        self.record_deposit_history(&bank, depositor, lamports, base_balance, new_balance);
         self.publish_bank_for_rpc();
 
         info!(
@@ -1966,7 +2034,9 @@ mod tests {
         solana_svm::transaction_processor::ExecutionRecordingConfig,
         solana_system_interface::instruction::transfer,
         solana_transaction::{versioned::VersionedTransaction, Transaction},
-        solana_transaction_status::{TransactionConfirmationStatus, UiTransactionEncoding},
+        solana_transaction_status::{
+            TransactionConfirmationStatus, TransactionWithStatusMeta, UiTransactionEncoding,
+        },
         std::{
             collections::HashSet,
             net::{IpAddr, Ipv4Addr, TcpListener},
@@ -2345,6 +2415,40 @@ mod tests {
         assert!(account_diff.l1_account.is_none());
         assert_eq!(account_diff.l1_lt_hash, LtHash::identity());
         assert_eq!(account_diff.er_account.lamports(), 7);
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_credit_deposit_records_er_history_for_depositor() {
+        let (_, mut runtime) = create_runtime();
+        let depositor = Pubkey::new_unique();
+
+        runtime.credit_deposit(&depositor, 7);
+
+        let signatures = runtime
+            .er_history_store
+            .get_signatures_for_address(&depositor, None, None, 10, CommitmentConfig::confirmed())
+            .unwrap();
+        assert_eq!(signatures.len(), 1);
+
+        let transaction = runtime
+            .er_history_store
+            .get_transaction(&signatures[0].signature, CommitmentConfig::confirmed())
+            .expect("deposit should be retrievable by signature");
+        let TransactionWithStatusMeta::Complete(tx) = transaction.tx_with_meta else {
+            panic!("deposit transaction should include metadata");
+        };
+        assert_eq!(tx.meta.status, Ok(()));
+        let depositor_index = tx
+            .transaction
+            .message
+            .static_account_keys()
+            .iter()
+            .position(|key| key == &depositor)
+            .expect("deposit transaction should touch depositor");
+        assert_eq!(tx.meta.pre_balances[depositor_index], 0);
+        assert_eq!(tx.meta.post_balances[depositor_index], 7);
 
         runtime.shutdown();
     }
