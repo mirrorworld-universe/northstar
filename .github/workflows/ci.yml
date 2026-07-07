@@ -99,11 +99,11 @@ jobs:
         run: ./cargo-build-sbf --manifest-path northstar/programs/portal/Cargo.toml
 
       - name: Build validator binary
-        run: cargo build --release --target-dir /home/ubuntu/northstar/ --bin agave-validator
+        run: cargo build --release --target-dir /solana/northstar/ --bin agave-validator
 
       - name: Confirm binary exists
         run: |
-          BIN="/home/ubuntu/northstar/release/agave-validator"
+          BIN="/solana/northstar/release/agave-validator"
           test -f "$BIN" && test -x "$BIN" && "$BIN" --version
 
       - name: Restart validator
@@ -111,12 +111,12 @@ jobs:
 
       - name: Wait for validator to be fully up
         run: |
-          sudo mkdir -p /home/ubuntu/northstar/logs
-          sudo touch /home/ubuntu/northstar/logs/validator.log
-          sudo chmod a+rw /home/ubuntu/northstar/logs/validator.log
+          sudo mkdir -p /solana/northstar/logs
+          sudo touch /solana/northstar/logs/validator.log
+          sudo chmod a+rw /solana/northstar/logs/validator.log
 
           # Stream validator logs to CI output while we wait
-          tail -f /home/ubuntu/northstar/logs/validator.log &
+          tail -f /solana/northstar/logs/validator.log &
           TAIL_PID=$!
 
           # shellcheck disable=SC2329

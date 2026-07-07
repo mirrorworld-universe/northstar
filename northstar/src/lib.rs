@@ -895,7 +895,7 @@ mod portal_e2e_tests {
         solana_keypair::{Keypair, Signer},
         solana_lattice_hash::lt_hash::LtHash,
         solana_leader_schedule::SlotLeader,
-        solana_net_utils::SocketAddrSpace,
+        solana_net_utils::{sockets::bind_to, SocketAddrSpace},
         solana_rent::Rent,
         solana_rpc_client::rpc_client::RpcClient,
         solana_runtime::{
@@ -905,7 +905,12 @@ mod portal_e2e_tests {
         solana_sdk_ids::system_program,
         solana_system_interface::instruction::transfer,
         solana_transaction::Transaction,
-        std::{collections::HashSet, net::TcpListener, sync::RwLock, time::Duration},
+        std::{
+            collections::HashSet,
+            net::{IpAddr, Ipv4Addr, TcpListener},
+            sync::RwLock,
+            time::{Duration, Instant},
+        },
     };
 
     /// Set up a test bank with portal program in genesis.
@@ -1082,8 +1087,27 @@ mod portal_e2e_tests {
     }
 
     fn find_free_addr() -> SocketAddr {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap()
+        loop {
+            let udp = bind_to(IpAddr::V4(Ipv4Addr::LOCALHOST), 0).unwrap();
+            let addr = udp.local_addr().unwrap();
+            if TcpListener::bind(addr).is_ok() {
+                return addr;
+            }
+        }
+    }
+
+    fn wait_for_rpc_ready(rpc_client: &RpcClient) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if rpc_client.get_latest_blockhash().is_ok() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            rpc_client.get_latest_blockhash().is_ok(),
+            "timed out waiting for RPC to accept requests"
+        );
     }
 
     /// Test: Deploy portal BPF program and execute OpenSession -> verify L1 event detection
@@ -1446,8 +1470,8 @@ mod portal_e2e_tests {
             "ER account data should match bytes written before delegation"
         );
 
-        std::thread::sleep(Duration::from_secs(2));
         let rpc_client = RpcClient::new(runtime.rpc_addr());
+        wait_for_rpc_ready(&rpc_client);
         let rpc_account = rpc_client
             .get_account_data(delegated_account)
             .expect("Delegated account should be readable via RPC");
@@ -1580,8 +1604,8 @@ mod portal_e2e_tests {
         );
         assert_eq!(er_account.lamports(), 5_000_000_000);
 
-        std::thread::sleep(Duration::from_secs(2));
         let rpc_client = RpcClient::new(runtime.rpc_addr());
+        wait_for_rpc_ready(&rpc_client);
         let rpc_balance = rpc_client
             .get_balance(&delegated_account_pubkey)
             .expect("Should be able to get balance via RPC");
@@ -2577,7 +2601,7 @@ mod ephemeral_accounts_background_service_regression {
         solana_keypair::Keypair,
         solana_leader_schedule::SlotLeader,
         solana_message::Message,
-        solana_net_utils::SocketAddrSpace,
+        solana_net_utils::{sockets::bind_to, SocketAddrSpace},
         solana_pubkey::Pubkey,
         solana_runtime::{
             accounts_background_service::{
@@ -2593,7 +2617,7 @@ mod ephemeral_accounts_background_service_regression {
         solana_system_interface::instruction::transfer,
         solana_transaction::Transaction,
         std::{
-            net::TcpListener,
+            net::{IpAddr, Ipv4Addr, TcpListener},
             num::NonZeroU64,
             sync::{
                 atomic::{AtomicBool, Ordering},
@@ -2606,10 +2630,13 @@ mod ephemeral_accounts_background_service_regression {
     };
 
     fn find_free_addr() -> std::net::SocketAddr {
-        TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
+        loop {
+            let udp = bind_to(IpAddr::V4(Ipv4Addr::LOCALHOST), 0).unwrap();
+            let addr = udp.local_addr().unwrap();
+            if TcpListener::bind(addr).is_ok() {
+                return addr;
+            }
+        }
     }
 
     fn cluster_info() -> Arc<ClusterInfo> {

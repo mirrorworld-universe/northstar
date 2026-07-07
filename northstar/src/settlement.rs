@@ -201,14 +201,13 @@ impl SettlementPlan {
         validator: Pubkey,
         include_begin: bool,
     ) -> Vec<Instruction> {
-        if self.is_empty() {
-            return vec![];
-        }
         if self.has_unsupported_changes() {
             warn!(
-                "Portal settlement blocked by unsupported account changes: {:?}",
+                "Portal settlement skipping unsupported account changes: {:?}",
                 self.unsupported_changes
             );
+        }
+        if self.is_empty() {
             return vec![];
         }
 
@@ -434,6 +433,7 @@ pub fn build_settlement_plan(
     let mut owner_changes = vec![];
     let mut lamport_candidates = vec![];
     let mut unsupported_changes = vec![];
+    let mut unsupported_accounts = HashSet::new();
     let mut receipt_payouts_by_recipient = HashMap::<Pubkey, u128>::new();
     for receipt in &receipt_balances {
         *receipt_payouts_by_recipient
@@ -448,6 +448,11 @@ pub fn build_settlement_plan(
 
         let account_unsupported_changes = unsupported_changes_for_account(account_diff);
         if !account_unsupported_changes.is_empty() {
+            unsupported_accounts.extend(
+                account_unsupported_changes
+                    .iter()
+                    .filter_map(SettlementUnsupportedChange::account),
+            );
             unsupported_changes.extend(account_unsupported_changes);
             continue;
         }
@@ -472,6 +477,7 @@ pub fn build_settlement_plan(
         let post_receipt_l1_lamports = (l1_lamports as u128).saturating_add(receipt_payout);
         if post_receipt_l1_lamports != er_lamports as u128 {
             if receipt_payout > 0 {
+                unsupported_accounts.insert(account_diff.pubkey);
                 unsupported_changes.push(SettlementUnsupportedChange::LamportsChanged {
                     account: account_diff.pubkey,
                     l1_lamports,
@@ -494,6 +500,7 @@ pub fn build_settlement_plan(
             count: lamport_candidates.len(),
             max: MAX_SETTLEMENT_LAMPORT_ACCOUNTS,
         });
+        unsupported_accounts.extend(lamport_candidates.iter().map(|(account, _, _)| *account));
     } else if !lamport_candidates.is_empty() {
         let l1_total = lamport_candidates
             .iter()
@@ -504,6 +511,7 @@ pub fn build_settlement_plan(
             .map(|(_, _, er_lamports)| *er_lamports as u128)
             .sum::<u128>();
         if l1_total != er_total {
+            unsupported_accounts.extend(lamport_candidates.iter().map(|(account, _, _)| *account));
             unsupported_changes.extend(lamport_candidates.iter().map(
                 |(account, l1_lamports, er_lamports)| {
                     SettlementUnsupportedChange::LamportsChanged {
@@ -524,10 +532,11 @@ pub fn build_settlement_plan(
     }
 
     if !unsupported_changes.is_empty() {
-        chunks.clear();
-        owner_changes.clear();
-        lamport_changes.clear();
-        warn!("Portal settlement blocked by unsupported account changes: {unsupported_changes:?}",);
+        chunks.retain(|chunk| !unsupported_accounts.contains(&chunk.account));
+        owner_changes.retain(|owner_change| !unsupported_accounts.contains(&owner_change.account));
+        lamport_changes
+            .retain(|lamport_change| !unsupported_accounts.contains(&lamport_change.account));
+        warn!("Portal settlement skipping unsupported account changes: {unsupported_changes:?}",);
     }
 
     if chunks.is_empty()
@@ -591,6 +600,20 @@ fn unsupported_changes_for_account(
     }
 
     unsupported_changes
+}
+
+impl SettlementUnsupportedChange {
+    fn account(&self) -> Option<Pubkey> {
+        match self {
+            Self::MissingL1Account { account }
+            | Self::DataLengthChanged { account, .. }
+            | Self::OwnerChanged { account, .. }
+            | Self::ExecutableChanged { account, .. }
+            | Self::RentEpochChanged { account, .. }
+            | Self::LamportsChanged { account, .. } => Some(*account),
+            Self::TooManyLamportChanges { .. } => None,
+        }
+    }
 }
 
 fn data_chunks_for_account(pubkey: Pubkey, l1_data: &[u8], er_data: &[u8]) -> Vec<SettlementChunk> {
@@ -945,6 +968,63 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_lamport_diff_does_not_block_independent_receipt_payout() {
+        use borsh::BorshDeserialize;
+
+        let dirty_delegated = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let er_source = Pubkey::new_unique();
+        let l1_recipient = Pubkey::new_unique();
+        let diff = diff_for_account(
+            dirty_delegated,
+            Some(account(&[], 100, &owner)),
+            account(&[], 40, &owner),
+        );
+        let delegated_accounts = HashSet::from([dirty_delegated]);
+        let receipt = ReceiptBalanceSettlement {
+            er_source,
+            l1_recipient,
+            balance: 999,
+            withdrawn: 10,
+            payout_lamports: 10,
+        };
+
+        let plan =
+            build_settlement_plan(&diff, &delegated_accounts, 5, vec![receipt.clone()]).unwrap();
+
+        assert_eq!(plan.chunks, vec![]);
+        assert_eq!(plan.lamport_changes, vec![]);
+        assert_eq!(plan.receipt_balances, vec![receipt]);
+        assert_eq!(
+            plan.unsupported_changes,
+            vec![SettlementUnsupportedChange::LamportsChanged {
+                account: dirty_delegated,
+                l1_lamports: 100,
+                er_lamports: 40,
+            }]
+        );
+
+        let instructions = plan.portal_instructions(
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+        );
+        assert_eq!(instructions.len(), 3);
+        assert!(matches!(
+            PortalInstruction::try_from_slice(&instructions[0].data).unwrap(),
+            PortalInstruction::BeginSettlement(_)
+        ));
+        assert!(matches!(
+            PortalInstruction::try_from_slice(&instructions[1].data).unwrap(),
+            PortalInstruction::SettleDepositReceipt(_)
+        ));
+        assert!(matches!(
+            PortalInstruction::try_from_slice(&instructions[2].data).unwrap(),
+            PortalInstruction::FinishSettlement(_)
+        ));
+    }
+
+    #[test]
     fn unsupported_non_data_diff_is_reported_and_not_partially_settled() {
         let pubkey = Pubkey::new_unique();
         let owner = Pubkey::new_unique();
@@ -1064,13 +1144,14 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_changes_block_portal_submission() {
-        let account = Pubkey::new_unique();
+    fn unsupported_changes_do_not_block_supported_portal_submission() {
+        let supported_account = Pubkey::new_unique();
+        let unsupported_account = Pubkey::new_unique();
         let plan = SettlementPlan {
             er_slot: 42,
             checksum: [7; 32],
             chunks: vec![SettlementChunk {
-                account,
+                account: supported_account,
                 account_data_offset: 0,
                 data: vec![1],
             }],
@@ -1078,7 +1159,7 @@ mod tests {
             lamport_changes: vec![],
             receipt_balances: vec![],
             unsupported_changes: vec![SettlementUnsupportedChange::LamportsChanged {
-                account,
+                account: unsupported_account,
                 l1_lamports: 1,
                 er_lamports: 2,
             }],
@@ -1087,10 +1168,10 @@ mod tests {
         let session_pda = Pubkey::new_unique();
         let validator = Keypair::new();
 
-        assert!(plan
+        assert!(!plan
             .portal_instructions(portal_program_id, session_pda, validator.pubkey())
             .is_empty());
-        assert!(plan
+        assert!(!plan
             .portal_transactions(
                 portal_program_id,
                 session_pda,

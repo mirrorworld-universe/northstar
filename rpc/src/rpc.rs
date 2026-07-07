@@ -40,6 +40,7 @@ use {
     solana_gossip::cluster_info::ClusterInfo,
     solana_hash::Hash,
     solana_keypair::Keypair,
+    solana_leader_schedule::SlotLeader,
     solana_ledger::{
         blockstore::{Blockstore, BlockstoreError, SignatureInfosForAddress},
         blockstore_meta::PerfSample,
@@ -306,6 +307,13 @@ pub trait ErTxExecutor: std::marker::Send + std::marker::Sync {
 impl Metadata for JsonRpcRequestProcessor {}
 
 impl JsonRpcRequestProcessor {
+    /// Sonic: Returns whether this node is behind the cluster for NorthStar sync status.
+    /// Do not synthesize a future `latestL1Slot`: callers should only report real
+    /// local L1 slots observed by this node.
+    pub(crate) fn northstar_is_behind_cluster(&self) -> bool {
+        matches!(self.health.check(), RpcHealthStatus::Behind { .. })
+    }
+
     pub fn clone_without_bigtable(&self) -> JsonRpcRequestProcessor {
         Self {
             bigtable_ledger_storage: None, // Disable BigTable
@@ -4155,14 +4163,14 @@ pub mod rpc_full {
             } else {
                 preflight_commitment.map(|commitment| CommitmentConfig { commitment })
             };
-            let preflight_bank = &*meta.get_bank_with_config(RpcContextConfig {
+            let preflight_bank = meta.get_bank_with_config(RpcContextConfig {
                 commitment: preflight_commitment,
                 min_context_slot,
             })?;
 
             let transaction = sanitize_transaction(
                 unsanitized_tx,
-                preflight_bank,
+                preflight_bank.as_ref(),
                 preflight_bank.get_reserved_account_keys(),
                 preflight_bank
                     .feature_set
@@ -4214,11 +4222,31 @@ pub mod rpc_full {
 
                 let simulation_result = if let Some(err) = verification_error {
                     TransactionSimulationResult::new_error(err)
-                } else if meta.er_tx_executor.is_some() && !preflight_bank.is_frozen() {
-                    // Sonic: ER processed commitment can point at the live working bank so
-                    // processed reads observe writes immediately. Preflight still needs to
-                    // simulate against that bank when clients request processed commitment.
-                    preflight_bank.simulate_transaction_unchecked(&transaction, false)
+                } else if meta.er_tx_executor.is_some() && preflight_bank.is_frozen() {
+                    // Sonic: ER preflight must not mutate a frozen ER bank's ProgramCache. Loader-v3
+                    // deploy transactions can otherwise leave Closed tombstones that collide with
+                    // real execution or the next deploy preflight.
+                    let simulation_bank = Bank::new_from_parent_ephemeral_isolated(
+                        Arc::clone(&preflight_bank),
+                        SlotLeader::default(),
+                        preflight_bank.slot().saturating_add(1),
+                    );
+                    simulation_bank.remove_programs_from_cache(
+                        transaction.message().account_keys().iter().copied(),
+                    );
+                    simulation_bank.simulate_transaction_unchecked(&transaction, false)
+                } else if meta.er_tx_executor.is_some() {
+                    // Sonic: Creating a child bank would freeze the live ER working bank. Simulate
+                    // in place, but clear cache entries touched by the transaction before/after so
+                    // loader-v3 preflight tombstones cannot leak into execution.
+                    preflight_bank.remove_programs_from_cache(
+                        transaction.message().account_keys().iter().copied(),
+                    );
+                    let result = preflight_bank.simulate_transaction_unchecked(&transaction, false);
+                    preflight_bank.remove_programs_from_cache(
+                        transaction.message().account_keys().iter().copied(),
+                    );
+                    result
                 } else {
                     preflight_bank.simulate_transaction(&transaction, false)
                 };

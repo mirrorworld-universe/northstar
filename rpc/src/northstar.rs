@@ -37,10 +37,14 @@ impl NorthStarSyncStatus {
     }
 
     pub fn snapshot(&self) -> RpcNorthStarSyncStatus {
+        self.snapshot_with_cluster_behind(false)
+    }
+
+    pub fn snapshot_with_cluster_behind(&self, cluster_behind: bool) -> RpcNorthStarSyncStatus {
         let latest_synced_slot = self.latest_synced_slot.load(Ordering::Relaxed);
         let latest_l1_slot = self.latest_l1_slot.load(Ordering::Relaxed);
         RpcNorthStarSyncStatus {
-            is_syncing: latest_synced_slot < latest_l1_slot,
+            is_syncing: cluster_behind || latest_synced_slot < latest_l1_slot,
             latest_synced_slot,
             latest_l1_slot,
         }
@@ -107,11 +111,44 @@ impl NorthStar for NorthStarImpl {
         debug!("northstar_sys_get_sync_status rpc request received");
         meta.northstar_sync_status
             .as_ref()
-            .map(|status| status.snapshot())
+            .map(|status| status.snapshot_with_cluster_behind(meta.northstar_is_behind_cluster()))
             .ok_or_else(|| jsonrpc_core::Error {
                 code: jsonrpc_core::ErrorCode::InvalidRequest,
                 message: "northstarSysGetSyncStatus is not available on this node".to_string(),
                 data: None,
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_status_reports_syncing_when_cluster_is_behind_without_inventing_l1_slot() {
+        let status = NorthStarSyncStatus::new_with_slots(100, 100);
+
+        assert_eq!(
+            status.snapshot_with_cluster_behind(true),
+            RpcNorthStarSyncStatus {
+                is_syncing: true,
+                latest_synced_slot: 100,
+                latest_l1_slot: 100,
+            }
+        );
+    }
+
+    #[test]
+    fn sync_status_uses_local_l1_gap_when_cluster_is_not_behind() {
+        let status = NorthStarSyncStatus::new_with_slots(100, 120);
+
+        assert_eq!(
+            status.snapshot_with_cluster_behind(false),
+            RpcNorthStarSyncStatus {
+                is_syncing: true,
+                latest_synced_slot: 100,
+                latest_l1_slot: 120,
+            }
+        );
     }
 }

@@ -12,11 +12,13 @@ use {
     solana_accounts_db::accounts_db::AccountsDb,
     solana_clock::{BankId, Slot},
     solana_gossip::cluster_info::ClusterInfo,
+    solana_instruction::{AccountMeta, Instruction},
     solana_keypair::Keypair,
     solana_lattice_hash::lt_hash::{Checksum, LtHash},
     solana_leader_schedule::SlotLeader,
     solana_ledger::{blockstore::Blockstore, leader_schedule_cache::LeaderScheduleCache},
     solana_loader_v3_interface::state::UpgradeableLoaderState,
+    solana_message::{v0::LoadedAddresses, Message, VersionedMessage},
     solana_pubkey::Pubkey,
     solana_rpc::{
         er_history::ErHistoryStore,
@@ -37,6 +39,8 @@ use {
     solana_send_transaction_service::send_transaction_service,
     solana_signer::Signer,
     solana_svm::account_loader::PROGRAM_OWNERS,
+    solana_transaction::versioned::VersionedTransaction,
+    solana_transaction_status::{TransactionStatusMeta, VersionedTransactionWithStatusMeta},
     std::{
         collections::{HashMap, HashSet},
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -969,18 +973,11 @@ impl EphemeralRuntime {
             self.delegated_accounts.write().unwrap().clear();
             self.touched_accounts.write().unwrap().clear();
             self.er_account_overlay.write().unwrap().clear();
-            let mut accounts = Vec::new();
-            if self
-                .l1_anchor_bank
-                .scan_all_accounts(|entry| {
-                    if let Some((pubkey, account, slot)) = entry {
-                        accounts.push((*pubkey, account, slot));
-                    }
-                })
-                .is_err()
-            {
-                warn!("Cannot hydrate existing delegations from L1: account scan failed");
-            }
+            // Sonic: Hotfix: skip historical delegation hydration on the reset hot path.
+            // Scanning all L1 accounts can stall the NorthStar thread on devnet-sized
+            // AccountsDB when no program-id index is available. Fresh AccountDelegated
+            // events still hydrate newly delegated accounts after the session is reopened.
+            let accounts: Vec<(Pubkey, AccountSharedData, Slot)> = Vec::new();
 
             let hydrated_delegations = accounts
                 .into_iter()
@@ -1870,6 +1867,69 @@ impl EphemeralRuntime {
         );
     }
 
+    fn record_deposit_history(
+        &self,
+        bank: &Bank,
+        depositor: &Pubkey,
+        lamports: u64,
+        base_balance: u64,
+        new_balance: u64,
+    ) {
+        let payer = Keypair::new();
+        let instruction = Instruction {
+            program_id: self.portal_program_id,
+            accounts: vec![AccountMeta::new(*depositor, false)],
+            data: format!("northstar:deposit:{lamports}:{new_balance}").into_bytes(),
+        };
+        let message = VersionedMessage::Legacy(Message::new_with_blockhash(
+            &[instruction],
+            Some(&payer.pubkey()),
+            &bank.last_blockhash(),
+        ));
+        let Ok(transaction) = VersionedTransaction::try_new(message, &[&payer]) else {
+            warn!("Failed to build ER deposit history transaction for {depositor}");
+            return;
+        };
+
+        let balances = |depositor_balance| {
+            transaction
+                .message
+                .static_account_keys()
+                .iter()
+                .map(|key| {
+                    if key == depositor {
+                        depositor_balance
+                    } else {
+                        bank.get_balance(key)
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let meta = TransactionStatusMeta {
+            status: Ok(()),
+            fee: 0,
+            pre_balances: balances(base_balance),
+            post_balances: balances(new_balance),
+            inner_instructions: None,
+            log_messages: Some(vec![format!(
+                "Northstar deposit credited {lamports} lamports to {depositor}"
+            )]),
+            pre_token_balances: Some(vec![]),
+            post_token_balances: Some(vec![]),
+            rewards: Some(vec![]),
+            loaded_addresses: LoadedAddresses::default(),
+            return_data: None,
+            compute_units_consumed: Some(0),
+            cost_units: None,
+        };
+
+        let _ = self.er_history_store.record_transaction(
+            bank,
+            VersionedTransactionWithStatusMeta { transaction, meta },
+        );
+    }
+
     /// Credit a deposit on the ephemeral bank. Called by NorthStarService
     /// when a FeeDeposited event is detected on L1.
     pub fn credit_deposit(&self, depositor: &Pubkey, lamports: u64) {
@@ -1925,6 +1985,7 @@ impl EphemeralRuntime {
             touched.insert(*depositor);
         }
 
+        self.record_deposit_history(&bank, depositor, lamports, base_balance, new_balance);
         self.publish_bank_for_rpc();
 
         info!(
@@ -1960,7 +2021,7 @@ mod tests {
         solana_keypair::{Keypair, Signer},
         solana_lattice_hash::lt_hash::LtHash,
         solana_message::{Message, SanitizedMessage},
-        solana_net_utils::SocketAddrSpace,
+        solana_net_utils::{sockets::bind_to, SocketAddrSpace},
         solana_rpc_client::rpc_client::RpcClient,
         solana_rpc_client_types::config::{
             CommitmentConfig, RpcSendTransactionConfig, RpcSimulateTransactionConfig,
@@ -1973,12 +2034,14 @@ mod tests {
         solana_svm::transaction_processor::ExecutionRecordingConfig,
         solana_system_interface::instruction::transfer,
         solana_transaction::{versioned::VersionedTransaction, Transaction},
-        solana_transaction_status::{TransactionConfirmationStatus, UiTransactionEncoding},
+        solana_transaction_status::{
+            TransactionConfirmationStatus, TransactionWithStatusMeta, UiTransactionEncoding,
+        },
         std::{
             collections::HashSet,
-            net::TcpListener,
+            net::{IpAddr, Ipv4Addr, TcpListener},
             sync::{atomic::AtomicU64, mpsc},
-            time::Duration,
+            time::{Duration, Instant},
         },
     };
 
@@ -2007,8 +2070,30 @@ mod tests {
     }
 
     fn find_free_addr() -> SocketAddr {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap()
+        loop {
+            let udp = bind_to(IpAddr::V4(Ipv4Addr::LOCALHOST), 0).unwrap();
+            let addr = udp.local_addr().unwrap();
+            if TcpListener::bind(addr).is_ok() {
+                return addr;
+            }
+        }
+    }
+
+    fn wait_for_rpc_ready(rpc_client: &RpcClient) {
+        wait_for("RPC to accept requests", Duration::from_secs(2), || {
+            rpc_client.get_latest_blockhash().is_ok()
+        });
+    }
+
+    fn wait_for(label: &str, timeout: Duration, mut condition: impl FnMut() -> bool) {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if condition() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(condition(), "timed out waiting for {label}");
     }
 
     fn create_test_bank() -> Bank {
@@ -2330,6 +2415,40 @@ mod tests {
         assert!(account_diff.l1_account.is_none());
         assert_eq!(account_diff.l1_lt_hash, LtHash::identity());
         assert_eq!(account_diff.er_account.lamports(), 7);
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_credit_deposit_records_er_history_for_depositor() {
+        let (_, mut runtime) = create_runtime();
+        let depositor = Pubkey::new_unique();
+
+        runtime.credit_deposit(&depositor, 7);
+
+        let signatures = runtime
+            .er_history_store
+            .get_signatures_for_address(&depositor, None, None, 10, CommitmentConfig::confirmed())
+            .unwrap();
+        assert_eq!(signatures.len(), 1);
+
+        let transaction = runtime
+            .er_history_store
+            .get_transaction(&signatures[0].signature, CommitmentConfig::confirmed())
+            .expect("deposit should be retrievable by signature");
+        let TransactionWithStatusMeta::Complete(tx) = transaction.tx_with_meta else {
+            panic!("deposit transaction should include metadata");
+        };
+        assert_eq!(tx.meta.status, Ok(()));
+        let depositor_index = tx
+            .transaction
+            .message
+            .static_account_keys()
+            .iter()
+            .position(|key| key == &depositor)
+            .expect("deposit transaction should touch depositor");
+        assert_eq!(tx.meta.pre_balances[depositor_index], 0);
+        assert_eq!(tx.meta.post_balances[depositor_index], 7);
 
         runtime.shutdown();
     }
@@ -3107,8 +3226,11 @@ mod tests {
     fn test_nonzero_er_fee_structure_survives_slot_advancement() {
         let lamports_per_signature = 5_000;
         let mut runtime = create_runtime_with_fee(lamports_per_signature);
+        let initial_slot = runtime.bank().slot();
         runtime.activate();
-        std::thread::sleep(Duration::from_millis(900));
+        wait_for("slot advancement", Duration::from_secs(2), || {
+            runtime.bank().slot() > initial_slot
+        });
         let bank = runtime.bank();
         let fee_payer = Pubkey::new_unique();
         let message = sanitized_transfer_message(&bank, &fee_payer);
@@ -3131,7 +3253,7 @@ mod tests {
         let (_, mut runtime) = create_runtime();
         let rpc_client = rpc_client(&runtime);
 
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         let blockhash = rpc_client.get_latest_blockhash().unwrap();
         assert_ne!(blockhash, solana_hash::Hash::default());
@@ -3171,7 +3293,7 @@ mod tests {
         .unwrap();
         let rpc_client = rpc_client(&runtime);
 
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         let balance = rpc_client.get_balance(&funded_pubkey).unwrap();
         assert_eq!(balance, initial_balance);
@@ -3216,7 +3338,7 @@ mod tests {
         let rpc_client = rpc_client(&runtime);
 
         // Wait for the slot advancer to advance past the initial slots
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         // Refresh blockhash using processed commitment (heaviest slot) before sending transaction
         let blockhash = rpc_client
@@ -3240,7 +3362,7 @@ mod tests {
             .unwrap();
 
         // Wait for transaction to be processed (longer sleep for slower slot advancement)
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         // Use processed commitment to read from the working bank, not the root
         let receiver_balance = rpc_client
@@ -3298,7 +3420,7 @@ mod tests {
         runtime.activate();
         let rpc_client = rpc_client(&runtime);
 
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         let blockhash = rpc_client
             .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
@@ -3375,7 +3497,7 @@ mod tests {
         runtime.activate();
         let rpc_client = rpc_client(&runtime);
 
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         let blockhash = rpc_client
             .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
@@ -3441,7 +3563,7 @@ mod tests {
         runtime.activate();
         let rpc_client = rpc_client(&runtime);
 
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         let blockhash = rpc_client
             .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
@@ -3511,7 +3633,7 @@ mod tests {
         runtime.activate();
         let rpc_client = rpc_client(&runtime);
 
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         let first_blockhash = rpc_client
             .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
@@ -3591,7 +3713,7 @@ mod tests {
         runtime.activate();
         let rpc_client = rpc_client(&runtime);
 
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         let first_blockhash = rpc_client
             .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
@@ -3674,7 +3796,7 @@ mod tests {
         runtime.activate();
         let rpc_client = rpc_client(&runtime);
 
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         let blockhash = rpc_client
             .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
@@ -3696,11 +3818,19 @@ mod tests {
             .send_transaction_with_config(&tx, config)
             .unwrap();
 
-        std::thread::sleep(Duration::from_secs(2));
-
-        let confirmed_tx = rpc_client
-            .get_transaction(&signature, UiTransactionEncoding::Json)
-            .unwrap();
+        let confirmed_tx = {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                match rpc_client.get_transaction(&signature, UiTransactionEncoding::Json) {
+                    Ok(tx) => break tx,
+                    Err(err) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(10));
+                        drop(err);
+                    }
+                    Err(err) => panic!("timed out waiting for transaction history: {err}"),
+                }
+            }
+        };
         assert_eq!(confirmed_tx.transaction_index, Some(0));
         let confirmed_meta = confirmed_tx
             .transaction
@@ -3781,7 +3911,7 @@ mod tests {
         assert!(!runtime.is_active());
         let rpc_client = rpc_client(&runtime);
 
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         // RPC reads should still work when inactive
         let blockhash = rpc_client
@@ -3809,7 +3939,7 @@ mod tests {
             "unexpected inactive sendTransaction error: {err}"
         );
 
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         // Receiver should have 0 balance — transaction was rejected
         let receiver_balance = rpc_client
@@ -4393,8 +4523,6 @@ mod tests {
         runtime.reset_to_new_parent(new_parent);
         runtime.activate();
 
-        std::thread::sleep(Duration::from_millis(500));
-
         // Account B (created after startup) should now be visible
         assert_eq!(runtime.bank().get_balance(&account_b), 20_000_000_000);
 
@@ -4666,7 +4794,7 @@ mod tests {
         let rpc_client = rpc_client(&runtime);
 
         // Wait for the slot advancer to advance past the initial slots
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         // Refresh blockhash using processed commitment (heaviest slot) before sending transaction
         let blockhash = rpc_client
@@ -4690,7 +4818,7 @@ mod tests {
             .unwrap();
 
         // Wait for transaction to be processed (longer sleep for slower slot advancement)
-        std::thread::sleep(Duration::from_secs(2));
+        wait_for_rpc_ready(&rpc_client);
 
         // Use processed commitment to read from the working bank, not the root
         let receiver_balance = rpc_client
@@ -4709,8 +4837,6 @@ mod tests {
         let rpc_client = rpc_client(&runtime);
 
         let old_blockhash = rpc_client.get_latest_blockhash().unwrap();
-
-        std::thread::sleep(Duration::from_secs(3));
 
         let result = rpc_client.send_transaction(&Transaction::new_unsigned(
             Message::new_with_blockhash(&[], None, &old_blockhash),
@@ -4756,7 +4882,7 @@ mod tests {
         runtime.activate();
         let rpc_client = rpc_client(&runtime);
 
-        std::thread::sleep(Duration::from_millis(500));
+        wait_for_rpc_ready(&rpc_client);
 
         let mut results = Vec::new();
         for _ in 0..100 {
@@ -4775,8 +4901,6 @@ mod tests {
             };
             results.push(rpc_client.send_transaction_with_config(&tx, config));
         }
-
-        std::thread::sleep(Duration::from_millis(500));
 
         let successes = results.iter().filter(|r| r.is_ok()).count();
         assert!(
@@ -4993,7 +5117,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reset_to_new_parent_rehydrates_existing_delegations_from_l1() {
+    fn test_reset_to_new_parent_skips_historical_delegation_scan_on_hot_path() {
         agave_logger::setup();
 
         let (parent_bank, mut runtime) = create_runtime();
@@ -5031,19 +5155,12 @@ mod tests {
         runtime.reset_to_new_parent(Arc::new(l1_bank));
 
         assert!(
-            runtime.delegated_accounts().contains(&delegated_pubkey),
-            "reset should hydrate delegated set from existing L1 DelegationRecord accounts"
+            !runtime.delegated_accounts().contains(&delegated_pubkey),
+            "hotfix: reset must not scan historical L1 DelegationRecord accounts"
         );
-        let er_delegated_account = runtime
-            .bank()
-            .get_account(&delegated_pubkey)
-            .expect("delegated account should be restored into ER after reset");
-        assert_eq!(er_delegated_account.owner(), &owner_program);
-        assert_eq!(er_delegated_account.data(), delegated_l1_snapshot.data());
         assert!(runtime
             .initial_account_snapshot(&delegated_pubkey)
-            .is_some());
-        assert!(runtime.bank().get_account(&programdata_address).is_some());
+            .is_none());
 
         runtime.shutdown();
     }
@@ -5592,10 +5709,9 @@ mod tests {
         )
         .unwrap();
 
-        std::thread::sleep(Duration::from_secs(2));
-
         // Call getDelegatedAccounts via RPC
         let rpc_client = rpc_client(&runtime);
+        wait_for_rpc_ready(&rpc_client);
         let accounts: Vec<String> = rpc_client
             .send(
                 solana_rpc_client_types::request::RpcRequest::Custom {

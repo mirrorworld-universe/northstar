@@ -10,7 +10,11 @@ use {
     packet_container::PacketContainer,
     solana_cost_model::cost_model::CostModel,
     solana_fee_structure::FeeDetails,
-    solana_gossip::{cluster_info::ClusterInfo, contact_info::Protocol, node::NodeMultihoming},
+    solana_gossip::{
+        cluster_info::ClusterInfo,
+        contact_info::{ContactInfo, Protocol},
+        node::NodeMultihoming,
+    },
     solana_keypair::Keypair,
     solana_net_utils::{multihomed_sockets::BindIpAddrs, token_bucket::TokenBucket},
     solana_packet as packet,
@@ -94,14 +98,14 @@ impl ForwardAddressGetter {
         }
     }
 
-    /// Returns a list of forwarding addresses for non-vote transactions.
+    /// Returns a list of leader TPU addresses for non-vote transactions.
     fn get_non_vote_forwarding_addresses(
         &self,
         max_count: u64,
         protocol: Protocol,
     ) -> Vec<SocketAddr> {
         next_leaders(&self.cluster_info, &self.poh_recorder, max_count, |node| {
-            node.tpu_forwards(protocol)
+            non_vote_transaction_address(node, protocol)
         })
     }
 
@@ -409,6 +413,15 @@ impl<VoteClient: ForwardingClient, NonVoteClient: ForwardingClient>
             }
         }
     }
+}
+
+fn non_vote_transaction_address(node: &ContactInfo, protocol: Protocol) -> Option<SocketAddr> {
+    // Sonic: Northstar settlement transactions originate from this validator and must land on
+    // L1 like normal user transactions. Some clusters advertise TPU-forwards QUIC sockets that
+    // accept gossip contact info but reject direct QUIC connections, causing settlement packets to
+    // be "forwarded" locally while never reaching the leader. Prefer the leader's normal TPU and
+    // only fall back to TPU-forwards when no TPU socket is advertised.
+    node.tpu(protocol).or_else(|| node.tpu_forwards(protocol))
 }
 
 /// [`ForwardingClientError`] enum represents failure when sending transactions
@@ -773,7 +786,10 @@ mod tests {
         solana_pubkey::Pubkey,
         solana_runtime::genesis_utils::create_genesis_config,
         solana_system_transaction as system_transaction,
-        std::sync::{Arc, Mutex},
+        std::{
+            net::SocketAddr,
+            sync::{Arc, Mutex},
+        },
     };
 
     #[derive(Clone)]
@@ -838,6 +854,39 @@ mod tests {
         assert!(!initial_packet_meta_filter(&meta_with_flags(
             PacketFlags::FROM_STAKED_NODE | PacketFlags::DISCARD
         )));
+    }
+
+    #[test]
+    fn non_vote_transactions_prefer_normal_tpu_over_tpu_forwards() {
+        let pubkey = Pubkey::new_unique();
+        let mut contact = ContactInfo::new_localhost(&pubkey, 0);
+        let tpu_addr: SocketAddr = "127.0.0.1:10001".parse().unwrap();
+        let forwards_addr: SocketAddr = "127.0.0.1:10002".parse().unwrap();
+        contact.set_tpu(Protocol::QUIC, tpu_addr).unwrap();
+        contact
+            .set_tpu_forwards(Protocol::QUIC, forwards_addr)
+            .unwrap();
+
+        assert_eq!(
+            non_vote_transaction_address(&contact, Protocol::QUIC),
+            Some(tpu_addr)
+        );
+    }
+
+    #[test]
+    fn non_vote_transactions_fall_back_to_tpu_forwards_when_tpu_missing() {
+        let pubkey = Pubkey::new_unique();
+        let mut contact = ContactInfo::new_localhost(&pubkey, 0);
+        let forwards_addr: SocketAddr = "127.0.0.1:10002".parse().unwrap();
+        contact.remove_tpu();
+        contact
+            .set_tpu_forwards(Protocol::QUIC, forwards_addr)
+            .unwrap();
+
+        assert_eq!(
+            non_vote_transaction_address(&contact, Protocol::QUIC),
+            Some(forwards_addr)
+        );
     }
 
     #[test]
