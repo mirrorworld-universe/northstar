@@ -923,6 +923,16 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
                 .validator(is_parsable::<u16>)
                 .help("Port for the ephemeral rollup TPU (QUIC) endpoint"),
         )
+        // Sonic: ER transaction history retention window, measured in ER slots.
+        .arg(
+            Arg::with_name("er_history_max_retained_slots")
+                .long("er-history-max-retained-slots")
+                .value_name("SLOTS")
+                .takes_value(true)
+                .default_value("10000")
+                .validator(is_parsable::<usize>)
+                .help("Maximum ER slot age retained in in-memory transaction history"),
+        )
         .args(&pub_sub_config::args(/*test_validator:*/ true))
 }
 

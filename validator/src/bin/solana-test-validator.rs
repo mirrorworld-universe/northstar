@@ -326,6 +326,11 @@ fn main() {
         .unwrap_or("8912")
         .parse()
         .expect("valid ephemeral tpu port");
+    let er_history_max_retained_slots: usize = matches
+        .value_of("er_history_max_retained_slots")
+        .unwrap_or("10000")
+        .parse()
+        .expect("valid ER history retained slot count");
 
     let warp_slot = if matches.is_present("warp_slot") {
         Some(match matches.value_of("warp_slot") {
@@ -524,6 +529,7 @@ fn main() {
         genesis.ephemeral_rpc_port(ephemeral_rpc_port);
         genesis.ephemeral_ws_port(ephemeral_ws_port);
         genesis.ephemeral_tpu_port(ephemeral_tpu_port);
+        genesis.er_history_max_retained_slots(er_history_max_retained_slots);
     }
 
     genesis.rpc_config(JsonRpcConfig {

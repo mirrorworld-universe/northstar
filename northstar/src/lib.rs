@@ -13,6 +13,7 @@ use {
     solana_keypair::Keypair,
     solana_pubkey::Pubkey,
     solana_rent::Rent,
+    solana_rpc::er_history::DEFAULT_MAX_RETAINED_SLOTS,
     solana_runtime::bank::Bank,
     solana_signer::Signer,
     solana_transaction::Transaction,
@@ -183,6 +184,7 @@ pub struct EphemeralForkMetadata {}
 pub struct Manager {
     config: ManagerConfig,
     slot_duration: Duration,
+    er_history_max_retained_slots: usize,
     /// Sonic: Always-on ephemeral runtime. Created once at startup via
     /// `init_runtime()`, stays alive for the validator's lifetime.
     /// The `active` flag inside gates transaction acceptance.
@@ -196,12 +198,17 @@ impl Manager {
         Self {
             config,
             slot_duration: DEFAULT_ER_SLOT_DURATION,
+            er_history_max_retained_slots: DEFAULT_MAX_RETAINED_SLOTS,
             runtime: None,
         }
     }
 
     pub fn set_slot_duration(&mut self, slot_duration: Duration) {
         self.slot_duration = slot_duration;
+    }
+
+    pub fn set_er_history_max_retained_slots(&mut self, max_retained_slots: usize) {
+        self.er_history_max_retained_slots = max_retained_slots;
     }
 
     /// Sonic: Check if an ephemeral session is currently active (accepting transactions)
@@ -590,6 +597,7 @@ impl Manager {
             self.config.portal_program_id,
             self.config.manager_account.clone(),
             self.slot_duration,
+            self.er_history_max_retained_slots,
         )
         .map_err(|e| {
             error!("Failed to create ephemeral runtime: {}", e);
@@ -795,6 +803,7 @@ impl Manager {
             self.config.portal_program_id,
             self.config.manager_account.clone(),
             self.slot_duration,
+            self.er_history_max_retained_slots,
         )
         .map_err(|e| {
             error!("Failed to create ephemeral runtime: {}", e);

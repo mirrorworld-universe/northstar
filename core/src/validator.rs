@@ -405,6 +405,8 @@ pub struct ValidatorConfig {
     pub ephemeral_ws_port: u16,
     // Sonic: Ephemeral TPU port for rollup QUIC transactions
     pub ephemeral_tpu_port: u16,
+    // Sonic: Maximum ER slot age retained in in-memory transaction history
+    pub er_history_max_retained_slots: usize,
 }
 
 impl ValidatorConfig {
@@ -497,6 +499,8 @@ impl ValidatorConfig {
             ephemeral_ws_port: 8911,
             // Sonic: Default ephemeral TPU port
             ephemeral_tpu_port: 8912,
+            // Sonic: Default ER history retention
+            er_history_max_retained_slots: solana_rpc::er_history::DEFAULT_MAX_RETAINED_SLOTS,
         }
     }
 
@@ -1435,6 +1439,7 @@ impl Validator {
                             .parse()
                             .unwrap(),
                         slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
+                        er_history_max_retained_slots: config.er_history_max_retained_slots,
                         settlement_sender: Some(banking_tracer_channels.non_vote_sender.clone()),
                         settlement_forward_sender: Some(settlement_forward_sender.clone()),
                     },
