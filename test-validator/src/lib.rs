@@ -183,6 +183,8 @@ pub struct TestValidatorGenesis {
     ephemeral_ws_port: u16,
     /// Sonic: Ephemeral TPU port for the rollup QUIC
     ephemeral_tpu_port: u16,
+    /// Sonic: Maximum ER slot age retained in in-memory transaction history.
+    er_history_max_retained_slots: usize,
 }
 
 impl Default for TestValidatorGenesis {
@@ -223,6 +225,7 @@ impl Default for TestValidatorGenesis {
             ephemeral_rpc_port: 8910,
             ephemeral_ws_port: 8911,
             ephemeral_tpu_port: 8912,
+            er_history_max_retained_slots: solana_rpc::er_history::DEFAULT_MAX_RETAINED_SLOTS,
         }
     }
 }
@@ -395,6 +398,12 @@ impl TestValidatorGenesis {
     /// Sonic: Set the ephemeral TPU port for the rollup QUIC endpoint.
     pub fn ephemeral_tpu_port(&mut self, port: u16) -> &mut Self {
         self.ephemeral_tpu_port = port;
+        self
+    }
+
+    /// Sonic: Set the ER transaction history retention window, measured in ER slots.
+    pub fn er_history_max_retained_slots(&mut self, slots: usize) -> &mut Self {
+        self.er_history_max_retained_slots = slots;
         self
     }
 
@@ -1277,6 +1286,7 @@ impl TestValidator {
             ephemeral_ws_port: config.ephemeral_ws_port,
             // Sonic: Ephemeral TPU port
             ephemeral_tpu_port: config.ephemeral_tpu_port,
+            er_history_max_retained_slots: config.er_history_max_retained_slots,
             ..ValidatorConfig::default_for_test()
         };
         if let Some(ref tower_storage) = config.tower_storage {

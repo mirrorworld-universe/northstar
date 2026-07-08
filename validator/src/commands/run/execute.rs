@@ -841,6 +841,7 @@ pub fn execute(
         ephemeral_ws_port: run_args.ephemeral_ws_port,
         // Sonic: Ephemeral TPU port for rollup QUIC
         ephemeral_tpu_port: run_args.ephemeral_tpu_port,
+        er_history_max_retained_slots: run_args.er_history_max_retained_slots,
         broadcast_stage_type: BroadcastStageType::Standard,
         block_verification_method: value_t_or_exit!(
             matches,

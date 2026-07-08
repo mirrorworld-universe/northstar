@@ -90,6 +90,7 @@ pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
         ephemeral_rpc_port: config.ephemeral_rpc_port,
         ephemeral_ws_port: config.ephemeral_ws_port,
         ephemeral_tpu_port: config.ephemeral_tpu_port,
+        er_history_max_retained_slots: config.er_history_max_retained_slots,
     }
 }
 
