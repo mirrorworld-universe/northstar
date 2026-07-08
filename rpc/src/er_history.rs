@@ -46,12 +46,13 @@ pub struct ErPerfSample {
     pub sample_period_secs: u16,
 }
 
-const DEFAULT_MAX_RETAINED_SLOTS: usize = 10_000;
+pub const DEFAULT_MAX_RETAINED_SLOTS: usize = 10_000;
 
 #[derive(Default)]
 struct ErHistoryInner {
     slots: BTreeMap<Slot, ErSlotHistory>,
     transactions: HashMap<Signature, ConfirmedTransactionWithStatusMeta>,
+    latest_observed_slot: Option<Slot>,
 }
 
 pub struct ErHistoryStore {
@@ -61,16 +62,12 @@ pub struct ErHistoryStore {
 
 impl Default for ErHistoryStore {
     fn default() -> Self {
-        Self {
-            inner: RwLock::new(ErHistoryInner::default()),
-            max_retained_slots: DEFAULT_MAX_RETAINED_SLOTS,
-        }
+        Self::new(DEFAULT_MAX_RETAINED_SLOTS)
     }
 }
 
 impl ErHistoryStore {
-    #[cfg(test)]
-    fn new_for_tests(max_retained_slots: usize) -> Self {
+    pub fn new(max_retained_slots: usize) -> Self {
         Self {
             inner: RwLock::new(ErHistoryInner::default()),
             max_retained_slots,
@@ -100,6 +97,7 @@ impl ErHistoryStore {
         }
 
         let slot = bank.slot();
+        Self::observe_slot(&mut inner, slot);
         let slot_history = inner.slots.entry(slot).or_default();
         Self::populate_slot_from_bank(slot_history, bank);
         let index = slot_history.signatures.len() as u32;
@@ -120,8 +118,27 @@ impl ErHistoryStore {
         Some(index)
     }
 
+    fn observe_slot(inner: &mut ErHistoryInner, slot: Slot) {
+        inner.latest_observed_slot = Some(
+            inner
+                .latest_observed_slot
+                .map_or(slot, |latest| latest.max(slot)),
+        );
+    }
+
     fn prune_excess_slots(&self, inner: &mut ErHistoryInner) {
-        while inner.slots.len() > self.max_retained_slots {
+        let Some(latest_slot) = inner.latest_observed_slot else {
+            return;
+        };
+        let first_retained_slot = latest_slot
+            .saturating_add(1)
+            .saturating_sub(self.max_retained_slots as Slot);
+
+        while inner
+            .slots
+            .first_key_value()
+            .is_some_and(|(slot, _)| *slot < first_retained_slot)
+        {
             let Some(slot) = inner.slots.keys().next().copied() else {
                 break;
             };
@@ -136,7 +153,11 @@ impl ErHistoryStore {
     pub fn finalize_slot(&self, bank: &Bank) {
         let slot = bank.slot();
         let mut inner = self.inner.write().unwrap();
-        let slot_history = inner.slots.entry(slot).or_default();
+        Self::observe_slot(&mut inner, slot);
+        let Some(slot_history) = inner.slots.get_mut(&slot) else {
+            self.prune_excess_slots(&mut inner);
+            return;
+        };
         Self::populate_slot_from_bank(slot_history, bank);
         slot_history.finalized = true;
 
@@ -264,10 +285,9 @@ impl ErHistoryStore {
         self.inner.read().unwrap().slots.keys().next().copied()
     }
 
-    /// Synthesize `getRecentPerformanceSamples` data from finalized ER slots.
-    /// Buckets adjacent slots into ~`sample_period_secs`-second windows using
-    /// `slot_duration_ms`. Returns at most `limit` samples, newest first (the
-    /// same order Solana RPC returns).
+    /// Synthesize `getRecentPerformanceSamples` data from finalized ER slots with transactions.
+    /// Empty ER slots are intentionally not retained in memory, so samples report
+    /// transaction-bearing slots only. Returns newest first, like Solana RPC.
     pub fn recent_performance_samples(
         &self,
         limit: usize,
@@ -481,16 +501,13 @@ mod tests {
 
         assert_eq!(
             store.get_blocks(0, 10, CommitmentConfig::finalized()),
-            vec![0, 1]
+            vec![0]
         );
         assert_eq!(
             store.get_blocks_with_limit(0, 1, CommitmentConfig::finalized()),
             vec![0]
         );
-        assert_eq!(
-            store.get_block_time(1, CommitmentConfig::finalized()),
-            Some(bank1.clock().unix_timestamp)
-        );
+        assert_eq!(store.get_block_time(1, CommitmentConfig::finalized()), None);
     }
 
     #[test]
@@ -686,7 +703,7 @@ mod tests {
 
     #[test]
     fn test_history_prunes_slots_and_transactions_past_retention_limit() {
-        let store = ErHistoryStore::new_for_tests(3);
+        let store = ErHistoryStore::new(3);
         let payer = Keypair::new();
         let recipient = Pubkey::new_unique();
         let mut bank = Arc::new(create_test_bank());
@@ -704,7 +721,7 @@ mod tests {
             store.finalize_slot(&bank);
         }
 
-        // Retention is slot-count based and deterministic. Once slots 0 and 1
+        // Retention is slot-age based and deterministic. Once slots 0 and 1
         // fall out, their full transaction metadata must fall out too; this is
         // the invariant that prevents unbounded ER history memory growth.
         assert_eq!(store.get_first_available_block(), Some(2));
@@ -726,6 +743,39 @@ mod tests {
             store
                 .get_transaction(&signatures[2], CommitmentConfig::confirmed())
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn test_empty_slots_advance_retention_without_being_stored() {
+        let store = ErHistoryStore::new(3);
+        let payer = Keypair::new();
+        let recipient = Pubkey::new_unique();
+
+        let bank0 = Arc::new(create_test_bank());
+        let tx = create_test_tx(&bank0, &payer, &recipient);
+        let signature = tx.transaction.signatures[0];
+        store.record_transaction(&bank0, tx);
+        store.finalize_slot(&bank0);
+        assert_eq!(
+            store.get_blocks(0, 10, CommitmentConfig::finalized()),
+            vec![0]
+        );
+
+        let mut bank = bank0;
+        for slot in 1u64..5 {
+            bank = Arc::new(Bank::new_from_parent(bank, SlotLeader::new_unique(), slot));
+            store.finalize_slot(&bank);
+        }
+
+        assert_eq!(
+            store.get_blocks(0, 10, CommitmentConfig::finalized()),
+            Vec::<Slot>::new()
+        );
+        assert!(
+            store
+                .get_transaction(&signature, CommitmentConfig::confirmed())
+                .is_none()
         );
     }
 }

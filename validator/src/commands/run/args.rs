@@ -60,6 +60,8 @@ pub struct RunArgs {
     pub ephemeral_ws_port: u16,
     // Sonic: Ephemeral TPU port for rollup QUIC transactions
     pub ephemeral_tpu_port: u16,
+    // Sonic: Maximum ER slot age retained in in-memory transaction history
+    pub er_history_max_retained_slots: usize,
     pub rpc_bootstrap_config: RpcBootstrapConfig,
     pub blockstore_options: BlockstoreOptions,
     pub json_rpc_config: JsonRpcConfig,
@@ -145,6 +147,11 @@ impl FromClapArgMatches for RunArgs {
             .unwrap_or("8912")
             .parse()
             .expect("valid ephemeral tpu port");
+        let er_history_max_retained_slots = matches
+            .value_of("er_history_max_retained_slots")
+            .unwrap_or("10000")
+            .parse()
+            .expect("valid ER history retained slot count");
 
         Ok(RunArgs {
             identity_keypair,
@@ -161,6 +168,8 @@ impl FromClapArgMatches for RunArgs {
             ephemeral_ws_port,
             // Sonic: Ephemeral TPU port
             ephemeral_tpu_port,
+            // Sonic: ER history retention
+            er_history_max_retained_slots,
             rpc_bootstrap_config: RpcBootstrapConfig::from_clap_arg_match(matches)?,
             blockstore_options: BlockstoreOptions::from_clap_arg_match(matches)?,
             json_rpc_config: JsonRpcConfig::from_clap_arg_match(matches)?,
@@ -719,6 +728,16 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .default_value("8912")
             .validator(is_parsable::<u16>)
             .help("Port for ephemeral rollup TPU (QUIC) endpoint"),
+    )
+    // Sonic: ER transaction history retention window, measured in ER slots.
+    .arg(
+        Arg::with_name("er_history_max_retained_slots")
+            .long("er-history-max-retained-slots")
+            .value_name("SLOTS")
+            .takes_value(true)
+            .default_value("10000")
+            .validator(is_parsable::<usize>)
+            .help("Maximum ER slot age retained in in-memory transaction history"),
     )
     .arg(
         Arg::with_name("repair_validators")
@@ -1389,6 +1408,7 @@ mod tests {
                 ephemeral_ws_port: 8911,
                 // Sonic: Default ephemeral TPU port
                 ephemeral_tpu_port: 8912,
+                er_history_max_retained_slots: solana_rpc::er_history::DEFAULT_MAX_RETAINED_SLOTS,
                 rpc_bootstrap_config: RpcBootstrapConfig::default(),
                 blockstore_options: BlockstoreOptions::default(),
                 json_rpc_config,
@@ -1424,6 +1444,7 @@ mod tests {
                 ephemeral_ws_port: self.ephemeral_ws_port,
                 // Sonic:
                 ephemeral_tpu_port: self.ephemeral_tpu_port,
+                er_history_max_retained_slots: self.er_history_max_retained_slots,
                 rpc_bootstrap_config: self.rpc_bootstrap_config.clone(),
                 blockstore_options: self.blockstore_options.clone(),
                 json_rpc_config: self.json_rpc_config.clone(),

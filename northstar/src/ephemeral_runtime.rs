@@ -21,7 +21,7 @@ use {
     solana_message::{v0::LoadedAddresses, Message, VersionedMessage},
     solana_pubkey::Pubkey,
     solana_rpc::{
-        er_history::ErHistoryStore,
+        er_history::{ErHistoryStore, DEFAULT_MAX_RETAINED_SLOTS},
         max_slots::MaxSlots,
         northstar::NorthStarSyncStatus,
         optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
@@ -449,9 +449,11 @@ impl EphemeralRuntime {
             portal_program_id,
             manager_keypair,
             crate::DEFAULT_ER_SLOT_DURATION,
+            DEFAULT_MAX_RETAINED_SLOTS,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_slot_duration(
         parent_bank: Arc<Bank>,
         cluster_info: Arc<ClusterInfo>,
@@ -462,6 +464,7 @@ impl EphemeralRuntime {
         portal_program_id: Pubkey,
         manager_keypair: Arc<Keypair>,
         slot_duration: Duration,
+        er_history_max_retained_slots: usize,
     ) -> Result<Self, String> {
         // Place ER slots far above L1 slots so the shared AccountsDb root
         // tracker never sees an out-of-order add_root from either side.
@@ -555,7 +558,7 @@ impl EphemeralRuntime {
         let active = Arc::new(AtomicBool::new(false));
         let session_pda: Arc<RwLock<Option<Pubkey>>> = Arc::new(RwLock::new(None));
         let sync_status = Arc::new(NorthStarSyncStatus::new(parent_bank.slot()));
-        let er_history_store = Arc::new(ErHistoryStore::default());
+        let er_history_store = Arc::new(ErHistoryStore::new(er_history_max_retained_slots));
         let withdrawal_payout_events = Arc::new(RwLock::new(Vec::new()));
 
         let ledger_dir = TempDir::new().map_err(|e| e.to_string())?;

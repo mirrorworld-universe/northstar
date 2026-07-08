@@ -40,6 +40,8 @@ pub struct NorthStarServiceConfig {
     pub tpu_addr: SocketAddr,
     /// Duration for each slot in the ephemeral rollup
     pub slot_duration: Duration,
+    /// Maximum ER slot age retained in in-memory transaction history.
+    pub er_history_max_retained_slots: usize,
     /// Local BankingStage non-vote sender for permissioned Portal settlement txs.
     pub settlement_sender: Option<BankingPacketSender>,
     /// Forwarding-stage sender for propagation when this node is not current leader.
@@ -574,6 +576,7 @@ impl NorthStarService {
         let portal_program_id = cfg.portal_program_id;
         let mut manager = northstar::Manager::new(cfg);
         manager.set_slot_duration(config.slot_duration);
+        manager.set_er_history_max_retained_slots(config.er_history_max_retained_slots);
         {
             let root_bank = bank_forks.read().unwrap().root_bank();
             if let Err(e) = manager.init_runtime(
@@ -1320,6 +1323,7 @@ mod tests {
             ws_addr: find_free_addr(),
             tpu_addr: find_free_addr(),
             slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
+            er_history_max_retained_slots: solana_rpc::er_history::DEFAULT_MAX_RETAINED_SLOTS,
             settlement_sender: None,
             settlement_forward_sender: None,
         };
@@ -1374,6 +1378,7 @@ mod tests {
             ws_addr: find_free_addr(),
             tpu_addr: find_free_addr(),
             slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
+            er_history_max_retained_slots: solana_rpc::er_history::DEFAULT_MAX_RETAINED_SLOTS,
             settlement_sender: None,
             settlement_forward_sender: None,
         };
@@ -1431,6 +1436,7 @@ mod tests {
             ws_addr: find_free_addr(),
             tpu_addr: find_free_addr(),
             slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
+            er_history_max_retained_slots: solana_rpc::er_history::DEFAULT_MAX_RETAINED_SLOTS,
             settlement_sender: None,
             settlement_forward_sender: None,
         };
@@ -1502,6 +1508,7 @@ mod tests {
             ws_addr: find_free_addr(),
             tpu_addr: find_free_addr(),
             slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
+            er_history_max_retained_slots: solana_rpc::er_history::DEFAULT_MAX_RETAINED_SLOTS,
             settlement_sender: None,
             settlement_forward_sender: None,
         };
@@ -1604,6 +1611,7 @@ mod tests {
             ws_addr: find_free_addr(),
             tpu_addr: find_free_addr(),
             slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
+            er_history_max_retained_slots: solana_rpc::er_history::DEFAULT_MAX_RETAINED_SLOTS,
             settlement_sender: None,
             settlement_forward_sender: None,
         };
@@ -1737,6 +1745,7 @@ mod tests {
             ws_addr: find_free_addr(),
             tpu_addr: find_free_addr(),
             slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
+            er_history_max_retained_slots: solana_rpc::er_history::DEFAULT_MAX_RETAINED_SLOTS,
             settlement_sender: None,
             settlement_forward_sender: None,
         };
