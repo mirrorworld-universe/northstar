@@ -1,6 +1,9 @@
 #![no_std]
+#[cfg(not(target_os = "solana"))]
+extern crate alloc;
 
 mod error;
+mod events;
 mod instruction;
 mod instructions;
 mod pda;
@@ -13,7 +16,7 @@ use {
         program_error::ProgramError, ProgramResult, SUCCESS,
     },
 };
-pub use {error::*, instruction::*, pda::*, state::*};
+pub use {error::*, events::*, instruction::*, pda::*, state::*};
 
 pub const MAX_SETTLEMENT_CHUNK: usize = 700;
 pub const MAX_SETTLEMENT_LAMPORT_ACCOUNTS: usize = 10;
