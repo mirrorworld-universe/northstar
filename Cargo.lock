@@ -4671,6 +4671,7 @@ dependencies = [
  "agave-logger",
  "agave-reserved-account-keys",
  "agave-snapshots",
+ "base64 0.22.1",
  "bincode",
  "borsh",
  "crossbeam-channel",
@@ -4730,6 +4731,7 @@ dependencies = [
 name = "northstar-portal"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "borsh",
  "pinocchio",
  "pinocchio-log",

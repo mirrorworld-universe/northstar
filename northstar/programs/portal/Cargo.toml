@@ -13,6 +13,7 @@ bpf-entrypoint = []
 idl = ["dep:shank"]
 
 [dependencies]
+base64-no-std = { package = "base64", version = "0.22.1", default-features = false }
 pinocchio = "0.9"
 pinocchio-system = "0.4"
 pinocchio-log = "0.5"

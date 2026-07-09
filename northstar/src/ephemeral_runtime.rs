@@ -1879,10 +1879,34 @@ impl EphemeralRuntime {
         new_balance: u64,
     ) {
         let payer = Keypair::new();
+        let (from, _) = northstar_portal::find_deposit_receipt_pda(
+            &self.portal_program_id.to_bytes(),
+            &self.settings.session_pda.to_bytes(),
+            &depositor.to_bytes(),
+        );
+        let from = Pubkey::new_from_array(from);
+        let event = northstar_portal::NorthstarTransferEvent {
+            version: northstar_portal::NorthstarTransferEvent::VERSION,
+            kind: northstar_portal::TransferEventKind::Deposit,
+            from: from.to_bytes(),
+            to: depositor.to_bytes(),
+            lamports,
+            pre_balance: base_balance,
+            post_balance: new_balance,
+            slot: bank.slot(),
+            timestamp: bank.clock().unix_timestamp,
+        };
         let instruction = Instruction {
             program_id: self.portal_program_id,
-            accounts: vec![AccountMeta::new(*depositor, false)],
-            data: format!("northstar:deposit:{lamports}:{new_balance}").into_bytes(),
+            accounts: vec![
+                AccountMeta::new_readonly(from, false),
+                AccountMeta::new(*depositor, false),
+            ],
+            data: format!(
+                "northstar:deposit:v1:from={from};to={depositor};lamports={lamports};\
+                 pre={base_balance};post={new_balance}"
+            )
+            .into_bytes(),
         };
         let message = VersionedMessage::Legacy(Message::new_with_blockhash(
             &[instruction],
@@ -1915,9 +1939,27 @@ impl EphemeralRuntime {
             pre_balances: balances(base_balance),
             post_balances: balances(new_balance),
             inner_instructions: None,
-            log_messages: Some(vec![format!(
-                "Northstar deposit credited {lamports} lamports to {depositor}"
-            )]),
+            log_messages: Some(vec![
+                format!("Program {} invoke [1]", self.portal_program_id),
+                format!("Program log: Instruction: NorthstarDeposit"),
+                format!(
+                    "Program log: NorthstarTransferEvent kind={} from={from} to={depositor} \
+                     lamports={lamports} pre_balance={base_balance} post_balance={new_balance} \
+                     slot={} timestamp={}",
+                    event.kind.as_str(),
+                    event.slot,
+                    event.timestamp
+                ),
+                northstar_portal::transfer_event_data_log(&event),
+                format!(
+                    "Northstar deposit credited {lamports} lamports from {from} to {depositor}"
+                ),
+                format!(
+                    "Program {} consumed 0 of 0 compute units",
+                    self.portal_program_id
+                ),
+                format!("Program {} success", self.portal_program_id),
+            ]),
             pre_token_balances: Some(vec![]),
             post_token_balances: Some(vec![]),
             rewards: Some(vec![]),
@@ -2013,7 +2055,8 @@ impl Drop for EphemeralRuntime {
 mod tests {
     use {
         super::*,
-        northstar_portal::{DelegationRecord, DepositReceipt},
+        base64::{prelude::BASE64_STANDARD, Engine as _},
+        northstar_portal::{DelegationRecord, DepositReceipt, NorthstarTransferEvent},
         solana_account::{
             state_traits::StateMut, AccountSharedData, ReadableAccount, WritableAccount,
         },
@@ -2452,6 +2495,34 @@ mod tests {
             .expect("deposit transaction should touch depositor");
         assert_eq!(tx.meta.pre_balances[depositor_index], 0);
         assert_eq!(tx.meta.post_balances[depositor_index], 7);
+        let logs = tx.meta.log_messages.as_ref().unwrap();
+        assert!(logs
+            .iter()
+            .any(|log| log == "Program log: Instruction: NorthstarDeposit"));
+        assert!(logs.iter().any(|log| log.contains("NorthstarTransferEvent")
+            && log.contains("kind=deposit")
+            && log.contains(&format!("to={depositor}"))
+            && log.contains("lamports=7")
+            && log.contains("pre_balance=0")
+            && log.contains("post_balance=7")));
+        let transfer_data = logs
+            .iter()
+            .find_map(|log| log.strip_prefix(northstar_portal::TRANSFER_EVENT_LOG_PREFIX))
+            .expect("deposit should emit a transfer data event log");
+        let event_data = BASE64_STANDARD.decode(transfer_data).unwrap();
+        let event: NorthstarTransferEvent = borsh::from_slice(&event_data).unwrap();
+        let (expected_from, _) = northstar_portal::find_deposit_receipt_pda(
+            &runtime.portal_program_id.to_bytes(),
+            &runtime.settings.session_pda.to_bytes(),
+            &depositor.to_bytes(),
+        );
+        assert_eq!(event.version, NorthstarTransferEvent::VERSION);
+        assert_eq!(event.kind, northstar_portal::TransferEventKind::Deposit);
+        assert_eq!(event.from, expected_from);
+        assert_eq!(event.to, depositor.to_bytes());
+        assert_eq!(event.lamports, 7);
+        assert_eq!(event.pre_balance, 0);
+        assert_eq!(event.post_balance, 7);
 
         runtime.shutdown();
     }
