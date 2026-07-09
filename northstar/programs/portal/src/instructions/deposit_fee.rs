@@ -1,6 +1,7 @@
 use {
     crate::{
         error::PortalError,
+        events::{emit_transfer_event, NorthstarTransferEvent, TransferEventKind},
         pda::{find_deposit_receipt_pda, find_withdrawal_sink_pda},
         state::{DepositReceipt, Session, WithdrawalSink},
     },
@@ -166,6 +167,11 @@ pub fn process_deposit_fee(
         }
     }
 
+    let receipt_rent_exempt = Rent::get()?.minimum_balance(DepositReceipt::LEN);
+    let pre_escrow = deposit_receipt
+        .lamports()
+        .checked_sub(receipt_rent_exempt)
+        .ok_or(PortalError::InsufficientFees)?;
     // Transfer lamports from depositor to the deposit_receipt PDA
     Transfer {
         from: depositor,
@@ -173,6 +179,22 @@ pub fn process_deposit_fee(
         lamports,
     }
     .invoke()?;
+
+    let post_escrow = deposit_receipt
+        .lamports()
+        .checked_sub(receipt_rent_exempt)
+        .ok_or(PortalError::InsufficientFees)?;
+    emit_transfer_event(&NorthstarTransferEvent {
+        version: NorthstarTransferEvent::VERSION,
+        kind: TransferEventKind::Deposit,
+        from: *depositor.key(),
+        to: *recipient_key,
+        lamports,
+        pre_balance: pre_escrow,
+        post_balance: post_escrow,
+        slot: clock.slot,
+        timestamp: clock.unix_timestamp,
+    });
 
     pinocchio_log::log!("DepositFee success");
 

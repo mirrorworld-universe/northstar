@@ -55,6 +55,7 @@ tokio.workspace = true
 
 northstar-portal.workspace = true
 
+base64.workspace = true
 borsh = { workspace = true }
 solana-rent.workspace = true
 spl-memo-interface.workspace = true

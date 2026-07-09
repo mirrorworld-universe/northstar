@@ -1,6 +1,7 @@
 use {
     crate::{
         error::PortalError,
+        events::{emit_transfer_event, NorthstarTransferEvent, TransferEventKind},
         instruction::SettleDepositReceipt,
         instructions::settlement::accumulate_receipt_checksum,
         pda::{find_deposit_receipt_pda, find_session_pda},
@@ -11,7 +12,7 @@ use {
         account_info::AccountInfo,
         program_error::ProgramError,
         pubkey::Pubkey,
-        sysvars::{rent::Rent, Sysvar},
+        sysvars::{clock::Clock, rent::Rent, Sysvar},
         ProgramResult,
     },
 };
@@ -138,12 +139,16 @@ pub fn process_settle_deposit_receipt(
         return Err(PortalError::InsufficientFees.into());
     }
 
+    let mut recipient_pre_balance = 0;
+    let mut recipient_post_balance = 0;
     if settle.payout_lamports > 0 {
         {
             let mut recipient_lamports = l1_recipient.try_borrow_mut_lamports()?;
+            recipient_pre_balance = *recipient_lamports;
             *recipient_lamports = recipient_lamports
                 .checked_add(settle.payout_lamports)
                 .ok_or(PortalError::ArithmeticOverflow)?;
+            recipient_post_balance = *recipient_lamports;
         }
         *deposit_receipt.try_borrow_mut_lamports()? = deposit_receipt
             .lamports()
@@ -171,6 +176,21 @@ pub fn process_settle_deposit_receipt(
     );
     let mut session_data = session.try_borrow_mut_data()?;
     BorshSerialize::serialize(&session_state, &mut &mut session_data[..Session::LEN]).unwrap();
+
+    if settle.payout_lamports > 0 {
+        let clock = Clock::get()?;
+        emit_transfer_event(&NorthstarTransferEvent {
+            version: NorthstarTransferEvent::VERSION,
+            kind: TransferEventKind::Withdrawal,
+            from: *er_source_key,
+            to: *l1_recipient_key,
+            lamports: settle.payout_lamports,
+            pre_balance: recipient_pre_balance,
+            post_balance: recipient_post_balance,
+            slot: settle.er_slot,
+            timestamp: clock.unix_timestamp,
+        });
+    }
 
     pinocchio_log::log!("SettleDepositReceipt success");
 
