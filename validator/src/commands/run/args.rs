@@ -60,7 +60,7 @@ pub struct RunArgs {
     pub ephemeral_ws_port: u16,
     // Sonic: Ephemeral TPU port for rollup QUIC transactions
     pub ephemeral_tpu_port: u16,
-    // Sonic: Maximum ER slot age retained in in-memory transaction history
+    // Sonic: Maximum number of non-empty ER slots retained in in-memory transaction history
     pub er_history_max_retained_slots: usize,
     pub rpc_bootstrap_config: RpcBootstrapConfig,
     pub blockstore_options: BlockstoreOptions,
@@ -729,7 +729,7 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .validator(is_parsable::<u16>)
             .help("Port for ephemeral rollup TPU (QUIC) endpoint"),
     )
-    // Sonic: ER transaction history retention window, measured in ER slots.
+    // Sonic: ER transaction history retention, measured in non-empty ER slots.
     .arg(
         Arg::with_name("er_history_max_retained_slots")
             .long("er-history-max-retained-slots")
@@ -737,7 +737,7 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .takes_value(true)
             .default_value("10000")
             .validator(is_parsable::<usize>)
-            .help("Maximum ER slot age retained in in-memory transaction history"),
+            .help("Maximum number of non-empty ER slots retained in in-memory transaction history"),
     )
     .arg(
         Arg::with_name("repair_validators")

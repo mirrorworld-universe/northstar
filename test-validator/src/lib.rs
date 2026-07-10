@@ -183,7 +183,7 @@ pub struct TestValidatorGenesis {
     ephemeral_ws_port: u16,
     /// Sonic: Ephemeral TPU port for the rollup QUIC
     ephemeral_tpu_port: u16,
-    /// Sonic: Maximum ER slot age retained in in-memory transaction history.
+    /// Sonic: Maximum number of non-empty ER slots retained in in-memory transaction history.
     er_history_max_retained_slots: usize,
 }
 
@@ -401,7 +401,7 @@ impl TestValidatorGenesis {
         self
     }
 
-    /// Sonic: Set the ER transaction history retention window, measured in ER slots.
+    /// Sonic: Set the maximum number of non-empty ER slots retained in transaction history.
     pub fn er_history_max_retained_slots(&mut self, slots: usize) -> &mut Self {
         self.er_history_max_retained_slots = slots;
         self
