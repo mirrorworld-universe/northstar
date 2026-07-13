@@ -2,8 +2,8 @@ use {
     crate::{
         error::PortalError,
         events::{emit_transfer_event, NorthstarTransferEvent, TransferEventKind},
-        pda::{find_deposit_receipt_pda, find_withdrawal_sink_pda},
-        state::{DepositReceipt, Session, WithdrawalSink},
+        pda::find_deposit_receipt_pda,
+        state::{DepositReceipt, Session},
     },
     borsh::{BorshDeserialize, BorshSerialize},
     pinocchio::{
@@ -34,7 +34,6 @@ pub fn process_deposit_fee(
     let deposit_receipt = &accounts[2]; // lamport receiver account belong to this program
     let recipient = &accounts[3]; // who will receive the lamports
     let _system_program = &accounts[4];
-    let withdrawal_sink = accounts.get(5);
 
     if !depositor.is_signer() {
         pinocchio_log::log!("ERROR: DepositFee failed: depositor is not signer");
@@ -135,35 +134,6 @@ pub fn process_deposit_fee(
         if receipt_state.session != *session_key || receipt_state.recipient != *recipient_key {
             pinocchio_log::log!("ERROR: DepositFee failed: receipt state seeds mismatch");
             return Err(PortalError::InvalidPdaSeeds.into());
-        }
-    }
-
-    if let Some(withdrawal_sink) = withdrawal_sink {
-        let (expected_sink_key, sink_bump) =
-            find_withdrawal_sink_pda(program_id, session_key, recipient_key);
-        if withdrawal_sink.key() != &expected_sink_key {
-            pinocchio_log::log!("ERROR: DepositFee failed: withdrawal sink PDA mismatch");
-            return Err(PortalError::InvalidPdaSeeds.into());
-        }
-        if withdrawal_sink.lamports() == 0 {
-            let rent = Rent::get()?;
-            let sink_lamports = rent.minimum_balance(0);
-            let sink_bump_bytes = [sink_bump];
-            let sink_seeds = &[
-                Seed::from(WithdrawalSink::SEED_PREFIX),
-                Seed::from(session_key.as_ref()),
-                Seed::from(recipient_key.as_ref()),
-                Seed::from(sink_bump_bytes.as_ref()),
-            ];
-            let sink_signer = Signer::from(sink_seeds);
-            CreateAccount {
-                from: depositor,
-                to: withdrawal_sink,
-                lamports: sink_lamports,
-                space: 0,
-                owner: &pinocchio_system::ID,
-            }
-            .invoke_signed(&[sink_signer])?;
         }
     }
 

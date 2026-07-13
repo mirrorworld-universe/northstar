@@ -5,7 +5,7 @@ use {
         nonce::check_nonce_account,
     },
     clap::{App, AppSettings, Arg, ArgMatches, SubCommand},
-    northstar_portal::{DelegationRecord, OpenSession, PortalInstruction},
+    northstar_portal::{DelegationRecord, OpenSession, PortalInstruction, WITHDRAWAL_SINK},
     solana_account::Account,
     solana_clap_utils::{
         compute_budget::{COMPUTE_UNIT_PRICE_ARG, ComputeUnitLimit, compute_unit_price_arg},
@@ -24,7 +24,7 @@ use {
     solana_remote_wallet::remote_wallet::RemoteWalletManager,
     solana_rpc_client::nonblocking::rpc_client::RpcClient,
     solana_rpc_client_nonce_utils::nonblocking::blockhash_query::BlockhashQuery,
-    solana_sdk_ids::system_program,
+    solana_sdk_ids::{system_program, sysvar},
     solana_signer::Signer,
     solana_system_interface::instruction as system_instruction,
     solana_transaction::Transaction,
@@ -628,14 +628,6 @@ fn find_deposit_receipt_pda(program_id: &Pubkey, session: &Pubkey, recipient: &P
     .0
 }
 
-fn find_withdrawal_sink_pda(program_id: &Pubkey, session: &Pubkey, recipient: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(
-        &[b"withdrawal_sink", session.as_ref(), recipient.as_ref()],
-        program_id,
-    )
-    .0
-}
-
 fn delegation_record_owner_program(account: &Account) -> Result<Pubkey, CliError> {
     if account.data.len() != DelegationRecord::LEN {
         return Err(CliError::BadParameter(format!(
@@ -925,8 +917,6 @@ pub async fn process_portal_subcommand(
             let session_pda = find_session_pda(&portal_program_id);
             let deposit_receipt_pda =
                 find_deposit_receipt_pda(&portal_program_id, &session_pda, recipient);
-            let withdrawal_sink_pda =
-                find_withdrawal_sink_pda(&portal_program_id, &session_pda, recipient);
             let instruction = Instruction {
                 program_id: portal_program_id,
                 accounts: vec![
@@ -935,7 +925,6 @@ pub async fn process_portal_subcommand(
                     AccountMeta::new(deposit_receipt_pda, false),
                     AccountMeta::new_readonly(*recipient, false),
                     AccountMeta::new_readonly(system_program::id(), false),
-                    AccountMeta::new(withdrawal_sink_pda, false),
                 ],
                 data: borsh::to_vec(&PortalInstruction::DepositFee {
                     lamports: *lamports,
@@ -970,25 +959,24 @@ pub async fn process_portal_subcommand(
         } => {
             let portal_program_id = resolve_portal_program_id(config, *portal_program_id)?;
             let recipient = config.signers[*recipient];
-            let session_pda = find_session_pda(&portal_program_id);
-            let withdrawal_sink_pda =
-                find_withdrawal_sink_pda(&portal_program_id, &session_pda, &recipient.pubkey());
-            // Sonic: ER settlement reads the memo as the L1 recipient for the
-            // withdrawal payout. Keep CLI parity with the TypeScript SDK by
-            // defaulting the L1 recipient to the withdrawing signer.
-            let instructions = vec![
-                system_instruction::transfer(&recipient.pubkey(), &withdrawal_sink_pda, *lamports),
-                Instruction {
-                    program_id: Pubkey::from(spl_memo_interface::v3::id().to_bytes()),
-                    accounts: vec![],
-                    data: recipient.pubkey().to_string().into_bytes(),
-                },
-            ];
-            process_portal_instructions(
+            let instruction = Instruction {
+                program_id: portal_program_id,
+                accounts: vec![
+                    AccountMeta::new(recipient.pubkey(), true),
+                    AccountMeta::new_readonly(recipient.pubkey(), false),
+                    AccountMeta::new(Pubkey::new_from_array(WITHDRAWAL_SINK), false),
+                    AccountMeta::new_readonly(system_program::id(), false),
+                    AccountMeta::new_readonly(sysvar::clock::id(), false),
+                ],
+                data: borsh::to_vec(&PortalInstruction::StartWithdrawal {
+                    lamports: *lamports,
+                })
+                .unwrap(),
+            };
+            process_portal_instruction(
                 rpc_client,
                 config,
-                instructions,
-                &[],
+                instruction,
                 *sign_only,
                 *dump_transaction_message,
                 blockhash_query,

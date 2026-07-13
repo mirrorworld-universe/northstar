@@ -4,6 +4,7 @@ pub mod deposit_fee;
 pub mod open_session;
 pub mod settle_deposit_receipt;
 pub mod settlement;
+pub mod start_withdrawal;
 pub mod undelegate;
 
 pub use {
@@ -17,5 +18,6 @@ pub use {
         process_settle_account_lamports, process_settle_account_owner,
         process_write_settlement_chunk,
     },
+    start_withdrawal::process_start_withdrawal,
     undelegate::{process_undelegate, process_undelegate_handoff},
 };
