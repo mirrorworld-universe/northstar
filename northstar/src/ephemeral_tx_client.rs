@@ -1,6 +1,5 @@
 use {
     crate::settlement::WithdrawalPayoutEvent,
-    base64::{prelude::BASE64_STANDARD, Engine as _},
     log::{debug, trace, warn},
     solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
     solana_keypair::Keypair,
@@ -689,16 +688,13 @@ impl EphemeralTransactionClient {
             if committed_tx.status.is_err() {
                 continue;
             }
-            let Some(logs) = committed_tx.log_messages.as_ref() else {
-                continue;
-            };
             let loaded_addresses = Self::load_transaction_addresses(bank, tx).unwrap_or_default();
             let account_keys = Self::full_account_keys(tx, &loaded_addresses);
             let Some(signature) = tx.signatures.first().copied() else {
                 continue;
             };
 
-            for ix in tx.message.instructions() {
+            for (outer_ix_index, ix) in tx.message.instructions().iter().enumerate() {
                 let Some(program_id) = account_keys.get(ix.program_id_index as usize) else {
                     continue;
                 };
@@ -736,24 +732,29 @@ impl EphemeralTransactionClient {
                 {
                     continue;
                 }
-                let emitted_event = logs
-                    .iter()
-                    .filter_map(|log| {
-                        let log = log.strip_prefix("Program log: ").unwrap_or(log);
-                        let data = log.strip_prefix(northstar_portal::TRANSFER_EVENT_LOG_PREFIX)?;
-                        let data = BASE64_STANDARD.decode(data).ok()?;
-                        borsh::from_slice::<northstar_portal::NorthstarTransferEvent>(&data).ok()
-                    })
-                    .any(|event| {
-                        event.version == northstar_portal::NorthstarTransferEvent::VERSION
-                            && event.kind == northstar_portal::TransferEventKind::Withdrawal
-                            && event.from == er_source.to_bytes()
-                            && event.to == l1_recipient.to_bytes()
-                            && event.lamports == lamports
+                let transferred_to_sink = committed_tx
+                    .inner_instructions
+                    .as_ref()
+                    .and_then(|instructions| instructions.get(outer_ix_index))
+                    .is_some_and(|instructions| {
+                        instructions.iter().any(|inner| {
+                            let ix = &inner.instruction;
+                            let Some(program_id) = account_keys.get(ix.program_id_index as usize)
+                            else {
+                                return false;
+                            };
+                            if !system_program::check_id(program_id) || ix.accounts.len() < 2 {
+                                return false;
+                            }
+                            Self::system_transfer_lamports(&ix.data) == Some(lamports)
+                                && account_keys.get(ix.accounts[0] as usize) == Some(er_source)
+                                && account_keys.get(ix.accounts[1] as usize)
+                                    == Some(withdrawal_sink)
+                        })
                     });
-                if !emitted_event {
+                if !transferred_to_sink {
                     warn!(
-                        "ignoring ER StartWithdrawal without matching Portal event: \
+                        "ignoring ER StartWithdrawal without matching system transfer: \
                          sig={signature}"
                     );
                     continue;
@@ -784,6 +785,13 @@ impl EphemeralTransactionClient {
                 .unwrap()
                 .extend(events);
         }
+    }
+
+    fn system_transfer_lamports(data: &[u8]) -> Option<u64> {
+        if data.len() != 12 || u32::from_le_bytes(data[0..4].try_into().ok()?) != 2 {
+            return None;
+        }
+        Some(u64::from_le_bytes(data[4..12].try_into().ok()?))
     }
 
     fn full_account_keys(tx: &VersionedTransaction, loaded: &LoadedAddresses) -> Vec<Pubkey> {
