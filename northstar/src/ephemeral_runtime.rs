@@ -840,6 +840,7 @@ impl EphemeralRuntime {
 
         // Clear session PDA
         *self.session_pda.write().unwrap() = None;
+        self._tx_client.clear_processed_signatures();
     }
 
     /// Sonic: Check if the ephemeral rollup is accepting transactions.
@@ -852,6 +853,7 @@ impl EphemeralRuntime {
         let mut session_pda = self.session_pda.write().unwrap();
         if *session_pda != Some(pda) {
             self.withdrawal_payout_events.write().unwrap().clear();
+            self._tx_client.clear_processed_signatures();
         }
         *session_pda = Some(pda);
     }
@@ -4381,6 +4383,68 @@ mod tests {
                 .is_hash_valid_for_age(&er_blockhash, solana_clock::MAX_PROCESSING_AGE),
             "ER blockhash minted before L1 reset must remain usable after reset"
         );
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_reanchor_does_not_replay_er_transaction() {
+        let parent_bank = create_test_bank();
+        parent_bank.freeze();
+        let parent_bank = Arc::new(parent_bank);
+        let source = Keypair::new();
+        let recipient = Pubkey::new_unique();
+        let session_pda = Pubkey::new_unique();
+        let settings = EphemeralRollupSettings {
+            session_pda,
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            parent_bank.clone(),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.set_session_pda(session_pda);
+        runtime.activate();
+        runtime.credit_deposit(&source.pubkey(), 2_000_000);
+
+        let transaction = Transaction::new_signed_with_payer(
+            &[solana_system_interface::instruction::transfer(
+                &source.pubkey(),
+                &recipient,
+                1_000_000,
+            )],
+            Some(&source.pubkey()),
+            &[&source],
+            runtime.bank().last_blockhash(),
+        );
+        let wire = bincode::serialize(&VersionedTransaction::from(transaction)).unwrap();
+        TransactionClient::send_transactions_in_batch(
+            &runtime._tx_client,
+            vec![wire.clone()],
+            &SendTransactionServiceStats::default(),
+        );
+        assert_eq!(runtime.bank().get_balance(&recipient), 1_000_000);
+
+        let new_parent = Bank::new_from_parent(parent_bank, SlotLeader::default(), 1);
+        new_parent.freeze();
+        runtime.reanchor_to_l1_parent(Arc::new(new_parent));
+        TransactionClient::send_transactions_in_batch(
+            &runtime._tx_client,
+            vec![wire],
+            &SendTransactionServiceStats::default(),
+        );
+
+        assert_eq!(runtime.bank().get_balance(&recipient), 1_000_000);
         runtime.shutdown();
     }
 
