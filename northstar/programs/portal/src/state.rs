@@ -3,6 +3,12 @@ use {
     pinocchio::pubkey::Pubkey,
 };
 
+/// Fixed ER account that holds withdrawn SOL until L1 settlement.
+pub const WITHDRAWAL_SINK: Pubkey = [
+    0x05, 0x7d, 0x77, 0xa2, 0x13, 0x37, 0xb6, 0x2d, 0xb7, 0x7d, 0xba, 0x7e, 0x26, 0xf8, 0xe1, 0x47,
+    0x06, 0x35, 0xbd, 0x36, 0x53, 0x76, 0xa6, 0x7d, 0x7f, 0xf5, 0xa1, 0x82, 0x3e, 0xe0, 0x8f, 0xb8,
+];
+
 #[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Session {
@@ -111,12 +117,6 @@ impl DepositReceipt {
     pub fn is_valid(&self) -> bool {
         self.discriminator == Self::DISCRIMINATOR
     }
-}
-
-pub struct WithdrawalSink;
-
-impl WithdrawalSink {
-    pub const SEED_PREFIX: &[u8] = b"withdrawal_sink";
 }
 
 #[cfg(test)]

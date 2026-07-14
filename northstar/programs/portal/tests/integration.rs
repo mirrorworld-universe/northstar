@@ -1,8 +1,12 @@
 #![cfg(test)]
 
 use {
+    base64_no_std::{prelude::BASE64_STANDARD, Engine as _},
     borsh::BorshDeserialize,
-    northstar_portal::{DepositReceipt, FeeVault, OpenSession, PortalInstruction, Session},
+    northstar_portal::{
+        DepositReceipt, FeeVault, NorthstarTransferEvent, OpenSession, PortalInstruction, Session,
+        TransferEventKind, WITHDRAWAL_SINK,
+    },
     solana_instruction::{AccountMeta, Instruction},
     solana_keypair::Keypair,
     solana_program_test::{BanksClient, ProgramTest, ProgramTestContext},
@@ -798,4 +802,98 @@ async fn test_deposit_to_expired_session_fails() {
     );
     let result = banks.process_transaction(tx).await;
     assert!(result.is_err(), "Deposit to expired session should fail");
+}
+
+#[tokio::test]
+async fn test_start_withdrawal_transfers_to_fixed_sink_and_emits_event() {
+    let context = setup().await;
+    let source = Keypair::new();
+    let l1_recipient = Pubkey::new_unique();
+    let funding = transfer(&context.payer.pubkey(), &source.pubkey(), 10_000_000);
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let transaction = Transaction::new_signed_with_payer(
+        &[funding],
+        Some(&context.payer.pubkey()),
+        &[&context.payer],
+        blockhash,
+    );
+    context
+        .banks_client
+        .process_transaction(transaction)
+        .await
+        .unwrap();
+    let source_before = context
+        .banks_client
+        .get_account(source.pubkey())
+        .await
+        .unwrap()
+        .unwrap()
+        .lamports;
+    let sink_before = context
+        .banks_client
+        .get_account(Pubkey::new_from_array(WITHDRAWAL_SINK))
+        .await
+        .unwrap()
+        .map(|account| account.lamports)
+        .unwrap_or_default();
+    let lamports = 1_000_000;
+    let instruction = Instruction {
+        program_id: PORTAL_PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(source.pubkey(), true),
+            AccountMeta::new_readonly(l1_recipient, false),
+            AccountMeta::new(Pubkey::new_from_array(WITHDRAWAL_SINK), false),
+            AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new_readonly(solana_sdk_ids::sysvar::clock::id(), false),
+        ],
+        data: borsh::to_vec(&PortalInstruction::StartWithdrawal { lamports }).unwrap(),
+    };
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let transaction = Transaction::new_signed_with_payer(
+        &[instruction],
+        Some(&context.payer.pubkey()),
+        &[&context.payer, &source],
+        blockhash,
+    );
+    let result = context
+        .banks_client
+        .process_transaction_with_metadata(transaction)
+        .await
+        .unwrap();
+    result.result.unwrap();
+
+    let source_after = context
+        .banks_client
+        .get_account(source.pubkey())
+        .await
+        .unwrap()
+        .unwrap()
+        .lamports;
+    let sink_after = context
+        .banks_client
+        .get_account(Pubkey::new_from_array(WITHDRAWAL_SINK))
+        .await
+        .unwrap()
+        .unwrap()
+        .lamports;
+    assert_eq!(source_before - source_after, lamports);
+    assert_eq!(sink_after - sink_before, lamports);
+
+    let metadata = result.metadata.unwrap();
+    let event_data = metadata
+        .log_messages
+        .iter()
+        .find_map(|log| {
+            log.strip_prefix("Program log: ")
+                .unwrap_or(log)
+                .strip_prefix(northstar_portal::TRANSFER_EVENT_LOG_PREFIX)
+        })
+        .unwrap();
+    let event: NorthstarTransferEvent =
+        borsh::from_slice(&BASE64_STANDARD.decode(event_data).unwrap()).unwrap();
+    assert_eq!(event.kind, TransferEventKind::Withdrawal);
+    assert_eq!(event.from, source.pubkey().to_bytes());
+    assert_eq!(event.to, l1_recipient.to_bytes());
+    assert_eq!(event.lamports, lamports);
+    assert_eq!(event.pre_balance - event.post_balance, lamports);
 }

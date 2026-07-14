@@ -86,6 +86,13 @@ pub enum PortalInstruction {
     #[cfg_attr(feature = "idl", account(0, name = "validator", sig))]
     #[cfg_attr(feature = "idl", account(1, name = "session", mut))]
     SettleAccountLamports(SettleAccountLamports),
+
+    #[cfg_attr(feature = "idl", account(0, name = "source", sig, mut))]
+    #[cfg_attr(feature = "idl", account(1, name = "l1_recipient"))]
+    #[cfg_attr(feature = "idl", account(2, name = "withdrawal_sink", mut))]
+    #[cfg_attr(feature = "idl", account(3, name = "system_program"))]
+    #[cfg_attr(feature = "idl", account(4, name = "clock"))]
+    StartWithdrawal { lamports: u64 },
 }
 
 #[cfg_attr(feature = "idl", derive(shank::ShankType))]

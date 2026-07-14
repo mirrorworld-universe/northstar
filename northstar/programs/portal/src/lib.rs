@@ -82,6 +82,8 @@ fn process_instruction(
         Ok((12, payload)) => deserialize_args(payload).and_then(|lamports| {
             instructions::process_settle_account_lamports(program_id, accounts, lamports)
         }),
+        Ok((13, payload)) => deserialize_args::<u64>(payload)
+            .and_then(|lamports| instructions::process_start_withdrawal(accounts, lamports)),
         Ok((_, _)) | Err(_) => Err(ProgramError::InvalidInstructionData),
     }
 }

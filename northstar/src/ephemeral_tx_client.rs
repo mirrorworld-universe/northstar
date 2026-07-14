@@ -676,10 +676,9 @@ impl EphemeralTransactionClient {
         txs: &[VersionedTransaction],
         commit_results: &[TransactionCommitResult],
     ) {
-        let Some(session_pda) = *self.session_pda.read().unwrap() else {
+        if self.session_pda.read().unwrap().is_none() {
             return;
-        };
-        let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
+        }
         let mut events = Vec::new();
 
         for (tx, commit_result) in txs.iter().zip(commit_results) {
@@ -689,53 +688,77 @@ impl EphemeralTransactionClient {
             if committed_tx.status.is_err() {
                 continue;
             }
-            let memo_l1_recipient = self.memo_l1_recipient(bank, tx);
             let loaded_addresses = Self::load_transaction_addresses(bank, tx).unwrap_or_default();
             let account_keys = Self::full_account_keys(tx, &loaded_addresses);
             let Some(signature) = tx.signatures.first().copied() else {
                 continue;
             };
 
-            for ix in tx.message.instructions() {
+            for (outer_ix_index, ix) in tx.message.instructions().iter().enumerate() {
                 let Some(program_id) = account_keys.get(ix.program_id_index as usize) else {
                     continue;
                 };
-                if !system_program::check_id(program_id) {
-                    continue;
-                }
-                let Some(lamports) = Self::system_transfer_lamports(&ix.data) else {
-                    continue;
-                };
-                if lamports == 0 || ix.accounts.len() < 2 {
-                    continue;
-                }
-                let from_index = ix.accounts[0] as usize;
-                let to_index = ix.accounts[1] as usize;
-                let Some(er_source) = account_keys.get(from_index).copied() else {
-                    continue;
-                };
-                let Some(destination) = account_keys.get(to_index) else {
-                    continue;
-                };
-                if from_index >= tx.message.static_account_keys().len()
-                    || !tx.message.is_signer(from_index)
+                if program_id != &self.portal_program_id
+                    || ix.data.len() != 9
+                    || ix.data[0] != 13
+                    || ix.accounts.len() < 5
                 {
                     continue;
                 }
-                let expected_sink =
-                    crate::withdrawal_sink_pda(&self.portal_program_id, &session_pda, &er_source);
-                let l1_recipient = if destination == &expected_sink {
-                    let Some(l1_recipient) = memo_l1_recipient else {
-                        continue;
-                    };
-                    l1_recipient
-                } else if delegated_accounts.contains(destination)
-                    && !delegated_accounts.contains(&er_source)
-                {
-                    *destination
-                } else {
+                let lamports = u64::from_le_bytes(ix.data[1..].try_into().unwrap());
+                if lamports == 0 {
+                    continue;
+                }
+                let (
+                    Some(er_source),
+                    Some(l1_recipient),
+                    Some(withdrawal_sink),
+                    Some(system),
+                    Some(clock),
+                ) = (
+                    account_keys.get(ix.accounts[0] as usize),
+                    account_keys.get(ix.accounts[1] as usize),
+                    account_keys.get(ix.accounts[2] as usize),
+                    account_keys.get(ix.accounts[3] as usize),
+                    account_keys.get(ix.accounts[4] as usize),
+                )
+                else {
                     continue;
                 };
+                if !tx.message.is_signer(ix.accounts[0] as usize)
+                    || withdrawal_sink != &crate::WITHDRAWAL_SINK
+                    || !system_program::check_id(system)
+                    || clock != &sysvar::clock::id()
+                {
+                    continue;
+                }
+                let transferred_to_sink = committed_tx
+                    .inner_instructions
+                    .as_ref()
+                    .and_then(|instructions| instructions.get(outer_ix_index))
+                    .is_some_and(|instructions| {
+                        instructions.iter().any(|inner| {
+                            let ix = &inner.instruction;
+                            let Some(program_id) = account_keys.get(ix.program_id_index as usize)
+                            else {
+                                return false;
+                            };
+                            if !system_program::check_id(program_id) || ix.accounts.len() < 2 {
+                                return false;
+                            }
+                            Self::system_transfer_lamports(&ix.data) == Some(lamports)
+                                && account_keys.get(ix.accounts[0] as usize) == Some(er_source)
+                                && account_keys.get(ix.accounts[1] as usize)
+                                    == Some(withdrawal_sink)
+                        })
+                    });
+                if !transferred_to_sink {
+                    warn!(
+                        "ignoring ER StartWithdrawal without matching system transfer: \
+                         sig={signature}"
+                    );
+                    continue;
+                }
 
                 debug!(
                     "recorded ER SOL withdrawal payout event: sig={}, er_source={}, \
@@ -747,8 +770,8 @@ impl EphemeralTransactionClient {
                     bank.slot()
                 );
                 events.push(WithdrawalPayoutEvent {
-                    er_source,
-                    l1_recipient,
+                    er_source: *er_source,
+                    l1_recipient: *l1_recipient,
                     lamports,
                     signature,
                     er_slot: bank.slot(),
@@ -764,55 +787,11 @@ impl EphemeralTransactionClient {
         }
     }
 
-    fn memo_l1_recipient(&self, bank: &Bank, tx: &VersionedTransaction) -> Option<Pubkey> {
-        let loaded_addresses = Self::load_transaction_addresses(bank, tx).unwrap_or_default();
-        let account_keys = Self::full_account_keys(tx, &loaded_addresses);
-        let mut memo_recipient = None;
-
-        for ix in tx.message.instructions() {
-            let Some(program_id) = account_keys.get(ix.program_id_index as usize) else {
-                continue;
-            };
-            if program_id != &spl_memo_interface::v3::id()
-                && program_id != &spl_memo_interface::v4::id()
-            {
-                continue;
-            }
-            let Some(recipient) = Self::decode_l1_recipient_memo(&ix.data) else {
-                warn!(
-                    "ignoring ER SOL withdrawal intent with invalid L1 recipient memo: sig={}",
-                    tx.signatures
-                        .first()
-                        .map(|signature| signature.to_string())
-                        .unwrap_or_default()
-                );
-                return None;
-            };
-            if memo_recipient.replace(recipient).is_some() {
-                warn!(
-                    "ignoring ER SOL withdrawal intent with multiple recipient memos: sig={}",
-                    tx.signatures
-                        .first()
-                        .map(|signature| signature.to_string())
-                        .unwrap_or_default()
-                );
-                return None;
-            }
-        }
-
-        memo_recipient
-    }
-
     fn system_transfer_lamports(data: &[u8]) -> Option<u64> {
         if data.len() != 12 || u32::from_le_bytes(data[0..4].try_into().ok()?) != 2 {
             return None;
         }
         Some(u64::from_le_bytes(data[4..12].try_into().ok()?))
-    }
-
-    fn decode_l1_recipient_memo(data: &[u8]) -> Option<Pubkey> {
-        let memo = std::str::from_utf8(data).ok()?.trim();
-        memo.parse::<Pubkey>().ok()
     }
 
     fn full_account_keys(tx: &VersionedTransaction, loaded: &LoadedAddresses) -> Vec<Pubkey> {
