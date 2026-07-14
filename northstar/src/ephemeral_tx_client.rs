@@ -2,6 +2,7 @@ use {
     crate::settlement::WithdrawalPayoutEvent,
     log::{debug, trace, warn},
     solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
+    solana_clock::Slot,
     solana_keypair::Keypair,
     solana_leader_schedule::SlotLeader,
     solana_ledger::transaction_balances::compile_collected_balances,
@@ -67,6 +68,9 @@ pub struct EphemeralTransactionClient {
     portal_program_id: Pubkey,
     session_pda: Arc<RwLock<Option<Pubkey>>>,
     withdrawal_payout_events: Arc<RwLock<Vec<WithdrawalPayoutEvent>>>,
+    /// Successful ER signatures persist across L1 reanchors, whose new bank has
+    /// the L1 parent's status cache rather than the old ER bank's cache.
+    processed_signatures: Arc<RwLock<HashMap<solana_signature::Signature, Slot>>>,
 }
 
 impl Clone for EphemeralTransactionClient {
@@ -85,6 +89,7 @@ impl Clone for EphemeralTransactionClient {
             portal_program_id: self.portal_program_id,
             session_pda: Arc::clone(&self.session_pda),
             withdrawal_payout_events: Arc::clone(&self.withdrawal_payout_events),
+            processed_signatures: Arc::clone(&self.processed_signatures),
         }
     }
 }
@@ -279,6 +284,7 @@ impl EphemeralTransactionClient {
             portal_program_id: options.portal_program_id,
             session_pda: options.session_pda,
             withdrawal_payout_events: options.withdrawal_payout_events,
+            processed_signatures: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -302,6 +308,44 @@ impl EphemeralTransactionClient {
         *self.rpc_subscriptions.write().unwrap() = Some(rpc_subscriptions);
     }
 
+    pub(crate) fn clear_processed_signatures(&self) {
+        self.processed_signatures.write().unwrap().clear();
+    }
+
+    fn has_processed_signature(&self, tx: &VersionedTransaction) -> bool {
+        tx.signatures.first().is_some_and(|signature| {
+            self.processed_signatures
+                .read()
+                .unwrap()
+                .contains_key(signature)
+        })
+    }
+
+    fn record_processed_signatures(
+        &self,
+        bank: &Bank,
+        txs: &[VersionedTransaction],
+        commit_results: &[TransactionCommitResult],
+    ) {
+        if self.session_pda.read().unwrap().is_none() {
+            return;
+        }
+
+        let min_slot = bank.slot().saturating_sub(self.transaction_max_age as u64);
+        let mut signatures = self.processed_signatures.write().unwrap();
+        signatures.retain(|_, slot| *slot >= min_slot);
+        for (tx, commit_result) in txs.iter().zip(commit_results) {
+            if commit_result
+                .as_ref()
+                .is_ok_and(|committed_tx| committed_tx.status.is_ok())
+            {
+                if let Some(signature) = tx.signatures.first() {
+                    signatures.insert(*signature, bank.slot());
+                }
+            }
+        }
+    }
+
     pub fn bank(&self) -> Arc<Bank> {
         self.bank_forks.read().unwrap().working_bank()
     }
@@ -309,14 +353,30 @@ impl EphemeralTransactionClient {
     /// Check if a transaction only writes to allowed accounts.
     /// Returns `true` if the transaction is allowed, `false` if it
     /// touches non-delegated writable accounts.
+    #[cfg(test)]
     fn is_transaction_allowed_on_bank(
         bank: &Bank,
         tx: &VersionedTransaction,
         delegated_accounts: &HashSet<Pubkey>,
         touched_accounts: &HashSet<Pubkey>,
     ) -> bool {
-        // If delegation set is empty, allow everything (unrestricted mode)
-        if delegated_accounts.is_empty() {
+        Self::is_transaction_allowed_on_bank_with_policy(
+            bank,
+            tx,
+            delegated_accounts,
+            touched_accounts,
+            false,
+        )
+    }
+
+    fn is_transaction_allowed_on_bank_with_policy(
+        bank: &Bank,
+        tx: &VersionedTransaction,
+        delegated_accounts: &HashSet<Pubkey>,
+        touched_accounts: &HashSet<Pubkey>,
+        enforce_account_access: bool,
+    ) -> bool {
+        if !enforce_account_access && delegated_accounts.is_empty() {
             return true;
         }
 
@@ -415,14 +475,26 @@ impl TransactionClient for EphemeralTransactionClient {
         let bank = self.bank();
         let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
         let touched_accounts = self.touched_accounts.read().unwrap().clone();
+        let enforce_account_access = self.session_pda.read().unwrap().is_some();
         let txs: Vec<_> = txs
             .into_iter()
             .filter(|tx| {
-                let allowed = Self::is_transaction_allowed_on_bank(
+                if enforce_account_access && self.has_processed_signature(tx) {
+                    warn!(
+                        "ER transaction already processed: sig={}",
+                        tx.signatures
+                            .first()
+                            .map(|signature| signature.to_string())
+                            .unwrap_or_default()
+                    );
+                    return false;
+                }
+                let allowed = Self::is_transaction_allowed_on_bank_with_policy(
                     &bank,
                     tx,
                     &delegated_accounts,
                     &touched_accounts,
+                    enforce_account_access,
                 );
                 if !allowed {
                     warn!(
@@ -447,11 +519,12 @@ impl TransactionClient for EphemeralTransactionClient {
             self.evict_loader_writes_from_program_cache(&bank, &writable_accounts);
         }
 
-        Self::zero_untouched_writable_accounts_for_batch(
+        Self::zero_untouched_writable_accounts_for_batch_with_policy(
             &bank,
             &txs,
             &self.touched_accounts,
             &delegated_accounts,
+            enforce_account_access,
         );
 
         if let Err(e) = self.execute_transactions(&bank, txs.clone()) {
@@ -653,6 +726,7 @@ impl EphemeralTransactionClient {
             &mut ExecuteTimings::default(),
             None,
         );
+        self.record_processed_signatures(bank, &txs, &commit_results);
 
         self.record_transaction_history_for_batch(bank, &txs, &commit_results, balance_collector);
         self.record_withdrawal_payout_events_for_batch(bank, &txs, &commit_results);
@@ -995,14 +1069,26 @@ impl EphemeralTransactionClient {
 
     /// Zero the balance of untouched writable accounts before transaction execution.
     /// This prevents users from spending inherited L1 balances on the ER.
+    #[cfg(test)]
     fn zero_untouched_writable_accounts_for_batch(
         bank: &Bank,
         txs: &[VersionedTransaction],
         touched: &RwLock<HashSet<Pubkey>>,
         delegated: &HashSet<Pubkey>,
     ) {
-        // Unrestricted mode - no zeroing (empty delegation set means dev/test mode)
-        if delegated.is_empty() {
+        Self::zero_untouched_writable_accounts_for_batch_with_policy(
+            bank, txs, touched, delegated, false,
+        );
+    }
+
+    fn zero_untouched_writable_accounts_for_batch_with_policy(
+        bank: &Bank,
+        txs: &[VersionedTransaction],
+        touched: &RwLock<HashSet<Pubkey>>,
+        delegated: &HashSet<Pubkey>,
+        enforce_account_access: bool,
+    ) {
+        if !enforce_account_access && delegated.is_empty() {
             return;
         }
 
@@ -1130,11 +1216,22 @@ impl solana_rpc::rpc::ErTxExecutor for EphemeralTransactionClient {
             })?;
 
         let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
+        let enforce_account_access = self.session_pda.read().unwrap().is_some();
+        if enforce_account_access && self.has_processed_signature(&tx) {
+            return Err(solana_rpc::rpc::ErTxError::Rejected(
+                "transaction already processed".to_string(),
+            ));
+        }
         let bank = self.bank();
         let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
         let touched_accounts = self.touched_accounts.read().unwrap().clone();
-        if !Self::is_transaction_allowed_on_bank(&bank, &tx, &delegated_accounts, &touched_accounts)
-        {
+        if !Self::is_transaction_allowed_on_bank_with_policy(
+            &bank,
+            &tx,
+            &delegated_accounts,
+            &touched_accounts,
+            enforce_account_access,
+        ) {
             let signature = tx
                 .signatures
                 .first()
@@ -1152,11 +1249,12 @@ impl solana_rpc::rpc::ErTxExecutor for EphemeralTransactionClient {
         if rotate_after_batch {
             self.evict_loader_writes_from_program_cache(&bank, &writable_accounts);
         }
-        Self::zero_untouched_writable_accounts_for_batch(
+        Self::zero_untouched_writable_accounts_for_batch_with_policy(
             &bank,
             &txs,
             &self.touched_accounts,
             &delegated_accounts,
+            enforce_account_access,
         );
         self.execute_transactions(&bank, txs.clone())
             .map_err(|err| {
@@ -1512,6 +1610,62 @@ mod tests {
     }
 
     #[test]
+    fn test_empty_session_cannot_spend_untouched_l1_balance() {
+        let source = Keypair::new();
+        let recipient = Pubkey::new_unique();
+        let bank = create_test_bank();
+        fund_account(&bank, &source.pubkey(), 10_000_000);
+        let blockhash = bank.last_blockhash();
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let bank = bank_forks.read().unwrap().root_bank();
+        let client =
+            create_client_with_history(bank_forks, vec![], Arc::new(ErHistoryStore::default()));
+        *client.session_pda.write().unwrap() = Some(Pubkey::new_unique());
+        let tx = create_transfer_tx(&source, source.pubkey(), recipient, blockhash);
+
+        let result =
+            solana_rpc::rpc::ErTxExecutor::execute_wire(&client, bincode::serialize(&tx).unwrap());
+
+        assert!(matches!(
+            result,
+            Err(solana_rpc::rpc::ErTxError::Rejected(_))
+        ));
+        assert_eq!(bank.get_balance(&recipient), 0);
+    }
+
+    #[test]
+    fn test_replayed_er_transaction_is_not_executed_twice() {
+        let source = Keypair::new();
+        let recipient = Pubkey::new_unique();
+        let bank = create_test_bank();
+        fund_account(&bank, &source.pubkey(), 10_000_000);
+        let blockhash = bank.last_blockhash();
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let bank = bank_forks.read().unwrap().root_bank();
+        let client = create_client_with_history(
+            bank_forks,
+            vec![source.pubkey()],
+            Arc::new(ErHistoryStore::default()),
+        );
+        *client.session_pda.write().unwrap() = Some(Pubkey::new_unique());
+        let tx = create_transfer_tx(&source, source.pubkey(), recipient, blockhash);
+        let wire = bincode::serialize(&tx).unwrap();
+
+        <EphemeralTransactionClient as TransactionClient>::send_transactions_in_batch(
+            &client,
+            vec![wire.clone()],
+            &SendTransactionServiceStats::default(),
+        );
+        <EphemeralTransactionClient as TransactionClient>::send_transactions_in_batch(
+            &client,
+            vec![wire],
+            &SendTransactionServiceStats::default(),
+        );
+
+        assert_eq!(bank.get_balance(&recipient), 1_000_000);
+    }
+
+    #[test]
     fn test_send_transactions_in_batch_executes_multiple_transfers_and_records_history() {
         let fee_payer_a = Keypair::new();
         let fee_payer_b = Keypair::new();
@@ -1524,7 +1678,11 @@ mod tests {
         let bank_forks = BankForks::new_rw_arc(bank);
         let bank = bank_forks.read().unwrap().root_bank();
         let er_history_store = Arc::new(ErHistoryStore::default());
-        let client = create_client_with_history(bank_forks, vec![], er_history_store.clone());
+        let client = create_client_with_history(
+            bank_forks,
+            vec![fee_payer_a.pubkey(), fee_payer_b.pubkey()],
+            er_history_store.clone(),
+        );
 
         let tx_a = create_transfer_tx(&fee_payer_a, fee_payer_a.pubkey(), recipient_a, blockhash);
         let signature_a = tx_a.signatures[0];
