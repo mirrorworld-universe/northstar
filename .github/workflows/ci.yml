@@ -93,18 +93,105 @@ jobs:
     runs-on: [devnet]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for portal program changes
+        id: portal_changes
+        run: |
+          set -euo pipefail
+          BEFORE="${{ github.event.before }}"
+          # Compare against the previous state of this branch (the base branch
+          # before the push). Fall back to HEAD~1..HEAD for new/force-pushed
+          # branches where the before commit is unreachable.
+          if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] && git rev-parse --verify "$BEFORE^{commit}" >/dev/null 2>&1; then
+            echo "Comparing $BEFORE..HEAD" >&2
+            CHANGED_FILES=$(git diff --name-only "$BEFORE" HEAD)
+          else
+            echo "Before commit unavailable; comparing HEAD~1..HEAD" >&2
+            CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
+          fi
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+          if echo "$CHANGED_FILES" | grep -qE '^northstar/programs/portal/'; then
+            echo "portal_changed=true" >> "$GITHUB_OUTPUT"
+            echo "Portal program files changed"
+          else
+            echo "portal_changed=false" >> "$GITHUB_OUTPUT"
+            echo "No portal program file changes"
+          fi
+
       - uses: ./.github/actions/ensure-rust-toolchain
 
+      - name: Ensure Solana CLI is available
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+          if ! command -v solana >/dev/null 2>&1; then
+            sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+            echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+          fi
+          solana --version
+
       - name: Build portal SBF program
-        run: ./cargo-build-sbf --manifest-path northstar/programs/portal/Cargo.toml
+        run: |
+          set -euo pipefail
+          mkdir -p /solana/northstar/deploy
+          SBF_OUT_DIR=/solana/northstar/deploy ./cargo-build-sbf --manifest-path northstar/programs/portal/Cargo.toml
 
       - name: Build validator binary
+        env:
+          SBF_OUT_DIR: /solana/northstar/deploy
         run: cargo build --release --target-dir /solana/northstar/ --bin agave-validator
 
       - name: Confirm binary exists
         run: |
+          set -euo pipefail
           BIN="/solana/northstar/release/agave-validator"
           test -f "$BIN" && test -x "$BIN" && "$BIN" --version
+
+      - name: Generate new portal program address
+        id: portal_address
+        if: steps.portal_changes.outputs.portal_changed == 'true'
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+          KEYPAIR="/solana/northstar/portal-keypair.json"
+          rm -f "$KEYPAIR"
+          solana-keygen new --outfile "$KEYPAIR" --force --no-passphrase
+          PUBKEY=$(solana-keygen pubkey "$KEYPAIR")
+          echo "portal_address=$PUBKEY" >> "$GITHUB_OUTPUT"
+          echo "New portal program address: $PUBKEY"
+
+      - name: Deploy portal program to devnet
+        id: portal_deploy
+        if: steps.portal_changes.outputs.portal_changed == 'true'
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+          PUBKEY="${{ steps.portal_address.outputs.portal_address }}"
+          echo "Deploying portal program to devnet at $PUBKEY"
+          solana program deploy \
+            /solana/northstar/deploy/northstar_portal.so \
+            --program-id /solana/northstar/portal-keypair.json \
+            --url https://api.devnet.solana.com \
+            --keypair /home/ubuntu/.config/solana/id.json
+          echo "Portal program deployed to devnet at $PUBKEY"
+          echo "portal_address=$PUBKEY" >> "$GITHUB_OUTPUT"
+
+      - name: Update validator service with new portal address
+        if: steps.portal_changes.outputs.portal_changed == 'true'
+        run: |
+          set -euo pipefail
+          SERVICE_FILE="/etc/systemd/system/northstar-validator.service"
+          PUBKEY="${{ steps.portal_address.outputs.portal_address }}"
+          sudo sed -i "s/--portal [^ ]*/--portal $PUBKEY/" "$SERVICE_FILE"
+          echo "Updated $SERVICE_FILE with portal address $PUBKEY"
+          grep -- "--portal" "$SERVICE_FILE"
+
+      - name: Reload systemd
+        if: steps.portal_changes.outputs.portal_changed == 'true'
+        run: sudo systemctl daemon-reload
 
       - name: Restart validator
         run: sudo systemctl restart northstar-validator
@@ -152,3 +239,49 @@ jobs:
           echo "Timed out waiting for validator to be fully up"
           exit 1
         timeout-minutes: 90
+
+      - name: Notify Slack
+        if: always()
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ vars.SLACK_CHANNEL_ID }}
+          STATUS: ${{ job.status }}
+          PORTAL_CHANGED: ${{ steps.portal_changes.outputs.portal_changed }}
+          PORTAL_ADDRESS: ${{ steps.portal_deploy.outputs.portal_address }}
+          COMMIT_SHA: ${{ github.sha }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y jq
+          fi
+          if [ "$STATUS" = "success" ]; then
+            STATUS_EMOJI=":white_check_mark:"
+          else
+            STATUS_EMOJI=":x:"
+          fi
+          if [ "$PORTAL_CHANGED" = "true" ] && [ -n "$PORTAL_ADDRESS" ]; then
+            TEXT=$(printf '%s\n%s\n%s\n%s\n%s' \
+              "$STATUS_EMOJI NorthStar validator deployment completed with status: *$STATUS*" \
+              ":rocket: Portal program changed and deployed at: \`$PORTAL_ADDRESS\`" \
+              ":link: Explorer: https://explorer.solana.com/address/$PORTAL_ADDRESS?cluster=devnet" \
+              ":memo: Commit: \`$COMMIT_SHA\`" \
+              "$COMMIT_MSG")
+          elif [ "$PORTAL_CHANGED" = "true" ] && [ -z "$PORTAL_ADDRESS" ]; then
+            TEXT=$(printf '%s\n%s\n%s\n%s' \
+              "$STATUS_EMOJI NorthStar validator deployment completed with status: *$STATUS*" \
+              ":warning: Portal program changed but deployment failed or was skipped." \
+              ":memo: Commit: \`$COMMIT_SHA\`" \
+              "$COMMIT_MSG")
+          else
+            TEXT=$(printf '%s\n%s\n%s\n%s' \
+              "$STATUS_EMOJI NorthStar validator deployment completed with status: *$STATUS*" \
+              ":information_source: No portal program changes." \
+              ":memo: Commit: \`$COMMIT_SHA\`" \
+              "$COMMIT_MSG")
+          fi
+          PAYLOAD=$(jq -n --arg channel "$SLACK_CHANNEL_ID" --arg text "$TEXT" '{channel: $channel, text: $text}')
+          curl -X POST -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H 'Content-type: application/json' \
+            --data "$PAYLOAD" \
+            https://slack.com/api/chat.postMessage
