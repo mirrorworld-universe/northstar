@@ -958,11 +958,6 @@ async fn committed_checkpoint_blocks_next_proposal_until_settled() {
     );
 
     let cancel_ix = build_cancel_checkpoint_ix(&PORTAL_PROGRAM_ID, &payer_pubkey, &session_pda, 20);
-    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
-    let tx =
-        Transaction::new_signed_with_payer(&[cancel_ix], Some(&payer_pubkey), &[&payer], blockhash);
-    context.banks_client.process_transaction(tx).await.unwrap();
-
     let close_ix = build_close_session_ix(
         &PORTAL_PROGRAM_ID,
         &payer_pubkey,
@@ -970,8 +965,12 @@ async fn committed_checkpoint_blocks_next_proposal_until_settled() {
         &fee_vault_pda,
     );
     let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
-    let tx =
-        Transaction::new_signed_with_payer(&[close_ix], Some(&payer_pubkey), &[&payer], blockhash);
+    let tx = Transaction::new_signed_with_payer(
+        &[cancel_ix, close_ix],
+        Some(&payer_pubkey),
+        &[&payer],
+        blockhash,
+    );
     context.banks_client.process_transaction(tx).await.unwrap();
 
     let open_ix = build_open_session_ix(
