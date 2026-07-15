@@ -15,7 +15,7 @@ use {
         sysvars::{clock::Clock, rent::Rent, Sysvar},
         ProgramResult,
     },
-    pinocchio_system::instructions::{CreateAccount, Transfer},
+    pinocchio_system::instructions::Transfer,
 };
 
 pub fn process_deposit_fee(
