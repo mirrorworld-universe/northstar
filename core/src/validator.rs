@@ -405,7 +405,7 @@ pub struct ValidatorConfig {
     pub ephemeral_ws_port: u16,
     // Sonic: Ephemeral TPU port for rollup QUIC transactions
     pub ephemeral_tpu_port: u16,
-    // Sonic: Maximum ER slot age retained in in-memory transaction history
+    // Sonic: Maximum number of non-empty ER slots retained in in-memory transaction history
     pub er_history_max_retained_slots: usize,
 }
 

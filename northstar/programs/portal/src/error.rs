@@ -34,6 +34,7 @@ pub enum PortalError {
     DelegatedAccountDataNotEmpty = 29,
     SettlementLamportsNotConserved = 30,
     SettlementLamportsBelowRentExempt = 31,
+    WithdrawalSinkMismatch = 32,
 }
 
 impl From<PortalError> for ProgramError {

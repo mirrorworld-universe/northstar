@@ -9,12 +9,13 @@ use {
     solana_fee_structure::FeeStructure,
     solana_gossip::cluster_info::ClusterInfo,
     solana_hash::Hash,
-    solana_instruction::Instruction,
+    solana_instruction::{AccountMeta, Instruction},
     solana_keypair::Keypair,
     solana_pubkey::Pubkey,
     solana_rent::Rent,
     solana_rpc::er_history::DEFAULT_MAX_RETAINED_SLOTS,
     solana_runtime::bank::Bank,
+    solana_sdk_ids::{system_program, sysvar},
     solana_signer::Signer,
     solana_transaction::Transaction,
     std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration},
@@ -57,36 +58,30 @@ fn deposit_receipt_escrow_lamports(lamports: u64) -> u64 {
     lamports.saturating_sub(Rent::default().minimum_balance(DepositReceipt::LEN))
 }
 
-/// PDA that receives ER withdrawal transfers for one bridged SOL recipient.
-/// Send a normal ER `system_program::transfer(recipient, sink, lamports)` to
-/// request L1 payout during the next Portal settlement.
-pub fn withdrawal_sink_pda(
-    portal_program_id: &Pubkey,
-    session_pda: &Pubkey,
-    recipient: &Pubkey,
-) -> Pubkey {
-    let (pda, _) = northstar_portal::find_withdrawal_sink_pda(
-        &portal_program_id.to_bytes(),
-        &session_pda.to_bytes(),
-        &recipient.to_bytes(),
-    );
-    Pubkey::new_from_array(pda)
-}
+/// Fixed ER account that receives all bridged SOL withdrawals.
+pub const WITHDRAWAL_SINK: Pubkey = Pubkey::new_from_array(northstar_portal::WITHDRAWAL_SINK);
 
-/// Build the ER transaction instruction for a bridged SOL withdrawal request.
-/// The validator observes the sink balance and Portal pays the L1 SOL during
-/// settlement.
+/// Build the ER Portal instruction for a bridged SOL withdrawal request.
 pub fn er_withdrawal_instruction(
     portal_program_id: &Pubkey,
-    session_pda: &Pubkey,
-    recipient: &Pubkey,
+    source: &Pubkey,
+    l1_recipient: &Pubkey,
     lamports: u64,
 ) -> Instruction {
-    solana_system_interface::instruction::transfer(
-        recipient,
-        &withdrawal_sink_pda(portal_program_id, session_pda, recipient),
-        lamports,
-    )
+    let mut data = [0; 9];
+    data[0] = 13;
+    data[1..].copy_from_slice(&lamports.to_le_bytes());
+    Instruction {
+        program_id: *portal_program_id,
+        accounts: vec![
+            AccountMeta::new(*source, true),
+            AccountMeta::new_readonly(*l1_recipient, false),
+            AccountMeta::new(WITHDRAWAL_SINK, false),
+            AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new_readonly(sysvar::clock::id(), false),
+        ],
+        data: data.to_vec(),
+    }
 }
 
 #[derive(Error, Debug)]

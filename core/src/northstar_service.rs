@@ -40,7 +40,7 @@ pub struct NorthStarServiceConfig {
     pub tpu_addr: SocketAddr,
     /// Duration for each slot in the ephemeral rollup
     pub slot_duration: Duration,
-    /// Maximum ER slot age retained in in-memory transaction history.
+    /// Maximum number of non-empty ER slots retained in in-memory transaction history.
     pub er_history_max_retained_slots: usize,
     /// Local BankingStage non-vote sender for permissioned Portal settlement txs.
     pub settlement_sender: Option<BankingPacketSender>,
