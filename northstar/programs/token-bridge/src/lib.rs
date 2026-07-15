@@ -31,7 +31,7 @@ struct SessionBridge {
 }
 
 impl SessionBridge {
-    const DISCRIMINATOR: u8 = 5;
+    const DISCRIMINATOR: u8 = 8;
 
     fn is_valid(&self) -> bool {
         self.discriminator == Self::DISCRIMINATOR
