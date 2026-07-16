@@ -83,6 +83,8 @@ jobs:
         run: cargo build-sbf --manifest-path northstar/programs/portal/Cargo.toml
       - name: Build Token Bridge SBF program
         run: cargo build-sbf --manifest-path northstar/programs/token-bridge/Cargo.toml
+      - name: Build test validator
+        run: cargo build --bin solana-test-validator
       - name: Run SPL token bridge tests
         run: cargo test -p northstar-token-bridge --no-fail-fast
       - name: Run Northstar crate tests
