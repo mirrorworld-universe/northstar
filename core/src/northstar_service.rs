@@ -587,16 +587,10 @@ impl NorthStarService {
                 config.tpu_addr,
             ) {
                 error!("Failed to initialize ephemeral runtime: {e}");
+            } else if manager.resume_active_session_from_l1(root_bank) {
+                info!("NorthStar resumed active Portal session from L1 on startup");
             } else {
-                // Sonic: Hotfix: do not resume historical sessions on the validator
-                // startup hot path. Resume scans Portal-owned accounts from the L1
-                // bank, which can devolve into an AccountsDB-wide scan without a
-                // program-id index and stall NorthStar sync reporting. Operators can
-                // reopen sessions until resume has a bounded/indexed recovery path.
-                info!(
-                    "NorthStar historical session resume skipped; reopen the Portal session to \
-                     activate ER"
-                );
+                info!("NorthStar found no active Portal session to resume on startup");
             }
         }
 
@@ -1022,6 +1016,7 @@ mod tests {
         let manager = northstar::Manager::new(northstar::ManagerConfig {
             portal_program_id: Pubkey::new_unique(),
             manager_account: Arc::clone(&payer),
+            checkpoint_plan_dir: None,
         });
 
         let mut transaction = pending.pop_next_transaction().unwrap();
@@ -1057,6 +1052,7 @@ mod tests {
         let manager = northstar::Manager::new(northstar::ManagerConfig {
             portal_program_id: Pubkey::new_unique(),
             manager_account: Arc::clone(&payer),
+            checkpoint_plan_dir: None,
         });
         let (settlement_sender, local_receiver) =
             crate::banking_trace::BankingTracer::channel_for_test();
@@ -1337,6 +1333,7 @@ mod tests {
             northstar::ManagerConfig {
                 portal_program_id,
                 manager_account: Arc::new(Keypair::new()),
+                checkpoint_plan_dir: None,
             },
             cluster_info,
             config.clone(),
@@ -1392,6 +1389,7 @@ mod tests {
             northstar::ManagerConfig {
                 portal_program_id,
                 manager_account: Arc::new(Keypair::new()),
+                checkpoint_plan_dir: None,
             },
             cluster_info,
             config.clone(),
@@ -1447,6 +1445,7 @@ mod tests {
             northstar::ManagerConfig {
                 portal_program_id,
                 manager_account: Arc::new(Keypair::new()),
+                checkpoint_plan_dir: None,
             },
             cluster_info,
             config,
@@ -1498,6 +1497,14 @@ mod tests {
         root_bank.process_transaction(&open_tx).unwrap();
         root_bank.freeze();
 
+        let expired_slot = root_bank.slot() + 2;
+        let expired_bank = Bank::new_from_parent(root_bank, SlotLeader::new_unique(), expired_slot);
+        expired_bank.freeze();
+        {
+            let mut bank_forks = bank_forks.write().unwrap();
+            bank_forks.insert(expired_bank);
+            bank_forks.set_root(expired_slot, None, None);
+        }
         let bank_for_open = bank_forks.read().unwrap().root_bank();
 
         let cluster_info = create_test_cluster_info();
@@ -1519,6 +1526,7 @@ mod tests {
             northstar::ManagerConfig {
                 portal_program_id: program_id,
                 manager_account: Arc::new(owner.insecure_clone()),
+                checkpoint_plan_dir: None,
             },
             cluster_info,
             config.clone(),
@@ -1622,6 +1630,7 @@ mod tests {
             northstar::ManagerConfig {
                 portal_program_id: program_id,
                 manager_account: Arc::new(Keypair::new()),
+                checkpoint_plan_dir: None,
             },
             cluster_info,
             config.clone(),
@@ -1756,6 +1765,7 @@ mod tests {
             northstar::ManagerConfig {
                 portal_program_id: program_id,
                 manager_account: Arc::new(Keypair::new()),
+                checkpoint_plan_dir: None,
             },
             cluster_info,
             config.clone(),

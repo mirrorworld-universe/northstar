@@ -40,6 +40,114 @@ pub enum SettlementStatus {
     InProgress = 1,
 }
 
+#[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct Checkpoint {
+    pub discriminator: u8,
+    pub session: Pubkey,
+    pub er_slot: u64,
+    pub previous_state_root: [u8; 32],
+    pub new_state_root: [u8; 32],
+    pub effect_commitment: [u8; 32],
+    pub proposer: Pubkey,
+    pub proposed_at_l1_slot: u64,
+    pub challenge_deadline_l1_slot: u64,
+    pub status: CheckpointStatus,
+    pub bond_lamports: u64,
+    pub bond_status: CheckpointBondStatus,
+    pub challenger: Pubkey,
+    pub challenged_at_l1_slot: u64,
+    /// Temporary single-proof skeleton guard; real bisection needs challenge-specific proofs.
+    pub challenge_resolved: bool,
+    pub bump: u8,
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[borsh(use_discriminant = true)]
+#[repr(u8)]
+pub enum CheckpointStatus {
+    Pending = 0,
+    Committed = 1,
+    Cancelled = 2,
+    Settled = 3,
+    Challenged = 4,
+    Invalid = 5,
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[borsh(use_discriminant = true)]
+#[repr(u8)]
+pub enum CheckpointBondStatus {
+    Locked = 0,
+    Released = 1,
+    Slashed = 2,
+}
+
+impl Checkpoint {
+    pub const LEN: usize = 237;
+    pub const SEED_PREFIX: &[u8] = b"checkpoint";
+    pub const DISCRIMINATOR: u8 = 5;
+
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        self.discriminator == Self::DISCRIMINATOR
+    }
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct CheckpointCursor {
+    pub discriminator: u8,
+    pub session: Pubkey,
+    pub latest_finalized_checkpoint: Pubkey,
+    pub latest_finalized_er_slot: u64,
+    pub latest_finalized_state_root: [u8; 32],
+    pub active_checkpoint: Pubkey,
+    pub active_er_slot: u64,
+    pub bump: u8,
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct StepProofAccount {
+    pub discriminator: u8,
+    pub checkpoint: Pubkey,
+    pub authority: Pubkey,
+    pub proof_kind: u8,
+    pub proof_version: u8,
+    pub step_index: u64,
+    pub public_input_hash: [u8; 32],
+    pub written_len: u32,
+    pub sealed: bool,
+    pub proof_hash: [u8; 32],
+    pub bump: u8,
+    pub data: [u8; crate::MAX_STEP_PROOF_BYTES],
+}
+
+impl StepProofAccount {
+    pub const LEN: usize = 401;
+    pub const SEED_PREFIX: &[u8] = b"step_proof";
+    pub const DISCRIMINATOR: u8 = 7;
+
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        self.discriminator == Self::DISCRIMINATOR
+    }
+}
+
+impl CheckpointCursor {
+    pub const LEN: usize = 146;
+    pub const SEED_PREFIX: &[u8] = b"checkpoint_cursor";
+    pub const DISCRIMINATOR: u8 = 6;
+
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        self.discriminator == Self::DISCRIMINATOR
+    }
+}
+
 impl Session {
     pub const LEN: usize = 219;
     pub const SEED_PREFIX: &[u8] = b"session";
@@ -183,6 +291,66 @@ mod tests {
         };
         let serialized = borsh::to_vec(&record).unwrap();
         assert_eq!(serialized.len(), DelegationRecord::LEN);
+    }
+
+    #[test]
+    fn test_checkpoint_len() {
+        let checkpoint = Checkpoint {
+            discriminator: Checkpoint::DISCRIMINATOR,
+            session: [0x10; 32],
+            er_slot: 10,
+            previous_state_root: [0x11; 32],
+            new_state_root: [0x12; 32],
+            effect_commitment: [0x13; 32],
+            proposer: [0x14; 32],
+            proposed_at_l1_slot: 100,
+            challenge_deadline_l1_slot: 110,
+            status: CheckpointStatus::Pending,
+            bond_lamports: 1_000_000,
+            bond_status: CheckpointBondStatus::Locked,
+            challenger: [0x15; 32],
+            challenged_at_l1_slot: 105,
+            challenge_resolved: true,
+            bump: 99,
+        };
+        let serialized = borsh::to_vec(&checkpoint).unwrap();
+        assert_eq!(serialized.len(), Checkpoint::LEN);
+    }
+
+    #[test]
+    fn test_checkpoint_cursor_len() {
+        let cursor = CheckpointCursor {
+            discriminator: CheckpointCursor::DISCRIMINATOR,
+            session: [0x10; 32],
+            latest_finalized_checkpoint: [0x11; 32],
+            latest_finalized_er_slot: 10,
+            latest_finalized_state_root: [0x12; 32],
+            active_checkpoint: [0x13; 32],
+            active_er_slot: 11,
+            bump: 99,
+        };
+        let serialized = borsh::to_vec(&cursor).unwrap();
+        assert_eq!(serialized.len(), CheckpointCursor::LEN);
+    }
+
+    #[test]
+    fn test_step_proof_account_len() {
+        let proof = StepProofAccount {
+            discriminator: StepProofAccount::DISCRIMINATOR,
+            checkpoint: [0x31; 32],
+            authority: [0x32; 32],
+            proof_kind: 1,
+            proof_version: 1,
+            step_index: 3,
+            public_input_hash: [0x33; 32],
+            written_len: 3,
+            sealed: true,
+            proof_hash: [0x34; 32],
+            bump: 77,
+            data: [0xAB; crate::MAX_STEP_PROOF_BYTES],
+        };
+        let serialized = borsh::to_vec(&proof).unwrap();
+        assert_eq!(serialized.len(), StepProofAccount::LEN);
     }
 
     #[test]

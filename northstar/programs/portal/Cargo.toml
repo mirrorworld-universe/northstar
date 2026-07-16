@@ -11,6 +11,7 @@ crate-type = ["cdylib", "lib"]
 default = []
 bpf-entrypoint = []
 idl = ["dep:shank"]
+test-verifier = []
 
 [dependencies]
 base64-no-std = { package = "base64", version = "0.22.1", default-features = false }

@@ -1,8 +1,10 @@
 use {
     crate::{
-        find_delegation_record_pda, find_session_pda, state::DelegationRecord, BeginSettlement,
-        FinishSettlement, PortalError, Session, SettleAccountLamports, SettleAccountOwner,
-        SettlementStatus, WriteSettlementChunk, MAX_SETTLEMENT_CHUNK,
+        find_checkpoint_cursor_pda, find_checkpoint_pda, find_delegation_record_pda,
+        find_session_pda,
+        state::{Checkpoint, CheckpointCursor, CheckpointStatus, DelegationRecord},
+        BeginSettlement, FinishSettlement, PortalError, Session, SettleAccountLamports,
+        SettleAccountOwner, SettlementStatus, WriteSettlementChunk, MAX_SETTLEMENT_CHUNK,
         MAX_SETTLEMENT_LAMPORT_ACCOUNTS,
     },
     borsh::{BorshDeserialize, BorshSerialize},
@@ -122,6 +124,98 @@ fn require_active_settlement(
     Ok(())
 }
 
+fn load_checkpoint_for_settlement(
+    program_id: &Pubkey,
+    session_key: &Pubkey,
+    er_slot: u64,
+    checksum: [u8; 32],
+    checkpoint: &AccountInfo,
+) -> Result<Checkpoint, ProgramError> {
+    let (expected_checkpoint_key, _) = find_checkpoint_pda(program_id, session_key, er_slot);
+    if checkpoint.key() != &expected_checkpoint_key {
+        return Err(PortalError::InvalidPdaSeeds.into());
+    }
+    if checkpoint.owner() != program_id {
+        return Err(PortalError::CheckpointStateInvalid.into());
+    }
+
+    let checkpoint_state = Checkpoint::try_from_slice(&checkpoint.try_borrow_data()?)
+        .map_err(|_| PortalError::CheckpointDeserializeFailed)?;
+    if !checkpoint_state.is_valid()
+        || checkpoint_state.session != *session_key
+        || checkpoint_state.er_slot != er_slot
+    {
+        return Err(PortalError::CheckpointStateInvalid.into());
+    }
+    if checkpoint_state.status == CheckpointStatus::Challenged {
+        return Err(PortalError::CheckpointChallenged.into());
+    }
+    if checkpoint_state.status == CheckpointStatus::Invalid {
+        return Err(PortalError::CheckpointStateInvalid.into());
+    }
+    if checkpoint_state.status != CheckpointStatus::Committed {
+        return Err(PortalError::CheckpointStateInvalid.into());
+    }
+    if checkpoint_state.effect_commitment != checksum {
+        return Err(PortalError::SettlementChecksumMismatch.into());
+    }
+
+    Ok(checkpoint_state)
+}
+
+fn store_checkpoint(checkpoint: &AccountInfo, checkpoint_state: &Checkpoint) -> ProgramResult {
+    let mut checkpoint_data = checkpoint.try_borrow_mut_data()?;
+    BorshSerialize::serialize(
+        checkpoint_state,
+        &mut &mut checkpoint_data[..Checkpoint::LEN],
+    )
+    .unwrap();
+    Ok(())
+}
+
+fn load_cursor(
+    program_id: &Pubkey,
+    session_key: &Pubkey,
+    cursor: &AccountInfo,
+) -> Result<CheckpointCursor, ProgramError> {
+    let (expected_cursor_key, _) = find_checkpoint_cursor_pda(program_id, session_key);
+    if cursor.key() != &expected_cursor_key {
+        return Err(PortalError::InvalidPdaSeeds.into());
+    }
+    if cursor.owner() != program_id {
+        return Err(PortalError::CheckpointCursorStateInvalid.into());
+    }
+    let cursor_state = CheckpointCursor::try_from_slice(&cursor.try_borrow_data()?)
+        .map_err(|_| PortalError::CheckpointCursorDeserializeFailed)?;
+    if !cursor_state.is_valid() || cursor_state.session != *session_key {
+        return Err(PortalError::CheckpointCursorStateInvalid.into());
+    }
+    Ok(cursor_state)
+}
+
+fn store_cursor(cursor: &AccountInfo, cursor_state: &CheckpointCursor) -> ProgramResult {
+    let mut cursor_data = cursor.try_borrow_mut_data()?;
+    BorshSerialize::serialize(cursor_state, &mut &mut cursor_data[..CheckpointCursor::LEN])
+        .unwrap();
+    Ok(())
+}
+
+fn require_active_checkpoint(
+    cursor_state: &CheckpointCursor,
+    checkpoint_key: &Pubkey,
+    er_slot: u64,
+) -> ProgramResult {
+    if cursor_state.active_checkpoint != *checkpoint_key || cursor_state.active_er_slot != er_slot {
+        return Err(PortalError::CheckpointStateInvalid.into());
+    }
+    Ok(())
+}
+
+fn clear_active_checkpoint(cursor_state: &mut CheckpointCursor) {
+    cursor_state.active_checkpoint = [0; 32];
+    cursor_state.active_er_slot = 0;
+}
+
 fn load_delegation_record(
     program_id: &Pubkey,
     session_state: &Session,
@@ -157,12 +251,13 @@ pub fn process_begin_settlement(
 ) -> ProgramResult {
     pinocchio_log::log!("Instruction: BeginSettlement, er_slot={}", er_slot);
 
-    if accounts.len() < 2 {
+    if accounts.len() < 3 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
     let validator = &accounts[0];
     let session = &accounts[1];
+    let checkpoint = &accounts[2];
     let mut session_state = load_session(program_id, session)?;
     require_validator(validator, &session_state)?;
 
@@ -181,6 +276,8 @@ pub fn process_begin_settlement(
     if er_slot <= session_state.last_settled_er_slot {
         return Err(PortalError::SettlementErSlotNotAdvanced.into());
     }
+
+    load_checkpoint_for_settlement(program_id, session.key(), er_slot, checksum, checkpoint)?;
 
     session_state.settlement_status = SettlementStatus::InProgress;
     session_state.settlement_er_slot = er_slot;
@@ -392,12 +489,14 @@ pub fn process_finish_settlement(
 ) -> ProgramResult {
     pinocchio_log::log!("Instruction: FinishSettlement, er_slot={}", er_slot);
 
-    if accounts.len() < 2 {
+    if accounts.len() < 4 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
     let validator = &accounts[0];
     let session = &accounts[1];
+    let checkpoint = &accounts[2];
+    let cursor = &accounts[3];
     let mut session_state = load_session(program_id, session)?;
     require_validator(validator, &session_state)?;
 
@@ -412,6 +511,17 @@ pub fn process_finish_settlement(
     {
         return Err(PortalError::SettlementChecksumMismatch.into());
     }
+
+    let session_key = session.key();
+    let mut checkpoint_state =
+        load_checkpoint_for_settlement(program_id, session_key, er_slot, checksum, checkpoint)?;
+    let mut cursor_state = load_cursor(program_id, session_key, cursor)?;
+    require_active_checkpoint(&cursor_state, checkpoint.key(), er_slot)?;
+
+    checkpoint_state.status = CheckpointStatus::Settled;
+    store_checkpoint(checkpoint, &checkpoint_state)?;
+    clear_active_checkpoint(&mut cursor_state);
+    store_cursor(cursor, &cursor_state)?;
 
     session_state.last_settled_l1_slot = Clock::get()?.slot;
     session_state.last_settled_er_slot = er_slot;
@@ -451,6 +561,11 @@ pub fn process_abort_settlement(program_id: &Pubkey, accounts: &[AccountInfo]) -
                 .saturating_add(session_state.settlement_interval_slots);
     if !is_validator && !is_timed_out_authority {
         return Err(PortalError::SettlementUnauthorizedAbort.into());
+    }
+    if session_state.settlement_accumulator
+        != initial_settlement_checksum(session_state.settlement_er_slot)
+    {
+        return Err(PortalError::SettlementInProgress.into());
     }
 
     session_state.settlement_status = SettlementStatus::Idle;

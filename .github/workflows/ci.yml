@@ -79,6 +79,8 @@ jobs:
           key: ${{ runner.os }}-solana-platform-tools-v3-${{ steps.solana_tools.outputs.platform_tools_version }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-solana-platform-tools-v3-${{ steps.solana_tools.outputs.platform_tools_version }}-
+      - name: Build Portal SBF program
+        run: cargo build-sbf --manifest-path northstar/programs/portal/Cargo.toml
       - name: Run Northstar crate tests
         run: cargo test -p northstar -p northstar-portal --no-fail-fast
       - name: Run Northstar SVM regression tests
