@@ -26,7 +26,7 @@ solana-system-interface = { workspace = true }
 spl-token-interface = { workspace = true }
 
 [dev-dependencies]
-northstar-portal = { path = "../portal" }
+northstar-portal = { path = "../portal", features = ["no-entrypoint"] }
 solana-account = { workspace = true }
 solana-commitment-config = { workspace = true }
 solana-hash = { workspace = true }

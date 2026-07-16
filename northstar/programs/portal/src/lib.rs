@@ -130,7 +130,7 @@ fn process_instruction(
 // the SBF stack before dispatch and causes live-validator Portal calls to exhaust
 // compute units without logs. Sixteen accounts covers current Portal instructions,
 // including batched Delegate calls, while keeping the stack scratch space small.
-#[no_mangle]
+#[cfg_attr(not(feature = "no-entrypoint"), no_mangle)]
 /// # Safety
 /// `input` must be a valid pointer to a serialized Solana program input buffer.
 pub unsafe extern "C" fn entrypoint(input: *mut u8) -> u64 {

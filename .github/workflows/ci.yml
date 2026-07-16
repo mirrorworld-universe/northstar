@@ -84,7 +84,7 @@ jobs:
       - name: Build Token Bridge SBF program
         run: cargo build-sbf --manifest-path northstar/programs/token-bridge/Cargo.toml
       - name: Run SPL token bridge tests
-        run: BPF_OUT_DIR=target/deploy cargo test -p northstar-token-bridge --no-fail-fast
+        run: cargo test -p northstar-token-bridge --no-fail-fast
       - name: Run Northstar crate tests
         run: cargo test -p northstar -p northstar-portal --no-fail-fast
       - name: Run Northstar SVM regression tests
