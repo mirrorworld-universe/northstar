@@ -1688,7 +1688,7 @@ mod portal_e2e_tests {
         solana_keypair::{Keypair, Signer},
         solana_lattice_hash::lt_hash::LtHash,
         solana_leader_schedule::SlotLeader,
-        solana_net_utils::{sockets::bind_to, SocketAddrSpace},
+        solana_net_utils::SocketAddrSpace,
         solana_rent::Rent,
         solana_rpc_client::rpc_client::RpcClient,
         solana_runtime::{
@@ -1701,7 +1701,6 @@ mod portal_e2e_tests {
         solana_transaction::Transaction,
         std::{
             collections::HashSet,
-            net::{IpAddr, Ipv4Addr, TcpListener},
             sync::RwLock,
             time::{Duration, Instant},
         },
@@ -2072,13 +2071,7 @@ mod portal_e2e_tests {
     }
 
     fn find_free_addr() -> SocketAddr {
-        loop {
-            let udp = bind_to(IpAddr::V4(Ipv4Addr::LOCALHOST), 0).unwrap();
-            let addr = udp.local_addr().unwrap();
-            if TcpListener::bind(addr).is_ok() {
-                return addr;
-            }
-        }
+        crate::ephemeral_runtime::find_free_test_addr()
     }
 
     fn wait_for_rpc_ready(rpc_client: &RpcClient) {
@@ -4322,7 +4315,7 @@ mod ephemeral_accounts_background_service_regression {
         solana_keypair::Keypair,
         solana_leader_schedule::SlotLeader,
         solana_message::Message,
-        solana_net_utils::{sockets::bind_to, SocketAddrSpace},
+        solana_net_utils::SocketAddrSpace,
         solana_pubkey::Pubkey,
         solana_runtime::{
             accounts_background_service::{
@@ -4338,7 +4331,6 @@ mod ephemeral_accounts_background_service_regression {
         solana_system_interface::instruction::transfer,
         solana_transaction::Transaction,
         std::{
-            net::{IpAddr, Ipv4Addr, TcpListener},
             num::NonZeroU64,
             sync::{
                 atomic::{AtomicBool, Ordering},
@@ -4351,13 +4343,7 @@ mod ephemeral_accounts_background_service_regression {
     };
 
     fn find_free_addr() -> std::net::SocketAddr {
-        loop {
-            let udp = bind_to(IpAddr::V4(Ipv4Addr::LOCALHOST), 0).unwrap();
-            let addr = udp.local_addr().unwrap();
-            if TcpListener::bind(addr).is_ok() {
-                return addr;
-            }
-        }
+        crate::ephemeral_runtime::find_free_test_addr()
     }
 
     fn cluster_info() -> Arc<ClusterInfo> {

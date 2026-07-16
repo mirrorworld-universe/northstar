@@ -75,6 +75,29 @@ impl DropCallback for NoopDropCallback {
 const MAX_WITHDRAWAL_PAYOUT_EVENTS: usize = 10_000;
 
 #[cfg(test)]
+static TEST_SOCKET_ADDRS: Mutex<Vec<SocketAddr>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) fn find_free_test_addr() -> SocketAddr {
+    loop {
+        let udp = solana_net_utils::sockets::bind_to(IpAddr::V4(Ipv4Addr::LOCALHOST), 0).unwrap();
+        let addr = udp.local_addr().unwrap();
+        if std::net::TcpListener::bind(addr).is_err() {
+            continue;
+        }
+
+        // Test threads probe ports concurrently. Retain chosen addresses so another
+        // thread cannot reuse a just-probed port before its runtime binds it.
+        let mut allocated = TEST_SOCKET_ADDRS.lock().unwrap();
+        if allocated.contains(&addr) {
+            continue;
+        }
+        allocated.push(addr);
+        return addr;
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::type_complexity)]
 static REANCHOR_AFTER_BANK_FORKS_REPLACE_HOOK: Mutex<Option<(Pubkey, Box<dyn FnMut() + Send>)>> =
     Mutex::new(None);
@@ -2110,7 +2133,7 @@ mod tests {
         solana_keypair::{Keypair, Signer},
         solana_lattice_hash::lt_hash::LtHash,
         solana_message::{Message, SanitizedMessage},
-        solana_net_utils::{sockets::bind_to, SocketAddrSpace},
+        solana_net_utils::SocketAddrSpace,
         solana_rpc_client::rpc_client::RpcClient,
         solana_rpc_client_types::config::{
             CommitmentConfig, RpcSendTransactionConfig, RpcSimulateTransactionConfig,
@@ -2128,7 +2151,6 @@ mod tests {
         },
         std::{
             collections::HashSet,
-            net::{IpAddr, Ipv4Addr, TcpListener},
             sync::{atomic::AtomicU64, mpsc},
             time::{Duration, Instant},
         },
@@ -2162,13 +2184,7 @@ mod tests {
     }
 
     fn find_free_addr() -> SocketAddr {
-        loop {
-            let udp = bind_to(IpAddr::V4(Ipv4Addr::LOCALHOST), 0).unwrap();
-            let addr = udp.local_addr().unwrap();
-            if TcpListener::bind(addr).is_ok() {
-                return addr;
-            }
-        }
+        crate::ephemeral_runtime::find_free_test_addr()
     }
 
     fn wait_for_rpc_ready(rpc_client: &RpcClient) {
