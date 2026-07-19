@@ -138,6 +138,20 @@ fn live_validator_spl_token_bridge_round_trip() {
         &[&payer],
     );
 
+    fund_and_delegate_er_fee_payer(&rpc, &payer, &er_fee_payer, session);
+
+    send_tx(
+        &rpc,
+        &[
+            delegate_er_ix(&payer.pubkey(), session, session_bridge, alice_er),
+            delegate_er_ix(&payer.pubkey(), session, session_bridge, bob_er),
+        ],
+        &payer.pubkey(),
+        &[&payer],
+    );
+    wait_for_er_amount(&er_rpc, alice_er, 0);
+    wait_for_er_amount(&er_rpc, bob_er, 0);
+
     send_tx(
         &rpc,
         &[deposit_ix(
@@ -155,21 +169,7 @@ fn live_validator_spl_token_bridge_round_trip() {
     );
     wait_token_amount(&rpc, alice_token.pubkey(), 400_000_000);
     wait_token_amount(&rpc, vault_token.pubkey(), DEPOSIT_AMOUNT);
-    wait_for_er_amount(&rpc, alice_er, DEPOSIT_AMOUNT);
-
-    fund_and_delegate_er_fee_payer(&rpc, &payer, &er_fee_payer, session);
-
-    send_tx(
-        &rpc,
-        &[
-            delegate_er_ix(&payer.pubkey(), session, session_bridge, alice_er),
-            delegate_er_ix(&payer.pubkey(), session, session_bridge, bob_er),
-        ],
-        &payer.pubkey(),
-        &[&payer],
-    );
     wait_for_er_amount(&er_rpc, alice_er, DEPOSIT_AMOUNT);
-    wait_for_er_amount(&er_rpc, bob_er, 0);
 
     submit_tx(
         &er_rpc,
@@ -189,7 +189,26 @@ fn live_validator_spl_token_bridge_round_trip() {
     wait_for_er_amount(&er_rpc, alice_er, DEPOSIT_AMOUNT - TRANSFER_AMOUNT);
     wait_for_er_amount(&er_rpc, bob_er, TRANSFER_AMOUNT);
 
-    wait_for_er_amount(&rpc, bob_er, TRANSFER_AMOUNT);
+    submit_tx(
+        &er_rpc,
+        &[start_withdrawal_ix(
+            bob.pubkey(),
+            bob_er,
+            session_bridge,
+            bob_token.pubkey(),
+            WITHDRAW_AMOUNT,
+        )],
+        &er_fee_payer.pubkey(),
+        &[&er_fee_payer, &bob],
+        RpcSendTransactionConfig {
+            skip_preflight: true,
+            ..RpcSendTransactionConfig::default()
+        },
+    );
+    wait_for_er_amount(&er_rpc, bob_er, TRANSFER_AMOUNT - WITHDRAW_AMOUNT);
+    wait_for_er_amount(&rpc, bob_er, TRANSFER_AMOUNT - WITHDRAW_AMOUNT);
+    wait_token_amount(&rpc, bob_token.pubkey(), WITHDRAW_AMOUNT);
+    wait_token_amount(&rpc, vault_token.pubkey(), DEPOSIT_AMOUNT - WITHDRAW_AMOUNT);
 
     send_tx(
         &rpc,
@@ -198,24 +217,6 @@ fn live_validator_spl_token_bridge_round_trip() {
         &[&payer, &bob],
     );
     wait_account_owner(&rpc, bob_er, northstar_token_bridge::id());
-
-    send_tx(
-        &rpc,
-        &[withdraw_ix(
-            bob.pubkey(),
-            vault,
-            bob_er,
-            session_bridge,
-            vault_token.pubkey(),
-            bob_token.pubkey(),
-            mint.pubkey(),
-            WITHDRAW_AMOUNT,
-        )],
-        &payer.pubkey(),
-        &[&payer, &bob],
-    );
-    wait_token_amount(&rpc, bob_token.pubkey(), WITHDRAW_AMOUNT);
-    wait_token_amount(&rpc, vault_token.pubkey(), DEPOSIT_AMOUNT - WITHDRAW_AMOUNT);
     wait_for_er_amount(&rpc, bob_er, TRANSFER_AMOUNT - WITHDRAW_AMOUNT);
 
     validator.kill();
@@ -326,11 +327,20 @@ fn deposit_ix(
     mint: Pubkey,
     amount: u64,
 ) -> Instruction {
+    let (deposit_receipt, _) = northstar_token_bridge::find_token_deposit_receipt_pda(
+        &northstar_token_bridge::id(),
+        &session_bridge,
+        &er_account,
+    );
+    let delegation_record = portal_pubkey(northstar_portal::find_delegation_record_pda(
+        &PORTAL_PROGRAM_ID.to_bytes(),
+        &er_account.to_bytes(),
+    ));
     Instruction {
         program_id: northstar_token_bridge::id(),
         accounts: vec![
-            AccountMeta::new_readonly(owner, true),
-            AccountMeta::new_readonly(vault, false),
+            AccountMeta::new(owner, true),
+            AccountMeta::new(vault, false),
             AccountMeta::new(er_account, false),
             AccountMeta::new_readonly(session_bridge, false),
             AccountMeta::new_readonly(PORTAL_PROGRAM_ID, false),
@@ -338,6 +348,9 @@ fn deposit_ix(
             AccountMeta::new(vault_token, false),
             AccountMeta::new_readonly(mint, false),
             AccountMeta::new_readonly(spl_token_interface::id(), false),
+            AccountMeta::new(deposit_receipt, false),
+            AccountMeta::new_readonly(delegation_record, false),
+            AccountMeta::new_readonly(system_program::id(), false),
         ],
         data: borsh::to_vec(&TokenBridgeInstruction::Deposit {
             amount,
@@ -364,30 +377,24 @@ fn transfer_ix(
     }
 }
 
-fn withdraw_ix(
+fn start_withdrawal_ix(
     owner: Pubkey,
-    vault: Pubkey,
     er_account: Pubkey,
     session_bridge: Pubkey,
-    vault_token: Pubkey,
     destination_token: Pubkey,
-    mint: Pubkey,
     amount: u64,
 ) -> Instruction {
     Instruction {
         program_id: northstar_token_bridge::id(),
         accounts: vec![
             AccountMeta::new_readonly(owner, true),
-            AccountMeta::new_readonly(vault, false),
             AccountMeta::new(er_account, false),
             AccountMeta::new_readonly(session_bridge, false),
             AccountMeta::new_readonly(PORTAL_PROGRAM_ID, false),
-            AccountMeta::new(vault_token, false),
-            AccountMeta::new(destination_token, false),
-            AccountMeta::new_readonly(mint, false),
+            AccountMeta::new_readonly(destination_token, false),
             AccountMeta::new_readonly(spl_token_interface::id(), false),
         ],
-        data: borsh::to_vec(&TokenBridgeInstruction::Withdraw {
+        data: borsh::to_vec(&TokenBridgeInstruction::StartWithdrawal {
             amount,
             decimals: DECIMALS,
         })

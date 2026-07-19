@@ -164,6 +164,15 @@ pub enum L1Event {
         /// Who gets credited on L2
         depositor: Pubkey,
     },
+    /// SPL tokens locked on L1 for a delegated ER token account.
+    TokenDeposited {
+        session_pda: Pubkey,
+        session_bridge: Pubkey,
+        bridge_program: Pubkey,
+        er_token_account: Pubkey,
+        amount: u64,
+        delta: u64,
+    },
 }
 
 /// Configuration for NorthStar Manager
@@ -907,6 +916,35 @@ impl Manager {
             .checked_add(challenge_window_slots)
     }
 
+    fn settlement_transactions_for_plan(
+        &self,
+        plan: &SettlementPlan,
+        session_pda: Pubkey,
+        recent_blockhash: Hash,
+    ) -> Vec<Transaction> {
+        let mut transactions = plan.portal_transactions(
+            self.config.portal_program_id,
+            session_pda,
+            self.config.manager_account.as_ref(),
+            recent_blockhash,
+        );
+        if !transactions.is_empty() {
+            if let Some(runtime) = &self.runtime {
+                let token_withdrawals = runtime.settlement_token_withdrawals(plan.er_slot);
+                transactions.extend(settlement::token_withdrawal_transactions(
+                    &token_withdrawals,
+                    self.config.portal_program_id,
+                    session_pda,
+                    plan.er_slot,
+                    plan.checksum,
+                    self.config.manager_account.as_ref(),
+                    recent_blockhash,
+                ));
+            }
+        }
+        transactions
+    }
+
     fn transactions_for_existing_checkpoint(
         &self,
         l1_bank: &Bank,
@@ -956,10 +994,9 @@ impl Manager {
                     self.config.manager_account.as_ref(),
                     recent_blockhash,
                 )];
-                transactions.extend(plan.portal_transactions(
-                    self.config.portal_program_id,
+                transactions.extend(self.settlement_transactions_for_plan(
+                    plan,
                     session_pda,
-                    self.config.manager_account.as_ref(),
                     recent_blockhash,
                 ));
                 Some(transactions)
@@ -969,12 +1006,7 @@ impl Manager {
                     "Portal checkpoint committed; settling er_slot={} checksum={:?}",
                     plan.er_slot, plan.checksum,
                 );
-                Some(plan.portal_transactions(
-                    self.config.portal_program_id,
-                    session_pda,
-                    self.config.manager_account.as_ref(),
-                    recent_blockhash,
-                ))
+                Some(self.settlement_transactions_for_plan(plan, session_pda, recent_blockhash))
             }
             CheckpointStatus::Challenged => {
                 let Some(resolution_deadline) = Self::challenge_resolution_deadline(&checkpoint)
@@ -1006,10 +1038,9 @@ impl Manager {
                     self.config.manager_account.as_ref(),
                     recent_blockhash,
                 )];
-                transactions.extend(plan.portal_transactions(
-                    self.config.portal_program_id,
+                transactions.extend(self.settlement_transactions_for_plan(
+                    plan,
                     session_pda,
-                    self.config.manager_account.as_ref(),
                     recent_blockhash,
                 ));
                 Some(transactions)
@@ -1105,13 +1136,79 @@ impl Manager {
             }
             Some(PortalAccount::Checkpoint(_))
             | Some(PortalAccount::CheckpointCursor(_))
-            | Some(PortalAccount::StepProofAccount(_)) => None,
+            | Some(PortalAccount::StepProofAccount(_))
+            | Some(PortalAccount::SessionBridge(_)) => None,
             None => {
                 // Unrecognized — log and skip
                 debug!("Unrecognized portal account at {pubkey}");
                 None
             }
         }
+    }
+
+    fn parse_token_bridge_event(
+        &self,
+        bank: &Bank,
+        pubkey: Pubkey,
+        account: &AccountSharedData,
+    ) -> Option<L1Event> {
+        let receipt =
+            borsh::from_slice::<northstar_token_bridge::state::TokenDepositReceipt>(account.data())
+                .ok()?;
+        if !receipt.is_valid() {
+            return None;
+        }
+
+        let session_bridge_key = Pubkey::new_from_array(receipt.session_bridge);
+        let session_bridge_account = bank.get_account(&session_bridge_key)?;
+        if session_bridge_account.owner() != &self.config.portal_program_id {
+            return None;
+        }
+        let PortalAccount::SessionBridge(session_bridge) =
+            portal_state::try_parse_raw_portal_account(session_bridge_account.data())?
+        else {
+            return None;
+        };
+        let bridge_program = Pubkey::new_from_array(session_bridge.bridge_program);
+        if account.owner() != &bridge_program {
+            return None;
+        }
+        let er_token_account = Pubkey::new_from_array(receipt.er_token_account);
+        let expected_receipt = northstar_token_bridge::find_token_deposit_receipt_pda(
+            &bridge_program,
+            &session_bridge_key,
+            &er_token_account,
+        )
+        .0;
+        if pubkey != expected_receipt {
+            return None;
+        }
+
+        let previous_balance = bank
+            .parent()
+            .and_then(|parent| parent.get_account(&pubkey))
+            .filter(|previous| previous.owner() == &bridge_program)
+            .and_then(|previous| {
+                borsh::from_slice::<northstar_token_bridge::state::TokenDepositReceipt>(
+                    previous.data(),
+                )
+                .ok()
+            })
+            .filter(|previous| {
+                previous.is_valid()
+                    && previous.session_bridge == receipt.session_bridge
+                    && previous.er_token_account == receipt.er_token_account
+            })
+            .map(|previous| previous.balance)
+            .unwrap_or(0);
+        (receipt.balance > previous_balance).then_some(L1Event::TokenDeposited {
+            session_pda: Pubkey::new_from_array(session_bridge.session),
+            session_bridge: session_bridge_key,
+            bridge_program,
+            er_token_account,
+            amount: receipt.balance,
+            delta: receipt.balance - previous_balance,
+        })
     }
 
     pub fn get_l1_events(&self, bank: &Bank) -> Vec<L1Event> {
@@ -1130,6 +1227,7 @@ impl Manager {
                             parent_account.owner() == &self.config.portal_program_id
                         })
                         .and_then(|_| self.parse_zeroed_account(bank, &pubkey))
+                        .or_else(|| self.parse_token_bridge_event(bank, pubkey, &account))
                 }
             })
             .collect()
@@ -1601,6 +1699,22 @@ impl Manager {
                 return;
             }
             runtime.credit_deposit(depositor, lamports);
+        }
+    }
+
+    pub fn credit_token_deposit(
+        &self,
+        bridge_program: &Pubkey,
+        session_bridge: &Pubkey,
+        er_token_account: &Pubkey,
+        amount: u64,
+    ) {
+        if let Some(runtime) = &self.runtime {
+            if !runtime.is_active() {
+                warn!("Ignoring token deposit for {er_token_account}: no active session");
+                return;
+            }
+            runtime.credit_token_deposit(bridge_program, session_bridge, er_token_account, amount);
         }
     }
 
@@ -2836,6 +2950,78 @@ mod portal_e2e_tests {
         assert_eq!(er_account.data(), &delegated_data[..]);
 
         manager.shutdown_runtime();
+    }
+
+    #[test]
+    fn test_token_deposit_receipt_emits_l1_event() {
+        setup();
+        let (bank, _bank_forks, portal_program, _mint_keypair) = setup_bank_with_portal();
+        let bridge_program = Pubkey::new_unique();
+        let session = Pubkey::new_unique();
+        let session_bridge = Pubkey::new_unique();
+        let er_token_account = Pubkey::new_unique();
+        let mint = Pubkey::new_unique();
+        let bridge_state = northstar_portal::SessionBridge {
+            discriminator: northstar_portal::SessionBridge::DISCRIMINATOR,
+            session: session.to_bytes(),
+            mint: mint.to_bytes(),
+            bridge_program: bridge_program.to_bytes(),
+            vault: Pubkey::new_unique().to_bytes(),
+            token_program: Pubkey::new_unique().to_bytes(),
+            bump: 255,
+        };
+        let bridge_data = borsh::to_vec(&bridge_state).unwrap();
+        let mut bridge_account =
+            AccountSharedData::new(1_000_000, bridge_data.len(), &portal_program);
+        bridge_account
+            .data_as_mut_slice()
+            .copy_from_slice(&bridge_data);
+        bank.store_account(&session_bridge, &bridge_account);
+        bank.freeze();
+
+        let deposit_bank = Bank::new_from_parent(bank, SlotLeader::new_unique(), 2);
+        let (deposit_receipt, bump) = northstar_token_bridge::find_token_deposit_receipt_pda(
+            &bridge_program,
+            &session_bridge,
+            &er_token_account,
+        );
+        let receipt_state = northstar_token_bridge::state::TokenDepositReceipt {
+            discriminator: northstar_token_bridge::state::TokenDepositReceipt::DISCRIMINATOR,
+            session_bridge: session_bridge.to_bytes(),
+            er_token_account: er_token_account.to_bytes(),
+            balance: 600_000_000,
+            withdrawn: 0,
+            bump,
+        };
+        let receipt_data = borsh::to_vec(&receipt_state).unwrap();
+        let mut receipt_account =
+            AccountSharedData::new(1_000_000, receipt_data.len(), &bridge_program);
+        receipt_account
+            .data_as_mut_slice()
+            .copy_from_slice(&receipt_data);
+        deposit_bank.store_account(&deposit_receipt, &receipt_account);
+        deposit_bank.freeze();
+
+        let manager = Manager::new(ManagerConfig {
+            portal_program_id: portal_program,
+            manager_account: Arc::new(Keypair::new()),
+            checkpoint_plan_dir: None,
+        });
+        let events = manager.get_l1_events(&deposit_bank);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            L1Event::TokenDeposited {
+                session_pda,
+                session_bridge: event_session_bridge,
+                bridge_program: event_bridge,
+                er_token_account: event_account,
+                amount: 600_000_000,
+                delta: 600_000_000,
+            } if *session_pda == session
+                && *event_session_bridge == session_bridge
+                && *event_bridge == bridge_program
+                && *event_account == er_token_account
+        )));
     }
 
     #[test]

@@ -249,6 +249,18 @@ async fn deposit_transfer_and_withdraw_round_trip() {
     assert_eq!(world.token_amount(world.bob_token).await, 200);
     assert_eq!(world.token_amount(world.vault_token).await, 400);
     assert_eq!(world.er_amount(world.bob_er).await, 50);
+    let vault_account = world
+        .context
+        .banks_client
+        .get_account(world.vault)
+        .await
+        .unwrap()
+        .unwrap();
+    let vault_state =
+        borsh::from_slice::<northstar_token_bridge::state::TokenVault>(&vault_account.data)
+            .unwrap();
+    assert_eq!(vault_state.deposited, 600);
+    assert_eq!(vault_state.withdrawn, 200);
 }
 
 #[tokio::test]
@@ -343,11 +355,21 @@ fn initialize_er_ix(world: &TestWorld, owner: Pubkey, er_account: Pubkey) -> Ins
 }
 
 fn deposit_ix(world: &TestWorld, amount: u64) -> Instruction {
+    let (deposit_receipt, _) = northstar_token_bridge::find_token_deposit_receipt_pda(
+        &northstar_token_bridge::id(),
+        &world.session_bridge,
+        &world.alice_er,
+    );
+    let delegation_record = Pubkey::find_program_address(
+        &[b"delegation", world.alice_er.as_ref()],
+        &PORTAL_PROGRAM_ID,
+    )
+    .0;
     Instruction {
         program_id: northstar_token_bridge::id(),
         accounts: vec![
-            AccountMeta::new_readonly(world.alice.pubkey(), true),
-            AccountMeta::new_readonly(world.vault, false),
+            AccountMeta::new(world.alice.pubkey(), true),
+            AccountMeta::new(world.vault, false),
             AccountMeta::new(world.alice_er, false),
             AccountMeta::new_readonly(world.session_bridge, false),
             AccountMeta::new_readonly(PORTAL_PROGRAM_ID, false),
@@ -355,6 +377,9 @@ fn deposit_ix(world: &TestWorld, amount: u64) -> Instruction {
             AccountMeta::new(world.vault_token, false),
             AccountMeta::new_readonly(world.mint, false),
             AccountMeta::new_readonly(spl_token_interface::id(), false),
+            AccountMeta::new(deposit_receipt, false),
+            AccountMeta::new_readonly(delegation_record, false),
+            AccountMeta::new_readonly(system_program::id(), false),
         ],
         data: borsh::to_vec(&TokenBridgeInstruction::Deposit {
             amount,
@@ -407,7 +432,7 @@ fn withdraw_ix_for(
         program_id: northstar_token_bridge::id(),
         accounts: vec![
             AccountMeta::new_readonly(owner, true),
-            AccountMeta::new_readonly(world.vault, false),
+            AccountMeta::new(world.vault, false),
             AccountMeta::new(er_account, false),
             AccountMeta::new_readonly(world.session_bridge, false),
             AccountMeta::new_readonly(PORTAL_PROGRAM_ID, false),

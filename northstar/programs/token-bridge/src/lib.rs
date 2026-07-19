@@ -16,13 +16,13 @@ use {
     solana_sdk_ids::system_program,
     solana_system_interface::instruction as system_instruction,
     spl_token_interface::{instruction as token_instruction, state::Account as SplTokenAccount},
-    state::{BridgeBuffer, ErTokenAccount, TokenVault},
+    state::{BridgeBuffer, ErTokenAccount, TokenDepositReceipt, TokenVault},
 };
 
 #[derive(BorshDeserialize)]
 struct SessionBridge {
     discriminator: u8,
-    _session: [u8; 32],
+    session: [u8; 32],
     mint: [u8; 32],
     bridge_program: [u8; 32],
     vault: [u8; 32],
@@ -36,6 +36,14 @@ impl SessionBridge {
     fn is_valid(&self) -> bool {
         self.discriminator == Self::DISCRIMINATOR
     }
+}
+
+#[derive(BorshDeserialize)]
+struct DelegationRecord {
+    discriminator: u8,
+    owner_program: [u8; 32],
+    _grid_id: u64,
+    _bump: u8,
 }
 
 solana_pubkey::declare_id!("HeVLVaSa9WnFai9aTRJ3UR2c4jwbMe5nbjagmDP1GbXR");
@@ -60,6 +68,21 @@ pub fn find_er_token_account_pda(
             ErTokenAccount::SEED_PREFIX,
             session_bridge.as_ref(),
             owner.as_ref(),
+        ],
+        program_id,
+    )
+}
+
+pub fn find_token_deposit_receipt_pda(
+    program_id: &Pubkey,
+    session_bridge: &Pubkey,
+    er_token_account: &Pubkey,
+) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[
+            TokenDepositReceipt::SEED_PREFIX,
+            session_bridge.as_ref(),
+            er_token_account.as_ref(),
         ],
         program_id,
     )
@@ -99,6 +122,18 @@ pub fn process_instruction(
         TokenBridgeInstruction::UndelegateErTokenAccount => {
             process_undelegate_er_token_account(program_id, accounts)
         }
+        TokenBridgeInstruction::StartWithdrawal { amount, decimals } => {
+            process_start_withdrawal(program_id, accounts, amount, decimals)
+        }
+        TokenBridgeInstruction::SettleWithdrawal {
+            er_slot,
+            checksum,
+            amount,
+            withdrawn,
+            decimals,
+        } => process_settle_withdrawal(
+            program_id, accounts, er_slot, checksum, amount, withdrawn, decimals,
+        ),
     }
 }
 
@@ -151,6 +186,8 @@ fn process_initialize_vault(program_id: &Pubkey, accounts: &[AccountInfo]) -> Pr
         mint: bridge.mint,
         vault_token_account: key_bytes(vault_token_account.key),
         token_program: bridge.token_program,
+        deposited: 0,
+        withdrawn: 0,
         bump,
     };
     store(vault, &state, TokenVault::LEN)
@@ -222,10 +259,14 @@ fn process_deposit(
     let vault_token_account = next_account_info(account_info_iter)?;
     let mint = next_account_info(account_info_iter)?;
     let token_program = next_account_info(account_info_iter)?;
+    let deposit_receipt = next_account_info(account_info_iter)?;
+    let delegation_record = next_account_info(account_info_iter)?;
+    let system_program_info = next_account_info(account_info_iter)?;
 
     require_signer(owner)?;
+    require_system_program(system_program_info)?;
     let bridge = load_session_bridge(program_id, session_bridge, portal_program)?;
-    let vault_state = load_vault(program_id, vault, session_bridge.key)?;
+    let mut vault_state = load_vault(program_id, vault, session_bridge.key)?;
     require_bridge_token_accounts(
         &bridge,
         &vault_state,
@@ -234,8 +275,26 @@ fn process_deposit(
         token_program,
     )?;
 
-    let mut er_state = load_er_token_account(program_id, er_token_account)?;
+    let mut er_state = load_er_token_account_data(er_token_account)?;
     require_er_account(&er_state, session_bridge.key, owner.key, &bridge.mint)?;
+    let is_delegated = er_token_account.owner == portal_program.key;
+    if !is_delegated && er_token_account.owner != program_id {
+        return Err(ProgramError::InvalidAccountOwner);
+    }
+    if is_delegated {
+        require_bridge_delegation(
+            program_id,
+            er_token_account,
+            delegation_record,
+            portal_program,
+        )?;
+    }
+
+    let (expected_receipt, receipt_bump) =
+        find_token_deposit_receipt_pda(program_id, session_bridge.key, er_token_account.key);
+    if expected_receipt != *deposit_receipt.key {
+        return Err(ProgramError::InvalidSeeds);
+    }
 
     let ix = token_instruction::transfer_checked(
         token_program.key,
@@ -258,11 +317,63 @@ fn process_deposit(
         ],
     )?;
 
-    er_state.amount = er_state
-        .amount
+    if deposit_receipt.lamports() == 0 {
+        create_pda(
+            owner,
+            deposit_receipt,
+            TokenDepositReceipt::LEN,
+            program_id,
+            &[
+                TokenDepositReceipt::SEED_PREFIX,
+                session_bridge.key.as_ref(),
+                er_token_account.key.as_ref(),
+                &[receipt_bump],
+            ],
+            system_program_info,
+        )?;
+    } else if deposit_receipt.owner != program_id {
+        return Err(ProgramError::InvalidAccountOwner);
+    }
+
+    let mut receipt = if deposit_receipt.try_borrow_data()?[0] == 0 {
+        TokenDepositReceipt {
+            discriminator: TokenDepositReceipt::DISCRIMINATOR,
+            session_bridge: key_bytes(session_bridge.key),
+            er_token_account: key_bytes(er_token_account.key),
+            balance: 0,
+            withdrawn: 0,
+            bump: receipt_bump,
+        }
+    } else {
+        TokenDepositReceipt::try_from_slice(&deposit_receipt.try_borrow_data()?)
+            .map_err(|_| ProgramError::InvalidAccountData)?
+    };
+    if !receipt.is_valid()
+        || receipt.session_bridge != key_bytes(session_bridge.key)
+        || receipt.er_token_account != key_bytes(er_token_account.key)
+        || receipt.bump != receipt_bump
+    {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    receipt.balance = receipt
+        .balance
         .checked_add(amount)
         .ok_or(ProgramError::ArithmeticOverflow)?;
-    store(er_token_account, &er_state, ErTokenAccount::LEN)
+    store(deposit_receipt, &receipt, TokenDepositReceipt::LEN)?;
+    vault_state.deposited = vault_state
+        .deposited
+        .checked_add(amount)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    store(vault, &vault_state, TokenVault::LEN)?;
+
+    if !is_delegated {
+        er_state.amount = er_state
+            .amount
+            .checked_add(amount)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
+        store(er_token_account, &er_state, ErTokenAccount::LEN)?;
+    }
+    Ok(())
 }
 
 fn process_transfer(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -> ProgramResult {
@@ -311,7 +422,7 @@ fn process_withdraw(
 
     require_signer(owner)?;
     let bridge = load_session_bridge(program_id, session_bridge, portal_program)?;
-    let vault_state = load_vault(program_id, vault, session_bridge.key)?;
+    let mut vault_state = load_vault(program_id, vault, session_bridge.key)?;
     require_bridge_token_accounts(
         &bridge,
         &vault_state,
@@ -325,6 +436,11 @@ fn process_withdraw(
     er_state.amount = er_state
         .amount
         .checked_sub(amount)
+        .ok_or(ProgramError::InsufficientFunds)?;
+    vault_state.withdrawn = vault_state
+        .withdrawn
+        .checked_add(amount)
+        .filter(|withdrawn| *withdrawn <= vault_state.deposited)
         .ok_or(ProgramError::InsufficientFunds)?;
 
     let ix = token_instruction::transfer_checked(
@@ -353,7 +469,157 @@ fn process_withdraw(
         ]],
     )?;
 
+    store(vault, &vault_state, TokenVault::LEN)?;
     store(er_token_account, &er_state, ErTokenAccount::LEN)
+}
+
+fn process_start_withdrawal(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    amount: u64,
+    _decimals: u8,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let owner = next_account_info(account_info_iter)?;
+    let er_token_account = next_account_info(account_info_iter)?;
+    let session_bridge = next_account_info(account_info_iter)?;
+    let portal_program = next_account_info(account_info_iter)?;
+    let destination_token_account = next_account_info(account_info_iter)?;
+    let token_program = next_account_info(account_info_iter)?;
+
+    require_signer(owner)?;
+    let bridge = load_session_bridge(program_id, session_bridge, portal_program)?;
+    if bridge.token_program != key_bytes(token_program.key) {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    let destination = unpack_token_account(destination_token_account)?;
+    if destination.mint.to_bytes() != bridge.mint {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let mut er_state = load_er_token_account(program_id, er_token_account)?;
+    require_er_account(&er_state, session_bridge.key, owner.key, &bridge.mint)?;
+    er_state.amount = er_state
+        .amount
+        .checked_sub(amount)
+        .ok_or(ProgramError::InsufficientFunds)?;
+    store(er_token_account, &er_state, ErTokenAccount::LEN)
+}
+
+fn process_settle_withdrawal(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    er_slot: u64,
+    checksum: [u8; 32],
+    amount: u64,
+    withdrawn: u64,
+    decimals: u8,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let validator = next_account_info(account_info_iter)?;
+    let session = next_account_info(account_info_iter)?;
+    let checkpoint = next_account_info(account_info_iter)?;
+    let session_bridge = next_account_info(account_info_iter)?;
+    let vault = next_account_info(account_info_iter)?;
+    let _er_token_account = next_account_info(account_info_iter)?;
+    let vault_token_account = next_account_info(account_info_iter)?;
+    let destination_token_account = next_account_info(account_info_iter)?;
+    let mint = next_account_info(account_info_iter)?;
+    let token_program = next_account_info(account_info_iter)?;
+
+    require_signer(validator)?;
+    if session.owner != checkpoint.owner || session_bridge.owner != session.owner {
+        return Err(ProgramError::InvalidAccountOwner);
+    }
+    let expected_checkpoint = Pubkey::find_program_address(
+        &[b"checkpoint", session.key.as_ref(), &er_slot.to_le_bytes()],
+        session.owner,
+    )
+    .0;
+    if expected_checkpoint != *checkpoint.key {
+        return Err(ProgramError::InvalidSeeds);
+    }
+    let session_data = session.try_borrow_data()?;
+    let checkpoint_data = checkpoint.try_borrow_data()?;
+    if session_data.len() != 219
+        || session_data[0] != 1
+        || session_data[81..113] != validator.key.to_bytes()
+        || checkpoint_data.len() != 237
+        || checkpoint_data[0] != 5
+        || checkpoint_data[1..33] != session.key.to_bytes()
+        || u64::from_le_bytes(checkpoint_data[33..41].try_into().unwrap()) != er_slot
+        || checkpoint_data[105..137] != checksum
+        || checkpoint_data[185] != 3
+    {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let bridge = SessionBridge::try_from_slice(&session_bridge.try_borrow_data()?)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+    let expected_session_bridge = Pubkey::find_program_address(
+        &[
+            b"session_bridge",
+            session.key.as_ref(),
+            bridge.mint.as_ref(),
+        ],
+        session.owner,
+    )
+    .0;
+    if !bridge.is_valid()
+        || bridge.bridge_program != key_bytes(program_id)
+        || bridge.session != key_bytes(session.key)
+        || expected_session_bridge != *session_bridge.key
+    {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    let mut vault_state = load_vault(program_id, vault, session_bridge.key)?;
+    require_bridge_token_accounts(
+        &bridge,
+        &vault_state,
+        vault_token_account,
+        mint,
+        token_program,
+    )?;
+    let destination = unpack_token_account(destination_token_account)?;
+    if destination.mint.to_bytes() != bridge.mint {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let expected_withdrawn = vault_state
+        .withdrawn
+        .checked_add(amount)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    if withdrawn != expected_withdrawn || withdrawn > vault_state.deposited {
+        return Err(ProgramError::InvalidArgument);
+    }
+    vault_state.withdrawn = withdrawn;
+
+    let ix = token_instruction::transfer_checked(
+        token_program.key,
+        vault_token_account.key,
+        mint.key,
+        destination_token_account.key,
+        vault.key,
+        &[],
+        amount,
+        decimals,
+    )?;
+    invoke_signed(
+        &ix,
+        &[
+            vault_token_account.clone(),
+            mint.clone(),
+            destination_token_account.clone(),
+            vault.clone(),
+            token_program.clone(),
+        ],
+        &[&[
+            TokenVault::SEED_PREFIX,
+            session_bridge.key.as_ref(),
+            &[vault_state.bump],
+        ]],
+    )?;
+    store(vault, &vault_state, TokenVault::LEN)
 }
 
 fn process_delegate_er_token_account(
@@ -543,6 +809,36 @@ fn load_er_token_account(
         return Err(ProgramError::InvalidAccountData);
     }
     Ok(state)
+}
+
+fn load_er_token_account_data(account: &AccountInfo) -> Result<ErTokenAccount, ProgramError> {
+    let state = ErTokenAccount::try_from_slice(&account.try_borrow_data()?)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+    if !state.is_valid() {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    Ok(state)
+}
+
+fn require_bridge_delegation(
+    program_id: &Pubkey,
+    er_token_account: &AccountInfo,
+    delegation_record: &AccountInfo,
+    portal_program: &AccountInfo,
+) -> ProgramResult {
+    let (expected, _) = Pubkey::find_program_address(
+        &[b"delegation", er_token_account.key.as_ref()],
+        portal_program.key,
+    );
+    if expected != *delegation_record.key || delegation_record.owner != portal_program.key {
+        return Err(ProgramError::InvalidSeeds);
+    }
+    let record = DelegationRecord::try_from_slice(&delegation_record.try_borrow_data()?)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+    if record.discriminator != 3 || record.owner_program != key_bytes(program_id) {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    Ok(())
 }
 
 fn require_er_account(

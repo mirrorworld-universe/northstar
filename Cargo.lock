@@ -4677,6 +4677,7 @@ dependencies = [
  "crossbeam-channel",
  "log",
  "northstar-portal",
+ "northstar-token-bridge",
  "serde_json",
  "solana-account 4.3.0",
  "solana-accounts-db",

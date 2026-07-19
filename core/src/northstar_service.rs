@@ -692,6 +692,20 @@ impl NorthStarService {
                                 } => {
                                     manager.credit_deposit(&depositor, delta);
                                 }
+                                L1Event::TokenDeposited {
+                                    bridge_program,
+                                    session_bridge,
+                                    er_token_account,
+                                    delta,
+                                    ..
+                                } => {
+                                    manager.credit_token_deposit(
+                                        &bridge_program,
+                                        &session_bridge,
+                                        &er_token_account,
+                                        delta,
+                                    );
+                                }
                                 other => {
                                     debug!("Unhandled L1 event: {other:?}");
                                 }
