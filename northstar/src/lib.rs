@@ -7,6 +7,7 @@ use {
     },
     portal_state::{try_parse_raw_portal_account, PortalAccount},
     solana_account::{AccountSharedData, ReadableAccount},
+    solana_accounts_db::accounts_index::IndexKey,
     solana_fee_structure::FeeStructure,
     solana_gossip::cluster_info::ClusterInfo,
     solana_hash::Hash,
@@ -648,23 +649,43 @@ impl Manager {
     }
 
     fn cleanup_terminal_checkpoint_plans(&self, l1_bank: &Bank, session_pda: Pubkey) {
-        if let Ok(accounts) = l1_bank.get_program_accounts(&self.config.portal_program_id) {
-            for (_, account) in accounts {
-                let Some(PortalAccount::Checkpoint(checkpoint)) =
-                    try_parse_raw_portal_account(account.data())
-                else {
-                    continue;
-                };
-                if checkpoint.session == session_pda.to_bytes()
-                    && matches!(
-                        checkpoint.status,
-                        CheckpointStatus::Settled
-                            | CheckpointStatus::Cancelled
-                            | CheckpointStatus::Invalid
-                    )
-                {
-                    self.remove_checkpoint_plan(session_pda, &checkpoint);
-                }
+        // IMPORTANT: `get_program_accounts` falls back to a global AccountsIndex scan when the
+        // validator has no program-id secondary index. Settlement runs on every frozen bank, so
+        // only inspect checkpoint PDAs already tracked by this manager.
+        let er_slots = self
+            .checkpoint_plans
+            .read()
+            .unwrap()
+            .keys()
+            .filter_map(|(plan_session, er_slot)| {
+                (plan_session == &session_pda).then_some(*er_slot)
+            })
+            .collect::<Vec<_>>();
+
+        for er_slot in er_slots {
+            let (checkpoint_pda, _) = find_checkpoint_pda(
+                &self.config.portal_program_id.to_bytes(),
+                &session_pda.to_bytes(),
+                er_slot,
+            );
+            let checkpoint_pda = Pubkey::new_from_array(checkpoint_pda);
+            let Some(account) = l1_bank.get_account(&checkpoint_pda) else {
+                continue;
+            };
+            let Some(PortalAccount::Checkpoint(checkpoint)) =
+                try_parse_raw_portal_account(account.data())
+            else {
+                continue;
+            };
+            if checkpoint.session == session_pda.to_bytes()
+                && matches!(
+                    checkpoint.status,
+                    CheckpointStatus::Settled
+                        | CheckpointStatus::Cancelled
+                        | CheckpointStatus::Invalid
+                )
+            {
+                self.remove_checkpoint_plan(session_pda, &checkpoint);
             }
         }
     }
@@ -817,27 +838,45 @@ impl Manager {
         l1_bank: &Bank,
         session_pda: Pubkey,
     ) -> Option<(Pubkey, Checkpoint)> {
-        l1_bank
-            .get_program_accounts(&self.config.portal_program_id)
-            .ok()?
-            .into_iter()
-            .filter_map(|(pubkey, account)| {
-                let PortalAccount::Checkpoint(checkpoint) =
-                    try_parse_raw_portal_account(account.data())?
-                else {
-                    return None;
-                };
-                (checkpoint.is_valid()
-                    && checkpoint.session == session_pda.to_bytes()
-                    && matches!(
-                        checkpoint.status,
-                        CheckpointStatus::Pending
-                            | CheckpointStatus::Committed
-                            | CheckpointStatus::Challenged
-                    ))
-                .then_some((pubkey, checkpoint))
-            })
-            .max_by_key(|(_, checkpoint)| checkpoint.er_slot)
+        // The cursor is the on-chain index for the one active checkpoint. Never rediscover it by
+        // scanning every Portal-owned account on the settlement hot path.
+        let (cursor_pda, _) = find_checkpoint_cursor_pda(
+            &self.config.portal_program_id.to_bytes(),
+            &session_pda.to_bytes(),
+        );
+        let cursor_pda = Pubkey::new_from_array(cursor_pda);
+        let cursor_account = l1_bank.get_account(&cursor_pda)?;
+        let PortalAccount::CheckpointCursor(cursor) =
+            try_parse_raw_portal_account(cursor_account.data())?
+        else {
+            return None;
+        };
+        if !cursor.is_valid()
+            || cursor.session != session_pda.to_bytes()
+            || cursor.active_checkpoint == [0; 32]
+        {
+            return None;
+        }
+
+        let checkpoint_pda = Pubkey::new_from_array(cursor.active_checkpoint);
+        let checkpoint_account = l1_bank.get_account(&checkpoint_pda)?;
+        if checkpoint_account.owner() != &self.config.portal_program_id {
+            return None;
+        }
+        let PortalAccount::Checkpoint(checkpoint) =
+            try_parse_raw_portal_account(checkpoint_account.data())?
+        else {
+            return None;
+        };
+        (checkpoint.is_valid()
+            && checkpoint.session == session_pda.to_bytes()
+            && matches!(
+                checkpoint.status,
+                CheckpointStatus::Pending
+                    | CheckpointStatus::Committed
+                    | CheckpointStatus::Challenged
+            ))
+        .then_some((checkpoint_pda, checkpoint))
     }
 
     fn challenge_resolution_deadline(checkpoint: &Checkpoint) -> Option<u64> {
@@ -1057,7 +1096,10 @@ impl Manager {
     }
 
     pub fn get_l1_events(&self, bank: &Bank) -> Vec<L1Event> {
-        bank.get_all_accounts_modified_since_parent()
+        // IMPORTANT: Do not use `get_all_accounts_modified_since_parent` here. It walks the
+        // global AccountsIndex for every frozen bank and can permanently starve L1 event
+        // ingestion. The slot-local storage scan still includes closed Portal accounts.
+        bank.get_accounts_modified_in_slot()
             .into_iter()
             .filter_map(|(pubkey, account)| {
                 if account.owner() == &self.config.portal_program_id {
@@ -1087,7 +1129,7 @@ impl Manager {
         delegation_record_pda: &Pubkey,
     ) -> Option<Pubkey> {
         let undelegated_account = bank
-            .get_all_accounts_modified_since_parent()
+            .get_accounts_modified_in_slot()
             .into_iter()
             .filter(|(pubkey, _)| pubkey != delegation_record_pda)
             .filter(|(_, account)| account.owner() == &self.config.portal_program_id)
@@ -1135,7 +1177,7 @@ impl Manager {
     ) -> Option<Pubkey> {
         let parent = bank.parent()?;
         let undelegated_account = bank
-            .get_all_accounts_modified_since_parent()
+            .get_accounts_modified_in_slot()
             .into_iter()
             .filter(|(pubkey, _)| pubkey != delegation_record_pda)
             .filter(|(pubkey, account)| {
@@ -1302,10 +1344,17 @@ impl Manager {
         bank: &Bank,
         grid_id: u64,
     ) -> Vec<(Pubkey, AccountSharedData, Pubkey)> {
-        let program_accounts = match bank.get_program_accounts(&self.config.portal_program_id) {
+        // IMPORTANT: Never fall back to `get_program_accounts` here. Without a program-id
+        // secondary index it scans every account during startup and can stall session resume
+        // for minutes. Portal validators install a targeted index before loading AccountsDb.
+        let program_accounts = match bank.get_filtered_indexed_accounts(
+            &IndexKey::ProgramId(self.config.portal_program_id),
+            |account| account.owner() == &self.config.portal_program_id,
+            None,
+        ) {
             Ok(accounts) => accounts,
             Err(err) => {
-                warn!("Failed to scan Portal accounts for startup resume: {err:?}");
+                warn!("Failed to load indexed Portal accounts for startup resume: {err:?}");
                 return vec![];
             }
         };
@@ -1531,6 +1580,12 @@ mod portal_e2e_tests {
             DelegationRecord, OpenSession, PortalInstruction, ProposeCheckpoint, Session,
         },
         solana_account::{AccountSharedData, WritableAccount},
+        solana_accounts_db::{
+            accounts_db::{AccountsDbConfig, ACCOUNTS_DB_CONFIG_FOR_TESTING},
+            accounts_index::{
+                AccountIndex, AccountSecondaryIndexes, AccountSecondaryIndexesIncludeExclude,
+            },
+        },
         solana_gossip::contact_info::ContactInfo,
         solana_instruction::{AccountMeta, Instruction},
         solana_keypair::{Keypair, Signer},
@@ -1540,6 +1595,7 @@ mod portal_e2e_tests {
         solana_rent::Rent,
         solana_rpc_client::rpc_client::RpcClient,
         solana_runtime::{
+            bank::BankTestConfig,
             bank_forks::BankForks,
             genesis_utils::{create_genesis_config, GenesisConfigInfo},
         },
@@ -1580,7 +1636,24 @@ mod portal_e2e_tests {
             },
         );
 
-        let (bank, _) = Bank::new_with_bank_forks_for_tests(&genesis_config);
+        let account_indexes = AccountSecondaryIndexes {
+            keys: Some(AccountSecondaryIndexesIncludeExclude {
+                exclude: false,
+                keys: HashSet::from([program_id]),
+            }),
+            indexes: HashSet::from([AccountIndex::ProgramId]),
+        };
+        let bank = Arc::new(Bank::new_with_paths_for_tests(
+            &genesis_config,
+            Some(BankTestConfig {
+                accounts_db_config: AccountsDbConfig {
+                    account_indexes: Some(account_indexes),
+                    ..ACCOUNTS_DB_CONFIG_FOR_TESTING
+                },
+            }),
+            vec![],
+            None,
+        ));
         bank.fill_bank_with_ticks_for_tests();
         let bank = Bank::new_from_parent(bank.clone(), *bank.leader(), bank.slot() + 1);
         let bank_forks = BankForks::new_rw_arc(bank);
@@ -3016,7 +3089,7 @@ mod portal_e2e_tests {
                 find_free_addr(),
             )
             .expect("runtime should start");
-        let runtime = manager.runtime.as_ref().unwrap();
+        let runtime = manager.runtime.as_mut().unwrap();
         runtime.set_session_pda(session_pda);
         let mut delegated_er = AccountSharedData::new(1_000_000, er_data.len(), &program_id);
         delegated_er.data_as_mut_slice().copy_from_slice(&er_data);
