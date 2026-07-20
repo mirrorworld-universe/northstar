@@ -175,6 +175,7 @@ wait_for_l1_catchup
 
 PHASE=capture_baseline
 BASELINE_ER_BALANCE=$(get_balance "$ER_RPC" "$WALLET_ADDRESS" processed)
+LOG_START_LINE=$(wc -l < /solana/northstar/logs/validator.log)
 rpc_result "$DEVNET_RPC" getSignaturesForAddress \
   "$(jq -cn --arg portal "$PORTAL_ADDRESS" '[$portal,{limit:40,commitment:"confirmed"}]')" \
   | jq -r '.[].signature' > /tmp/northstar-e2e-before-signatures.txt
@@ -240,14 +241,27 @@ if [ "$CURRENT_L1_BALANCE" -lt "$EXPECTED_L1_BALANCE" ]; then
 fi
 
 PHASE=collect_settlement_receipts
-rpc_result "$DEVNET_RPC" getSignaturesForAddress \
-  "$(jq -cn --arg portal "$PORTAL_ADDRESS" '[$portal,{limit:40,commitment:"confirmed"}]')" \
-  | jq -r '.[].signature' > /tmp/northstar-e2e-after-signatures.txt
+CONFIRMED_SIGNATURES=$(
+  tail -n "+$((LOG_START_LINE + 1))" /solana/northstar/logs/validator.log \
+    | sed -n 's/.*Portal settlement transaction confirmed.*signatures=\[\([^]]*\)\].*/\1/p' \
+    | tr ',' '\n' \
+    | tr -d ' []"' \
+    | tail -n 3
+ )
+if [ -z "$CONFIRMED_SIGNATURES" ]; then
+  rpc_result "$DEVNET_RPC" getSignaturesForAddress \
+    "$(jq -cn --arg portal "$PORTAL_ADDRESS" '[$portal,{limit:40,commitment:"confirmed"}]')" \
+    | jq -r '.[].signature' > /tmp/northstar-e2e-after-signatures.txt
+  CONFIRMED_SIGNATURES=$(
+    grep -Fvx -f /tmp/northstar-e2e-before-signatures.txt /tmp/northstar-e2e-after-signatures.txt \
+      | grep -Fvx "$DEPOSIT_SIGNATURE" \
+      | tail -n 3
+  )
+fi
 SETTLEMENT_SIGNATURES=$(
-  grep -Fvx -f /tmp/northstar-e2e-before-signatures.txt /tmp/northstar-e2e-after-signatures.txt \
-    | grep -Fvx "$DEPOSIT_SIGNATURE" \
-    | awk '{printf "<https://explorer.solana.com/tx/%s?cluster=devnet|%s> ", $1, substr($1,1,8)}'
-)
+  awk '{printf "<https://explorer.solana.com/tx/%s?cluster=devnet|%s> ", $1, substr($1,1,8)}' \
+    <<< "$CONFIRMED_SIGNATURES"
+ )
 test -n "$SETTLEMENT_SIGNATURES"
 
 PHASE=complete
