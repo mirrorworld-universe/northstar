@@ -1,5 +1,5 @@
 use {
-    crate::settlement::WithdrawalPayoutEvent,
+    crate::{settlement::WithdrawalPayoutEvent, unsettled_state::UnsettledStateStore},
     log::{debug, trace, warn},
     solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
     solana_clock::Slot,
@@ -71,6 +71,7 @@ pub struct EphemeralTransactionClient {
     /// Successful ER signatures persist across L1 reanchors, whose new bank has
     /// the L1 parent's status cache rather than the old ER bank's cache.
     processed_signatures: Arc<RwLock<HashMap<solana_signature::Signature, Slot>>>,
+    unsettled_state_store: Arc<UnsettledStateStore>,
 }
 
 impl Clone for EphemeralTransactionClient {
@@ -90,6 +91,7 @@ impl Clone for EphemeralTransactionClient {
             session_pda: Arc::clone(&self.session_pda),
             withdrawal_payout_events: Arc::clone(&self.withdrawal_payout_events),
             processed_signatures: Arc::clone(&self.processed_signatures),
+            unsettled_state_store: Arc::clone(&self.unsettled_state_store),
         }
     }
 }
@@ -102,6 +104,7 @@ pub(crate) struct EphemeralTransactionClientOptions {
     portal_program_id: Pubkey,
     session_pda: Arc<RwLock<Option<Pubkey>>>,
     withdrawal_payout_events: Arc<RwLock<Vec<WithdrawalPayoutEvent>>>,
+    unsettled_state_store: Arc<UnsettledStateStore>,
 }
 
 impl EphemeralTransactionClientOptions {
@@ -118,6 +121,7 @@ impl EphemeralTransactionClientOptions {
             portal_program_id: Pubkey::default(),
             session_pda: Arc::new(RwLock::new(None)),
             withdrawal_payout_events: Arc::new(RwLock::new(Vec::new())),
+            unsettled_state_store: Arc::new(UnsettledStateStore::default()),
         }
     }
 
@@ -135,6 +139,14 @@ impl EphemeralTransactionClientOptions {
         self.portal_program_id = portal_program_id;
         self.session_pda = session_pda;
         self.withdrawal_payout_events = withdrawal_payout_events;
+        self
+    }
+
+    pub(crate) fn with_unsettled_state_store(
+        mut self,
+        unsettled_state_store: Arc<UnsettledStateStore>,
+    ) -> Self {
+        self.unsettled_state_store = unsettled_state_store;
         self
     }
 }
@@ -285,6 +297,7 @@ impl EphemeralTransactionClient {
             session_pda: options.session_pda,
             withdrawal_payout_events: options.withdrawal_payout_events,
             processed_signatures: Arc::new(RwLock::new(HashMap::new())),
+            unsettled_state_store: options.unsettled_state_store,
         }
     }
 
@@ -310,6 +323,16 @@ impl EphemeralTransactionClient {
 
     pub(crate) fn clear_processed_signatures(&self) {
         self.processed_signatures.write().unwrap().clear();
+    }
+
+    pub(crate) fn restore_processed_signatures(
+        &self,
+        signatures: Vec<(solana_signature::Signature, Slot)>,
+    ) {
+        self.processed_signatures
+            .write()
+            .unwrap()
+            .extend(signatures);
     }
 
     fn has_processed_signature(&self, tx: &VersionedTransaction) -> bool {
@@ -532,15 +555,19 @@ impl TransactionClient for EphemeralTransactionClient {
         }
 
         self.capture_overlay_accounts(&bank, &writable_accounts);
+        // Mark writable accounts as touched even on failure, since fee payers may be debited.
+        Self::mark_writable_as_touched_for_batch(&bank, &txs, &self.touched_accounts);
+        if let Err(err) = self.persist_unsettled_updates(&bank, &writable_accounts, &txs) {
+            self.active.store(false, Ordering::Relaxed);
+            warn!("Failed to persist committed ER transaction batch; deactivating ER: {err}");
+            return;
+        }
         if rotate_after_batch {
             self.evict_loader_writes_from_program_cache(&bank, &writable_accounts);
             self.freeze_and_rotate_bank(&bank);
         } else {
             self.publish_processed_slot(&bank);
         }
-
-        // Mark writable accounts as touched (even on failure, since fee payers may be debited)
-        Self::mark_writable_as_touched_for_batch(&bank, &txs, &self.touched_accounts);
     }
 }
 
@@ -558,6 +585,35 @@ impl EphemeralTransactionClient {
             .write()
             .unwrap()
             .extend(overlay_updates);
+    }
+
+    fn persist_unsettled_updates(
+        &self,
+        bank: &Bank,
+        writable_accounts: &HashSet<Pubkey>,
+        txs: &[VersionedTransaction],
+    ) -> std::io::Result<()> {
+        let accounts = writable_accounts
+            .iter()
+            .map(|key| (*key, bank.get_account(key).unwrap_or_default()))
+            .collect::<Vec<_>>();
+        let touched_accounts = writable_accounts.iter().copied().collect::<Vec<_>>();
+        let payout_events = self.withdrawal_payout_events.read().unwrap().clone();
+        let processed = self.processed_signatures.read().unwrap();
+        let processed_signatures = txs
+            .iter()
+            .filter_map(|tx| {
+                let signature = tx.signatures.first()?;
+                processed.get(signature).map(|slot| (*signature, *slot))
+            })
+            .collect::<Vec<_>>();
+        drop(processed);
+        self.unsettled_state_store.append_update(
+            &accounts,
+            &touched_accounts,
+            Some(&payout_events),
+            &processed_signatures,
+        )
     }
 
     fn publish_processed_slot(&self, bank: &Bank) {
@@ -754,6 +810,16 @@ impl EphemeralTransactionClient {
             return;
         }
         let mut events = Vec::new();
+        let mut cumulative_by_source = self.withdrawal_payout_events.read().unwrap().iter().fold(
+            HashMap::new(),
+            |mut cumulative, event| {
+                cumulative
+                    .entry(event.er_source)
+                    .and_modify(|value: &mut u64| *value = (*value).max(event.cumulative_withdrawn))
+                    .or_insert(event.cumulative_withdrawn);
+                cumulative
+            },
+        );
 
         for (tx, commit_result) in txs.iter().zip(commit_results) {
             let Ok(committed_tx) = commit_result else {
@@ -843,10 +909,21 @@ impl EphemeralTransactionClient {
                     lamports,
                     bank.slot()
                 );
+                let l1_withdrawn = self.l1_receipt_withdrawn(bank, er_source);
+                let cumulative = cumulative_by_source
+                    .entry(*er_source)
+                    .or_insert(l1_withdrawn);
+                *cumulative = (*cumulative).max(l1_withdrawn);
+                let Some(cumulative_withdrawn) = cumulative.checked_add(lamports) else {
+                    warn!("withdrawal payout counter overflow for {er_source}");
+                    continue;
+                };
+                *cumulative = cumulative_withdrawn;
                 events.push(WithdrawalPayoutEvent {
                     er_source: *er_source,
                     l1_recipient: *l1_recipient,
                     lamports,
+                    cumulative_withdrawn,
                     signature,
                     er_slot: bank.slot(),
                 });
@@ -859,6 +936,27 @@ impl EphemeralTransactionClient {
                 .unwrap()
                 .extend(events);
         }
+    }
+
+    fn l1_receipt_withdrawn(&self, bank: &Bank, er_source: &Pubkey) -> u64 {
+        let Some(session_pda) = *self.session_pda.read().unwrap() else {
+            return 0;
+        };
+        let (receipt_pda, _) = northstar_portal::find_deposit_receipt_pda(
+            &self.portal_program_id.to_bytes(),
+            &session_pda.to_bytes(),
+            &er_source.to_bytes(),
+        );
+        let receipt_pda = Pubkey::new_from_array(receipt_pda);
+        let Some(account) = bank.get_account(&receipt_pda) else {
+            return 0;
+        };
+        let Some(crate::portal_state::PortalAccount::DepositReceipt(receipt)) =
+            crate::portal_state::try_parse_raw_portal_account(account.data())
+        else {
+            return 0;
+        };
+        receipt.withdrawn
     }
 
     fn system_transfer_lamports(data: &[u8]) -> Option<u64> {
@@ -1263,13 +1361,19 @@ impl solana_rpc::rpc::ErTxExecutor for EphemeralTransactionClient {
                 ))
             })?;
         self.capture_overlay_accounts(&bank, &writable_accounts);
+        Self::mark_writable_as_touched_for_batch(&bank, &txs, &self.touched_accounts);
+        if let Err(err) = self.persist_unsettled_updates(&bank, &writable_accounts, &txs) {
+            self.active.store(false, Ordering::Relaxed);
+            return Err(solana_rpc::rpc::ErTxError::Rejected(format!(
+                "committed ER transaction could not be persisted; ER deactivated: {err}"
+            )));
+        }
         if rotate_after_batch {
             self.evict_loader_writes_from_program_cache(&bank, &writable_accounts);
             self.freeze_and_rotate_bank(&bank);
         } else {
             self.publish_processed_slot(&bank);
         }
-        Self::mark_writable_as_touched_for_batch(&bank, &txs, &self.touched_accounts);
 
         Ok(())
     }

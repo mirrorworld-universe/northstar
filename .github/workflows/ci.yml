@@ -147,7 +147,6 @@ jobs:
         run: cargo build --release --target-dir /solana/northstar/ --bin agave-validator
 
       - name: Build Northstar Solana CLI
-        if: steps.portal_changes.outputs.portal_changed == 'true'
         run: cargo build --release --target-dir /solana/northstar/ --package solana-cli --bin solana --no-default-features
 
       - name: Confirm binary exists
@@ -270,6 +269,14 @@ jobs:
             --portal "$PORTAL_ADDRESS" \
             --validator "$VALIDATOR_IDENTITY"
 
+      - name: Run deposit, resume, withdrawal, and settlement smoke test
+        id: e2e_smoke
+        timeout-minutes: 45
+        env:
+          PORTAL_ADDRESS: ${{ steps.portal_deploy.outputs.portal_address }}
+          REPORT_PATH: /tmp/northstar-e2e-report.txt
+        run: ./.github/scripts/devnet-e2e-smoke.sh
+
       - name: Notify Slack
         if: always()
         env:
@@ -280,6 +287,7 @@ jobs:
           PORTAL_ADDRESS: ${{ steps.portal_deploy.outputs.portal_address }}
           COMMIT_SHA: ${{ github.sha }}
           COMMIT_MSG: ${{ github.event.head_commit.message }}
+          SMOKE_OUTCOME: ${{ steps.e2e_smoke.outcome }}
         run: |
           set -euo pipefail
           if ! command -v jq >/dev/null 2>&1; then
@@ -367,5 +375,27 @@ jobs:
             https://slack.com/api/pins.add)
           if ! jq -e '.ok == true' >/dev/null <<<"$PIN_RESPONSE"; then
             echo "Failed to pin Slack message: $PIN_RESPONSE" >&2
+            exit 1
+          fi
+
+          if [ "$SMOKE_OUTCOME" != "skipped" ] && [ -f /tmp/northstar-e2e-report.txt ]; then
+            E2E_REPORT=$(cat /tmp/northstar-e2e-report.txt)
+          else
+            E2E_REPORT=$(printf '%s\n%s' \
+              ':test_tube: Devnet E2E smoke status: *skipped*' \
+              ':information_source: The smoke step did not run because an earlier deployment step failed.')
+          fi
+          THREAD_PAYLOAD=$(jq -n \
+            --arg channel "$SLACK_CHANNEL_ID" \
+            --arg thread_ts "$MESSAGE_TS" \
+            --arg text "$E2E_REPORT" \
+            '{channel: $channel, thread_ts: $thread_ts, text: $text}')
+          THREAD_RESPONSE=$(curl -sS -X POST \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H 'Content-type: application/json' \
+            --data "$THREAD_PAYLOAD" \
+            https://slack.com/api/chat.postMessage)
+          if ! jq -e '.ok == true' >/dev/null <<<"$THREAD_RESPONSE"; then
+            echo "Failed to post E2E report thread: $THREAD_RESPONSE" >&2
             exit 1
           fi

@@ -4,6 +4,9 @@ use {
         ephemeral_tx_client::{EphemeralTransactionClient, EphemeralTransactionClientOptions},
         settlement::{ReceiptBalanceSettlement, WithdrawalPayoutEvent},
         slot_advancer::SlotAdvancer,
+        unsettled_state::{
+            RecoveredUnsettledState, RecoveryOutcome, UnsettledSessionIdentity, UnsettledStateStore,
+        },
         EphemeralRollupSettings,
     },
     crossbeam_channel::{unbounded, Sender},
@@ -44,6 +47,7 @@ use {
     std::{
         collections::{HashMap, HashSet},
         net::{IpAddr, Ipv4Addr, SocketAddr},
+        path::PathBuf,
         sync::{
             atomic::{AtomicBool, AtomicU64, Ordering},
             Arc, Mutex, RwLock,
@@ -167,6 +171,7 @@ pub struct EphemeralRuntime {
     er_history_store: Arc<ErHistoryStore>,
     /// Successful ER SOL withdrawal transfers paired with payout recipient memos.
     withdrawal_payout_events: Arc<RwLock<Vec<WithdrawalPayoutEvent>>>,
+    unsettled_state_store: Arc<UnsettledStateStore>,
     portal_program_id: Pubkey,
 
     _tx_client: EphemeralTransactionClient,
@@ -560,6 +565,7 @@ impl EphemeralRuntime {
         let sync_status = Arc::new(NorthStarSyncStatus::new(parent_bank.slot()));
         let er_history_store = Arc::new(ErHistoryStore::new(er_history_max_retained_slots));
         let withdrawal_payout_events = Arc::new(RwLock::new(Vec::new()));
+        let unsettled_state_store = Arc::new(UnsettledStateStore::default());
 
         let ledger_dir = TempDir::new().map_err(|e| e.to_string())?;
         let blockstore = Arc::new(Blockstore::open(ledger_dir.path()).map_err(|e| e.to_string())?);
@@ -591,7 +597,8 @@ impl EphemeralRuntime {
                 portal_program_id,
                 session_pda.clone(),
                 withdrawal_payout_events.clone(),
-            ),
+            )
+            .with_unsettled_state_store(unsettled_state_store.clone()),
         );
 
         let optimistically_confirmed_bank = Arc::new(RwLock::new(OptimisticallyConfirmedBank {
@@ -773,6 +780,7 @@ impl EphemeralRuntime {
             sync_status,
             er_history_store,
             withdrawal_payout_events,
+            unsettled_state_store,
             portal_program_id,
 
             settings,
@@ -864,6 +872,69 @@ impl EphemeralRuntime {
         self.settings.grid_id = grid_id;
         self.settings.ttl_slots = ttl_slots;
         self.settings.fee_cap = fee_cap;
+    }
+
+    pub fn configure_unsettled_state(&self, dir: PathBuf) {
+        self.unsettled_state_store.configure(dir);
+    }
+
+    pub fn begin_unsettled_session(
+        &self,
+        identity: UnsettledSessionIdentity,
+    ) -> std::io::Result<RecoveryOutcome> {
+        self.unsettled_state_store.begin_session(identity)
+    }
+
+    pub fn enable_unsettled_writes(&self) {
+        self.unsettled_state_store.enable_writes();
+    }
+
+    pub fn restore_unsettled_state(&self, recovered: RecoveredUnsettledState) {
+        if recovered.accounts.is_empty()
+            && recovered.touched_accounts.is_empty()
+            && recovered.payout_events.is_empty()
+            && recovered.processed_signatures.is_empty()
+        {
+            return;
+        }
+        let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
+        let bank = self.bank();
+        for (pubkey, account) in &recovered.accounts {
+            bank.store_account(pubkey, account);
+        }
+        self.er_account_overlay
+            .write()
+            .unwrap()
+            .extend(recovered.accounts);
+        self.touched_accounts
+            .write()
+            .unwrap()
+            .extend(recovered.touched_accounts);
+        *self.withdrawal_payout_events.write().unwrap() = recovered.payout_events;
+        self._tx_client
+            .restore_processed_signatures(recovered.processed_signatures);
+        self.publish_bank_for_rpc();
+    }
+
+    pub fn clear_unsettled_state(&self) {
+        if let Err(err) = self.unsettled_state_store.clear() {
+            warn!("Failed to clear persisted unsettled ER state: {err}");
+        }
+    }
+
+    fn persist_unsettled_update(
+        &self,
+        accounts: &[(Pubkey, AccountSharedData)],
+        touched_accounts: &[Pubkey],
+        payout_events: Option<&[WithdrawalPayoutEvent]>,
+    ) {
+        if let Err(err) =
+            self.unsettled_state_store
+                .append_update(accounts, touched_accounts, payout_events, &[])
+        {
+            self.active.store(false, Ordering::Relaxed);
+            warn!("Failed to persist ER state mutation; deactivating ER: {err}");
+        }
     }
 
     /// Sonic: Get a clone of the session PDA Arc for sharing with RPC.
@@ -1495,23 +1566,20 @@ impl EphemeralRuntime {
                 .then_with(|| a.er_source.to_bytes().cmp(&b.er_source.to_bytes()))
                 .then_with(|| a.l1_recipient.to_bytes().cmp(&b.l1_recipient.to_bytes()))
         });
-        let mut cumulative_by_source = HashMap::new();
         payout_events_guard.retain(|event| {
-            let cumulative = cumulative_by_source.entry(event.er_source).or_insert(0u64);
-            let Some(next_cumulative) = cumulative.checked_add(event.lamports) else {
-                warn!("withdrawal payout counter overflow for {}", event.er_source);
-                return true;
-            };
-            *cumulative = next_cumulative;
             receipt_withdrawn
                 .get(&event.er_source)
-                .map(|withdrawn| next_cumulative > *withdrawn)
+                .map(|withdrawn| event.cumulative_withdrawn > *withdrawn)
                 .unwrap_or(true)
         });
         if payout_events_guard.len() > MAX_WITHDRAWAL_PAYOUT_EVENTS {
-            let dropped = payout_events_guard.len() - MAX_WITHDRAWAL_PAYOUT_EVENTS;
-            warn!("dropping {dropped} old withdrawal payout events to keep retention bounded");
-            payout_events_guard.drain(..dropped);
+            warn!(
+                "pending withdrawal payout events exceed safe retention limit ({} > {}); \
+                 deactivating ER until settlement catches up",
+                payout_events_guard.len(),
+                MAX_WITHDRAWAL_PAYOUT_EVENTS,
+            );
+            self.active.store(false, Ordering::Relaxed);
         }
         let payout_events = payout_events_guard.clone();
         drop(payout_events_guard);
@@ -1519,7 +1587,6 @@ impl EphemeralRuntime {
         let mut receipt_balances = Vec::new();
         let mut stale_payout_events = Vec::new();
         for (er_source, er_balance, receipt_balance, receipt_withdrawn) in receipts {
-            let mut cumulative_withdrawn = receipt_withdrawn;
             let mut current_withdrawn = receipt_withdrawn;
             let mut remaining_net_payout = receipt_balance.saturating_sub(er_balance);
             for event in payout_events
@@ -1537,11 +1604,10 @@ impl EphemeralRuntime {
                 }
                 remaining_net_payout = remaining_net_payout.saturating_sub(event.lamports);
 
-                let Some(next_withdrawn) = cumulative_withdrawn.checked_add(event.lamports) else {
-                    warn!("withdrawal payout counter overflow for {er_source}");
-                    break;
-                };
-                cumulative_withdrawn = next_withdrawn;
+                let next_withdrawn = event.cumulative_withdrawn;
+                if next_withdrawn <= current_withdrawn {
+                    continue;
+                }
                 let payout_lamports = next_withdrawn.saturating_sub(current_withdrawn);
                 if payout_lamports > 0 {
                     receipt_balances.push(ReceiptBalanceSettlement {
@@ -1563,6 +1629,8 @@ impl EphemeralRuntime {
                 .retain(|event| !stale_payout_events.contains(event));
         }
 
+        let persisted_payout_events = self.withdrawal_payout_events.read().unwrap().clone();
+        self.persist_unsettled_update(&[], &[], Some(&persisted_payout_events));
         receipt_balances.sort_by(|a, b| {
             a.er_source
                 .to_bytes()
@@ -1832,6 +1900,11 @@ impl EphemeralRuntime {
             .unwrap()
             .insert(*delegated_account);
 
+        self.persist_unsettled_update(
+            &[(*delegated_account, er_account.clone())],
+            &[*delegated_account],
+            None,
+        );
         self.publish_bank_for_rpc();
 
         info!(
@@ -1992,6 +2065,14 @@ impl EphemeralRuntime {
             .unwrap()
             .extend([*depositor, withdrawal_sink]);
 
+        let persisted_accounts = [
+            (*depositor, account),
+            (
+                withdrawal_sink,
+                bank.get_account(&withdrawal_sink).unwrap_or_default(),
+            ),
+        ];
+        self.persist_unsettled_update(&persisted_accounts, &[*depositor, withdrawal_sink], None);
         self.record_deposit_history(&bank, depositor, lamports, base_balance, new_balance);
         self.publish_bank_for_rpc();
 
@@ -2814,7 +2895,85 @@ mod tests {
     }
 
     #[test]
-    fn test_withdrawal_payout_events_are_bounded_within_session() {
+    fn test_settlement_retry_keeps_pending_withdrawal_after_settled_prefix() {
+        let parent_bank = create_test_bank();
+        let portal_program_id = PORTAL_PROGRAM_ID;
+        let session_pda = Pubkey::new_unique();
+        let er_source = Pubkey::new_unique();
+        let old_recipient = Pubkey::new_unique();
+        let pending_recipient = Pubkey::new_unique();
+        store_deposit_receipt(
+            &parent_bank,
+            &portal_program_id,
+            &session_pda,
+            &er_source,
+            20,
+            10,
+        );
+        parent_bank.freeze();
+
+        let settings = EphemeralRollupSettings {
+            session_pda,
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1_000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            portal_program_id,
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.set_session_pda(session_pda);
+        let zero_balance = AccountSharedData::new(0, 0, &system_program::id());
+        runtime.bank().store_account(&er_source, &zero_balance);
+        runtime
+            .er_account_overlay
+            .write()
+            .unwrap()
+            .insert(er_source, zero_balance);
+        runtime.withdrawal_payout_events.write().unwrap().extend([
+            WithdrawalPayoutEvent {
+                er_source,
+                l1_recipient: old_recipient,
+                lamports: 10,
+                cumulative_withdrawn: 10,
+                signature: solana_signature::Signature::from([1; 64]),
+                er_slot: 1,
+            },
+            WithdrawalPayoutEvent {
+                er_source,
+                l1_recipient: pending_recipient,
+                lamports: 10,
+                cumulative_withdrawn: 20,
+                signature: solana_signature::Signature::from([2; 64]),
+                er_slot: 2,
+            },
+        ]);
+
+        let first_attempt = runtime.settlement_receipt_balances(session_pda);
+        assert_eq!(first_attempt.len(), 1);
+        assert_eq!(first_attempt[0].l1_recipient, pending_recipient);
+        assert_eq!(first_attempt[0].withdrawn, 20);
+        assert_eq!(first_attempt[0].payout_lamports, 10);
+        assert_eq!(
+            runtime.settlement_receipt_balances(session_pda),
+            first_attempt,
+            "rebuilding an expired settlement must preserve the pending payout",
+        );
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_excess_pending_withdrawals_deactivate_session_without_dropping_payouts() {
         let parent_bank = create_test_bank();
         parent_bank.freeze();
         let portal_program_id = Pubkey::new_unique();
@@ -2838,6 +2997,7 @@ mod tests {
             Arc::new(Keypair::new()),
         )
         .unwrap();
+        runtime.activate();
 
         let er_source = Pubkey::new_unique();
         let l1_recipient = Pubkey::new_unique();
@@ -2846,6 +3006,7 @@ mod tests {
                 er_source,
                 l1_recipient,
                 lamports: 1,
+                cumulative_withdrawn: index as u64 + 1,
                 signature: solana_signature::Signature::default(),
                 er_slot: index as Slot,
             }),
@@ -2853,8 +3014,8 @@ mod tests {
 
         assert!(runtime.settlement_receipt_balances(session_pda).is_empty());
         let events = runtime.withdrawal_payout_events.read().unwrap();
-        assert_eq!(events.len(), MAX_WITHDRAWAL_PAYOUT_EVENTS);
-        assert_eq!(events.first().unwrap().er_slot, 5);
+        assert_eq!(events.len(), MAX_WITHDRAWAL_PAYOUT_EVENTS + 5);
+        assert!(!runtime.is_active());
         drop(events);
 
         runtime.shutdown();

@@ -22,6 +22,7 @@ use {
     solana_transaction::Transaction,
     std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration},
     thiserror::Error,
+    unsettled_state::{RecoveredUnsettledState, RecoveryDisposition, UnsettledSessionIdentity},
 };
 
 pub mod ephemeral_runtime;
@@ -30,6 +31,7 @@ pub mod ephemeral_tx_client;
 pub mod portal_state;
 pub mod settlement;
 pub mod slot_advancer;
+pub mod unsettled_state;
 
 pub use crate::{
     ephemeral_runtime::{EphemeralRuntime, ErStateDiff, ErStateDiffAccount},
@@ -538,6 +540,23 @@ impl Manager {
         std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join("northstar-checkpoint-plans")
+    }
+
+    fn unsettled_state_dir(&self) -> Option<PathBuf> {
+        if let Some(path) = std::env::var_os("NORTHSTAR_UNSETTLED_STATE_DIR").map(PathBuf::from) {
+            return Some(path);
+        }
+        let checkpoint_dir = self
+            .config
+            .checkpoint_plan_dir
+            .clone()
+            .or_else(|| std::env::var_os("NORTHSTAR_CHECKPOINT_PLAN_DIR").map(PathBuf::from))?;
+        Some(
+            checkpoint_dir
+                .parent()
+                .unwrap_or(&checkpoint_dir)
+                .join("northstar-unsettled-state"),
+        )
     }
 
     fn checkpoint_plan_path(&self, session_pda: Pubkey, proposer: Pubkey, er_slot: u64) -> PathBuf {
@@ -1275,12 +1294,74 @@ impl Manager {
             NorthStarError::RuntimeCreationFailed(e)
         })?;
 
+        if let Some(dir) = self.unsettled_state_dir() {
+            runtime.configure_unsettled_state(dir);
+        }
+
         info!(
             "Always-on ephemeral RPC initialized at {rpc_addr}, WS at {ws_addr}, TPU at \
              {tpu_addr} (inactive until session opens)"
         );
         self.runtime = Some(runtime);
         Ok(())
+    }
+
+    fn prepare_session(
+        &mut self,
+        root_bank: Arc<Bank>,
+        session_pda: Pubkey,
+        session: &northstar_portal::Session,
+    ) -> Option<RecoveredUnsettledState> {
+        let persistence_enabled = self.unsettled_state_dir().is_some();
+        let Some(runtime) = &mut self.runtime else {
+            warn!("Cannot activate session: runtime not initialized");
+            return None;
+        };
+        trace!(
+            "activate_session: resetting to L1 root slot={}, epoch={}",
+            root_bank.slot(),
+            root_bank.epoch(),
+        );
+        runtime.set_session_settings(session.grid_id, session.ttl_slots, session.fee_cap);
+        runtime.reset_to_new_parent(root_bank);
+        runtime.set_session_pda(session_pda);
+        if !persistence_enabled {
+            return Some(RecoveredUnsettledState {
+                accounts: vec![],
+                touched_accounts: vec![],
+                payout_events: vec![],
+                processed_signatures: vec![],
+            });
+        }
+
+        let identity =
+            UnsettledSessionIdentity::new(self.config.portal_program_id, session_pda, session);
+        match runtime.begin_unsettled_session(identity) {
+            Ok(outcome) => {
+                match outcome.disposition {
+                    RecoveryDisposition::Recovered => info!(
+                        "Recovered persisted unsettled ER state: accounts={}, payouts={}, \
+                         signatures={}",
+                        outcome.state.accounts.len(),
+                        outcome.state.payout_events.len(),
+                        outcome.state.processed_signatures.len(),
+                    ),
+                    RecoveryDisposition::DroppedIdentityMismatch => warn!(
+                        "Dropped persisted unsettled ER state because Portal/session \
+                         configuration changed"
+                    ),
+                    RecoveryDisposition::DroppedCorrupt => {
+                        warn!("Dropped corrupt persisted unsettled ER state")
+                    }
+                    RecoveryDisposition::New => {}
+                }
+                Some(outcome.state)
+            }
+            Err(err) => {
+                warn!("Cannot activate ER: failed to initialize unsettled state journal: {err}");
+                None
+            }
+        }
     }
 
     /// Sonic: Activate the ephemeral session — resets bank to current L1 root
@@ -1293,19 +1374,33 @@ impl Manager {
         ttl_slots: u64,
         fee_cap: u64,
     ) {
+        let Some(account) = root_bank.get_account(&session_pda) else {
+            warn!("Cannot activate session: Session account {session_pda} is missing");
+            return;
+        };
+        let Some(PortalAccount::Session(session)) = try_parse_raw_portal_account(account.data())
+        else {
+            warn!("Cannot activate session: Session account {session_pda} is invalid");
+            return;
+        };
+        if session.grid_id != grid_id
+            || session.ttl_slots != ttl_slots
+            || session.fee_cap != fee_cap
+        {
+            warn!("Cannot activate session: event settings do not match Session account");
+            return;
+        }
+        let Some(recovered) = self.prepare_session(root_bank, session_pda, &session) else {
+            return;
+        };
         if let Some(runtime) = &mut self.runtime {
-            trace!(
-                "activate_session: resetting to L1 root slot={}, epoch={}",
-                root_bank.slot(),
-                root_bank.epoch(),
-            );
-            runtime.set_session_settings(grid_id, ttl_slots, fee_cap);
-            runtime.reset_to_new_parent(root_bank);
-            runtime.set_session_pda(session_pda);
+            runtime.restore_unsettled_state(recovered);
+            runtime.enable_unsettled_writes();
             runtime.activate();
-            info!("Ephemeral session activated, PDA={session_pda}, grid_id={grid_id}");
-        } else {
-            warn!("Cannot activate session: runtime not initialized");
+            info!(
+                "Ephemeral session activated, PDA={session_pda}, grid_id={}",
+                session.grid_id
+            );
         }
     }
 
@@ -1313,7 +1408,8 @@ impl Manager {
     pub fn deactivate_session(&mut self) {
         if let Some(runtime) = &mut self.runtime {
             runtime.deactivate();
-            info!("Ephemeral session deactivated");
+            runtime.clear_unsettled_state();
+            info!("Ephemeral session deactivated and persisted state cleared");
         } else {
             warn!("Cannot deactivate session: runtime not initialized");
         }
@@ -1423,13 +1519,9 @@ impl Manager {
             );
         }
 
-        self.activate_session(
-            root_bank.clone(),
-            session_pda,
-            session.grid_id,
-            session.ttl_slots,
-            session.fee_cap,
-        );
+        let Some(recovered) = self.prepare_session(root_bank.clone(), session_pda, &session) else {
+            return false;
+        };
         for (delegated_account, account, owner_program) in &delegations {
             if let Some(runtime) = &self.runtime {
                 runtime.handle_delegation_inner(
@@ -1439,6 +1531,11 @@ impl Manager {
                     Some(&root_bank),
                 );
             }
+        }
+        if let Some(runtime) = &mut self.runtime {
+            runtime.restore_unsettled_state(recovered);
+            runtime.enable_unsettled_writes();
+            runtime.activate();
         }
         self.mark_synced_through(root_bank.slot());
 
@@ -2597,6 +2694,96 @@ mod portal_e2e_tests {
         assert_eq!(er_account.lamports(), committed_lamports);
 
         manager.shutdown_runtime();
+    }
+
+    #[test]
+    fn test_startup_resume_restores_unsettled_er_balance_from_disk() {
+        setup();
+
+        let (bank, _bank_forks, program_id, _mint_keypair) = setup_bank_with_portal();
+        let manager_account = Arc::new(Keypair::new());
+        let depositor = Pubkey::new_unique();
+        let grid_id = 7;
+        let (session_pda, session_bump) = find_session_pda(&program_id);
+        let session = Session {
+            discriminator: Session::DISCRIMINATOR,
+            grid_id,
+            ttl_slots: 1_000,
+            fee_cap: 123_456,
+            created_at: bank.slot(),
+            nonce: 1,
+            authority: Pubkey::new_unique().to_bytes(),
+            validator: manager_account.pubkey().to_bytes(),
+            settlement_interval_slots: 10,
+            last_settled_l1_slot: bank.slot(),
+            last_settled_er_slot: 0,
+            settlement_status: SettlementStatus::Idle,
+            settlement_er_slot: 0,
+            settlement_checksum: [0; 32],
+            settlement_accumulator: [0; 32],
+            settlement_started_l1_slot: 0,
+            bump: session_bump,
+        };
+        let session_data = borsh::to_vec(&session).unwrap();
+        let mut session_account =
+            AccountSharedData::new(1_000_000, session_data.len(), &program_id);
+        session_account
+            .data_as_mut_slice()
+            .copy_from_slice(&session_data);
+        bank.store_account(&session_pda, &session_account);
+        bank.freeze();
+
+        let state_root = tempfile::TempDir::new().unwrap();
+        let config = ManagerConfig {
+            portal_program_id: program_id,
+            manager_account: manager_account.clone(),
+            checkpoint_plan_dir: Some(state_root.path().join("checkpoint-plans")),
+        };
+        let mut manager = Manager::new(config.clone());
+        manager
+            .init_runtime(
+                bank.clone(),
+                create_test_cluster_info(),
+                find_free_addr(),
+                find_free_addr(),
+                find_free_addr(),
+            )
+            .unwrap();
+        assert!(manager.resume_active_session_from_l1(bank.clone()));
+        manager.credit_deposit(&depositor, 777);
+        assert_eq!(
+            manager
+                .runtime
+                .as_ref()
+                .unwrap()
+                .bank()
+                .get_balance(&depositor),
+            777
+        );
+        manager.shutdown_runtime();
+
+        let mut resumed_manager = Manager::new(config);
+        resumed_manager
+            .init_runtime(
+                bank.clone(),
+                create_test_cluster_info(),
+                find_free_addr(),
+                find_free_addr(),
+                find_free_addr(),
+            )
+            .unwrap();
+        assert!(resumed_manager.resume_active_session_from_l1(bank));
+        assert_eq!(
+            resumed_manager
+                .runtime
+                .as_ref()
+                .unwrap()
+                .bank()
+                .get_balance(&depositor),
+            777,
+            "unsettled ER balance must survive validator restart",
+        );
+        resumed_manager.shutdown_runtime();
     }
 
     #[test]
