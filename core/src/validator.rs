@@ -45,6 +45,9 @@ use {
     solana_account::ReadableAccount,
     solana_accounts_db::{
         accounts_db::{ACCOUNTS_DB_CONFIG_FOR_TESTING, AccountsDbConfig},
+        accounts_index::{
+            AccountIndex, AccountSecondaryIndexes, AccountSecondaryIndexesIncludeExclude,
+        },
         accounts_update_notifier_interface::AccountsUpdateNotifier,
         utils::validate_account_paths_for_direct_io,
     },
@@ -2359,6 +2362,36 @@ fn load_genesis(
     Ok(genesis_config)
 }
 
+// Sonic: Build the AccountsDb configuration used while loading the validator ledger.
+fn accounts_db_config_for_validator(config: &ValidatorConfig) -> AccountsDbConfig {
+    let mut accounts_db_config = config.accounts_db_config.clone();
+    let Some(portal_program_id) = config.portal else {
+        return accounts_db_config;
+    };
+
+    let account_indexes = accounts_db_config
+        .account_indexes
+        .get_or_insert_with(AccountSecondaryIndexes::default);
+    let should_limit_default_index =
+        account_indexes.indexes.is_empty() && account_indexes.keys.is_none();
+    account_indexes.indexes.insert(AccountIndex::ProgramId);
+
+    if should_limit_default_index {
+        account_indexes.keys = Some(AccountSecondaryIndexesIncludeExclude {
+            exclude: false,
+            keys: HashSet::from([portal_program_id]),
+        });
+    } else if let Some(keys) = account_indexes.keys.as_mut() {
+        if keys.exclude {
+            keys.keys.remove(&portal_program_id);
+        } else {
+            keys.keys.insert(portal_program_id);
+        }
+    }
+
+    accounts_db_config
+}
+
 #[allow(clippy::type_complexity)]
 fn load_blockstore(
     config: &ValidatorConfig,
@@ -2395,7 +2428,7 @@ fn load_blockstore(
         halt_at_slot: None,
         new_hard_forks: config.new_hard_forks.clone(),
         debug_keys: config.debug_keys.clone(),
-        accounts_db_config: config.accounts_db_config.clone(),
+        accounts_db_config: accounts_db_config_for_validator(config),
         accounts_db_skip_shrink: config.accounts_db_skip_shrink,
         accounts_db_force_initial_clean: config.accounts_db_force_initial_clean,
         runtime_config: config.runtime_config.clone(),
@@ -3182,6 +3215,25 @@ mod tests {
         solana_vote_program::vote_state::{LandedVote, Lockout, VoteStateVersions},
         std::{fs::remove_dir_all, num::NonZeroU64, thread, time::Duration},
     };
+
+    #[test]
+    fn test_portal_validator_indexes_only_portal_owned_accounts_by_default() {
+        let portal = Pubkey::new_unique();
+        let config = ValidatorConfig {
+            portal: Some(portal),
+            ..ValidatorConfig::default_for_test()
+        };
+
+        let accounts_db_config = accounts_db_config_for_validator(&config);
+        let account_indexes = accounts_db_config
+            .account_indexes
+            .expect("Portal validator should configure an account index");
+        assert!(
+            account_indexes.contains(&solana_accounts_db::accounts_index::AccountIndex::ProgramId)
+        );
+        assert!(account_indexes.include_key(&portal));
+        assert!(!account_indexes.include_key(&Pubkey::new_unique()));
+    }
 
     #[test]
     fn test_should_require_vote_history_file() {
