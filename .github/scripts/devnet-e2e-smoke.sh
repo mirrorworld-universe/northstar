@@ -127,6 +127,23 @@ wait_for_balance() {
   return 1
 }
 
+wait_for_deposit_credit() {
+  local baseline=$1
+  local materialized=$AMOUNT_LAMPORTS
+  local accumulated=$((baseline + AMOUNT_LAMPORTS))
+  for _ in $(seq 1 180); do
+    local actual
+    actual=$(get_balance "$ER_RPC" "$WALLET_ADDRESS" processed 2>/dev/null || true)
+    if [ "$actual" = "$materialized" ] || [ "$actual" = "$accumulated" ]; then
+      printf '%s\n' "$actual"
+      return 0
+    fi
+    sleep 5
+  done
+  echo "Timed out waiting for ER deposit credit ($materialized or $accumulated)" >&2
+  return 1
+}
+
 PHASE=resolve_configuration
 test -x "$SOLANA_CLI"
 test -f "$DEPLOYER_KEYPAIR"
@@ -157,10 +174,9 @@ DEPOSIT_OUTPUT=$(
 )
 DEPOSIT_SIGNATURE=$(jq -er '.signature' <<< "$DEPOSIT_OUTPUT")
 POST_DEPOSIT_L1_BALANCE=$(get_balance "$DEVNET_RPC" "$WALLET_ADDRESS" confirmed)
-EXPECTED_CREDITED_BALANCE=$((BASELINE_ER_BALANCE + AMOUNT_LAMPORTS))
 
 PHASE=wait_for_er_credit
-wait_for_balance "$ER_RPC" "$WALLET_ADDRESS" processed "$EXPECTED_CREDITED_BALANCE" 'ER deposit credit'
+CREDITED_BALANCE=$(wait_for_deposit_credit "$BASELINE_ER_BALANCE")
 
 PHASE=restart_with_unsettled_state
 sudo systemctl restart "$SERVICE"
@@ -169,8 +185,8 @@ wait_for_session "$SESSION_PDA"
 
 PHASE=verify_restored_state
 RESTORED_BALANCE=$(get_balance "$ER_RPC" "$WALLET_ADDRESS" processed)
-if [ "$RESTORED_BALANCE" != "$EXPECTED_CREDITED_BALANCE" ]; then
-  echo "Restored ER balance mismatch: expected=$EXPECTED_CREDITED_BALANCE actual=$RESTORED_BALANCE" >&2
+if [ "$RESTORED_BALANCE" != "$CREDITED_BALANCE" ]; then
+  echo "Restored ER balance mismatch: expected=$CREDITED_BALANCE actual=$RESTORED_BALANCE" >&2
   exit 1
 fi
 
@@ -186,7 +202,8 @@ WITHDRAWAL_OUTPUT=$(
     "$AMOUNT_SOL"
 )
 WITHDRAWAL_SIGNATURE=$(jq -er '.signature' <<< "$WITHDRAWAL_OUTPUT")
-wait_for_balance "$ER_RPC" "$WALLET_ADDRESS" processed "$BASELINE_ER_BALANCE" 'ER withdrawal'
+EXPECTED_WITHDRAWN_BALANCE=$((CREDITED_BALANCE - AMOUNT_LAMPORTS))
+wait_for_balance "$ER_RPC" "$WALLET_ADDRESS" processed "$EXPECTED_WITHDRAWN_BALANCE" 'ER withdrawal'
 
 PHASE=wait_for_l1_settlement
 EXPECTED_L1_BALANCE=$((POST_DEPOSIT_L1_BALANCE + AMOUNT_LAMPORTS))
