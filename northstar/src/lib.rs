@@ -1428,6 +1428,7 @@ impl Manager {
                 accounts: vec![],
                 touched_accounts: vec![],
                 payout_events: vec![],
+                token_payout_events: vec![],
                 processed_signatures: vec![],
             });
         }
@@ -1438,10 +1439,11 @@ impl Manager {
             Ok(outcome) => {
                 match outcome.disposition {
                     RecoveryDisposition::Recovered => info!(
-                        "Recovered persisted unsettled ER state: accounts={}, payouts={}, \
-                         signatures={}",
+                        "Recovered persisted unsettled ER state: accounts={}, SOL payouts={}, \
+                         token payouts={}, signatures={}",
                         outcome.state.accounts.len(),
                         outcome.state.payout_events.len(),
+                        outcome.state.token_payout_events.len(),
                         outcome.state.processed_signatures.len(),
                     ),
                     RecoveryDisposition::DroppedIdentityMismatch => warn!(

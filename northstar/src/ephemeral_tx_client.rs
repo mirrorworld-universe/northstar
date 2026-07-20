@@ -609,6 +609,7 @@ impl EphemeralTransactionClient {
             .collect::<Vec<_>>();
         let touched_accounts = writable_accounts.iter().copied().collect::<Vec<_>>();
         let payout_events = self.withdrawal_payout_events.read().unwrap().clone();
+        let token_payout_events = self.token_withdrawal_payout_events.read().unwrap().clone();
         let processed = self.processed_signatures.read().unwrap();
         let processed_signatures = txs
             .iter()
@@ -622,6 +623,7 @@ impl EphemeralTransactionClient {
             &accounts,
             &touched_accounts,
             Some(&payout_events),
+            Some(&token_payout_events),
             &processed_signatures,
         )
     }

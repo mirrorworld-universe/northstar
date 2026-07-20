@@ -924,6 +924,7 @@ impl EphemeralRuntime {
         if recovered.accounts.is_empty()
             && recovered.touched_accounts.is_empty()
             && recovered.payout_events.is_empty()
+            && recovered.token_payout_events.is_empty()
             && recovered.processed_signatures.is_empty()
         {
             return;
@@ -942,6 +943,7 @@ impl EphemeralRuntime {
             .unwrap()
             .extend(recovered.touched_accounts);
         *self.withdrawal_payout_events.write().unwrap() = recovered.payout_events;
+        *self.token_withdrawal_payout_events.write().unwrap() = recovered.token_payout_events;
         self._tx_client
             .restore_processed_signatures(recovered.processed_signatures);
         self.publish_bank_for_rpc();
@@ -959,10 +961,14 @@ impl EphemeralRuntime {
         touched_accounts: &[Pubkey],
         payout_events: Option<&[WithdrawalPayoutEvent]>,
     ) {
-        if let Err(err) =
-            self.unsettled_state_store
-                .append_update(accounts, touched_accounts, payout_events, &[])
-        {
+        let token_payout_events = self.token_withdrawal_payout_events.read().unwrap().clone();
+        if let Err(err) = self.unsettled_state_store.append_update(
+            accounts,
+            touched_accounts,
+            payout_events,
+            Some(&token_payout_events),
+            &[],
+        ) {
             self.active.store(false, Ordering::Relaxed);
             warn!("Failed to persist ER state mutation; deactivating ER: {err}");
         }
