@@ -11,11 +11,16 @@ AMOUNT_SOL=${AMOUNT_SOL:-0.01}
 AMOUNT_LAMPORTS=${AMOUNT_LAMPORTS:-10000000}
 REPORT_PATH=${REPORT_PATH:-/tmp/northstar-e2e-report.txt}
 SERVICE=${SERVICE:-northstar-validator}
+RESTART_COMMAND=${RESTART_COMMAND:-}
+VALIDATOR_LOG=${VALIDATOR_LOG:-/solana/northstar/logs/validator.log}
 PORTAL_ADDRESS=${PORTAL_ADDRESS:-}
 
-for command in curl jq solana-keygen systemctl; do
+for command in curl jq solana-keygen; do
   command -v "$command" >/dev/null
 done
+if [ -z "$RESTART_COMMAND" ]; then
+  command -v systemctl >/dev/null
+fi
 
 STARTED_AT=$(date +%s)
 STATUS=failure
@@ -71,11 +76,11 @@ get_session() {
 
 wait_for_l1_rpc() {
   for _ in $(seq 1 1080); do
-    if sudo systemctl is-failed --quiet "$SERVICE"; then
+    if [ -z "$RESTART_COMMAND" ] && sudo systemctl is-failed --quiet "$SERVICE"; then
       echo "Validator service failed" >&2
       return 1
     fi
-    if sudo systemctl is-active --quiet "$SERVICE" && \
+    if { [ -n "$RESTART_COMMAND" ] || sudo systemctl is-active --quiet "$SERVICE"; } &&
       rpc_result "$L1_LOCAL_RPC" getVersion '[]' >/dev/null 2>&1; then
       return 0
     fi
@@ -83,6 +88,14 @@ wait_for_l1_rpc() {
   done
   echo "Timed out waiting for L1 RPC" >&2
   return 1
+}
+
+restart_validator() {
+  if [ -n "$RESTART_COMMAND" ]; then
+    bash -lc "$RESTART_COMMAND"
+  else
+    sudo systemctl restart "$SERVICE"
+  fi
 }
 
 wait_for_l1_catchup() {
@@ -166,6 +179,7 @@ test -x "$SOLANA_CLI"
 test -f "$DEPLOYER_KEYPAIR"
 WALLET_ADDRESS=$(solana-keygen pubkey "$DEPLOYER_KEYPAIR")
 if [ -z "$PORTAL_ADDRESS" ]; then
+  test -z "$RESTART_COMMAND"
   PORTAL_ADDRESS=$(systemctl cat "$SERVICE" | sed -n 's/.*--portal \([^ ]*\).*/\1/p' | tail -n 1)
 fi
 test -n "$PORTAL_ADDRESS"
@@ -175,7 +189,7 @@ wait_for_l1_catchup
 
 PHASE=capture_baseline
 BASELINE_ER_BALANCE=$(get_balance "$ER_RPC" "$WALLET_ADDRESS" processed)
-LOG_START_LINE=$(wc -l < /solana/northstar/logs/validator.log)
+LOG_START_LINE=$(wc -l < "$VALIDATOR_LOG")
 rpc_result "$DEVNET_RPC" getSignaturesForAddress \
   "$(jq -cn --arg portal "$PORTAL_ADDRESS" '[$portal,{limit:40,commitment:"confirmed"}]')" \
   | jq -r '.[].signature' > /tmp/northstar-e2e-before-signatures.txt
@@ -198,7 +212,7 @@ PHASE=wait_for_er_credit
 CREDITED_BALANCE=$(wait_for_deposit_credit "$BASELINE_ER_BALANCE")
 
 PHASE=restart_with_unsettled_state
-sudo systemctl restart "$SERVICE"
+restart_validator
 wait_for_l1_rpc
 wait_for_l1_catchup
 wait_for_session "$SESSION_PDA"
@@ -242,7 +256,7 @@ fi
 
 PHASE=collect_settlement_receipts
 CONFIRMED_SIGNATURES=$(
-  tail -n "+$((LOG_START_LINE + 1))" /solana/northstar/logs/validator.log \
+  tail -n "+$((LOG_START_LINE + 1))" "$VALIDATOR_LOG" \
     | sed -n 's/.*Portal settlement transaction confirmed.*signatures=\[\([^]]*\)\].*/\1/p' \
     | tr ',' '\n' \
     | tr -d ' []"' \

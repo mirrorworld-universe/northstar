@@ -169,7 +169,7 @@ impl SettlementPlan {
         challenge_window_slots: u64,
         previous_state_root: [u8; 32],
     ) -> Option<Transaction> {
-        (!self.is_empty() && !self.has_unsupported_changes()).then(|| {
+        (!self.has_unsupported_changes()).then(|| {
             sign_settlement_transaction(
                 &[self.checkpoint_proposal_instruction(
                     portal_program_id,
@@ -1350,6 +1350,18 @@ mod tests {
                 Pubkey::new_unique()
             )
             .is_empty());
+        assert!(
+            plan.checkpoint_proposal_transaction(
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                &Keypair::new(),
+                Hash::new_unique(),
+                10,
+                [0; 32],
+            )
+            .is_some(),
+            "token-only settlement still needs a checkpoint proposal",
+        );
     }
 
     #[test]

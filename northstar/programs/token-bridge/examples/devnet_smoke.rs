@@ -33,7 +33,6 @@ use {
 const DECIMALS: u8 = 6;
 const DEPOSIT_AMOUNT: u64 = 1_000_000;
 const WITHDRAW_AMOUNT: u64 = 1_000_000;
-const WAIT_TIMEOUT: Duration = Duration::from_secs(900);
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -196,14 +195,17 @@ fn prepare(config: &Config) -> Result<()> {
     fs::write(
         &config.state_path,
         format!(
-            "SESSION={session}\nMINT={}\nSESSION_BRIDGE={session_bridge}\nVAULT={vault}\\
-             nVAULT_TOKEN={}\nSOURCE_TOKEN={}\nDESTINATION_TOKEN={}\\
-             nER_TOKEN_ACCOUNT={er_token_account}\nSETUP_SIGNATURE={setup_signature}\\
-             nDEPOSIT_SIGNATURE={deposit_signature}\n",
+            "SESSION={}\nMINT={}\nSESSION_BRIDGE={}\nVAULT={}\nVAULT_TOKEN={}\nSOURCE_TOKEN={}\nDESTINATION_TOKEN={}\nER_TOKEN_ACCOUNT={}\nSETUP_SIGNATURE={}\nDEPOSIT_SIGNATURE={}\n",
+            session,
             mint.pubkey(),
+            session_bridge,
+            vault,
             vault_token.pubkey(),
             source_token.pubkey(),
             destination_token.pubkey(),
+            er_token_account,
+            setup_signature,
+            deposit_signature,
         ),
     )?;
     println!("SPL deposit confirmed: {deposit_signature}");
@@ -245,15 +247,16 @@ fn withdraw(config: &Config) -> Result<()> {
     let setup_signature = state
         .get("SETUP_SIGNATURE")
         .ok_or("missing setup signature")?;
-    let settlement_signature = rpc
-        .get_signatures_for_address(&destination_token)?
-        .into_iter()
-        .map(|status| status.signature)
-        .find(|signature| signature != setup_signature)
-        .ok_or("could not find SPL settlement signature")?;
     let deposit_signature = state
         .get("DEPOSIT_SIGNATURE")
         .ok_or("missing deposit signature")?;
+    let settlement_signature = wait_for_settlement_signature(
+        &rpc,
+        destination_token,
+        config.bridge_program,
+        setup_signature,
+        deposit_signature,
+    )?;
     fs::write(
         &config.report_path,
         format!(
@@ -581,6 +584,7 @@ fn send_tx(
         &tx,
         RpcSendTransactionConfig {
             skip_preflight,
+            preflight_commitment: Some(rpc.commitment().commitment),
             max_retries: Some(20),
             ..RpcSendTransactionConfig::default()
         },
@@ -623,15 +627,57 @@ fn wait_for_er_amount(rpc: &RpcClient, er_account: Pubkey, expected: u64) -> Res
     )
 }
 
+fn smoke_wait_timeout() -> Duration {
+    Duration::from_secs(
+        env::var("SMOKE_WAIT_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(900),
+    )
+}
+
+fn smoke_poll_interval() -> Duration {
+    Duration::from_millis(
+        env::var("SMOKE_POLL_MILLIS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(2_000),
+    )
+}
+
 fn wait_until(mut condition: impl FnMut() -> bool, description: String) -> Result<()> {
-    let deadline = Instant::now() + WAIT_TIMEOUT;
+    let deadline = Instant::now() + smoke_wait_timeout();
     while Instant::now() < deadline {
         if condition() {
             return Ok(());
         }
-        sleep(Duration::from_secs(2));
+        sleep(smoke_poll_interval());
     }
     Err(format!("timed out waiting for {description}").into())
+}
+
+fn wait_for_settlement_signature(
+    rpc: &RpcClient,
+    destination: Pubkey,
+    bridge_program: Pubkey,
+    setup_signature: &str,
+    deposit_signature: &str,
+) -> Result<String> {
+    let deadline = Instant::now() + smoke_wait_timeout();
+    while Instant::now() < deadline {
+        let signatures = rpc
+            .get_signatures_for_address(&destination)?
+            .into_iter()
+            .chain(rpc.get_signatures_for_address(&bridge_program)?);
+        if let Some(signature) = signatures
+            .map(|status| status.signature)
+            .find(|signature| signature != setup_signature && signature != deposit_signature)
+        {
+            return Ok(signature);
+        }
+        sleep(smoke_poll_interval());
+    }
+    Err("timed out waiting for indexed SPL settlement signature".into())
 }
 
 fn read_keypair(path: &str) -> Result<Keypair> {

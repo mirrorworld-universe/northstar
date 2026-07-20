@@ -1036,6 +1036,11 @@ impl EphemeralTransactionClient {
                 {
                     continue;
                 }
+                debug!(
+                    "Recorded ER token withdrawal payout: bridge={}, account={}, destination={}, \
+                     amount={}",
+                    program_id, er_token_account, destination, amount
+                );
                 events.push(TokenWithdrawalPayoutEvent {
                     bridge_program: *program_id,
                     session_bridge: *session_bridge,

@@ -1963,6 +1963,28 @@ impl EphemeralRuntime {
         l1_bank: Option<&Bank>,
     ) {
         let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
+        if let Some(existing) = self
+            .er_account_overlay
+            .read()
+            .unwrap()
+            .get(delegated_account)
+        {
+            let existing_token =
+                borsh::from_slice::<northstar_token_bridge::state::ErTokenAccount>(existing.data());
+            let incoming_token = borsh::from_slice::<northstar_token_bridge::state::ErTokenAccount>(
+                account_data.data(),
+            );
+            if matches!(
+                (existing_token, incoming_token),
+                (Ok(existing), Ok(incoming)) if existing.amount > incoming.amount
+            ) {
+                debug!(
+                    "Ignoring stale L1 hydration for unsettled ER token account \
+                     {delegated_account}"
+                );
+                return;
+            }
+        }
         let bank = self.bank();
         let mut er_account = account_data.clone();
         if let Some(owner_program) = owner_program {
@@ -2269,11 +2291,12 @@ impl EphemeralRuntime {
         self.er_account_overlay
             .write()
             .unwrap()
-            .insert(*er_token_account, account);
+            .insert(*er_token_account, account.clone());
         self.touched_accounts
             .write()
             .unwrap()
             .insert(*er_token_account);
+        self.persist_unsettled_update(&[(*er_token_account, account)], &[*er_token_account], None);
         self.publish_bank_for_rpc();
         info!(
             "Credited {} tokens to {} on ER (new amount: {})",
@@ -2746,7 +2769,7 @@ mod tests {
             Arc::new(Keypair::new()),
         )
         .unwrap();
-        runtime.handle_delegation(&er_token_account, account);
+        runtime.handle_delegation(&er_token_account, account.clone());
 
         assert!(runtime.credit_token_deposit(
             &bridge_program,
@@ -2759,6 +2782,16 @@ mod tests {
             borsh::from_slice::<northstar_token_bridge::state::ErTokenAccount>(credited.data())
                 .unwrap();
         assert_eq!(credited_state.amount, 600_000_000);
+
+        runtime.handle_delegation(&er_token_account, account);
+        let rehydrated = runtime.bank().get_account(&er_token_account).unwrap();
+        let rehydrated_state =
+            borsh::from_slice::<northstar_token_bridge::state::ErTokenAccount>(rehydrated.data())
+                .unwrap();
+        assert_eq!(
+            rehydrated_state.amount, 600_000_000,
+            "duplicate L1 delegation hydration must preserve unsettled ER state",
+        );
 
         runtime.shutdown();
     }

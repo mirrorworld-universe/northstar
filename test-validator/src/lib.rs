@@ -1285,17 +1285,33 @@ impl TestValidator {
                     .0,
             ],
             run_verification: false, // Skip PoH verification of ledger on startup for speed
-            snapshot_config: SnapshotConfig {
-                full_snapshot_archive_interval: SnapshotInterval::Slots(
-                    NonZeroU64::new(100).unwrap(),
-                ),
-                incremental_snapshot_archive_interval: SnapshotInterval::Disabled,
-                bank_snapshots_dir: ledger_path.join(BANK_SNAPSHOTS_DIR),
-                full_snapshot_archives_dir: ledger_path.to_path_buf(),
-                incremental_snapshot_archives_dir: ledger_path.to_path_buf(),
-                use_registered_io_uring_buffers: false,
-                use_direct_io: false,
-                ..SnapshotConfig::default()
+            snapshot_config: if std::env::var_os("NORTHSTAR_TEST_VALIDATOR_LOAD_ONLY_SNAPSHOTS")
+                .is_some()
+            {
+                // Sonic: restart smoke tests load one durable checkpoint, then disable new
+                // snapshots because resumed local banks may not carry DCou block ids.
+                let mut snapshot_config = SnapshotConfig::new_load_only();
+                snapshot_config.bank_snapshots_dir = ledger_path.join("load-only-snapshots");
+                snapshot_config.full_snapshot_archives_dir = ledger_path.to_path_buf();
+                snapshot_config.incremental_snapshot_archives_dir = ledger_path.to_path_buf();
+                snapshot_config
+            } else {
+                SnapshotConfig {
+                    full_snapshot_archive_interval: SnapshotInterval::Slots(
+                        std::env::var("NORTHSTAR_TEST_VALIDATOR_SNAPSHOT_INTERVAL_SLOTS")
+                            .ok()
+                            .and_then(|value| value.parse().ok())
+                            .and_then(NonZeroU64::new)
+                            .unwrap_or(NonZeroU64::new(100).unwrap()),
+                    ),
+                    incremental_snapshot_archive_interval: SnapshotInterval::Disabled,
+                    bank_snapshots_dir: ledger_path.join(BANK_SNAPSHOTS_DIR),
+                    full_snapshot_archives_dir: ledger_path.to_path_buf(),
+                    incremental_snapshot_archives_dir: ledger_path.to_path_buf(),
+                    use_registered_io_uring_buffers: false,
+                    use_direct_io: false,
+                    ..SnapshotConfig::default()
+                }
             },
             warp_slot: config.warp_slot,
             validator_exit: config.validator_exit.clone(),

@@ -408,13 +408,29 @@ impl Manager {
         let runtime = self.runtime.as_ref()?;
         let session_pda = (*runtime.session_pda().read().unwrap())?;
         let diff = runtime.state_diff_from_l1();
+        let er_slot = runtime.bank().slot();
         let receipt_balances = runtime.settlement_receipt_balances(session_pda);
         build_settlement_plan(
             &diff,
             &runtime.delegated_accounts(),
-            runtime.bank().slot(),
+            er_slot,
             receipt_balances,
         )
+        .or_else(|| {
+            (!runtime.settlement_token_withdrawals(er_slot).is_empty()).then(|| {
+                let mut plan = SettlementPlan {
+                    er_slot,
+                    checksum: [0; 32],
+                    chunks: vec![],
+                    owner_changes: vec![],
+                    lamport_changes: vec![],
+                    receipt_balances: vec![],
+                    unsupported_changes: vec![],
+                };
+                plan.checksum = plan.recomputed_checksum();
+                plan
+            })
+        })
     }
 
     /// Build Portal settlement instructions for current data-only diff.
@@ -928,19 +944,17 @@ impl Manager {
             self.config.manager_account.as_ref(),
             recent_blockhash,
         );
-        if !transactions.is_empty() {
-            if let Some(runtime) = &self.runtime {
-                let token_withdrawals = runtime.settlement_token_withdrawals(plan.er_slot);
-                transactions.extend(settlement::token_withdrawal_transactions(
-                    &token_withdrawals,
-                    self.config.portal_program_id,
-                    session_pda,
-                    plan.er_slot,
-                    plan.checksum,
-                    self.config.manager_account.as_ref(),
-                    recent_blockhash,
-                ));
-            }
+        if let Some(runtime) = &self.runtime {
+            let token_withdrawals = runtime.settlement_token_withdrawals(plan.er_slot);
+            transactions.extend(settlement::token_withdrawal_transactions(
+                &token_withdrawals,
+                self.config.portal_program_id,
+                session_pda,
+                plan.er_slot,
+                plan.checksum,
+                self.config.manager_account.as_ref(),
+                recent_blockhash,
+            ));
         }
         transactions
     }

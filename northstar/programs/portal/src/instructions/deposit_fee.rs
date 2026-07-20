@@ -80,11 +80,34 @@ pub fn process_deposit_fee(
         return Err(PortalError::InvalidPdaSeeds.into());
     }
 
+    let receipt_rent_exempt = Rent::get()?.minimum_balance(DepositReceipt::LEN);
+    let pre_escrow = if deposit_receipt.data_is_empty() {
+        0
+    } else {
+        deposit_receipt
+            .lamports()
+            .checked_sub(receipt_rent_exempt)
+            .ok_or(PortalError::InsufficientFees)?
+    };
+    let post_escrow = pre_escrow
+        .checked_add(lamports)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    emit_transfer_event(&NorthstarTransferEvent {
+        version: NorthstarTransferEvent::VERSION,
+        kind: TransferEventKind::Deposit,
+        from: *depositor.key(),
+        to: *recipient_key,
+        lamports,
+        pre_balance: pre_escrow,
+        post_balance: post_escrow,
+        slot: clock.slot,
+        timestamp: clock.unix_timestamp,
+    });
+
     // Create or update DepositReceipt
     if deposit_receipt.data_is_empty() {
         // First deposit — create the PDA
-        let rent = Rent::get()?;
-        let receipt_lamports = rent.minimum_balance(DepositReceipt::LEN);
+        let receipt_lamports = receipt_rent_exempt;
 
         let receipt_bump_bytes = [receipt_bump];
         let receipt_seeds = &[
@@ -138,11 +161,6 @@ pub fn process_deposit_fee(
         }
     }
 
-    let receipt_rent_exempt = Rent::get()?.minimum_balance(DepositReceipt::LEN);
-    let pre_escrow = deposit_receipt
-        .lamports()
-        .checked_sub(receipt_rent_exempt)
-        .ok_or(PortalError::InsufficientFees)?;
     // Transfer lamports from depositor to the deposit_receipt PDA
     Transfer {
         from: depositor,
@@ -150,22 +168,6 @@ pub fn process_deposit_fee(
         lamports,
     }
     .invoke()?;
-
-    let post_escrow = deposit_receipt
-        .lamports()
-        .checked_sub(receipt_rent_exempt)
-        .ok_or(PortalError::InsufficientFees)?;
-    emit_transfer_event(&NorthstarTransferEvent {
-        version: NorthstarTransferEvent::VERSION,
-        kind: TransferEventKind::Deposit,
-        from: *depositor.key(),
-        to: *recipient_key,
-        lamports,
-        pre_balance: pre_escrow,
-        post_balance: post_escrow,
-        slot: clock.slot,
-        timestamp: clock.unix_timestamp,
-    });
 
     pinocchio_log::log!("DepositFee success");
 

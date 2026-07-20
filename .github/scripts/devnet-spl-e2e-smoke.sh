@@ -5,6 +5,9 @@ L1_LOCAL_RPC=${L1_LOCAL_RPC:-http://localhost:8899}
 DEVNET_RPC=${DEVNET_RPC:-https://api.devnet.solana.com}
 ER_RPC=${ER_RPC:-https://ephemeral.devnet.sonic.game}
 SERVICE=${SERVICE:-northstar-validator}
+RESTART_COMMAND=${RESTART_COMMAND:-}
+CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-/solana/northstar}
+DEVNET_SMOKE_BIN=${DEVNET_SMOKE_BIN:-}
 DEPLOYER_KEYPAIR=${DEPLOYER_KEYPAIR:-/home/ubuntu/.config/solana/id.json}
 ER_FEE_PAYER_KEYPAIR=${ER_FEE_PAYER_KEYPAIR:-/tmp/northstar-spl-e2e-fee-payer.json}
 STATE_PATH=${STATE_PATH:-/tmp/northstar-spl-e2e-state.env}
@@ -22,7 +25,6 @@ write_failure_report() {
 :stopwatch: Elapsed: $(( $(date +%s) - STARTED_AT ))s
 EOF
   fi
-  rm -f "$ER_FEE_PAYER_KEYPAIR" "$STATE_PATH"
   exit "$status"
 }
 trap write_failure_report EXIT
@@ -37,11 +39,11 @@ rpc_result() {
 
 wait_for_l1_rpc() {
   for _ in $(seq 1 1080); do
-    if sudo systemctl is-failed --quiet "$SERVICE"; then
+    if [ -z "$RESTART_COMMAND" ] && sudo systemctl is-failed --quiet "$SERVICE"; then
       echo "Validator service failed" >&2
       return 1
     fi
-    if sudo systemctl is-active --quiet "$SERVICE" && \
+    if { [ -n "$RESTART_COMMAND" ] || sudo systemctl is-active --quiet "$SERVICE"; } &&
       rpc_result "$L1_LOCAL_RPC" getVersion >/dev/null 2>&1; then
       return 0
     fi
@@ -49,6 +51,14 @@ wait_for_l1_rpc() {
   done
   echo "Timed out waiting for L1 RPC" >&2
   return 1
+}
+
+restart_validator() {
+  if [ -n "$RESTART_COMMAND" ]; then
+    bash -lc "$RESTART_COMMAND"
+  else
+    sudo systemctl restart "$SERVICE"
+  fi
 }
 
 wait_for_l1_catchup() {
@@ -82,6 +92,15 @@ wait_for_session() {
   return 1
 }
 
+run_devnet_smoke() {
+  if [ -n "$DEVNET_SMOKE_BIN" ]; then
+    RUST_LOG=warn "$DEVNET_SMOKE_BIN" "$@"
+  else
+    RUST_LOG=warn cargo run --quiet --release --target-dir "$CARGO_TARGET_DIR" \
+      --package northstar-token-bridge --example devnet_smoke -- "$@"
+  fi
+}
+
 PHASE=resolve_configuration
 test -f "$DEPLOYER_KEYPAIR"
 test -n "$PORTAL_ADDRESS"
@@ -98,18 +117,16 @@ export DEVNET_RPC ER_RPC PORTAL_ADDRESS TOKEN_BRIDGE_ADDRESS DEPLOYER_KEYPAIR
 export ER_FEE_PAYER_KEYPAIR STATE_PATH REPORT_PATH
 
 PHASE=deposit_spl_on_l1
-RUST_LOG=warn cargo run --quiet --release --target-dir /solana/northstar \
-  --package northstar-token-bridge --example devnet_smoke -- prepare
+run_devnet_smoke prepare
 
 PHASE=restart_with_unsettled_spl_state
-sudo systemctl restart "$SERVICE"
+restart_validator
 wait_for_l1_rpc
 wait_for_l1_catchup
 wait_for_session "$SESSION_PDA"
 
 PHASE=withdraw_spl_on_er_and_settle_l1
-RUST_LOG=warn cargo run --quiet --release --target-dir /solana/northstar \
-  --package northstar-token-bridge --example devnet_smoke -- withdraw
+run_devnet_smoke withdraw
 
 PHASE=complete
 trap - EXIT

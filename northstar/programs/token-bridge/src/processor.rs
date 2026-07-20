@@ -568,7 +568,7 @@ fn process_settle_withdrawal(
         || checkpoint_data[1..33] != session.key()[..]
         || u64::from_le_bytes(checkpoint_data[33..41].try_into().unwrap()) != er_slot
         || checkpoint_data[105..137] != checksum
-        || checkpoint_data[185] != 3
+        || !matches!(checkpoint_data[185], 1 | 3)
     {
         return Err(ProgramError::InvalidAccountData);
     }
