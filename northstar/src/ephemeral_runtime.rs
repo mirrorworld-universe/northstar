@@ -4,6 +4,9 @@ use {
         ephemeral_tx_client::{EphemeralTransactionClient, EphemeralTransactionClientOptions},
         settlement::{ReceiptBalanceSettlement, WithdrawalPayoutEvent},
         slot_advancer::SlotAdvancer,
+        unsettled_state::{
+            RecoveredUnsettledState, RecoveryOutcome, UnsettledSessionIdentity, UnsettledStateStore,
+        },
         EphemeralRollupSettings,
     },
     crossbeam_channel::{unbounded, Sender},
@@ -44,6 +47,7 @@ use {
     std::{
         collections::{HashMap, HashSet},
         net::{IpAddr, Ipv4Addr, SocketAddr},
+        path::PathBuf,
         sync::{
             atomic::{AtomicBool, AtomicU64, Ordering},
             Arc, Mutex, RwLock,
@@ -167,6 +171,7 @@ pub struct EphemeralRuntime {
     er_history_store: Arc<ErHistoryStore>,
     /// Successful ER SOL withdrawal transfers paired with payout recipient memos.
     withdrawal_payout_events: Arc<RwLock<Vec<WithdrawalPayoutEvent>>>,
+    unsettled_state_store: Arc<UnsettledStateStore>,
     portal_program_id: Pubkey,
 
     _tx_client: EphemeralTransactionClient,
@@ -560,6 +565,7 @@ impl EphemeralRuntime {
         let sync_status = Arc::new(NorthStarSyncStatus::new(parent_bank.slot()));
         let er_history_store = Arc::new(ErHistoryStore::new(er_history_max_retained_slots));
         let withdrawal_payout_events = Arc::new(RwLock::new(Vec::new()));
+        let unsettled_state_store = Arc::new(UnsettledStateStore::default());
 
         let ledger_dir = TempDir::new().map_err(|e| e.to_string())?;
         let blockstore = Arc::new(Blockstore::open(ledger_dir.path()).map_err(|e| e.to_string())?);
@@ -591,7 +597,8 @@ impl EphemeralRuntime {
                 portal_program_id,
                 session_pda.clone(),
                 withdrawal_payout_events.clone(),
-            ),
+            )
+            .with_unsettled_state_store(unsettled_state_store.clone()),
         );
 
         let optimistically_confirmed_bank = Arc::new(RwLock::new(OptimisticallyConfirmedBank {
@@ -773,6 +780,7 @@ impl EphemeralRuntime {
             sync_status,
             er_history_store,
             withdrawal_payout_events,
+            unsettled_state_store,
             portal_program_id,
 
             settings,
@@ -864,6 +872,69 @@ impl EphemeralRuntime {
         self.settings.grid_id = grid_id;
         self.settings.ttl_slots = ttl_slots;
         self.settings.fee_cap = fee_cap;
+    }
+
+    pub fn configure_unsettled_state(&self, dir: PathBuf) {
+        self.unsettled_state_store.configure(dir);
+    }
+
+    pub fn begin_unsettled_session(
+        &self,
+        identity: UnsettledSessionIdentity,
+    ) -> std::io::Result<RecoveryOutcome> {
+        self.unsettled_state_store.begin_session(identity)
+    }
+
+    pub fn enable_unsettled_writes(&self) {
+        self.unsettled_state_store.enable_writes();
+    }
+
+    pub fn restore_unsettled_state(&self, recovered: RecoveredUnsettledState) {
+        if recovered.accounts.is_empty()
+            && recovered.touched_accounts.is_empty()
+            && recovered.payout_events.is_empty()
+            && recovered.processed_signatures.is_empty()
+        {
+            return;
+        }
+        let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
+        let bank = self.bank();
+        for (pubkey, account) in &recovered.accounts {
+            bank.store_account(pubkey, account);
+        }
+        self.er_account_overlay
+            .write()
+            .unwrap()
+            .extend(recovered.accounts);
+        self.touched_accounts
+            .write()
+            .unwrap()
+            .extend(recovered.touched_accounts);
+        *self.withdrawal_payout_events.write().unwrap() = recovered.payout_events;
+        self._tx_client
+            .restore_processed_signatures(recovered.processed_signatures);
+        self.publish_bank_for_rpc();
+    }
+
+    pub fn clear_unsettled_state(&self) {
+        if let Err(err) = self.unsettled_state_store.clear() {
+            warn!("Failed to clear persisted unsettled ER state: {err}");
+        }
+    }
+
+    fn persist_unsettled_update(
+        &self,
+        accounts: &[(Pubkey, AccountSharedData)],
+        touched_accounts: &[Pubkey],
+        payout_events: Option<&[WithdrawalPayoutEvent]>,
+    ) {
+        if let Err(err) =
+            self.unsettled_state_store
+                .append_update(accounts, touched_accounts, payout_events, &[])
+        {
+            self.active.store(false, Ordering::Relaxed);
+            warn!("Failed to persist ER state mutation; deactivating ER: {err}");
+        }
     }
 
     /// Sonic: Get a clone of the session PDA Arc for sharing with RPC.
@@ -1563,6 +1634,8 @@ impl EphemeralRuntime {
                 .retain(|event| !stale_payout_events.contains(event));
         }
 
+        let persisted_payout_events = self.withdrawal_payout_events.read().unwrap().clone();
+        self.persist_unsettled_update(&[], &[], Some(&persisted_payout_events));
         receipt_balances.sort_by(|a, b| {
             a.er_source
                 .to_bytes()
@@ -1832,6 +1905,11 @@ impl EphemeralRuntime {
             .unwrap()
             .insert(*delegated_account);
 
+        self.persist_unsettled_update(
+            &[(*delegated_account, er_account.clone())],
+            &[*delegated_account],
+            None,
+        );
         self.publish_bank_for_rpc();
 
         info!(
@@ -1992,6 +2070,14 @@ impl EphemeralRuntime {
             .unwrap()
             .extend([*depositor, withdrawal_sink]);
 
+        let persisted_accounts = [
+            (*depositor, account),
+            (
+                withdrawal_sink,
+                bank.get_account(&withdrawal_sink).unwrap_or_default(),
+            ),
+        ];
+        self.persist_unsettled_update(&persisted_accounts, &[*depositor, withdrawal_sink], None);
         self.record_deposit_history(&bank, depositor, lamports, base_balance, new_balance);
         self.publish_bank_for_rpc();
 
