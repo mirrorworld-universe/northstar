@@ -648,23 +648,43 @@ impl Manager {
     }
 
     fn cleanup_terminal_checkpoint_plans(&self, l1_bank: &Bank, session_pda: Pubkey) {
-        if let Ok(accounts) = l1_bank.get_program_accounts(&self.config.portal_program_id) {
-            for (_, account) in accounts {
-                let Some(PortalAccount::Checkpoint(checkpoint)) =
-                    try_parse_raw_portal_account(account.data())
-                else {
-                    continue;
-                };
-                if checkpoint.session == session_pda.to_bytes()
-                    && matches!(
-                        checkpoint.status,
-                        CheckpointStatus::Settled
-                            | CheckpointStatus::Cancelled
-                            | CheckpointStatus::Invalid
-                    )
-                {
-                    self.remove_checkpoint_plan(session_pda, &checkpoint);
-                }
+        // IMPORTANT: `get_program_accounts` falls back to a global AccountsIndex scan when the
+        // validator has no program-id secondary index. Settlement runs on every frozen bank, so
+        // only inspect checkpoint PDAs already tracked by this manager.
+        let er_slots = self
+            .checkpoint_plans
+            .read()
+            .unwrap()
+            .keys()
+            .filter_map(|(plan_session, er_slot)| {
+                (plan_session == &session_pda).then_some(*er_slot)
+            })
+            .collect::<Vec<_>>();
+
+        for er_slot in er_slots {
+            let (checkpoint_pda, _) = find_checkpoint_pda(
+                &self.config.portal_program_id.to_bytes(),
+                &session_pda.to_bytes(),
+                er_slot,
+            );
+            let checkpoint_pda = Pubkey::new_from_array(checkpoint_pda);
+            let Some(account) = l1_bank.get_account(&checkpoint_pda) else {
+                continue;
+            };
+            let Some(PortalAccount::Checkpoint(checkpoint)) =
+                try_parse_raw_portal_account(account.data())
+            else {
+                continue;
+            };
+            if checkpoint.session == session_pda.to_bytes()
+                && matches!(
+                    checkpoint.status,
+                    CheckpointStatus::Settled
+                        | CheckpointStatus::Cancelled
+                        | CheckpointStatus::Invalid
+                )
+            {
+                self.remove_checkpoint_plan(session_pda, &checkpoint);
             }
         }
     }
@@ -817,27 +837,45 @@ impl Manager {
         l1_bank: &Bank,
         session_pda: Pubkey,
     ) -> Option<(Pubkey, Checkpoint)> {
-        l1_bank
-            .get_program_accounts(&self.config.portal_program_id)
-            .ok()?
-            .into_iter()
-            .filter_map(|(pubkey, account)| {
-                let PortalAccount::Checkpoint(checkpoint) =
-                    try_parse_raw_portal_account(account.data())?
-                else {
-                    return None;
-                };
-                (checkpoint.is_valid()
-                    && checkpoint.session == session_pda.to_bytes()
-                    && matches!(
-                        checkpoint.status,
-                        CheckpointStatus::Pending
-                            | CheckpointStatus::Committed
-                            | CheckpointStatus::Challenged
-                    ))
-                .then_some((pubkey, checkpoint))
-            })
-            .max_by_key(|(_, checkpoint)| checkpoint.er_slot)
+        // The cursor is the on-chain index for the one active checkpoint. Never rediscover it by
+        // scanning every Portal-owned account on the settlement hot path.
+        let (cursor_pda, _) = find_checkpoint_cursor_pda(
+            &self.config.portal_program_id.to_bytes(),
+            &session_pda.to_bytes(),
+        );
+        let cursor_pda = Pubkey::new_from_array(cursor_pda);
+        let cursor_account = l1_bank.get_account(&cursor_pda)?;
+        let PortalAccount::CheckpointCursor(cursor) =
+            try_parse_raw_portal_account(cursor_account.data())?
+        else {
+            return None;
+        };
+        if !cursor.is_valid()
+            || cursor.session != session_pda.to_bytes()
+            || cursor.active_checkpoint == [0; 32]
+        {
+            return None;
+        }
+
+        let checkpoint_pda = Pubkey::new_from_array(cursor.active_checkpoint);
+        let checkpoint_account = l1_bank.get_account(&checkpoint_pda)?;
+        if checkpoint_account.owner() != &self.config.portal_program_id {
+            return None;
+        }
+        let PortalAccount::Checkpoint(checkpoint) =
+            try_parse_raw_portal_account(checkpoint_account.data())?
+        else {
+            return None;
+        };
+        (checkpoint.is_valid()
+            && checkpoint.session == session_pda.to_bytes()
+            && matches!(
+                checkpoint.status,
+                CheckpointStatus::Pending
+                    | CheckpointStatus::Committed
+                    | CheckpointStatus::Challenged
+            ))
+        .then_some((checkpoint_pda, checkpoint))
     }
 
     fn challenge_resolution_deadline(checkpoint: &Checkpoint) -> Option<u64> {
