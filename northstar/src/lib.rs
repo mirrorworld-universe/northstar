@@ -7,6 +7,7 @@ use {
     },
     portal_state::{try_parse_raw_portal_account, PortalAccount},
     solana_account::{AccountSharedData, ReadableAccount},
+    solana_accounts_db::accounts_index::IndexKey,
     solana_fee_structure::FeeStructure,
     solana_gossip::cluster_info::ClusterInfo,
     solana_hash::Hash,
@@ -1343,10 +1344,17 @@ impl Manager {
         bank: &Bank,
         grid_id: u64,
     ) -> Vec<(Pubkey, AccountSharedData, Pubkey)> {
-        let program_accounts = match bank.get_program_accounts(&self.config.portal_program_id) {
+        // IMPORTANT: Never fall back to `get_program_accounts` here. Without a program-id
+        // secondary index it scans every account during startup and can stall session resume
+        // for minutes. Portal validators install a targeted index before loading AccountsDb.
+        let program_accounts = match bank.get_filtered_indexed_accounts(
+            &IndexKey::ProgramId(self.config.portal_program_id),
+            |account| account.owner() == &self.config.portal_program_id,
+            None,
+        ) {
             Ok(accounts) => accounts,
             Err(err) => {
-                warn!("Failed to scan Portal accounts for startup resume: {err:?}");
+                warn!("Failed to load indexed Portal accounts for startup resume: {err:?}");
                 return vec![];
             }
         };
@@ -1572,6 +1580,12 @@ mod portal_e2e_tests {
             DelegationRecord, OpenSession, PortalInstruction, ProposeCheckpoint, Session,
         },
         solana_account::{AccountSharedData, WritableAccount},
+        solana_accounts_db::{
+            accounts_db::{AccountsDbConfig, ACCOUNTS_DB_CONFIG_FOR_TESTING},
+            accounts_index::{
+                AccountIndex, AccountSecondaryIndexes, AccountSecondaryIndexesIncludeExclude,
+            },
+        },
         solana_gossip::contact_info::ContactInfo,
         solana_instruction::{AccountMeta, Instruction},
         solana_keypair::{Keypair, Signer},
@@ -1581,6 +1595,7 @@ mod portal_e2e_tests {
         solana_rent::Rent,
         solana_rpc_client::rpc_client::RpcClient,
         solana_runtime::{
+            bank::BankTestConfig,
             bank_forks::BankForks,
             genesis_utils::{create_genesis_config, GenesisConfigInfo},
         },
@@ -1621,7 +1636,24 @@ mod portal_e2e_tests {
             },
         );
 
-        let (bank, _) = Bank::new_with_bank_forks_for_tests(&genesis_config);
+        let account_indexes = AccountSecondaryIndexes {
+            keys: Some(AccountSecondaryIndexesIncludeExclude {
+                exclude: false,
+                keys: HashSet::from([program_id]),
+            }),
+            indexes: HashSet::from([AccountIndex::ProgramId]),
+        };
+        let bank = Arc::new(Bank::new_with_paths_for_tests(
+            &genesis_config,
+            Some(BankTestConfig {
+                accounts_db_config: AccountsDbConfig {
+                    account_indexes: Some(account_indexes),
+                    ..ACCOUNTS_DB_CONFIG_FOR_TESTING
+                },
+            }),
+            vec![],
+            None,
+        ));
         bank.fill_bank_with_ticks_for_tests();
         let bank = Bank::new_from_parent(bank.clone(), *bank.leader(), bank.slot() + 1);
         let bank_forks = BankForks::new_rw_arc(bank);
