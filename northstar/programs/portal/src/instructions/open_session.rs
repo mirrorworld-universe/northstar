@@ -1,4 +1,5 @@
 use {
+    super::initialize_pda_account,
     crate::{
         find_fee_vault_pda, find_session_pda, FeeVault, OpenSession, PortalError, Session,
         SettlementStatus,
@@ -12,7 +13,6 @@ use {
         sysvars::{clock::Clock, rent::Rent, Sysvar},
         ProgramResult,
     },
-    pinocchio_system::instructions::CreateAccount,
 };
 
 pub fn process_open_session(
@@ -79,14 +79,14 @@ pub fn process_open_session(
     ];
     let session_signer = Signer::from(session_seeds);
 
-    CreateAccount {
-        from: payer,
-        to: session,
-        lamports: session_lamports,
-        space: Session::LEN as u64,
-        owner: program_id,
-    }
-    .invoke_signed(&[session_signer])?;
+    initialize_pda_account(
+        payer,
+        session,
+        session_lamports,
+        Session::LEN as u64,
+        program_id,
+        session_signer,
+    )?;
 
     // Create FeeVault PDA
     let fee_vault_bump_bytes = [fee_vault_bump];
@@ -96,14 +96,14 @@ pub fn process_open_session(
     ];
     let fee_vault_signer = Signer::from(fee_vault_seeds);
 
-    CreateAccount {
-        from: payer,
-        to: fee_vault,
-        lamports: fee_vault_lamports,
-        space: FeeVault::LEN as u64,
-        owner: program_id,
-    }
-    .invoke_signed(&[fee_vault_signer])?;
+    initialize_pda_account(
+        payer,
+        fee_vault,
+        fee_vault_lamports,
+        FeeVault::LEN as u64,
+        program_id,
+        fee_vault_signer,
+    )?;
 
     // Write Session state
     let session_state = Session {

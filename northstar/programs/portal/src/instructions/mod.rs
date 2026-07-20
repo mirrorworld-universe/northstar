@@ -1,3 +1,10 @@
+use {
+    crate::PortalError,
+    pinocchio::{account_info::AccountInfo, instruction::Signer, pubkey::Pubkey, ProgramResult},
+    pinocchio_system::instructions::{Allocate, Assign, Transfer},
+};
+
+pub mod checkpoint;
 pub mod close_session;
 pub mod delegate;
 pub mod deposit_fee;
@@ -7,7 +14,49 @@ pub mod settlement;
 pub mod start_withdrawal;
 pub mod undelegate;
 
+fn initialize_pda_account(
+    payer: &AccountInfo,
+    pda: &AccountInfo,
+    lamports: u64,
+    space: u64,
+    owner: &Pubkey,
+    signer: Signer,
+) -> ProgramResult {
+    if !pda.data_is_empty() || pda.owner() != &pinocchio_system::ID {
+        return Err(PortalError::InvalidAccountData.into());
+    }
+
+    if pda.lamports() < lamports {
+        Transfer {
+            from: payer,
+            to: pda,
+            lamports: lamports
+                .checked_sub(pda.lamports())
+                .ok_or(PortalError::ArithmeticOverflow)?,
+        }
+        .invoke()?;
+    }
+
+    Allocate {
+        account: pda,
+        space,
+    }
+    .invoke_signed(core::slice::from_ref(&signer))?;
+    Assign {
+        account: pda,
+        owner,
+    }
+    .invoke_signed(&[signer])?;
+
+    Ok(())
+}
+
 pub use {
+    checkpoint::{
+        process_cancel_checkpoint, process_challenge_checkpoint, process_commit_checkpoint,
+        process_create_step_proof, process_propose_checkpoint, process_seal_step_proof,
+        process_submit_step_proof, process_write_step_proof,
+    },
     close_session::process_close_session,
     delegate::process_delegate,
     deposit_fee::process_deposit_fee,

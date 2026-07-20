@@ -1426,6 +1426,7 @@ impl Validator {
                     northstar::ManagerConfig {
                         portal_program_id,
                         manager_account: identity_keypair.clone(),
+                        checkpoint_plan_dir: Some(ledger_path.join("northstar-checkpoint-plans")),
                     },
                     cluster_info.clone(),
                     crate::northstar_service::NorthStarServiceConfig {

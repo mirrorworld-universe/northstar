@@ -18,8 +18,22 @@ use {
 };
 pub use {error::*, events::*, instruction::*, pda::*, state::*};
 
+#[cfg(all(
+    feature = "test-verifier",
+    target_os = "solana",
+    not(northstar_allow_test_verifier_sbf)
+))]
+compile_error!(
+    "Portal test-verifier dummy must not be enabled in SBF deploy builds. Set \
+     NORTHSTAR_ALLOW_TEST_VERIFIER_SBF=1 only for local program-test fixtures."
+);
+
 pub const MAX_SETTLEMENT_CHUNK: usize = 700;
-pub const MAX_SETTLEMENT_LAMPORT_ACCOUNTS: usize = 10;
+pub const MAX_SETTLEMENT_LAMPORT_ACCOUNTS: usize = 7;
+pub const CHECKPOINT_PROPOSER_BOND_LAMPORTS: u64 = 1_000_000;
+// Groth16-class v1 cap. Larger zkVM/STARK receipts need a future multi-account proof store.
+pub const MAX_STEP_PROOF_BYTES: usize = 256;
+pub const MAX_STEP_PROOF_CHUNK: usize = 128;
 
 no_allocator!();
 
@@ -84,6 +98,26 @@ fn process_instruction(
         }),
         Ok((13, payload)) => deserialize_args::<u64>(payload)
             .and_then(|lamports| instructions::process_start_withdrawal(accounts, lamports)),
+        Ok((14, payload)) => deserialize_args(payload).and_then(|checkpoint| {
+            instructions::process_propose_checkpoint(program_id, accounts, checkpoint)
+        }),
+        Ok((15, payload)) => deserialize_args(payload).and_then(|checkpoint| {
+            instructions::process_commit_checkpoint(program_id, accounts, checkpoint)
+        }),
+        Ok((16, payload)) => deserialize_args(payload).and_then(|checkpoint| {
+            instructions::process_cancel_checkpoint(program_id, accounts, checkpoint)
+        }),
+        Ok((17, payload)) => deserialize_args(payload).and_then(|checkpoint| {
+            instructions::process_challenge_checkpoint(program_id, accounts, checkpoint)
+        }),
+        Ok((18, payload)) => deserialize_args(payload)
+            .and_then(|proof| instructions::process_create_step_proof(program_id, accounts, proof)),
+        Ok((19, payload)) => deserialize_args(payload)
+            .and_then(|proof| instructions::process_write_step_proof(program_id, accounts, proof)),
+        Ok((20, payload)) => deserialize_args(payload)
+            .and_then(|proof| instructions::process_seal_step_proof(program_id, accounts, proof)),
+        Ok((21, payload)) => deserialize_args(payload)
+            .and_then(|proof| instructions::process_submit_step_proof(program_id, accounts, proof)),
         Ok((_, _)) | Err(_) => Err(ProgramError::InvalidInstructionData),
     }
 }

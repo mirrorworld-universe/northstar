@@ -79,6 +79,8 @@ jobs:
           key: ${{ runner.os }}-solana-platform-tools-v3-${{ steps.solana_tools.outputs.platform_tools_version }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-solana-platform-tools-v3-${{ steps.solana_tools.outputs.platform_tools_version }}-
+      - name: Build Portal SBF program
+        run: cargo build-sbf --manifest-path northstar/programs/portal/Cargo.toml
       - name: Run Northstar crate tests
         run: cargo test -p northstar -p northstar-portal --no-fail-fast
       - name: Run Northstar SVM regression tests
@@ -143,6 +145,10 @@ jobs:
         env:
           SBF_OUT_DIR: /solana/northstar/deploy
         run: cargo build --release --target-dir /solana/northstar/ --bin agave-validator
+
+      - name: Build Northstar Solana CLI
+        if: steps.portal_changes.outputs.portal_changed == 'true'
+        run: cargo build --release --target-dir /solana/northstar/ --package solana-cli --bin solana --no-default-features
 
       - name: Confirm binary exists
         run: |
@@ -240,6 +246,30 @@ jobs:
           exit 1
         timeout-minutes: 90
 
+      - name: Open Portal session on devnet
+        if: steps.portal_changes.outputs.portal_changed == 'true'
+        run: |
+          set -euo pipefail
+          SOLANA_CLI="/solana/northstar/release/solana"
+          PORTAL_ADDRESS="${{ steps.portal_address.outputs.portal_address }}"
+          DEPLOYER_KEYPAIR="/home/ubuntu/.config/solana/id.json"
+          DEVNET_RPC="https://api.devnet.solana.com"
+
+          test -x "$SOLANA_CLI"
+          VALIDATOR_IDENTITY=$(curl -sf -X POST -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"getIdentity"}' \
+            http://localhost:8899 | sed -n 's/.*"identity":"\([^"]*\)".*/\1/p')
+          test -n "$VALIDATOR_IDENTITY"
+
+          echo "Opening session for portal $PORTAL_ADDRESS with validator $VALIDATOR_IDENTITY"
+          "$SOLANA_CLI" \
+            --url "$DEVNET_RPC" \
+            --keypair "$DEPLOYER_KEYPAIR" \
+            --commitment confirmed \
+            portal open-session \
+            --portal "$PORTAL_ADDRESS" \
+            --validator "$VALIDATOR_IDENTITY"
+
       - name: Notify Slack
         if: always()
         env:
@@ -255,6 +285,41 @@ jobs:
           if ! command -v jq >/dev/null 2>&1; then
             sudo apt-get update && sudo apt-get install -y jq
           fi
+
+          USERS_RESPONSE=$(curl -sS -G \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            --data-urlencode "limit=200" \
+            https://slack.com/api/users.list)
+          if ! jq -e '.ok == true' >/dev/null <<<"$USERS_RESPONSE"; then
+            echo "Failed to list Slack users: $USERS_RESPONSE" >&2
+            exit 1
+          fi
+
+          resolve_user_id() {
+            local name="$1"
+            jq -r --arg name "$name" '
+              .members[]
+              | select(.deleted != true)
+              | select(
+                  .name == $name
+                  or .real_name == $name
+                  or .profile.real_name == $name
+                  or .profile.display_name == $name
+                )
+              | .id
+            ' <<<"$USERS_RESPONSE" | head -n 1
+          }
+
+          MENTIONS=""
+          for USER_NAME in "Ivan Rybin" "Bilal Afzal" "Bai Xiong" "_bakebwa.sol"; do
+            USER_ID=$(resolve_user_id "$USER_NAME")
+            if [ -z "$USER_ID" ]; then
+              echo "Could not resolve Slack user: $USER_NAME" >&2
+              exit 1
+            fi
+            MENTIONS="$MENTIONS<@$USER_ID> "
+          done
+
           if [ "$STATUS" = "success" ]; then
             STATUS_EMOJI=":white_check_mark:"
           else
@@ -280,8 +345,27 @@ jobs:
               ":memo: Commit: \`$COMMIT_SHA\`" \
               "$COMMIT_MSG")
           fi
+          TEXT="$MENTIONS"$'\n'"$TEXT"
+
           PAYLOAD=$(jq -n --arg channel "$SLACK_CHANNEL_ID" --arg text "$TEXT" '{channel: $channel, text: $text}')
-          curl -X POST -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+          MESSAGE_RESPONSE=$(curl -sS -X POST \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
             -H 'Content-type: application/json' \
             --data "$PAYLOAD" \
-            https://slack.com/api/chat.postMessage
+            https://slack.com/api/chat.postMessage)
+          if ! jq -e '.ok == true' >/dev/null <<<"$MESSAGE_RESPONSE"; then
+            echo "Failed to post Slack message: $MESSAGE_RESPONSE" >&2
+            exit 1
+          fi
+
+          MESSAGE_TS=$(jq -r '.ts' <<<"$MESSAGE_RESPONSE")
+          PIN_PAYLOAD=$(jq -n --arg channel "$SLACK_CHANNEL_ID" --arg timestamp "$MESSAGE_TS" '{channel: $channel, timestamp: $timestamp}')
+          PIN_RESPONSE=$(curl -sS -X POST \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H 'Content-type: application/json' \
+            --data "$PIN_PAYLOAD" \
+            https://slack.com/api/pins.add)
+          if ! jq -e '.ok == true' >/dev/null <<<"$PIN_RESPONSE"; then
+            echo "Failed to pin Slack message: $PIN_RESPONSE" >&2
+            exit 1
+          fi
