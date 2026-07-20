@@ -1057,7 +1057,10 @@ impl Manager {
     }
 
     pub fn get_l1_events(&self, bank: &Bank) -> Vec<L1Event> {
-        bank.get_all_accounts_modified_since_parent()
+        // IMPORTANT: Do not use `get_all_accounts_modified_since_parent` here. It walks the
+        // global AccountsIndex for every frozen bank and can permanently starve L1 event
+        // ingestion. The slot-local storage scan still includes closed Portal accounts.
+        bank.get_accounts_modified_in_slot()
             .into_iter()
             .filter_map(|(pubkey, account)| {
                 if account.owner() == &self.config.portal_program_id {
@@ -1087,7 +1090,7 @@ impl Manager {
         delegation_record_pda: &Pubkey,
     ) -> Option<Pubkey> {
         let undelegated_account = bank
-            .get_all_accounts_modified_since_parent()
+            .get_accounts_modified_in_slot()
             .into_iter()
             .filter(|(pubkey, _)| pubkey != delegation_record_pda)
             .filter(|(_, account)| account.owner() == &self.config.portal_program_id)
@@ -1135,7 +1138,7 @@ impl Manager {
     ) -> Option<Pubkey> {
         let parent = bank.parent()?;
         let undelegated_account = bank
-            .get_all_accounts_modified_since_parent()
+            .get_accounts_modified_in_slot()
             .into_iter()
             .filter(|(pubkey, _)| pubkey != delegation_record_pda)
             .filter(|(pubkey, account)| {

@@ -5214,6 +5214,14 @@ impl Bank {
             .get_logs_for_address(address)
     }
 
+    // Sonic: Return slot-local writes without walking the global AccountsIndex.
+    pub fn get_accounts_modified_in_slot(&self) -> Vec<KeyedAccountSharedData> {
+        self.rc
+            .accounts
+            .accounts_db
+            .get_pubkey_account_for_slot(self.slot())
+    }
+
     /// Returns all the accounts stored in this slot
     pub fn get_all_accounts_modified_since_parent(&self) -> Vec<KeyedAccountSharedData> {
         self.rc.accounts.load_by_program_slot(self.slot(), None)

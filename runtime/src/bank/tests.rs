@@ -3383,6 +3383,37 @@ fn test_bank_get_program_accounts() {
 }
 
 #[test]
+fn test_bank_get_accounts_modified_in_slot_includes_owner_changes() {
+    let (genesis_config, _mint_keypair) = create_genesis_config(500);
+    let (parent, _bank_forks) =
+        Bank::new_for_tests(&genesis_config).wrap_with_bank_forks_for_tests();
+    let bank0 = Arc::new(new_from_parent(parent));
+    let pubkey = solana_pubkey::new_rand();
+    let untouched_pubkey = solana_pubkey::new_rand();
+    let portal_program_id = Pubkey::new_unique();
+    let portal_account = AccountSharedData::new(1, 0, &portal_program_id);
+    bank0.store_account(&pubkey, &portal_account);
+    bank0.store_account(&untouched_pubkey, &portal_account);
+    bank0.freeze();
+
+    let bank1 = Arc::new(new_from_parent(bank0));
+    let closed_account = AccountSharedData::default();
+    bank1.store_account(&pubkey, &closed_account);
+
+    let modified_accounts = bank1.get_accounts_modified_in_slot();
+    assert!(
+        modified_accounts.contains(&(pubkey, closed_account)),
+        "owner change must remain visible to closed Portal account detection"
+    );
+    assert!(
+        modified_accounts
+            .iter()
+            .all(|(modified_pubkey, _)| modified_pubkey != &untouched_pubkey),
+        "slot-local scan must not include untouched parent accounts"
+    );
+}
+
+#[test]
 fn test_get_filtered_indexed_accounts_limit_exceeded() {
     let (genesis_config, _mint_keypair) = create_genesis_config(500);
     let mut account_indexes = AccountSecondaryIndexes::default();
