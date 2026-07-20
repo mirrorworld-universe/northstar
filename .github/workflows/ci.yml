@@ -85,8 +85,10 @@ jobs:
         run: cargo build-sbf --manifest-path northstar/programs/token-bridge/Cargo.toml
       - name: Build test validator
         run: cargo build --bin solana-test-validator
-      - name: Run SPL token bridge tests
-        run: cargo test -p northstar-token-bridge --no-fail-fast
+      - name: Run SPL token bridge core tests
+        run: BPF_OUT_DIR="$PWD/target/deploy" cargo test -p northstar-token-bridge --test core
+      - name: Run SPL token bridge validator E2E
+        run: BPF_OUT_DIR="$PWD/target/deploy" cargo test -p northstar-token-bridge --test validator_e2e -- --nocapture
       - name: Run Northstar crate tests
         run: cargo test -p northstar -p northstar-portal --no-fail-fast
       - name: Run Northstar SVM regression tests
@@ -289,7 +291,7 @@ jobs:
         timeout-minutes: 90
 
       - name: Open Portal session on devnet
-        if: steps.portal_changes.outputs.portal_changed == 'true'
+        if: steps.program_changes.outputs.portal_changed == 'true'
         run: |
           set -euo pipefail
           SOLANA_CLI="/solana/northstar/release/solana"
@@ -312,13 +314,22 @@ jobs:
             --portal "$PORTAL_ADDRESS" \
             --validator "$VALIDATOR_IDENTITY"
 
-      - name: Run deposit, resume, withdrawal, and settlement smoke test
-        id: e2e_smoke
+      - name: Run SOL deposit, resume, withdrawal, and settlement smoke test
+        id: sol_e2e_smoke
         timeout-minutes: 45
         env:
           PORTAL_ADDRESS: ${{ steps.portal_deploy.outputs.portal_address }}
-          REPORT_PATH: /tmp/northstar-e2e-report.txt
+          REPORT_PATH: /tmp/northstar-sol-e2e-report.txt
         run: ./.github/scripts/devnet-e2e-smoke.sh
+
+      - name: Run SPL deposit, resume, withdrawal, and settlement smoke test
+        id: spl_e2e_smoke
+        timeout-minutes: 45
+        env:
+          PORTAL_ADDRESS: ${{ steps.portal_deploy.outputs.portal_address }}
+          TOKEN_BRIDGE_ADDRESS: ${{ steps.token_bridge_deploy.outputs.token_bridge_address }}
+          REPORT_PATH: /tmp/northstar-spl-e2e-report.txt
+        run: ./.github/scripts/devnet-spl-e2e-smoke.sh
 
       - name: Notify Slack
         if: always()
@@ -332,7 +343,8 @@ jobs:
           TOKEN_BRIDGE_ADDRESS: ${{ steps.token_bridge_deploy.outputs.token_bridge_address }}
           COMMIT_SHA: ${{ github.sha }}
           COMMIT_MSG: ${{ github.event.head_commit.message }}
-          SMOKE_OUTCOME: ${{ steps.e2e_smoke.outcome }}
+          SOL_SMOKE_OUTCOME: ${{ steps.sol_e2e_smoke.outcome }}
+          SPL_SMOKE_OUTCOME: ${{ steps.spl_e2e_smoke.outcome }}
         run: |
           set -euo pipefail
           if ! command -v jq >/dev/null 2>&1; then
@@ -430,13 +442,21 @@ jobs:
             exit 1
           fi
 
-          if [ "$SMOKE_OUTCOME" != "skipped" ] && [ -f /tmp/northstar-e2e-report.txt ]; then
-            E2E_REPORT=$(cat /tmp/northstar-e2e-report.txt)
+          if [ "$SOL_SMOKE_OUTCOME" != "skipped" ] && [ -f /tmp/northstar-sol-e2e-report.txt ]; then
+            SOL_REPORT=$(cat /tmp/northstar-sol-e2e-report.txt)
           else
-            E2E_REPORT=$(printf '%s\n%s' \
-              ':test_tube: Devnet E2E smoke status: *skipped*' \
-              ':information_source: The smoke step did not run because an earlier deployment step failed.')
+            SOL_REPORT=$(printf '%s\n%s' \
+              ':test_tube: Devnet SOL smoke status: *skipped*' \
+              ':information_source: The SOL smoke step did not run because an earlier deployment step failed.')
           fi
+          if [ "$SPL_SMOKE_OUTCOME" != "skipped" ] && [ -f /tmp/northstar-spl-e2e-report.txt ]; then
+            SPL_REPORT=$(cat /tmp/northstar-spl-e2e-report.txt)
+          else
+            SPL_REPORT=$(printf '%s\n%s' \
+              ':test_tube: Devnet SPL smoke status: *skipped*' \
+              ':information_source: The SPL smoke step did not run because an earlier deployment step failed.')
+          fi
+          E2E_REPORT=$(printf '%s\n\n%s' "$SOL_REPORT" "$SPL_REPORT")
           THREAD_PAYLOAD=$(jq -n \
             --arg channel "$SLACK_CHANNEL_ID" \
             --arg thread_ts "$MESSAGE_TS" \
