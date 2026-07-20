@@ -12,6 +12,10 @@ no-entrypoint = []
 
 [dependencies]
 borsh = { version = "1", default-features = false, features = ["derive"] }
+pinocchio = "0.9"
+pinocchio-pubkey = { version = "0.3", features = ["const"] }
+pinocchio-system = "0.4"
+pinocchio-token = "0.4"
 solana-account-info = { workspace = true }
 solana-instruction = { workspace = true }
 solana-msg = { workspace = true }
@@ -39,6 +43,7 @@ solana-rpc-client-api = { workspace = true }
 solana-signature = { workspace = true }
 solana-signer = { workspace = true }
 solana-transaction = { workspace = true }
+solana-transaction-status-client-types = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 
 [lints.rust]

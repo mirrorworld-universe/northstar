@@ -17,6 +17,7 @@ use {
     solana_signer::Signer,
     solana_system_interface::instruction as system_instruction,
     solana_transaction::Transaction,
+    solana_transaction_status_client_types::UiTransactionEncoding,
     spl_token_interface::{
         instruction as token_instruction,
         state::{Account as SplTokenAccount, Mint},
@@ -108,6 +109,7 @@ fn live_validator_spl_token_bridge_round_trip() {
         &bob.pubkey(),
     );
 
+    eprintln!("creating L1 mint and token accounts");
     create_l1_mint_and_token_accounts(
         &rpc,
         &payer,
@@ -120,16 +122,23 @@ fn live_validator_spl_token_bridge_round_trip() {
     );
     wait_token_amount(&rpc, alice_token.pubkey(), 1_000_000_000);
 
+    eprintln!("registering session bridge");
+    send_tx(
+        &rpc,
+        &[register_session_bridge_ix(
+            &payer.pubkey(),
+            session,
+            session_bridge,
+            mint.pubkey(),
+            vault,
+        )],
+        &payer.pubkey(),
+        &[&payer],
+    );
+    eprintln!("initializing bridge accounts");
     send_tx(
         &rpc,
         &[
-            register_session_bridge_ix(
-                &payer.pubkey(),
-                session,
-                session_bridge,
-                mint.pubkey(),
-                vault,
-            ),
             initialize_vault_ix(&payer.pubkey(), session_bridge, vault, vault_token.pubkey()),
             initialize_er_ix(&payer.pubkey(), session_bridge, payer.pubkey(), alice_er),
             initialize_er_ix(&payer.pubkey(), session_bridge, bob.pubkey(), bob_er),
@@ -138,8 +147,10 @@ fn live_validator_spl_token_bridge_round_trip() {
         &[&payer],
     );
 
+    eprintln!("delegating ER fee payer");
     fund_and_delegate_er_fee_payer(&rpc, &payer, &er_fee_payer, session);
 
+    eprintln!("delegating ER token accounts");
     send_tx(
         &rpc,
         &[
@@ -149,6 +160,7 @@ fn live_validator_spl_token_bridge_round_trip() {
         &payer.pubkey(),
         &[&payer],
     );
+    eprintln!("waiting for delegated ER accounts: alice={alice_er}, bob={bob_er}");
     wait_for_er_amount(&er_rpc, alice_er, 0);
     wait_for_er_amount(&er_rpc, bob_er, 0);
 
@@ -662,6 +674,30 @@ fn send_tx_with_config(
     let signature = submit_tx(rpc, instructions, payer, signers, config);
     rpc.poll_for_signature_with_commitment(&signature, CommitmentConfig::processed())
         .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        if let Some(status) = rpc.get_signature_status(&signature).unwrap() {
+            if let Err(err) = status {
+                let mut confirmed = None;
+                while Instant::now() < deadline {
+                    if let Ok(transaction) =
+                        rpc.get_transaction(&signature, UiTransactionEncoding::Json)
+                    {
+                        confirmed = Some(transaction);
+                        break;
+                    }
+                    sleep(Duration::from_millis(100));
+                }
+                panic!(
+                    "transaction {signature} failed: {err:?}; meta={:?}",
+                    confirmed.and_then(|transaction| transaction.transaction.meta)
+                );
+            }
+            return;
+        }
+        sleep(Duration::from_millis(100));
+    }
+    panic!("timed out waiting for transaction status {signature}");
 }
 
 fn submit_tx(
@@ -673,6 +709,14 @@ fn submit_tx(
 ) -> solana_signature::Signature {
     let blockhash = rpc.get_latest_blockhash().unwrap();
     let tx = Transaction::new_signed_with_payer(instructions, Some(payer), signers, blockhash);
+    if !config.skip_preflight {
+        let simulation = rpc.simulate_transaction(&tx).unwrap().value;
+        assert_eq!(
+            simulation.err, None,
+            "simulation failed: {:?}",
+            simulation.logs
+        );
+    }
     rpc.send_transaction_with_config(&tx, config).unwrap()
 }
 

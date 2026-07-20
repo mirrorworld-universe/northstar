@@ -4759,6 +4759,10 @@ version = "0.1.0"
 dependencies = [
  "borsh",
  "northstar-portal",
+ "pinocchio",
+ "pinocchio-pubkey",
+ "pinocchio-system",
+ "pinocchio-token",
  "solana-account 4.3.0",
  "solana-account-info",
  "solana-commitment-config",
@@ -4782,6 +4786,7 @@ dependencies = [
  "solana-signer",
  "solana-system-interface 3.2.0",
  "solana-transaction",
+ "solana-transaction-status-client-types",
  "spl-token-interface",
  "tokio",
 ]
@@ -5322,6 +5327,16 @@ name = "pinocchio-system"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4be2a6dad40b5e75d1486f021619c4bd504c34c1362c9b94ed7fa525b1cc63cc"
+dependencies = [
+ "pinocchio",
+ "pinocchio-pubkey",
+]
+
+[[package]]
+name = "pinocchio-token"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4eb3a10d04ea7a633c01c4fe68eb650b4606cee4a3977bd1a1259cba324abafb"
 dependencies = [
  "pinocchio",
  "pinocchio-pubkey",

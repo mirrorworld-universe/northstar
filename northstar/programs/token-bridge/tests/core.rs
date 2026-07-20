@@ -1,19 +1,15 @@
 use {
     borsh::BorshDeserialize,
-    northstar_portal::{
-        DelegationRecord, PortalInstruction, Session, SessionBridge, SettlementStatus,
-    },
+    northstar_portal::{DelegationRecord, Session, SessionBridge, SettlementStatus},
     northstar_token_bridge::{
         find_buffer_pda, find_er_token_account_pda, find_token_vault_pda,
         instruction::TokenBridgeInstruction, state::ErTokenAccount,
     },
     solana_account::{Account, AccountSharedData, ReadableAccount},
-    solana_account_info::{next_account_info, AccountInfo},
     solana_instruction::{AccountMeta, Instruction},
     solana_keypair::Keypair,
-    solana_program_error::{ProgramError, ProgramResult},
     solana_program_pack::Pack,
-    solana_program_test::{processor, ProgramTest, ProgramTestContext},
+    solana_program_test::{ProgramTest, ProgramTestContext},
     solana_pubkey::Pubkey,
     solana_rent::Rent,
     solana_sdk_ids::system_program,
@@ -67,16 +63,9 @@ impl TestWorld {
         let bob_token = Pubkey::new_unique();
         let vault_token = Pubkey::new_unique();
 
-        let mut program_test = ProgramTest::new(
-            "northstar_token_bridge",
-            northstar_token_bridge::id(),
-            processor!(northstar_token_bridge::process_instruction),
-        );
-        program_test.add_program(
-            "fake_portal",
-            PORTAL_PROGRAM_ID,
-            processor!(fake_portal_process),
-        );
+        let mut program_test =
+            ProgramTest::new("northstar_token_bridge", northstar_token_bridge::id(), None);
+        program_test.add_program("northstar_portal", PORTAL_PROGRAM_ID, None);
         for (address, account) in
             solana_program_binaries::by_id(&spl_token_interface::id(), &Rent::default()).unwrap()
         {
@@ -492,42 +481,6 @@ fn undelegate_ix(world: &TestWorld) -> Instruction {
             AccountMeta::new_readonly(system_program::id(), false),
         ],
         data: borsh::to_vec(&TokenBridgeInstruction::UndelegateErTokenAccount).unwrap(),
-    }
-}
-
-fn fake_portal_process(
-    _program_id: &Pubkey,
-    accounts: &[AccountInfo],
-    instruction_data: &[u8],
-) -> ProgramResult {
-    match PortalInstruction::try_from_slice(instruction_data)
-        .map_err(|_| ProgramError::InvalidInstructionData)?
-    {
-        PortalInstruction::Delegate { .. } => {
-            let account_info_iter = &mut accounts.iter();
-            let _payer = next_account_info(account_info_iter)?;
-            let _system_program = next_account_info(account_info_iter)?;
-            let _session = next_account_info(account_info_iter)?;
-            let delegated_account = next_account_info(account_info_iter)?;
-            let _owner_program = next_account_info(account_info_iter)?;
-            let _delegation_record = next_account_info(account_info_iter)?;
-            let buffer = next_account_info(account_info_iter)?;
-            let buffer_data = buffer.try_borrow_data()?;
-            delegated_account
-                .try_borrow_mut_data()?
-                .copy_from_slice(&buffer_data);
-            Ok(())
-        }
-        PortalInstruction::UndelegateHandoff => {
-            let account_info_iter = &mut accounts.iter();
-            let _authority = next_account_info(account_info_iter)?;
-            let delegated_account = next_account_info(account_info_iter)?;
-            let owner_program = next_account_info(account_info_iter)?;
-            delegated_account.try_borrow_mut_data()?.fill(0);
-            delegated_account.assign(owner_program.key);
-            Ok(())
-        }
-        _ => Err(ProgramError::InvalidInstructionData),
     }
 }
 
