@@ -3057,7 +3057,7 @@ mod portal_e2e_tests {
                 find_free_addr(),
             )
             .expect("runtime should start");
-        let runtime = manager.runtime.as_ref().unwrap();
+        let runtime = manager.runtime.as_mut().unwrap();
         runtime.set_session_pda(session_pda);
         let mut delegated_er = AccountSharedData::new(1_000_000, er_data.len(), &program_id);
         delegated_er.data_as_mut_slice().copy_from_slice(&er_data);

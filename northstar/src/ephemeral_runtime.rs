@@ -849,13 +849,14 @@ impl EphemeralRuntime {
     }
 
     /// Sonic: Set the current session PDA.
-    pub fn set_session_pda(&self, pda: Pubkey) {
+    pub fn set_session_pda(&mut self, pda: Pubkey) {
         let mut session_pda = self.session_pda.write().unwrap();
         if *session_pda != Some(pda) {
             self.withdrawal_payout_events.write().unwrap().clear();
             self._tx_client.clear_processed_signatures();
         }
         *session_pda = Some(pda);
+        self.settings.session_pda = pda;
     }
 
     /// Sonic: Apply settings from the active L1 session before resetting ER state.
@@ -2451,9 +2452,12 @@ mod tests {
     }
 
     #[test]
-    fn test_credit_deposit_records_er_history_for_depositor() {
+    fn test_credit_deposit_history_uses_active_session_receipt() {
         let (_, mut runtime) = create_runtime();
         let depositor = Pubkey::new_unique();
+        let active_session_pda = Pubkey::new_unique();
+        assert_ne!(active_session_pda, runtime.settings.session_pda);
+        runtime.set_session_pda(active_session_pda);
 
         runtime.credit_deposit(&depositor, 7);
 
@@ -2498,7 +2502,7 @@ mod tests {
         let event: NorthstarTransferEvent = borsh::from_slice(&event_data).unwrap();
         let (expected_from, _) = northstar_portal::find_deposit_receipt_pda(
             &runtime.portal_program_id.to_bytes(),
-            &runtime.settings.session_pda.to_bytes(),
+            &active_session_pda.to_bytes(),
             &depositor.to_bytes(),
         );
         assert_eq!(event.version, NorthstarTransferEvent::VERSION);
