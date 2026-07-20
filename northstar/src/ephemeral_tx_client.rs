@@ -810,6 +810,16 @@ impl EphemeralTransactionClient {
             return;
         }
         let mut events = Vec::new();
+        let mut cumulative_by_source = self.withdrawal_payout_events.read().unwrap().iter().fold(
+            HashMap::new(),
+            |mut cumulative, event| {
+                cumulative
+                    .entry(event.er_source)
+                    .and_modify(|value: &mut u64| *value = (*value).max(event.cumulative_withdrawn))
+                    .or_insert(event.cumulative_withdrawn);
+                cumulative
+            },
+        );
 
         for (tx, commit_result) in txs.iter().zip(commit_results) {
             let Ok(committed_tx) = commit_result else {
@@ -899,10 +909,21 @@ impl EphemeralTransactionClient {
                     lamports,
                     bank.slot()
                 );
+                let l1_withdrawn = self.l1_receipt_withdrawn(bank, er_source);
+                let cumulative = cumulative_by_source
+                    .entry(*er_source)
+                    .or_insert(l1_withdrawn);
+                *cumulative = (*cumulative).max(l1_withdrawn);
+                let Some(cumulative_withdrawn) = cumulative.checked_add(lamports) else {
+                    warn!("withdrawal payout counter overflow for {er_source}");
+                    continue;
+                };
+                *cumulative = cumulative_withdrawn;
                 events.push(WithdrawalPayoutEvent {
                     er_source: *er_source,
                     l1_recipient: *l1_recipient,
                     lamports,
+                    cumulative_withdrawn,
                     signature,
                     er_slot: bank.slot(),
                 });
@@ -915,6 +936,27 @@ impl EphemeralTransactionClient {
                 .unwrap()
                 .extend(events);
         }
+    }
+
+    fn l1_receipt_withdrawn(&self, bank: &Bank, er_source: &Pubkey) -> u64 {
+        let Some(session_pda) = *self.session_pda.read().unwrap() else {
+            return 0;
+        };
+        let (receipt_pda, _) = northstar_portal::find_deposit_receipt_pda(
+            &self.portal_program_id.to_bytes(),
+            &session_pda.to_bytes(),
+            &er_source.to_bytes(),
+        );
+        let receipt_pda = Pubkey::new_from_array(receipt_pda);
+        let Some(account) = bank.get_account(&receipt_pda) else {
+            return 0;
+        };
+        let Some(crate::portal_state::PortalAccount::DepositReceipt(receipt)) =
+            crate::portal_state::try_parse_raw_portal_account(account.data())
+        else {
+            return 0;
+        };
+        receipt.withdrawn
     }
 
     fn system_transfer_lamports(data: &[u8]) -> Option<u64> {

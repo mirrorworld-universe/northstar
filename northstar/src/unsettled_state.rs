@@ -19,7 +19,7 @@ use {
     },
 };
 
-const FORMAT_VERSION: u16 = 1;
+const FORMAT_VERSION: u16 = 2;
 const SNAPSHOT_FILE: &str = "state.borsh";
 const JOURNAL_FILE: &str = "journal.bin";
 const COMPACT_RECORDS: usize = 128;
@@ -126,6 +126,7 @@ struct PersistedPayoutEvent {
     er_source: [u8; 32],
     l1_recipient: [u8; 32],
     lamports: u64,
+    cumulative_withdrawn: u64,
     signature: [u8; 64],
     er_slot: u64,
 }
@@ -136,6 +137,7 @@ impl From<&WithdrawalPayoutEvent> for PersistedPayoutEvent {
             er_source: event.er_source.to_bytes(),
             l1_recipient: event.l1_recipient.to_bytes(),
             lamports: event.lamports,
+            cumulative_withdrawn: event.cumulative_withdrawn,
             signature: event.signature.as_ref().try_into().unwrap(),
             er_slot: event.er_slot,
         }
@@ -148,6 +150,7 @@ impl From<PersistedPayoutEvent> for WithdrawalPayoutEvent {
             er_source: Pubkey::new_from_array(event.er_source),
             l1_recipient: Pubkey::new_from_array(event.l1_recipient),
             lamports: event.lamports,
+            cumulative_withdrawn: event.cumulative_withdrawn,
             signature: Signature::from(event.signature),
             er_slot: event.er_slot,
         }
@@ -613,6 +616,7 @@ mod tests {
             er_source: account_key,
             l1_recipient: Pubkey::new_unique(),
             lamports: 12,
+            cumulative_withdrawn: 12,
             signature,
             er_slot: 99,
         };

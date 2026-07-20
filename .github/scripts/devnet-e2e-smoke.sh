@@ -85,6 +85,23 @@ wait_for_l1_rpc() {
   return 1
 }
 
+wait_for_l1_catchup() {
+  for _ in $(seq 1 360); do
+    local local_slot public_slot gap
+    local_slot=$(rpc_result "$L1_LOCAL_RPC" getSlot '[{"commitment":"confirmed"}]' 2>/dev/null || true)
+    public_slot=$(rpc_result "$DEVNET_RPC" getSlot '[{"commitment":"confirmed"}]' 2>/dev/null || true)
+    if [[ "$local_slot" =~ ^[0-9]+$ ]] && [[ "$public_slot" =~ ^[0-9]+$ ]]; then
+      gap=$((public_slot - local_slot))
+      if [ "$gap" -ge -50 ] && [ "$gap" -le 50 ]; then
+        return 0
+      fi
+    fi
+    sleep 5
+  done
+  echo "Timed out waiting for local L1 RPC to catch up with devnet" >&2
+  return 1
+}
+
 wait_for_session() {
   local expected=$1
   for _ in $(seq 1 360); do
@@ -154,6 +171,7 @@ fi
 test -n "$PORTAL_ADDRESS"
 VALIDATOR_IDENTITY=$(rpc_result "$L1_LOCAL_RPC" getIdentity '[]' | jq -r '.identity')
 SESSION_PDA=$(wait_for_any_session)
+wait_for_l1_catchup
 
 PHASE=capture_baseline
 BASELINE_ER_BALANCE=$(get_balance "$ER_RPC" "$WALLET_ADDRESS" processed)
@@ -181,6 +199,7 @@ CREDITED_BALANCE=$(wait_for_deposit_credit "$BASELINE_ER_BALANCE")
 PHASE=restart_with_unsettled_state
 sudo systemctl restart "$SERVICE"
 wait_for_l1_rpc
+wait_for_l1_catchup
 wait_for_session "$SESSION_PDA"
 
 PHASE=verify_restored_state

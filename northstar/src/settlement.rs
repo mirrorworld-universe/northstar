@@ -46,6 +46,8 @@ pub struct WithdrawalPayoutEvent {
     pub er_source: Pubkey,
     pub l1_recipient: Pubkey,
     pub lamports: u64,
+    /// Cumulative withdrawal amount for this ER source after this event.
+    pub cumulative_withdrawn: u64,
     pub signature: solana_signature::Signature,
     pub er_slot: Slot,
 }

@@ -1566,23 +1566,20 @@ impl EphemeralRuntime {
                 .then_with(|| a.er_source.to_bytes().cmp(&b.er_source.to_bytes()))
                 .then_with(|| a.l1_recipient.to_bytes().cmp(&b.l1_recipient.to_bytes()))
         });
-        let mut cumulative_by_source = HashMap::new();
         payout_events_guard.retain(|event| {
-            let cumulative = cumulative_by_source.entry(event.er_source).or_insert(0u64);
-            let Some(next_cumulative) = cumulative.checked_add(event.lamports) else {
-                warn!("withdrawal payout counter overflow for {}", event.er_source);
-                return true;
-            };
-            *cumulative = next_cumulative;
             receipt_withdrawn
                 .get(&event.er_source)
-                .map(|withdrawn| next_cumulative > *withdrawn)
+                .map(|withdrawn| event.cumulative_withdrawn > *withdrawn)
                 .unwrap_or(true)
         });
         if payout_events_guard.len() > MAX_WITHDRAWAL_PAYOUT_EVENTS {
-            let dropped = payout_events_guard.len() - MAX_WITHDRAWAL_PAYOUT_EVENTS;
-            warn!("dropping {dropped} old withdrawal payout events to keep retention bounded");
-            payout_events_guard.drain(..dropped);
+            warn!(
+                "pending withdrawal payout events exceed safe retention limit ({} > {}); \
+                 deactivating ER until settlement catches up",
+                payout_events_guard.len(),
+                MAX_WITHDRAWAL_PAYOUT_EVENTS,
+            );
+            self.active.store(false, Ordering::Relaxed);
         }
         let payout_events = payout_events_guard.clone();
         drop(payout_events_guard);
@@ -1590,7 +1587,6 @@ impl EphemeralRuntime {
         let mut receipt_balances = Vec::new();
         let mut stale_payout_events = Vec::new();
         for (er_source, er_balance, receipt_balance, receipt_withdrawn) in receipts {
-            let mut cumulative_withdrawn = receipt_withdrawn;
             let mut current_withdrawn = receipt_withdrawn;
             let mut remaining_net_payout = receipt_balance.saturating_sub(er_balance);
             for event in payout_events
@@ -1608,11 +1604,10 @@ impl EphemeralRuntime {
                 }
                 remaining_net_payout = remaining_net_payout.saturating_sub(event.lamports);
 
-                let Some(next_withdrawn) = cumulative_withdrawn.checked_add(event.lamports) else {
-                    warn!("withdrawal payout counter overflow for {er_source}");
-                    break;
-                };
-                cumulative_withdrawn = next_withdrawn;
+                let next_withdrawn = event.cumulative_withdrawn;
+                if next_withdrawn <= current_withdrawn {
+                    continue;
+                }
                 let payout_lamports = next_withdrawn.saturating_sub(current_withdrawn);
                 if payout_lamports > 0 {
                     receipt_balances.push(ReceiptBalanceSettlement {
@@ -2900,7 +2895,85 @@ mod tests {
     }
 
     #[test]
-    fn test_withdrawal_payout_events_are_bounded_within_session() {
+    fn test_settlement_retry_keeps_pending_withdrawal_after_settled_prefix() {
+        let parent_bank = create_test_bank();
+        let portal_program_id = PORTAL_PROGRAM_ID;
+        let session_pda = Pubkey::new_unique();
+        let er_source = Pubkey::new_unique();
+        let old_recipient = Pubkey::new_unique();
+        let pending_recipient = Pubkey::new_unique();
+        store_deposit_receipt(
+            &parent_bank,
+            &portal_program_id,
+            &session_pda,
+            &er_source,
+            20,
+            10,
+        );
+        parent_bank.freeze();
+
+        let settings = EphemeralRollupSettings {
+            session_pda,
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1_000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            portal_program_id,
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.set_session_pda(session_pda);
+        let zero_balance = AccountSharedData::new(0, 0, &system_program::id());
+        runtime.bank().store_account(&er_source, &zero_balance);
+        runtime
+            .er_account_overlay
+            .write()
+            .unwrap()
+            .insert(er_source, zero_balance);
+        runtime.withdrawal_payout_events.write().unwrap().extend([
+            WithdrawalPayoutEvent {
+                er_source,
+                l1_recipient: old_recipient,
+                lamports: 10,
+                cumulative_withdrawn: 10,
+                signature: solana_signature::Signature::from([1; 64]),
+                er_slot: 1,
+            },
+            WithdrawalPayoutEvent {
+                er_source,
+                l1_recipient: pending_recipient,
+                lamports: 10,
+                cumulative_withdrawn: 20,
+                signature: solana_signature::Signature::from([2; 64]),
+                er_slot: 2,
+            },
+        ]);
+
+        let first_attempt = runtime.settlement_receipt_balances(session_pda);
+        assert_eq!(first_attempt.len(), 1);
+        assert_eq!(first_attempt[0].l1_recipient, pending_recipient);
+        assert_eq!(first_attempt[0].withdrawn, 20);
+        assert_eq!(first_attempt[0].payout_lamports, 10);
+        assert_eq!(
+            runtime.settlement_receipt_balances(session_pda),
+            first_attempt,
+            "rebuilding an expired settlement must preserve the pending payout",
+        );
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_excess_pending_withdrawals_deactivate_session_without_dropping_payouts() {
         let parent_bank = create_test_bank();
         parent_bank.freeze();
         let portal_program_id = Pubkey::new_unique();
@@ -2924,6 +2997,7 @@ mod tests {
             Arc::new(Keypair::new()),
         )
         .unwrap();
+        runtime.activate();
 
         let er_source = Pubkey::new_unique();
         let l1_recipient = Pubkey::new_unique();
@@ -2932,6 +3006,7 @@ mod tests {
                 er_source,
                 l1_recipient,
                 lamports: 1,
+                cumulative_withdrawn: index as u64 + 1,
                 signature: solana_signature::Signature::default(),
                 er_slot: index as Slot,
             }),
@@ -2939,8 +3014,8 @@ mod tests {
 
         assert!(runtime.settlement_receipt_balances(session_pda).is_empty());
         let events = runtime.withdrawal_payout_events.read().unwrap();
-        assert_eq!(events.len(), MAX_WITHDRAWAL_PAYOUT_EVENTS);
-        assert_eq!(events.first().unwrap().er_slot, 5);
+        assert_eq!(events.len(), MAX_WITHDRAWAL_PAYOUT_EVENTS + 5);
+        assert!(!runtime.is_active());
         drop(events);
 
         runtime.shutdown();
