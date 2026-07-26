@@ -39,6 +39,8 @@ solana-keypair = { workspace = true }
 solana-account = { workspace = true }
 solana-system-interface = { workspace = true }
 solana-hash = { workspace = true }
+solana-commitment-config = { workspace = true }
+solana-rpc-client = { workspace = true }
 
 [lints.rust]
 unexpected_cfgs = "allow"
