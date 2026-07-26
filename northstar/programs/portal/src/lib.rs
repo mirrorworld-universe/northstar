@@ -31,6 +31,10 @@ compile_error!(
 pub const MAX_SETTLEMENT_CHUNK: usize = 700;
 pub const MAX_SETTLEMENT_LAMPORT_ACCOUNTS: usize = 7;
 pub const CHECKPOINT_PROPOSER_BOND_LAMPORTS: u64 = 1_000_000;
+/// About one hour at Solana's target 400ms slot time.
+pub const MAX_CHALLENGE_WINDOW_SLOTS: u64 = 9_000;
+/// Five-minute response budget, capped by checkpoint's hard deadline.
+pub const CHALLENGE_TURN_WINDOW_SLOTS: u64 = 750;
 // Groth16-class v1 cap. Larger zkVM/STARK receipts need a future multi-account proof store.
 pub const MAX_STEP_PROOF_BYTES: usize = 256;
 pub const MAX_STEP_PROOF_CHUNK: usize = 128;
@@ -108,7 +112,7 @@ fn process_instruction(
             instructions::process_cancel_checkpoint(program_id, accounts, checkpoint)
         }),
         Ok((17, payload)) => deserialize_args(payload).and_then(|checkpoint| {
-            instructions::process_challenge_checkpoint(program_id, accounts, checkpoint)
+            instructions::process_open_challenge(program_id, accounts, checkpoint)
         }),
         Ok((18, payload)) => deserialize_args(payload)
             .and_then(|proof| instructions::process_create_step_proof(program_id, accounts, proof)),
@@ -117,9 +121,18 @@ fn process_instruction(
         Ok((20, payload)) => deserialize_args(payload)
             .and_then(|proof| instructions::process_seal_step_proof(program_id, accounts, proof)),
         Ok((21, payload)) => deserialize_args(payload)
-            .and_then(|proof| instructions::process_submit_step_proof(program_id, accounts, proof)),
+            .and_then(|proof| instructions::process_resolve_challenge(program_id, accounts, proof)),
         Ok((22, payload)) => deserialize_args(payload).and_then(|register| {
             instructions::process_register_session_bridge(program_id, accounts, register)
+        }),
+        Ok((23, payload)) => deserialize_args(payload).and_then(|response| {
+            instructions::process_respond_challenge(program_id, accounts, response)
+        }),
+        Ok((24, payload)) => deserialize_args(payload).and_then(|bisect| {
+            instructions::process_bisect_challenge(program_id, accounts, bisect)
+        }),
+        Ok((25, payload)) => deserialize_args(payload).and_then(|timeout| {
+            instructions::process_timeout_challenge(program_id, accounts, timeout)
         }),
         Ok((_, _)) | Err(_) => Err(ProgramError::InvalidInstructionData),
     }

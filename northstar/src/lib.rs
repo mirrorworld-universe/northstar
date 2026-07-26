@@ -3,7 +3,7 @@ use {
     northstar_portal::{
         find_checkpoint_cursor_pda, find_checkpoint_pda,
         find_delegation_record_pda as find_portal_delegation_record_pda, Checkpoint,
-        CheckpointStatus, DepositReceipt, SettlementStatus,
+        CheckpointStatus, DepositReceipt, SettlementStatus, MAX_CHALLENGE_WINDOW_SLOTS,
     },
     portal_state::{try_parse_raw_portal_account, PortalAccount},
     solana_account::{AccountSharedData, ReadableAccount},
@@ -772,9 +772,10 @@ impl Manager {
         challenge_window_slots: u64,
         recent_blockhash: Hash,
     ) -> Option<Vec<Transaction>> {
-        let challenge_window_slots = challenge_window_slots
-            .max(1)
-            .max(DEFAULT_CHECKPOINT_CHALLENGE_WINDOW_SLOTS);
+        let challenge_window_slots = challenge_window_slots.clamp(
+            DEFAULT_CHECKPOINT_CHALLENGE_WINDOW_SLOTS,
+            MAX_CHALLENGE_WINDOW_SLOTS,
+        );
         if let Some((checkpoint_pda, checkpoint)) =
             self.active_checkpoint_for_session(l1_bank, session_pda)
         {
@@ -923,15 +924,6 @@ impl Manager {
         .then_some((checkpoint_pda, checkpoint))
     }
 
-    fn challenge_resolution_deadline(checkpoint: &Checkpoint) -> Option<u64> {
-        let challenge_window_slots = checkpoint
-            .challenge_deadline_l1_slot
-            .checked_sub(checkpoint.proposed_at_l1_slot)?;
-        checkpoint
-            .challenged_at_l1_slot
-            .checked_add(challenge_window_slots)
-    }
-
     fn settlement_transactions_for_plan(
         &self,
         plan: &SettlementPlan,
@@ -1023,41 +1015,15 @@ impl Manager {
                 Some(self.settlement_transactions_for_plan(plan, session_pda, recent_blockhash))
             }
             CheckpointStatus::Challenged => {
-                let Some(resolution_deadline) = Self::challenge_resolution_deadline(&checkpoint)
-                else {
-                    warn!(
-                        "Portal checkpoint has invalid challenge timing: \
-                         checkpoint={checkpoint_pda}"
-                    );
-                    return None;
-                };
-                if l1_bank.slot() < resolution_deadline {
-                    warn!(
-                        "Portal checkpoint challenged; waiting for challenge timeout: er_slot={} \
-                         checkpoint={} current_l1_slot={} resolution_deadline={}",
-                        plan.er_slot,
-                        checkpoint_pda,
-                        l1_bank.slot(),
-                        resolution_deadline,
-                    );
-                    return None;
-                }
-                info!(
-                    "Portal challenged checkpoint timed out; committing er_slot={} checksum={:?}",
-                    plan.er_slot, plan.checksum,
+                warn!(
+                    "Portal checkpoint challenged; explicit resolution required: er_slot={} \
+                     checkpoint={} current_l1_slot={} hard_deadline={}",
+                    plan.er_slot,
+                    checkpoint_pda,
+                    l1_bank.slot(),
+                    checkpoint.challenge_deadline_l1_slot,
                 );
-                let mut transactions = vec![plan.checkpoint_commit_transaction(
-                    self.config.portal_program_id,
-                    session_pda,
-                    self.config.manager_account.as_ref(),
-                    recent_blockhash,
-                )];
-                transactions.extend(self.settlement_transactions_for_plan(
-                    plan,
-                    session_pda,
-                    recent_blockhash,
-                ));
-                Some(transactions)
+                None
             }
             CheckpointStatus::Settled => {
                 debug!(
@@ -1150,6 +1116,8 @@ impl Manager {
             }
             Some(PortalAccount::Checkpoint(_))
             | Some(PortalAccount::CheckpointCursor(_))
+            | Some(PortalAccount::Challenge(_))
+            | Some(PortalAccount::DataAvailabilityProof(_))
             | Some(PortalAccount::StepProofAccount(_))
             | Some(PortalAccount::SessionBridge(_)) => None,
             None => {
@@ -1803,8 +1771,8 @@ mod portal_e2e_tests {
         super::*,
         agave_logger::setup,
         northstar_portal::{
-            ChallengeCheckpoint, Checkpoint, CheckpointCursor, CheckpointStatus, CommitCheckpoint,
-            DelegationRecord, OpenSession, PortalInstruction, ProposeCheckpoint, Session,
+            Checkpoint, CheckpointCursor, CheckpointStatus, CommitCheckpoint, DelegationRecord,
+            OpenChallenge, OpenSession, PortalInstruction, ProposeCheckpoint, Session,
         },
         solana_account::{AccountSharedData, WritableAccount},
         solana_accounts_db::{
@@ -2027,8 +1995,13 @@ mod portal_e2e_tests {
             discriminator: Checkpoint::DISCRIMINATOR,
             session: session.to_bytes(),
             er_slot,
+            step_count: 1,
             previous_state_root: [0; 32],
             new_state_root: [0; 32],
+            trace_root: effect_commitment,
+            tx_effect_root: effect_commitment,
+            readonly_l1_root: [0; 32],
+            da_commitment: effect_commitment,
             effect_commitment,
             proposer: proposer.to_bytes(),
             proposed_at_l1_slot: bank.slot(),
@@ -2077,8 +2050,13 @@ mod portal_e2e_tests {
         let (cursor_pda, _) = find_checkpoint_cursor_pda(&program_id, &session_pda);
         let ix = PortalInstruction::ProposeCheckpoint(ProposeCheckpoint {
             er_slot,
+            step_count: 1,
             previous_state_root: [0; 32],
             new_state_root: [1; 32],
+            trace_root: effect_commitment,
+            tx_effect_root: effect_commitment,
+            readonly_l1_root: [0; 32],
+            da_commitment: effect_commitment,
             effect_commitment,
             challenge_window_slots,
         });
@@ -2125,13 +2103,21 @@ mod portal_e2e_tests {
         er_slot: u64,
     ) -> Instruction {
         let (checkpoint_pda, _) = find_checkpoint_pda(&program_id, &session_pda, er_slot);
-        let ix = PortalInstruction::ChallengeCheckpoint(ChallengeCheckpoint { er_slot });
+        let (challenge, _) = northstar_portal::find_challenge_pda(
+            &program_id.to_bytes(),
+            &checkpoint_pda.to_bytes(),
+        );
+        let (da_proof, _) = northstar_portal::find_da_proof_pda(&program_id.to_bytes(), &challenge);
+        let ix = PortalInstruction::OpenChallenge(OpenChallenge { er_slot });
         Instruction {
             program_id,
             accounts: vec![
-                AccountMeta::new_readonly(challenger, true),
+                AccountMeta::new(challenger, true),
                 AccountMeta::new_readonly(session_pda, false),
                 AccountMeta::new(checkpoint_pda, false),
+                AccountMeta::new(Pubkey::new_from_array(challenge), false),
+                AccountMeta::new(Pubkey::new_from_array(da_proof), false),
+                AccountMeta::new_readonly(system_program::id(), false),
             ],
             data: borsh::to_vec(&ix).unwrap(),
         }
@@ -3509,7 +3495,7 @@ mod portal_e2e_tests {
             delegated_account,
             _owner_program,
             l1_data,
-            er_data,
+            _er_data,
         ) = setup_checkpoint_flow_fixture();
         let due_slot = bank.slot() + 10;
         let due_bank = Bank::new_from_parent(bank, SlotLeader::default(), due_slot);
@@ -3626,39 +3612,17 @@ mod portal_e2e_tests {
         let expired_bank = Bank::new_from_parent(
             Arc::new(original_deadline_bank),
             SlotLeader::default(),
-            Manager::challenge_resolution_deadline(&challenged_checkpoint).unwrap(),
+            challenged_checkpoint.challenge_deadline_l1_slot + 1,
         );
-        let (_er_slot, _checksum, transactions) = manager
-            .settlement_transactions_if_due(&expired_bank, expired_bank.last_blockhash())
-            .expect("challenge-timeout checkpoint should produce commit plus settlement");
-        assert!(matches!(
-            first_portal_instruction(&transactions[0]),
-            PortalInstruction::CommitCheckpoint(_)
-        ));
-        assert!(transactions.iter().skip(1).any(|transaction| matches!(
-            first_portal_instruction(transaction),
-            PortalInstruction::BeginSettlement(_)
-        )));
-
-        expired_bank.process_transaction(&transactions[0]).unwrap();
-        assert_eq!(
-            expired_bank.get_account(&delegated_account).unwrap().data(),
-            l1_data.as_slice(),
-            "checkpoint commit must not mutate delegated L1 data",
-        );
-        for transaction in transactions.iter().skip(1) {
-            expired_bank.process_transaction(transaction).unwrap();
-        }
-        assert_eq!(
-            expired_bank.get_account(&delegated_account).unwrap().data(),
-            er_data.as_slice(),
-            "delegated L1 data should change only after checkpoint-backed settlement",
-        );
-        let _ =
-            manager.settlement_transactions_if_due(&expired_bank, expired_bank.last_blockhash());
         assert!(
-            !checkpoint_plan_path.exists(),
-            "settled checkpoint should remove durable settlement plan"
+            manager
+                .settlement_transactions_if_due(&expired_bank, expired_bank.last_blockhash())
+                .is_none(),
+            "challenged checkpoint must remain blocked until explicit resolution"
+        );
+        assert!(
+            checkpoint_plan_path.exists(),
+            "unresolved checkpoint must retain durable settlement plan"
         );
         manager.shutdown_runtime();
 

@@ -118,43 +118,73 @@ pub enum PortalInstruction {
     #[cfg_attr(feature = "idl", account(3, name = "checkpoint_cursor", mut))]
     CancelCheckpoint(CancelCheckpoint),
 
-    #[cfg_attr(feature = "idl", account(0, name = "challenger", sig))]
+    #[cfg_attr(feature = "idl", account(0, name = "challenger", sig, mut))]
     #[cfg_attr(feature = "idl", account(1, name = "session"))]
     #[cfg_attr(feature = "idl", account(2, name = "checkpoint", mut))]
-    ChallengeCheckpoint(ChallengeCheckpoint),
+    #[cfg_attr(feature = "idl", account(3, name = "challenge", mut))]
+    #[cfg_attr(feature = "idl", account(4, name = "da_proof", mut))]
+    #[cfg_attr(feature = "idl", account(5, name = "system_program"))]
+    OpenChallenge(OpenChallenge),
 
     #[cfg_attr(feature = "idl", account(0, name = "authority", sig, mut))]
     #[cfg_attr(feature = "idl", account(1, name = "session"))]
     #[cfg_attr(feature = "idl", account(2, name = "checkpoint"))]
-    #[cfg_attr(feature = "idl", account(3, name = "step_proof", mut))]
-    #[cfg_attr(feature = "idl", account(4, name = "system_program"))]
+    #[cfg_attr(feature = "idl", account(3, name = "challenge"))]
+    #[cfg_attr(feature = "idl", account(4, name = "step_proof", mut))]
+    #[cfg_attr(feature = "idl", account(5, name = "system_program"))]
     CreateStepProof(CreateStepProof),
 
     #[cfg_attr(feature = "idl", account(0, name = "authority", sig))]
     #[cfg_attr(feature = "idl", account(1, name = "session"))]
     #[cfg_attr(feature = "idl", account(2, name = "checkpoint"))]
-    #[cfg_attr(feature = "idl", account(3, name = "step_proof", mut))]
+    #[cfg_attr(feature = "idl", account(3, name = "challenge"))]
+    #[cfg_attr(feature = "idl", account(4, name = "step_proof", mut))]
     WriteStepProof(WriteStepProof),
 
     #[cfg_attr(feature = "idl", account(0, name = "authority", sig))]
     #[cfg_attr(feature = "idl", account(1, name = "session"))]
     #[cfg_attr(feature = "idl", account(2, name = "checkpoint"))]
-    #[cfg_attr(feature = "idl", account(3, name = "step_proof", mut))]
+    #[cfg_attr(feature = "idl", account(3, name = "challenge"))]
+    #[cfg_attr(feature = "idl", account(4, name = "step_proof", mut))]
     SealStepProof(SealStepProof),
 
     #[cfg_attr(feature = "idl", account(0, name = "submitter", sig))]
     #[cfg_attr(feature = "idl", account(1, name = "session"))]
     #[cfg_attr(feature = "idl", account(2, name = "checkpoint", mut))]
-    #[cfg_attr(feature = "idl", account(3, name = "step_proof"))]
-    #[cfg_attr(feature = "idl", account(4, name = "bond_recipient", mut))]
-    #[cfg_attr(feature = "idl", account(5, name = "checkpoint_cursor", mut))]
-    SubmitStepProof(SubmitStepProof),
+    #[cfg_attr(feature = "idl", account(3, name = "challenge", mut))]
+    #[cfg_attr(feature = "idl", account(4, name = "da_proof"))]
+    #[cfg_attr(feature = "idl", account(5, name = "step_proof"))]
+    #[cfg_attr(feature = "idl", account(6, name = "bond_recipient", mut))]
+    #[cfg_attr(feature = "idl", account(7, name = "checkpoint_cursor", mut))]
+    ResolveChallenge(ResolveChallenge),
 
     #[cfg_attr(feature = "idl", account(0, name = "authority", sig, mut))]
     #[cfg_attr(feature = "idl", account(1, name = "session"))]
     #[cfg_attr(feature = "idl", account(2, name = "session_bridge", mut))]
     #[cfg_attr(feature = "idl", account(3, name = "system_program"))]
     RegisterSessionBridge(RegisterSessionBridge),
+
+    #[cfg_attr(feature = "idl", account(0, name = "validator", sig))]
+    #[cfg_attr(feature = "idl", account(1, name = "session"))]
+    #[cfg_attr(feature = "idl", account(2, name = "checkpoint"))]
+    #[cfg_attr(feature = "idl", account(3, name = "challenge", mut))]
+    #[cfg_attr(feature = "idl", account(4, name = "da_proof", mut))]
+    RespondChallenge(RespondChallenge),
+
+    #[cfg_attr(feature = "idl", account(0, name = "challenger", sig))]
+    #[cfg_attr(feature = "idl", account(1, name = "session"))]
+    #[cfg_attr(feature = "idl", account(2, name = "checkpoint"))]
+    #[cfg_attr(feature = "idl", account(3, name = "challenge", mut))]
+    BisectChallenge(BisectChallenge),
+
+    #[cfg_attr(feature = "idl", account(0, name = "caller", sig))]
+    #[cfg_attr(feature = "idl", account(1, name = "session"))]
+    #[cfg_attr(feature = "idl", account(2, name = "checkpoint", mut))]
+    #[cfg_attr(feature = "idl", account(3, name = "challenge", mut))]
+    #[cfg_attr(feature = "idl", account(4, name = "da_proof", mut))]
+    #[cfg_attr(feature = "idl", account(5, name = "bond_recipient", mut))]
+    #[cfg_attr(feature = "idl", account(6, name = "checkpoint_cursor", mut))]
+    TimeoutChallenge(TimeoutChallenge),
 }
 
 #[cfg_attr(feature = "idl", derive(shank::ShankType))]
@@ -223,8 +253,13 @@ pub struct SettleAccountLamports {
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
 pub struct ProposeCheckpoint {
     pub er_slot: u64,
+    pub step_count: u64,
     pub previous_state_root: [u8; 32],
     pub new_state_root: [u8; 32],
+    pub trace_root: [u8; 32],
+    pub tx_effect_root: [u8; 32],
+    pub readonly_l1_root: [u8; 32],
+    pub da_commitment: [u8; 32],
     pub effect_commitment: [u8; 32],
     pub challenge_window_slots: u64,
 }
@@ -243,7 +278,7 @@ pub struct CancelCheckpoint {
 
 #[cfg_attr(feature = "idl", derive(shank::ShankType))]
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
-pub struct ChallengeCheckpoint {
+pub struct OpenChallenge {
     pub er_slot: u64,
 }
 
@@ -254,6 +289,9 @@ pub struct CreateStepProof {
     pub proof_kind: u8,
     pub proof_version: u8,
     pub step_index: u64,
+    pub tx_effect_root: [u8; 32],
+    pub readonly_l1_root: [u8; 32],
+    pub settlement_effect_root: [u8; 32],
 }
 
 #[cfg_attr(feature = "idl", derive(shank::ShankType))]
@@ -283,7 +321,7 @@ pub enum StepProofVerifierMode {
 
 #[cfg_attr(feature = "idl", derive(shank::ShankType))]
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
-pub struct SubmitStepProof {
+pub struct ResolveChallenge {
     pub er_slot: u64,
     pub verifier_mode: StepProofVerifierMode,
 }
@@ -295,4 +333,27 @@ pub struct RegisterSessionBridge {
     pub bridge_program: Pubkey,
     pub vault: Pubkey,
     pub token_program: Pubkey,
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+pub struct RespondChallenge {
+    pub er_slot: u64,
+    pub claimed_step: u64,
+    pub claimed_state_root: [u8; 32],
+    pub da_payload_root: [u8; 32],
+    pub da_inclusion_proof_hash: [u8; 32],
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+pub struct BisectChallenge {
+    pub er_slot: u64,
+    pub dispute_upper: bool,
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+pub struct TimeoutChallenge {
+    pub er_slot: u64,
 }

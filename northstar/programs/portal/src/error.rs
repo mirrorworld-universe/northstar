@@ -58,6 +58,15 @@ pub enum PortalError {
     CheckpointPreviousRootMismatch = 53,
     CheckpointActiveExists = 54,
     StepProofPublicInputMismatch = 55,
+    ChallengeStateInvalid = 56,
+    ChallengeDeserializeFailed = 57,
+    ChallengeTurnInvalid = 58,
+    ChallengeDeadlineNotReached = 59,
+    ChallengeResponseInvalid = 60,
+    DataAvailabilityStateInvalid = 61,
+    DataAvailabilityDeserializeFailed = 62,
+    DataAvailabilityCommitmentMismatch = 63,
+    CheckpointChallengeWindowTooLong = 64,
 }
 
 impl From<PortalError> for ProgramError {
