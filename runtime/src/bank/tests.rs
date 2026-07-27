@@ -11865,6 +11865,17 @@ fn test_parent_block_id() {
 }
 
 #[test]
+fn test_development_bank_serializes_without_block_id() {
+    let (mut genesis_config, _mint_keypair) = create_genesis_config(100_000);
+    genesis_config.cluster_type = ClusterType::Development;
+    let bank = Bank::new_for_tests(&genesis_config);
+    bank.freeze();
+
+    assert_eq!(bank.block_id(), None);
+    assert_eq!(bank.get_fields_to_serialize().block_id, bank.hash());
+}
+
+#[test]
 fn test_bpf_loader_upgradeable_deploy_with_more_than_255_accounts() {
     let (genesis_config, _mint_keypair) = create_genesis_config_no_tx_fee(1_000_000_000);
     let bank = Bank::new_for_tests(&genesis_config);

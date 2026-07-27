@@ -2397,9 +2397,15 @@ impl Bank {
             block_id: self
                 .block_id()
                 .or_else(|| {
-                    // Sonic: local validator snapshots can precede DCou block-id assignment.
-                    std::env::var_os("NORTHSTAR_TEST_VALIDATOR_ALLOW_MISSING_BLOCK_IDS")
-                        .map(|_| self.hash())
+                    // Sonic: Development snapshots can precede DCou block-id assignment.
+                    if self.cluster_type == Some(ClusterType::Development)
+                        || std::env::var_os("NORTHSTAR_TEST_VALIDATOR_ALLOW_MISSING_BLOCK_IDS")
+                            .is_some()
+                    {
+                        Some(self.hash())
+                    } else {
+                        None
+                    }
                 })
                 .expect("block id must be set"),
         }
