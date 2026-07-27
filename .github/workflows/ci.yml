@@ -85,6 +85,8 @@ jobs:
         run: cargo build-sbf --manifest-path northstar/programs/token-bridge/Cargo.toml
       - name: Build test validator
         run: cargo build --bin solana-test-validator
+      - name: Test devnet SPL smoke state format
+        run: cargo test -p northstar-token-bridge --example devnet_smoke
       - name: Run SPL token bridge core tests
         run: BPF_OUT_DIR="$PWD/target/deploy" cargo test -p northstar-token-bridge --test core
       - name: Run SPL token bridge validator E2E

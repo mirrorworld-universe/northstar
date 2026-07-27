@@ -33,6 +33,18 @@ use {
 const DECIMALS: u8 = 6;
 const DEPOSIT_AMOUNT: u64 = 1_000_000;
 const WITHDRAW_AMOUNT: u64 = 1_000_000;
+const STATE_KEYS: [&str; 10] = [
+    "SESSION",
+    "MINT",
+    "SESSION_BRIDGE",
+    "VAULT",
+    "VAULT_TOKEN",
+    "SOURCE_TOKEN",
+    "DESTINATION_TOKEN",
+    "ER_TOKEN_ACCOUNT",
+    "SETUP_SIGNATURE",
+    "DEPOSIT_SIGNATURE",
+];
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -192,26 +204,29 @@ fn prepare(config: &Config) -> Result<()> {
     wait_for_er_amount(&er_rpc, er_token_account, DEPOSIT_AMOUNT)?;
     write_keypair_file(&er_fee_payer, &config.fee_payer_keypair)
         .map_err(|err| format!("write ER fee payer keypair: {err}"))?;
-    fs::write(
-        &config.state_path,
-        format!(
-            "SESSION={}\nMINT={}\nSESSION_BRIDGE={}\nVAULT={}\nVAULT_TOKEN={}\nSOURCE_TOKEN={}\\
-             nDESTINATION_TOKEN={}\nER_TOKEN_ACCOUNT={}\nSETUP_SIGNATURE={}\nDEPOSIT_SIGNATURE={}\\
-             n",
-            session,
-            mint.pubkey(),
-            session_bridge,
-            vault,
-            vault_token.pubkey(),
-            source_token.pubkey(),
-            destination_token.pubkey(),
-            er_token_account,
-            setup_signature,
-            deposit_signature,
-        ),
-    )?;
+    let state_values = [
+        session.to_string(),
+        mint.pubkey().to_string(),
+        session_bridge.to_string(),
+        vault.to_string(),
+        vault_token.pubkey().to_string(),
+        source_token.pubkey().to_string(),
+        destination_token.pubkey().to_string(),
+        er_token_account.to_string(),
+        setup_signature.to_string(),
+        deposit_signature.to_string(),
+    ];
+    fs::write(&config.state_path, format_state(&state_values))?;
     println!("SPL deposit confirmed: {deposit_signature}");
     Ok(())
+}
+
+fn format_state(values: &[String; 10]) -> String {
+    STATE_KEYS
+        .iter()
+        .zip(values)
+        .map(|(key, value)| format!("{key}={value}\n"))
+        .collect()
 }
 
 fn withdraw(config: &Config) -> Result<()> {
@@ -687,11 +702,15 @@ fn read_keypair(path: &str) -> Result<Keypair> {
 }
 
 fn read_state(path: &str) -> Result<HashMap<String, String>> {
-    Ok(fs::read_to_string(path)?
+    Ok(parse_state(&fs::read_to_string(path)?))
+}
+
+fn parse_state(contents: &str) -> HashMap<String, String> {
+    contents
         .lines()
         .filter_map(|line| line.split_once('='))
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
-        .collect())
+        .collect()
 }
 
 fn state_pubkey(state: &HashMap<String, String>, key: &str) -> Result<Pubkey> {
@@ -711,4 +730,34 @@ fn portal_pubkey((pubkey, _bump): ([u8; 32], u8)) -> Pubkey {
 #[allow(dead_code)]
 fn path_exists(path: &str) -> bool {
     Path::new(path).exists()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepared_state_contains_every_field_on_its_own_line() {
+        let keys = [
+            "SESSION",
+            "MINT",
+            "SESSION_BRIDGE",
+            "VAULT",
+            "VAULT_TOKEN",
+            "SOURCE_TOKEN",
+            "DESTINATION_TOKEN",
+            "ER_TOKEN_ACCOUNT",
+            "SETUP_SIGNATURE",
+            "DEPOSIT_SIGNATURE",
+        ];
+        let values = std::array::from_fn(|index| format!("value-{index}"));
+
+        let encoded = format_state(&values);
+        let decoded = parse_state(&encoded);
+
+        assert_eq!(encoded.lines().count(), keys.len());
+        for (index, key) in keys.iter().enumerate() {
+            assert_eq!(decoded.get(*key), Some(&values[index]));
+        }
+    }
 }
