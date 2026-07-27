@@ -195,7 +195,9 @@ fn prepare(config: &Config) -> Result<()> {
     fs::write(
         &config.state_path,
         format!(
-            "SESSION={}\nMINT={}\nSESSION_BRIDGE={}\nVAULT={}\nVAULT_TOKEN={}\nSOURCE_TOKEN={}\nDESTINATION_TOKEN={}\nER_TOKEN_ACCOUNT={}\nSETUP_SIGNATURE={}\nDEPOSIT_SIGNATURE={}\n",
+            "SESSION={}\nMINT={}\nSESSION_BRIDGE={}\nVAULT={}\nVAULT_TOKEN={}\nSOURCE_TOKEN={}\\
+             nDESTINATION_TOKEN={}\nER_TOKEN_ACCOUNT={}\nSETUP_SIGNATURE={}\nDEPOSIT_SIGNATURE={}\\
+             n",
             session,
             mint.pubkey(),
             session_bridge,
