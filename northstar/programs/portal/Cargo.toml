@@ -9,6 +9,7 @@ crate-type = ["cdylib", "lib"]
 
 [features]
 default = []
+no-entrypoint = []
 bpf-entrypoint = []
 idl = ["dep:shank"]
 test-verifier = []

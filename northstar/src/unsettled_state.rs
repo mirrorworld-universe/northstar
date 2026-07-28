@@ -4,7 +4,7 @@
 //! Periodic atomic snapshots compact the journal. Recovery is allowed only when the complete
 //! immutable Portal/session identity matches the active L1 Session.
 use {
-    crate::settlement::WithdrawalPayoutEvent,
+    crate::settlement::{TokenWithdrawalPayoutEvent, WithdrawalPayoutEvent},
     borsh::{BorshDeserialize, BorshSerialize},
     solana_account::{AccountSharedData, ReadableAccount},
     solana_pubkey::Pubkey,
@@ -19,7 +19,7 @@ use {
     },
 };
 
-const FORMAT_VERSION: u16 = 2;
+const FORMAT_VERSION: u16 = 3;
 const SNAPSHOT_FILE: &str = "state.borsh";
 const JOURNAL_FILE: &str = "journal.bin";
 const COMPACT_RECORDS: usize = 128;
@@ -70,6 +70,7 @@ pub struct RecoveredUnsettledState {
     pub accounts: Vec<(Pubkey, AccountSharedData)>,
     pub touched_accounts: Vec<Pubkey>,
     pub payout_events: Vec<WithdrawalPayoutEvent>,
+    pub token_payout_events: Vec<TokenWithdrawalPayoutEvent>,
     pub processed_signatures: Vec<(Signature, u64)>,
 }
 
@@ -158,6 +159,50 @@ impl From<PersistedPayoutEvent> for WithdrawalPayoutEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+struct PersistedTokenPayoutEvent {
+    bridge_program: [u8; 32],
+    session_bridge: [u8; 32],
+    er_token_account: [u8; 32],
+    l1_destination_token_account: [u8; 32],
+    amount: u64,
+    decimals: u8,
+    signature: [u8; 64],
+    er_slot: u64,
+}
+
+impl From<&TokenWithdrawalPayoutEvent> for PersistedTokenPayoutEvent {
+    fn from(event: &TokenWithdrawalPayoutEvent) -> Self {
+        Self {
+            bridge_program: event.bridge_program.to_bytes(),
+            session_bridge: event.session_bridge.to_bytes(),
+            er_token_account: event.er_token_account.to_bytes(),
+            l1_destination_token_account: event.l1_destination_token_account.to_bytes(),
+            amount: event.amount,
+            decimals: event.decimals,
+            signature: event.signature.as_ref().try_into().unwrap(),
+            er_slot: event.er_slot,
+        }
+    }
+}
+
+impl From<PersistedTokenPayoutEvent> for TokenWithdrawalPayoutEvent {
+    fn from(event: PersistedTokenPayoutEvent) -> Self {
+        Self {
+            bridge_program: Pubkey::new_from_array(event.bridge_program),
+            session_bridge: Pubkey::new_from_array(event.session_bridge),
+            er_token_account: Pubkey::new_from_array(event.er_token_account),
+            l1_destination_token_account: Pubkey::new_from_array(
+                event.l1_destination_token_account,
+            ),
+            amount: event.amount,
+            decimals: event.decimals,
+            signature: Signature::from(event.signature),
+            er_slot: event.er_slot,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 struct PersistedSignature {
     signature: [u8; 64],
     slot: u64,
@@ -168,6 +213,7 @@ struct PersistedState {
     accounts: BTreeMap<[u8; 32], PersistedAccount>,
     touched_accounts: BTreeSet<[u8; 32]>,
     payout_events: Vec<PersistedPayoutEvent>,
+    token_payout_events: Vec<PersistedTokenPayoutEvent>,
     processed_signatures: BTreeMap<[u8; 64], u64>,
 }
 
@@ -191,6 +237,12 @@ impl PersistedState {
                 .cloned()
                 .map(WithdrawalPayoutEvent::from)
                 .collect(),
+            token_payout_events: self
+                .token_payout_events
+                .iter()
+                .cloned()
+                .map(TokenWithdrawalPayoutEvent::from)
+                .collect(),
             processed_signatures: self
                 .processed_signatures
                 .iter()
@@ -205,6 +257,7 @@ impl PersistedState {
                 accounts,
                 touched_accounts,
                 payout_events,
+                token_payout_events,
                 processed_signatures,
             } => {
                 for account in accounts {
@@ -213,6 +266,9 @@ impl PersistedState {
                 self.touched_accounts.extend(touched_accounts);
                 if let Some(events) = payout_events {
                     self.payout_events = events;
+                }
+                if let Some(events) = token_payout_events {
+                    self.token_payout_events = events;
                 }
                 for signature in processed_signatures {
                     self.processed_signatures
@@ -242,6 +298,7 @@ enum Mutation {
         accounts: Vec<PersistedAccount>,
         touched_accounts: Vec<[u8; 32]>,
         payout_events: Option<Vec<PersistedPayoutEvent>>,
+        token_payout_events: Option<Vec<PersistedTokenPayoutEvent>>,
         processed_signatures: Vec<PersistedSignature>,
     },
 }
@@ -419,6 +476,7 @@ impl UnsettledStateStore {
         accounts: &[(Pubkey, AccountSharedData)],
         touched_accounts: &[Pubkey],
         payout_events: Option<&[WithdrawalPayoutEvent]>,
+        token_payout_events: Option<&[TokenWithdrawalPayoutEvent]>,
         processed_signatures: &[(Signature, u64)],
     ) -> io::Result<()> {
         let mut inner = self.inner.lock().unwrap();
@@ -439,6 +497,8 @@ impl UnsettledStateStore {
             touched_accounts: touched_accounts.iter().map(Pubkey::to_bytes).collect(),
             payout_events: payout_events
                 .map(|events| events.iter().map(PersistedPayoutEvent::from).collect()),
+            token_payout_events: token_payout_events
+                .map(|events| events.iter().map(PersistedTokenPayoutEvent::from).collect()),
             processed_signatures: processed_signatures
                 .iter()
                 .map(|(signature, slot)| PersistedSignature {
@@ -620,6 +680,16 @@ mod tests {
             signature,
             er_slot: 99,
         };
+        let token_payout = TokenWithdrawalPayoutEvent {
+            bridge_program: Pubkey::new_unique(),
+            session_bridge: Pubkey::new_unique(),
+            er_token_account: Pubkey::new_unique(),
+            l1_destination_token_account: Pubkey::new_unique(),
+            amount: 34,
+            decimals: 6,
+            signature: Signature::from([8; 64]),
+            er_slot: 100,
+        };
 
         let store = UnsettledStateStore::default();
         store.configure(dir.path().to_path_buf());
@@ -633,6 +703,7 @@ mod tests {
                 &[(account_key, account.clone())],
                 &[account_key],
                 Some(std::slice::from_ref(&payout)),
+                Some(std::slice::from_ref(&token_payout)),
                 &[(signature, 99)],
             )
             .unwrap();
@@ -646,6 +717,7 @@ mod tests {
         assert_eq!(outcome.state.touched_accounts, vec![account_key]);
         assert_eq!(outcome.state.processed_signatures, vec![(signature, 99)]);
         assert_eq!(outcome.state.payout_events, vec![payout]);
+        assert_eq!(outcome.state.token_payout_events, vec![token_payout]);
     }
 
     #[test]
@@ -689,6 +761,7 @@ mod tests {
                     )],
                     &[],
                     None,
+                    None,
                     &[],
                 )
                 .unwrap();
@@ -719,6 +792,7 @@ mod tests {
                         AccountSharedData::new(lamports, 0, &system_program::id()),
                     )],
                     &[account_key],
+                    None,
                     None,
                     &[],
                 )
@@ -755,6 +829,7 @@ mod tests {
                     AccountSharedData::new(1, 0, &system_program::id()),
                 )],
                 &[],
+                None,
                 None,
                 &[],
             )

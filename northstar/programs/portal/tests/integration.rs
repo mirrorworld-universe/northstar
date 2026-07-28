@@ -1227,16 +1227,16 @@ async fn checkpoint_bond_locks_and_releases() {
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
-    let propose_ix = build_propose_checkpoint_ix(
+    let insufficient_bond_propose_ix = build_propose_checkpoint_ix(
         &PORTAL_PROGRAM_ID,
         &proposer_pubkey,
         &session_pda,
         er_slot,
-        challenge_window_slots,
+        challenge_window_slots + 1,
     );
     let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        std::slice::from_ref(&propose_ix),
+        std::slice::from_ref(&insufficient_bond_propose_ix),
         Some(&payer_pubkey),
         &[&payer, &proposer],
         blockhash,
@@ -1257,6 +1257,13 @@ async fn checkpoint_bond_locks_and_releases() {
     context.banks_client.process_transaction(tx).await.unwrap();
 
     let proposer_before_propose = get_lamports(&mut context.banks_client, &proposer_pubkey).await;
+    let propose_ix = build_propose_checkpoint_ix(
+        &PORTAL_PROGRAM_ID,
+        &proposer_pubkey,
+        &session_pda,
+        er_slot,
+        challenge_window_slots,
+    );
     let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
         &[propose_ix],

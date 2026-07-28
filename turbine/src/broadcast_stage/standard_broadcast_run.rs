@@ -140,9 +140,25 @@ impl StandardBroadcastRun {
     ) {
         debug_assert_ne!(bank.slot(), self.slot);
 
+        // Sonic: local validators can expose a frozen parent before DCou assigns its block id.
+        // Calculate it here for broadcast chaining. Resumed roots may no longer retain a parent;
+        // match Votor's default in that case.
         let parent_block_id = bank
-            .parent_block_id()
-            .expect("All banks frozen (including snapshot banks) must have a block id");
+            .parent()
+            .map(|parent| {
+                if parent.block_id().is_none() {
+                    Bank::calculate_and_set_block_id_for_dcou(&parent);
+                }
+                parent.block_id().expect("DCou must assign a block id")
+            })
+            .unwrap_or_else(|| {
+                warn!(
+                    "Bank {} parent {} is unavailable; using default block id",
+                    bank.slot(),
+                    bank.parent_slot()
+                );
+                Hash::default()
+            });
 
         let chained_merkle_root = if self.slot == bank.parent_slot() {
             self.chained_merkle_root
@@ -808,6 +824,47 @@ mod test {
             standard_broadcast_run.max_data_shreds_per_slot,
             standard_broadcast_run.max_code_shreds_per_slot,
         )
+    }
+
+    #[test]
+    fn test_reinitialize_state_handles_frozen_parent_without_block_id() {
+        let (blockstore, _, _, root, _, _, _) = setup(10);
+        let parent = Arc::new(Bank::new_from_parent(
+            root.clone(),
+            *root.leader(),
+            root.slot() + 1,
+        ));
+        parent.freeze();
+        assert_eq!(parent.block_id(), None);
+        let child = Bank::new_from_parent(parent.clone(), *parent.leader(), parent.slot() + 1);
+        child.freeze();
+
+        let (votor_event_sender, _) = unbounded();
+        let mut run = StandardBroadcastRun::new(
+            0,
+            Arc::new(MigrationStatus::default()),
+            votor_event_sender,
+            test_leader_schedule_cache(&child),
+        );
+        run.reinitialize_state(&blockstore, &child, &mut ProcessShredsStats::default());
+
+        assert_eq!(run.parent_block_id, parent.block_id().unwrap());
+    }
+
+    #[test]
+    fn test_reinitialize_state_handles_bank_without_parent() {
+        let (blockstore, _, _, bank, _, _, _) = setup(10);
+        let (votor_event_sender, _) = unbounded();
+        let mut run = StandardBroadcastRun::new(
+            0,
+            Arc::new(MigrationStatus::default()),
+            votor_event_sender,
+            test_leader_schedule_cache(&bank),
+        );
+
+        run.reinitialize_state(&blockstore, &bank, &mut ProcessShredsStats::default());
+
+        assert_eq!(run.parent_block_id, Hash::default());
     }
 
     #[test]

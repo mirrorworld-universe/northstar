@@ -149,6 +149,12 @@ pub enum PortalInstruction {
     #[cfg_attr(feature = "idl", account(4, name = "bond_recipient", mut))]
     #[cfg_attr(feature = "idl", account(5, name = "checkpoint_cursor", mut))]
     SubmitStepProof(SubmitStepProof),
+
+    #[cfg_attr(feature = "idl", account(0, name = "authority", sig, mut))]
+    #[cfg_attr(feature = "idl", account(1, name = "session"))]
+    #[cfg_attr(feature = "idl", account(2, name = "session_bridge", mut))]
+    #[cfg_attr(feature = "idl", account(3, name = "system_program"))]
+    RegisterSessionBridge(RegisterSessionBridge),
 }
 
 #[cfg_attr(feature = "idl", derive(shank::ShankType))]
@@ -280,4 +286,13 @@ pub enum StepProofVerifierMode {
 pub struct SubmitStepProof {
     pub er_slot: u64,
     pub verifier_mode: StepProofVerifierMode,
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+pub struct RegisterSessionBridge {
+    pub mint: Pubkey,
+    pub bridge_program: Pubkey,
+    pub vault: Pubkey,
+    pub token_program: Pubkey,
 }

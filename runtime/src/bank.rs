@@ -2394,7 +2394,20 @@ impl Bank {
             accounts_data_len: self.load_accounts_data_size(),
             versioned_epoch_stakes: self.epoch_stakes.clone(),
             accounts_lt_hash: self.accounts_lt_hash.lock().unwrap().clone(),
-            block_id: self.block_id().expect("block id must be set"),
+            block_id: self
+                .block_id()
+                .or_else(|| {
+                    // Sonic: Development snapshots can precede DCou block-id assignment.
+                    if self.cluster_type == Some(ClusterType::Development)
+                        || std::env::var_os("NORTHSTAR_TEST_VALIDATOR_ALLOW_MISSING_BLOCK_IDS")
+                            .is_some()
+                    {
+                        Some(self.hash())
+                    } else {
+                        None
+                    }
+                })
+                .expect("block id must be set"),
         }
     }
 

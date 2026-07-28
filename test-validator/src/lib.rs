@@ -90,6 +90,10 @@ use {
 pub const DEFAULT_PORTAL_PROGRAM_ID: Pubkey =
     Pubkey::from_str_const("5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf");
 
+/// Sonic: Default token bridge program ID loaded with Portal for SPL token ER flows.
+pub const DEFAULT_TOKEN_BRIDGE_PROGRAM_ID: Pubkey =
+    Pubkey::from_str_const("HeVLVaSa9WnFai9aTRJ3UR2c4jwbMe5nbjagmDP1GbXR");
+
 /// Sonic: Portal program binary embedded at compile time.
 #[cfg(not(northstar_skip_portal_program_binary))]
 static PORTAL_PROGRAM_BINARY: &[u8] = include_bytes!(env!("NORTHSTAR_PORTAL_PROGRAM_SO"));
@@ -97,6 +101,15 @@ static PORTAL_PROGRAM_BINARY: &[u8] = include_bytes!(env!("NORTHSTAR_PORTAL_PROG
 /// Sonic: Clippy only type-checks this crate and does not need the embedded SBF binary.
 #[cfg(northstar_skip_portal_program_binary)]
 static PORTAL_PROGRAM_BINARY: &[u8] = &[];
+
+/// Sonic: SPL token bridge binary embedded at compile time.
+#[cfg(not(northstar_skip_token_bridge_program_binary))]
+static TOKEN_BRIDGE_PROGRAM_BINARY: &[u8] =
+    include_bytes!(env!("NORTHSTAR_TOKEN_BRIDGE_PROGRAM_SO"));
+
+/// Sonic: Clippy only type-checks this crate and does not need the embedded SBF binary.
+#[cfg(northstar_skip_token_bridge_program_binary)]
+static TOKEN_BRIDGE_PROGRAM_BINARY: &[u8] = &[];
 
 #[derive(Clone)]
 pub struct AccountInfo<'a> {
@@ -240,6 +253,50 @@ impl TestValidatorGenesis {
             ..Self::default()
         }
     }
+}
+
+fn insert_upgradeable_program_accounts(
+    accounts: &mut HashMap<Pubkey, AccountSharedData>,
+    program_id: Pubkey,
+    program_binary: &[u8],
+) {
+    let loader = solana_sdk_ids::bpf_loader_upgradeable::id();
+    let (programdata_address, _) = Pubkey::find_program_address(&[program_id.as_ref()], &loader);
+
+    let mut program_data = bincode::serialize(&UpgradeableLoaderState::ProgramData {
+        slot: 0,
+        upgrade_authority_address: Some(Pubkey::default()),
+    })
+    .unwrap();
+    program_data.extend_from_slice(program_binary);
+
+    accounts.insert(
+        programdata_address,
+        AccountSharedData::from(Account {
+            lamports: Rent::default().minimum_balance(program_data.len()).max(1),
+            data: program_data,
+            owner: loader,
+            executable: false,
+            rent_epoch: 0,
+        }),
+    );
+
+    let program_account_data = bincode::serialize(&UpgradeableLoaderState::Program {
+        programdata_address,
+    })
+    .unwrap();
+    accounts.insert(
+        program_id,
+        AccountSharedData::from(Account {
+            lamports: Rent::default()
+                .minimum_balance(program_account_data.len())
+                .max(1),
+            data: program_account_data,
+            owner: loader,
+            executable: true,
+            rent_epoch: 0,
+        }),
+    );
 }
 
 fn try_transform_program_data(
@@ -1023,47 +1080,17 @@ impl TestValidator {
             );
         }
 
-        // Sonic: Load portal program into genesis if portal is configured
+        // Sonic: Load Portal and its SPL token bridge into genesis if Portal is configured.
         if let Some(portal_program_id) = config.portal {
-            let data = PORTAL_PROGRAM_BINARY.to_vec();
-            let loader = solana_sdk_ids::bpf_loader_upgradeable::id();
-
-            let (programdata_address, _) =
-                Pubkey::find_program_address(&[portal_program_id.as_ref()], &loader);
-
-            let mut program_data = bincode::serialize(&UpgradeableLoaderState::ProgramData {
-                slot: 0,
-                upgrade_authority_address: Some(Pubkey::default()),
-            })
-            .unwrap();
-            program_data.extend_from_slice(&data);
-
-            accounts.insert(
-                programdata_address,
-                AccountSharedData::from(Account {
-                    lamports: Rent::default().minimum_balance(program_data.len()).max(1),
-                    data: program_data,
-                    owner: loader,
-                    executable: false,
-                    rent_epoch: 0,
-                }),
-            );
-
-            let program_account_data = bincode::serialize(&UpgradeableLoaderState::Program {
-                programdata_address,
-            })
-            .unwrap();
-            accounts.insert(
+            insert_upgradeable_program_accounts(
+                &mut accounts,
                 portal_program_id,
-                AccountSharedData::from(Account {
-                    lamports: Rent::default()
-                        .minimum_balance(program_account_data.len())
-                        .max(1),
-                    data: program_account_data,
-                    owner: loader,
-                    executable: true,
-                    rent_epoch: 0,
-                }),
+                PORTAL_PROGRAM_BINARY,
+            );
+            insert_upgradeable_program_accounts(
+                &mut accounts,
+                DEFAULT_TOKEN_BRIDGE_PROGRAM_ID,
+                TOKEN_BRIDGE_PROGRAM_BINARY,
             );
         }
 
@@ -1258,17 +1285,33 @@ impl TestValidator {
                     .0,
             ],
             run_verification: false, // Skip PoH verification of ledger on startup for speed
-            snapshot_config: SnapshotConfig {
-                full_snapshot_archive_interval: SnapshotInterval::Slots(
-                    NonZeroU64::new(100).unwrap(),
-                ),
-                incremental_snapshot_archive_interval: SnapshotInterval::Disabled,
-                bank_snapshots_dir: ledger_path.join(BANK_SNAPSHOTS_DIR),
-                full_snapshot_archives_dir: ledger_path.to_path_buf(),
-                incremental_snapshot_archives_dir: ledger_path.to_path_buf(),
-                use_registered_io_uring_buffers: false,
-                use_direct_io: false,
-                ..SnapshotConfig::default()
+            snapshot_config: if std::env::var_os("NORTHSTAR_TEST_VALIDATOR_LOAD_ONLY_SNAPSHOTS")
+                .is_some()
+            {
+                // Sonic: restart smoke tests load one durable checkpoint, then disable new
+                // snapshots because resumed local banks may not carry DCou block ids.
+                let mut snapshot_config = SnapshotConfig::new_load_only();
+                snapshot_config.bank_snapshots_dir = ledger_path.join("load-only-snapshots");
+                snapshot_config.full_snapshot_archives_dir = ledger_path.to_path_buf();
+                snapshot_config.incremental_snapshot_archives_dir = ledger_path.to_path_buf();
+                snapshot_config
+            } else {
+                SnapshotConfig {
+                    full_snapshot_archive_interval: SnapshotInterval::Slots(
+                        std::env::var("NORTHSTAR_TEST_VALIDATOR_SNAPSHOT_INTERVAL_SLOTS")
+                            .ok()
+                            .and_then(|value| value.parse().ok())
+                            .and_then(NonZeroU64::new)
+                            .unwrap_or(NonZeroU64::new(100).unwrap()),
+                    ),
+                    incremental_snapshot_archive_interval: SnapshotInterval::Disabled,
+                    bank_snapshots_dir: ledger_path.join(BANK_SNAPSHOTS_DIR),
+                    full_snapshot_archives_dir: ledger_path.to_path_buf(),
+                    incremental_snapshot_archives_dir: ledger_path.to_path_buf(),
+                    use_registered_io_uring_buffers: false,
+                    use_direct_io: false,
+                    ..SnapshotConfig::default()
+                }
             },
             warp_slot: config.warp_slot,
             validator_exit: config.validator_exit.clone(),
@@ -1706,6 +1749,26 @@ mod test {
         let account = fetched_programs[3].as_ref().unwrap();
         assert_eq!(account.owner, solana_sdk_ids::bpf_loader_upgradeable::id());
         assert!(account.executable);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_portal_enables_token_bridge_program() {
+        let (test_validator, _payer) = TestValidatorGenesis::default_for_tests()
+            .portal(DEFAULT_PORTAL_PROGRAM_ID)
+            .start_async()
+            .await;
+
+        let rpc_client = test_validator.get_async_rpc_client();
+        let fetched_programs = rpc_client
+            .get_multiple_accounts(&[DEFAULT_PORTAL_PROGRAM_ID, DEFAULT_TOKEN_BRIDGE_PROGRAM_ID])
+            .await
+            .unwrap();
+
+        for account in fetched_programs {
+            let account = account.unwrap();
+            assert_eq!(account.owner, solana_sdk_ids::bpf_loader_upgradeable::id());
+            assert!(account.executable);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

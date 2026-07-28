@@ -39,13 +39,9 @@ pub fn process_start_withdrawal(accounts: &[AccountInfo], lamports: u64) -> Prog
     }
 
     let pre_balance = source.lamports();
-    Transfer {
-        from: source,
-        to: withdrawal_sink,
-        lamports,
-    }
-    .invoke()?;
-    let post_balance = source.lamports();
+    let post_balance = pre_balance
+        .checked_sub(lamports)
+        .ok_or(ProgramError::InsufficientFunds)?;
 
     emit_transfer_event(&NorthstarTransferEvent {
         version: NorthstarTransferEvent::VERSION,
@@ -58,6 +54,13 @@ pub fn process_start_withdrawal(accounts: &[AccountInfo], lamports: u64) -> Prog
         slot: clock.slot,
         timestamp: clock.unix_timestamp,
     });
+
+    Transfer {
+        from: source,
+        to: withdrawal_sink,
+        lamports,
+    }
+    .invoke()?;
 
     pinocchio_log::log!("StartWithdrawal success");
     Ok(())

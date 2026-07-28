@@ -1,0 +1,50 @@
+[package]
+name = "northstar-token-bridge"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = []
+no-entrypoint = []
+
+[dependencies]
+borsh = { version = "1", default-features = false, features = ["derive"] }
+pinocchio = "0.9"
+pinocchio-pubkey = { version = "0.3", features = ["const"] }
+pinocchio-system = "0.4"
+pinocchio-token = "0.4"
+solana-account-info = { workspace = true }
+solana-instruction = { workspace = true }
+solana-msg = { workspace = true }
+solana-program = { workspace = true }
+solana-program-entrypoint = { workspace = true }
+solana-program-error = { workspace = true }
+solana-program-pack = { workspace = true }
+solana-pubkey = { workspace = true }
+solana-rent = { workspace = true }
+solana-sdk-ids = { workspace = true }
+solana-system-interface = { workspace = true }
+spl-token-interface = { workspace = true }
+
+[dev-dependencies]
+northstar-portal = { path = "../portal", features = ["no-entrypoint"] }
+solana-account = { workspace = true }
+solana-commitment-config = { workspace = true }
+solana-hash = { workspace = true }
+solana-keypair = { workspace = true }
+solana-native-token = { workspace = true }
+solana-program-binaries = { workspace = true }
+solana-program-test = { workspace = true }
+solana-rpc-client = { workspace = true }
+solana-rpc-client-api = { workspace = true }
+solana-signature = { workspace = true }
+solana-signer = { workspace = true }
+solana-transaction = { workspace = true }
+solana-transaction-status-client-types = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+
+[lints.rust]
+unexpected_cfgs = "allow"

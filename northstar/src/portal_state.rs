@@ -1,6 +1,6 @@
 use northstar_portal::{
     Checkpoint, CheckpointCursor, DelegationRecord, DepositReceipt, FeeVault, Session,
-    StepProofAccount,
+    SessionBridge, StepProofAccount,
 };
 
 /// Enum representing any portal program account type.
@@ -13,6 +13,7 @@ pub enum PortalAccount {
     Checkpoint(Checkpoint),
     CheckpointCursor(CheckpointCursor),
     StepProofAccount(StepProofAccount),
+    SessionBridge(SessionBridge),
 }
 
 pub fn try_parse_raw_portal_account(data: &[u8]) -> Option<PortalAccount> {
@@ -41,6 +42,9 @@ pub fn try_parse_raw_portal_account(data: &[u8]) -> Option<PortalAccount> {
         StepProofAccount::DISCRIMINATOR => borsh::from_slice::<StepProofAccount>(data)
             .ok()
             .map(PortalAccount::StepProofAccount),
+        SessionBridge::DISCRIMINATOR => borsh::from_slice::<SessionBridge>(data)
+            .ok()
+            .map(PortalAccount::SessionBridge),
         _ => None,
     }
 }
