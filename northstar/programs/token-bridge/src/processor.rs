@@ -5,6 +5,7 @@ use {
         state::{BridgeBuffer, ErTokenAccount, TokenDepositReceipt, TokenVault},
     },
     borsh::{BorshDeserialize, BorshSerialize},
+    northstar_portal::{Checkpoint, Session},
     pinocchio::{
         account_info::AccountInfo,
         entrypoint::deserialize,
@@ -559,10 +560,12 @@ fn process_settle_withdrawal(
     if expected_checkpoint != *checkpoint.key() {
         return Err(ProgramError::InvalidSeeds);
     }
-    let session_data = session.try_borrow_data()?;
-    let checkpoint_data = checkpoint.try_borrow_data()?;
-    if !is_valid_settlement_session(&session_data, validator.key())
-        || !is_valid_settlement_checkpoint(&checkpoint_data, session.key(), er_slot, &checksum)
+    let session_state = Session::try_from_slice(&session.try_borrow_data()?)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+    let checkpoint_state = Checkpoint::try_from_slice(&checkpoint.try_borrow_data()?)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+    if !is_valid_settlement_session(&session_state, validator.key())
+        || !is_valid_settlement_checkpoint(&checkpoint_state, session.key(), er_slot, &checksum)
     {
         return Err(ProgramError::InvalidAccountData);
     }
