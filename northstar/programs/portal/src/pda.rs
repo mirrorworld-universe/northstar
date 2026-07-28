@@ -1,7 +1,7 @@
 use {
     crate::{
-        Checkpoint, CheckpointCursor, DelegationRecord, DepositReceipt, FeeVault, Session,
-        SessionBridge, StepProofAccount,
+        Challenge, Checkpoint, CheckpointCursor, DataAvailabilityProof, DelegationRecord,
+        DepositReceipt, FeeVault, Session, SessionBridge, StepProofAccount,
     },
     pinocchio::pubkey::Pubkey,
 };
@@ -45,6 +45,16 @@ pub fn find_checkpoint_pda(program_id: &Pubkey, session: &Pubkey, er_slot: u64) 
 
 pub fn find_checkpoint_cursor_pda(program_id: &Pubkey, session: &Pubkey) -> (Pubkey, u8) {
     let seeds = &[CheckpointCursor::SEED_PREFIX, session.as_ref()];
+    find_program_address(seeds, program_id)
+}
+
+pub fn find_challenge_pda(program_id: &Pubkey, checkpoint: &Pubkey) -> (Pubkey, u8) {
+    let seeds = &[Challenge::SEED_PREFIX, checkpoint.as_ref()];
+    find_program_address(seeds, program_id)
+}
+
+pub fn find_da_proof_pda(program_id: &Pubkey, challenge: &Pubkey) -> (Pubkey, u8) {
+    let seeds = &[DataAvailabilityProof::SEED_PREFIX, challenge.as_ref()];
     find_program_address(seeds, program_id)
 }
 

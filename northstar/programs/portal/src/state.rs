@@ -46,8 +46,13 @@ pub struct Checkpoint {
     pub discriminator: u8,
     pub session: Pubkey,
     pub er_slot: u64,
+    pub step_count: u64,
     pub previous_state_root: [u8; 32],
     pub new_state_root: [u8; 32],
+    pub trace_root: [u8; 32],
+    pub tx_effect_root: [u8; 32],
+    pub readonly_l1_root: [u8; 32],
+    pub da_commitment: [u8; 32],
     pub effect_commitment: [u8; 32],
     pub proposer: Pubkey,
     pub proposed_at_l1_slot: u64,
@@ -57,7 +62,6 @@ pub struct Checkpoint {
     pub bond_status: CheckpointBondStatus,
     pub challenger: Pubkey,
     pub challenged_at_l1_slot: u64,
-    /// Temporary single-proof skeleton guard; real bisection needs challenge-specific proofs.
     pub challenge_resolved: bool,
     pub bump: u8,
 }
@@ -86,7 +90,7 @@ pub enum CheckpointBondStatus {
 }
 
 impl Checkpoint {
-    pub const LEN: usize = 237;
+    pub const LEN: usize = 373;
     pub const SEED_PREFIX: &[u8] = b"checkpoint";
     pub const DISCRIMINATOR: u8 = 5;
 
@@ -111,13 +115,105 @@ pub struct CheckpointCursor {
 
 #[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct Challenge {
+    pub discriminator: u8,
+    pub checkpoint: Pubkey,
+    pub challenger: Pubkey,
+    pub respondent: Pubkey,
+    pub opened_at_l1_slot: u64,
+    pub hard_deadline_l1_slot: u64,
+    pub turn_deadline_l1_slot: u64,
+    pub start_step: u64,
+    pub end_step: u64,
+    pub midpoint_step: u64,
+    pub start_state_root: [u8; 32],
+    pub end_state_root: [u8; 32],
+    pub midpoint_state_root: [u8; 32],
+    pub status: ChallengeStatus,
+    pub turn: ChallengeTurn,
+    pub rounds: u32,
+    pub bump: u8,
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[borsh(use_discriminant = true)]
+#[repr(u8)]
+pub enum ChallengeStatus {
+    Active = 0,
+    ChallengerWon = 1,
+    ValidatorWon = 2,
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[borsh(use_discriminant = true)]
+#[repr(u8)]
+pub enum ChallengeTurn {
+    Respondent = 0,
+    Challenger = 1,
+    Prove = 2,
+}
+
+impl Challenge {
+    pub const LEN: usize = 248;
+    pub const SEED_PREFIX: &[u8] = b"challenge";
+    pub const DISCRIMINATOR: u8 = 9;
+
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        self.discriminator == Self::DISCRIMINATOR
+    }
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct DataAvailabilityProof {
+    pub discriminator: u8,
+    pub challenge: Pubkey,
+    pub checkpoint: Pubkey,
+    pub commitment: [u8; 32],
+    pub payload_root: [u8; 32],
+    pub inclusion_proof_hash: [u8; 32],
+    pub revealed_at_l1_slot: u64,
+    pub status: DataAvailabilityStatus,
+    pub bump: u8,
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[borsh(use_discriminant = true)]
+#[repr(u8)]
+pub enum DataAvailabilityStatus {
+    Missing = 0,
+    Revealed = 1,
+    Defaulted = 2,
+}
+
+impl DataAvailabilityProof {
+    pub const LEN: usize = 171;
+    pub const SEED_PREFIX: &[u8] = b"da_proof";
+    pub const DISCRIMINATOR: u8 = 10;
+
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        self.discriminator == Self::DISCRIMINATOR
+    }
+}
+
+#[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct StepProofAccount {
     pub discriminator: u8,
     pub checkpoint: Pubkey,
+    pub challenge: Pubkey,
     pub authority: Pubkey,
     pub proof_kind: u8,
     pub proof_version: u8,
     pub step_index: u64,
+    pub tx_effect_root: [u8; 32],
+    pub readonly_l1_root: [u8; 32],
+    pub settlement_effect_root: [u8; 32],
     pub public_input_hash: [u8; 32],
     pub written_len: u32,
     pub sealed: bool,
@@ -127,7 +223,7 @@ pub struct StepProofAccount {
 }
 
 impl StepProofAccount {
-    pub const LEN: usize = 401;
+    pub const LEN: usize = 529;
     pub const SEED_PREFIX: &[u8] = b"step_proof";
     pub const DISCRIMINATOR: u8 = 7;
 
@@ -322,16 +418,21 @@ mod tests {
             discriminator: Checkpoint::DISCRIMINATOR,
             session: [0x10; 32],
             er_slot: 10,
+            step_count: 4,
             previous_state_root: [0x11; 32],
             new_state_root: [0x12; 32],
-            effect_commitment: [0x13; 32],
-            proposer: [0x14; 32],
+            trace_root: [0x13; 32],
+            tx_effect_root: [0x14; 32],
+            readonly_l1_root: [0x15; 32],
+            da_commitment: [0x16; 32],
+            effect_commitment: [0x17; 32],
+            proposer: [0x18; 32],
             proposed_at_l1_slot: 100,
             challenge_deadline_l1_slot: 110,
             status: CheckpointStatus::Pending,
             bond_lamports: 1_000_000,
             bond_status: CheckpointBondStatus::Locked,
-            challenger: [0x15; 32],
+            challenger: [0x19; 32],
             challenged_at_l1_slot: 105,
             challenge_resolved: true,
             bump: 99,
@@ -357,18 +458,62 @@ mod tests {
     }
 
     #[test]
+    fn test_challenge_and_da_proof_len() {
+        let challenge = Challenge {
+            discriminator: Challenge::DISCRIMINATOR,
+            checkpoint: [1; 32],
+            challenger: [2; 32],
+            respondent: [3; 32],
+            opened_at_l1_slot: 1,
+            hard_deadline_l1_slot: 10,
+            turn_deadline_l1_slot: 5,
+            start_step: 0,
+            end_step: 4,
+            midpoint_step: 2,
+            start_state_root: [4; 32],
+            end_state_root: [5; 32],
+            midpoint_state_root: [6; 32],
+            status: ChallengeStatus::Active,
+            turn: ChallengeTurn::Respondent,
+            rounds: 0,
+            bump: 7,
+        };
+        assert_eq!(borsh::to_vec(&challenge).unwrap().len(), Challenge::LEN);
+
+        let da_proof = DataAvailabilityProof {
+            discriminator: DataAvailabilityProof::DISCRIMINATOR,
+            challenge: [1; 32],
+            checkpoint: [2; 32],
+            commitment: [3; 32],
+            payload_root: [4; 32],
+            inclusion_proof_hash: [5; 32],
+            revealed_at_l1_slot: 6,
+            status: DataAvailabilityStatus::Revealed,
+            bump: 7,
+        };
+        assert_eq!(
+            borsh::to_vec(&da_proof).unwrap().len(),
+            DataAvailabilityProof::LEN
+        );
+    }
+
+    #[test]
     fn test_step_proof_account_len() {
         let proof = StepProofAccount {
             discriminator: StepProofAccount::DISCRIMINATOR,
             checkpoint: [0x31; 32],
-            authority: [0x32; 32],
+            challenge: [0x32; 32],
+            authority: [0x33; 32],
             proof_kind: 1,
             proof_version: 1,
             step_index: 3,
-            public_input_hash: [0x33; 32],
+            tx_effect_root: [0x34; 32],
+            readonly_l1_root: [0x35; 32],
+            settlement_effect_root: [0x36; 32],
+            public_input_hash: [0x37; 32],
             written_len: 3,
             sealed: true,
-            proof_hash: [0x34; 32],
+            proof_hash: [0x35; 32],
             bump: 77,
             data: [0xAB; crate::MAX_STEP_PROOF_BYTES],
         };

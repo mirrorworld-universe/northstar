@@ -303,8 +303,13 @@ impl SettlementPlan {
             ],
             data: borsh::to_vec(&PortalInstruction::ProposeCheckpoint(ProposeCheckpoint {
                 er_slot: self.er_slot,
+                step_count: 1,
                 previous_state_root,
                 new_state_root: self.checksum,
+                trace_root: self.checksum,
+                tx_effect_root: self.checksum,
+                readonly_l1_root: [0; 32],
+                da_commitment: self.checksum,
                 effect_commitment: self.checksum,
                 challenge_window_slots,
             }))
