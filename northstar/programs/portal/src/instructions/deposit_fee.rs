@@ -80,7 +80,16 @@ pub fn process_deposit_fee(
         return Err(PortalError::InvalidPdaSeeds.into());
     }
 
-    let receipt_rent_exempt = Rent::get()?.minimum_balance(DepositReceipt::LEN);
+    let new_receipt_state = DepositReceipt {
+        discriminator: DepositReceipt::DISCRIMINATOR,
+        session: *session_key,
+        recipient: *recipient_key,
+        balance: 0,
+        withdrawn: 0,
+        bump: receipt_bump,
+    };
+    let receipt_size = crate::account_size(&new_receipt_state);
+    let receipt_rent_exempt = Rent::get()?.minimum_balance(receipt_size);
     let pre_escrow = if deposit_receipt.data_is_empty() {
         0
     } else {
@@ -123,25 +132,13 @@ pub fn process_deposit_fee(
             depositor,
             deposit_receipt,
             receipt_lamports,
-            DepositReceipt::LEN as u64,
+            receipt_size as u64,
             program_id,
             receipt_signer,
         )?;
 
-        let receipt_state = DepositReceipt {
-            discriminator: DepositReceipt::DISCRIMINATOR,
-            session: *session_key,
-            recipient: *recipient_key,
-            balance: 0,
-            withdrawn: 0,
-            bump: receipt_bump,
-        };
         let mut receipt_data = deposit_receipt.try_borrow_mut_data()?;
-        BorshSerialize::serialize(
-            &receipt_state,
-            &mut &mut receipt_data[..DepositReceipt::LEN],
-        )
-        .unwrap();
+        BorshSerialize::serialize(&new_receipt_state, &mut &mut receipt_data[..]).unwrap();
     } else {
         // Subsequent deposit — update existing receipt
         let receipt_state = DepositReceipt::try_from_slice(&deposit_receipt.try_borrow_data()?)

@@ -146,8 +146,15 @@ fn process_delegate_account(
         return Err(PortalError::DelegateBufferSizeMismatch.into());
     }
 
+    let delegation_state = DelegationRecord {
+        discriminator: DelegationRecord::DISCRIMINATOR,
+        owner_program: *owner_program.key(),
+        grid_id: _session_state.grid_id,
+        bump,
+    };
     let rent = Rent::get()?;
-    let lamports = rent.minimum_balance(DelegationRecord::LEN);
+    let delegation_size = crate::account_size(&delegation_state);
+    let lamports = rent.minimum_balance(delegation_size);
 
     let bump_bytes = [bump];
     let seeds = &[
@@ -161,23 +168,13 @@ fn process_delegate_account(
         from: payer,
         to: delegation_record,
         lamports,
-        space: DelegationRecord::LEN as u64,
+        space: delegation_size as u64,
         owner: program_id,
     }
     .invoke_signed(&[signer])?;
 
-    let delegation_state = DelegationRecord {
-        discriminator: DelegationRecord::DISCRIMINATOR,
-        owner_program: *owner_program.key(),
-        grid_id: _session_state.grid_id,
-        bump,
-    };
     let mut delegation_data = delegation_record.try_borrow_mut_data()?;
-    BorshSerialize::serialize(
-        &delegation_state,
-        &mut &mut delegation_data[..DelegationRecord::LEN],
-    )
-    .unwrap();
+    BorshSerialize::serialize(&delegation_state, &mut &mut delegation_data[..]).unwrap();
     drop(delegation_data);
 
     let buffer_data = buffer.try_borrow_data()?;

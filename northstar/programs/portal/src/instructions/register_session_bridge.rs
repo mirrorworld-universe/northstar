@@ -82,7 +82,8 @@ pub fn process_register_session_bridge(
 
     if session_bridge.lamports() == 0 {
         let rent = Rent::get()?;
-        let lamports = rent.minimum_balance(SessionBridge::LEN);
+        let bridge_size = crate::account_size(&bridge_state);
+        let lamports = rent.minimum_balance(bridge_size);
         let bridge_bump_bytes = [bridge_bump];
         let signer_seeds = &[
             Seed::from(SessionBridge::SEED_PREFIX),
@@ -96,7 +97,7 @@ pub fn process_register_session_bridge(
             from: authority,
             to: session_bridge,
             lamports,
-            space: SessionBridge::LEN as u64,
+            space: bridge_size as u64,
             owner: program_id,
         }
         .invoke_signed(&[signer])?;
@@ -115,7 +116,7 @@ pub fn process_register_session_bridge(
     }
 
     let mut bridge_data = session_bridge.try_borrow_mut_data()?;
-    BorshSerialize::serialize(&bridge_state, &mut &mut bridge_data[..SessionBridge::LEN]).unwrap();
+    BorshSerialize::serialize(&bridge_state, &mut &mut bridge_data[..]).unwrap();
 
     Ok(())
 }

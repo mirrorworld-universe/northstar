@@ -3,7 +3,7 @@ use {
     northstar_portal::{
         find_checkpoint_cursor_pda, find_checkpoint_pda,
         find_delegation_record_pda as find_portal_delegation_record_pda, Checkpoint,
-        CheckpointStatus, DepositReceipt, SettlementStatus, MAX_CHALLENGE_WINDOW_SLOTS,
+        CheckpointStatus, SettlementStatus, MAX_CHALLENGE_WINDOW_SLOTS,
     },
     portal_state::{try_parse_raw_portal_account, PortalAccount},
     solana_account::{AccountSharedData, ReadableAccount},
@@ -59,8 +59,8 @@ fn scale_l1_slot_age_for_er(l1_slot_age: usize, slot_duration: Duration) -> usiz
     (l1_slot_age * solana_clock::DEFAULT_MS_PER_SLOT as usize).div_ceil(er_slot_ms)
 }
 
-fn deposit_receipt_escrow_lamports(lamports: u64) -> u64 {
-    lamports.saturating_sub(Rent::default().minimum_balance(DepositReceipt::LEN))
+fn deposit_receipt_escrow_lamports(lamports: u64, data_len: usize) -> u64 {
+    lamports.saturating_sub(Rent::default().minimum_balance(data_len))
 }
 
 /// Fixed ER account that receives all bridged SOL withdrawals.
@@ -1102,10 +1102,14 @@ impl Manager {
                     .and_then(|parent| parent.get_account(&pubkey))
                     .and_then(|account| {
                         portal_state::try_parse_raw_portal_account(account.data())?;
-                        Some(deposit_receipt_escrow_lamports(account.lamports()))
+                        Some(deposit_receipt_escrow_lamports(
+                            account.lamports(),
+                            account.data().len(),
+                        ))
                     })
                     .unwrap_or(0);
-                let escrow = deposit_receipt_escrow_lamports(account.lamports());
+                let escrow =
+                    deposit_receipt_escrow_lamports(account.lamports(), account.data().len());
 
                 (escrow > prev_escrow).then(|| L1Event::FeeDeposited {
                     session_pda: receipt.session.into(),
@@ -3274,7 +3278,10 @@ mod portal_e2e_tests {
         };
         assert_eq!(receipt.balance, deposit_amount - withdraw_amount);
         assert_eq!(
-            deposit_receipt_escrow_lamports(receipt_account.lamports()),
+            deposit_receipt_escrow_lamports(
+                receipt_account.lamports(),
+                receipt_account.data().len(),
+            ),
             deposit_amount - withdraw_amount
         );
     }

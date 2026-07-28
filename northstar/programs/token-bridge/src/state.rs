@@ -1,5 +1,9 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 
+pub fn account_size<T: BorshSerialize + ?Sized>(account: &T) -> usize {
+    borsh::object_length(account).expect("account serialization length overflow")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct TokenVault {
     pub discriminator: u8,
@@ -14,7 +18,6 @@ pub struct TokenVault {
 
 impl TokenVault {
     pub const DISCRIMINATOR: u8 = 1;
-    pub const LEN: usize = 146;
     pub const SEED_PREFIX: &'static [u8] = b"token_vault";
 
     pub fn is_valid(&self) -> bool {
@@ -34,7 +37,6 @@ pub struct ErTokenAccount {
 
 impl ErTokenAccount {
     pub const DISCRIMINATOR: u8 = 2;
-    pub const LEN: usize = 106;
     pub const SEED_PREFIX: &'static [u8] = b"er_token";
 
     pub fn is_valid(&self) -> bool {
@@ -54,7 +56,6 @@ pub struct TokenDepositReceipt {
 
 impl TokenDepositReceipt {
     pub const DISCRIMINATOR: u8 = 3;
-    pub const LEN: usize = 82;
     pub const SEED_PREFIX: &'static [u8] = b"token_deposit";
 
     pub fn is_valid(&self) -> bool {

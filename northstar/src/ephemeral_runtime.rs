@@ -1579,8 +1579,7 @@ impl EphemeralRuntime {
                     return None;
                 };
                 let escrow_balance = receipt_account.lamports().saturating_sub(
-                    solana_rent::Rent::default()
-                        .minimum_balance(northstar_portal::DepositReceipt::LEN),
+                    solana_rent::Rent::default().minimum_balance(receipt_account.data().len()),
                 );
                 Some((
                     *er_source,
@@ -2458,16 +2457,15 @@ mod tests {
             withdrawn,
             bump,
         };
+        let receipt_data = borsh::to_vec(&receipt).unwrap();
         let mut account = AccountSharedData::new(
             solana_rent::Rent::default()
-                .minimum_balance(DepositReceipt::LEN)
+                .minimum_balance(receipt_data.len())
                 .saturating_add(balance),
-            DepositReceipt::LEN,
+            receipt_data.len(),
             portal_program_id,
         );
-        account
-            .data_as_mut_slice()
-            .copy_from_slice(&borsh::to_vec(&receipt).unwrap());
+        account.data_as_mut_slice().copy_from_slice(&receipt_data);
         bank.store_account(&receipt_pda, &account);
     }
 
@@ -2486,7 +2484,7 @@ mod tests {
         let mut receipt = bank.get_account(&receipt_pda).unwrap();
         receipt.set_lamports(
             solana_rent::Rent::default()
-                .minimum_balance(DepositReceipt::LEN)
+                .minimum_balance(receipt.data().len())
                 .saturating_add(escrow_lamports),
         );
         bank.store_account(&receipt_pda, &receipt);

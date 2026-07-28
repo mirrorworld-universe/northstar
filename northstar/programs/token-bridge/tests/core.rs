@@ -1,6 +1,6 @@
 use {
     borsh::BorshDeserialize,
-    northstar_portal::{DelegationRecord, Session, SessionBridge, SettlementStatus},
+    northstar_portal::{account_size, DelegationRecord, Session, SessionBridge, SettlementStatus},
     northstar_token_bridge::{
         find_buffer_pda, find_er_token_account_pda, find_token_vault_pda,
         instruction::TokenBridgeInstruction, state::ErTokenAccount,
@@ -74,30 +74,30 @@ impl TestWorld {
         program_test.add_account(payer.pubkey(), system_account(5_000_000_000));
         program_test.add_account(alice.pubkey(), system_account(1_000_000_000));
         program_test.add_account(bob.pubkey(), system_account(1_000_000_000));
+        let session_state = Session {
+            discriminator: Session::DISCRIMINATOR,
+            grid_id: 1,
+            ttl_slots: 100,
+            fee_cap: 0,
+            created_at: 0,
+            nonce: 0,
+            authority: payer.pubkey().to_bytes(),
+            validator: payer.pubkey().to_bytes(),
+            settlement_interval_slots: 10,
+            last_settled_l1_slot: 0,
+            last_settled_er_slot: 0,
+            settlement_status: SettlementStatus::Idle,
+            settlement_er_slot: 0,
+            settlement_checksum: [0; 32],
+            settlement_accumulator: [0; 32],
+            settlement_started_l1_slot: 0,
+            bump: session_bump,
+        };
         program_test.add_account(
             session,
             Account {
-                lamports: Rent::default().minimum_balance(Session::LEN),
-                data: borsh::to_vec(&Session {
-                    discriminator: Session::DISCRIMINATOR,
-                    grid_id: 1,
-                    ttl_slots: 100,
-                    fee_cap: 0,
-                    created_at: 0,
-                    nonce: 0,
-                    authority: payer.pubkey().to_bytes(),
-                    validator: payer.pubkey().to_bytes(),
-                    settlement_interval_slots: 10,
-                    last_settled_l1_slot: 0,
-                    last_settled_er_slot: 0,
-                    settlement_status: SettlementStatus::Idle,
-                    settlement_er_slot: 0,
-                    settlement_checksum: [0; 32],
-                    settlement_accumulator: [0; 32],
-                    settlement_started_l1_slot: 0,
-                    bump: session_bump,
-                })
-                .unwrap(),
+                lamports: Rent::default().minimum_balance(account_size(&session_state)),
+                data: borsh::to_vec(&session_state).unwrap(),
                 owner: PORTAL_PROGRAM_ID,
                 executable: false,
                 rent_epoch: 0,
@@ -119,7 +119,7 @@ impl TestWorld {
         program_test.add_account(
             session_bridge,
             Account {
-                lamports: Rent::default().minimum_balance(SessionBridge::LEN),
+                lamports: Rent::default().minimum_balance(account_size(&bridge)),
                 data: borsh::to_vec(&bridge).unwrap(),
                 owner: PORTAL_PROGRAM_ID,
                 executable: false,

@@ -4,13 +4,13 @@ use {
     base64_no_std::{prelude::BASE64_STANDARD, Engine as _},
     borsh::BorshDeserialize,
     northstar_portal::{
-        BeginSettlement, BisectChallenge, CancelCheckpoint, Challenge, ChallengeStatus,
-        ChallengeTurn, Checkpoint, CheckpointBondStatus, CheckpointCursor, CheckpointStatus,
-        CommitCheckpoint, CreateStepProof, DataAvailabilityProof, DataAvailabilityStatus,
-        DepositReceipt, FeeVault, FinishSettlement, NorthstarTransferEvent, OpenChallenge,
-        OpenSession, PortalInstruction, ProposeCheckpoint, ResolveChallenge, RespondChallenge,
-        SealStepProof, Session, StepProofAccount, StepProofVerifierMode, TimeoutChallenge,
-        TransferEventKind, WriteStepProof, CHECKPOINT_PROPOSER_BOND_LAMPORTS,
+        account_size, BeginSettlement, BisectChallenge, CancelCheckpoint, Challenge,
+        ChallengeStatus, ChallengeTurn, Checkpoint, CheckpointBondStatus, CheckpointCursor,
+        CheckpointStatus, CommitCheckpoint, CreateStepProof, DataAvailabilityProof,
+        DataAvailabilityStatus, DepositReceipt, FeeVault, FinishSettlement, NorthstarTransferEvent,
+        OpenChallenge, OpenSession, PortalInstruction, ProposeCheckpoint, ResolveChallenge,
+        RespondChallenge, SealStepProof, Session, StepProofAccount, StepProofVerifierMode,
+        TimeoutChallenge, TransferEventKind, WriteStepProof, CHECKPOINT_PROPOSER_BOND_LAMPORTS,
         MAX_CHALLENGE_WINDOW_SLOTS, MAX_STEP_PROOF_CHUNK, WITHDRAWAL_SINK,
     },
     solana_account::Account,
@@ -1367,8 +1367,39 @@ async fn checkpoint_bond_locks_and_releases() {
     let (checkpoint_pda, _) = find_checkpoint_pda(&PORTAL_PROGRAM_ID, &session_pda, er_slot);
 
     let rent = context.banks_client.get_rent().await.unwrap();
-    let cursor_rent = rent.minimum_balance(CheckpointCursor::LEN);
-    let checkpoint_rent = rent.minimum_balance(Checkpoint::LEN);
+    let cursor_rent = rent.minimum_balance(account_size(&CheckpointCursor {
+        discriminator: CheckpointCursor::DISCRIMINATOR,
+        session: [0; 32],
+        latest_finalized_checkpoint: [0; 32],
+        latest_finalized_er_slot: 0,
+        latest_finalized_state_root: [0; 32],
+        active_checkpoint: [0; 32],
+        active_er_slot: 0,
+        bump: 0,
+    }));
+    let checkpoint_rent = rent.minimum_balance(account_size(&Checkpoint {
+        discriminator: Checkpoint::DISCRIMINATOR,
+        session: [0; 32],
+        er_slot: 0,
+        step_count: 0,
+        previous_state_root: [0; 32],
+        new_state_root: [0; 32],
+        trace_root: [0; 32],
+        tx_effect_root: [0; 32],
+        readonly_l1_root: [0; 32],
+        da_commitment: [0; 32],
+        effect_commitment: [0; 32],
+        proposer: [0; 32],
+        proposed_at_l1_slot: 0,
+        challenge_deadline_l1_slot: 0,
+        status: CheckpointStatus::Pending,
+        bond_lamports: 0,
+        bond_status: CheckpointBondStatus::Locked,
+        challenger: [0; 32],
+        challenged_at_l1_slot: 0,
+        challenge_resolved: false,
+        bump: 0,
+    }));
     let rent_only_funding = cursor_rent + checkpoint_rent;
     let proposer_keepalive_lamports = rent.minimum_balance(0);
 

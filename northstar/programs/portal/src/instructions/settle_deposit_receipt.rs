@@ -126,7 +126,7 @@ pub fn process_settle_deposit_receipt(
         return Err(PortalError::InvalidAccountData.into());
     }
 
-    let rent_exempt = Rent::get()?.minimum_balance(DepositReceipt::LEN);
+    let rent_exempt = Rent::get()?.minimum_balance(crate::account_size(&receipt_state));
     let escrow_lamports = deposit_receipt
         .lamports()
         .checked_sub(rent_exempt)
@@ -159,11 +159,7 @@ pub fn process_settle_deposit_receipt(
     receipt_state.balance = settle.balance;
     receipt_state.withdrawn = settle.withdrawn;
     let mut receipt_data = deposit_receipt.try_borrow_mut_data()?;
-    BorshSerialize::serialize(
-        &receipt_state,
-        &mut &mut receipt_data[..DepositReceipt::LEN],
-    )
-    .unwrap();
+    BorshSerialize::serialize(&receipt_state, &mut &mut receipt_data[..]).unwrap();
     drop(receipt_data);
 
     session_state.settlement_accumulator = accumulate_receipt_checksum(
@@ -175,7 +171,7 @@ pub fn process_settle_deposit_receipt(
         settle.payout_lamports,
     );
     let mut session_data = session.try_borrow_mut_data()?;
-    BorshSerialize::serialize(&session_state, &mut &mut session_data[..Session::LEN]).unwrap();
+    BorshSerialize::serialize(&session_state, &mut &mut session_data[..]).unwrap();
 
     if settle.payout_lamports > 0 {
         let clock = Clock::get()?;
