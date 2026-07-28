@@ -53,6 +53,33 @@ pub struct WithdrawalPayoutEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenWithdrawalPayoutEvent {
+    pub bridge_program: Pubkey,
+    pub session_bridge: Pubkey,
+    pub er_token_account: Pubkey,
+    pub l1_destination_token_account: Pubkey,
+    pub amount: u64,
+    pub decimals: u8,
+    pub signature: solana_signature::Signature,
+    pub er_slot: Slot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenWithdrawalSettlement {
+    pub bridge_program: Pubkey,
+    pub session_bridge: Pubkey,
+    pub er_token_account: Pubkey,
+    pub vault: Pubkey,
+    pub vault_token_account: Pubkey,
+    pub l1_destination_token_account: Pubkey,
+    pub mint: Pubkey,
+    pub token_program: Pubkey,
+    pub amount: u64,
+    pub withdrawn: u64,
+    pub decimals: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountOwnerSettlement {
     pub account: Pubkey,
     pub owner: Pubkey,
@@ -142,7 +169,7 @@ impl SettlementPlan {
         challenge_window_slots: u64,
         previous_state_root: [u8; 32],
     ) -> Option<Transaction> {
-        (!self.is_empty() && !self.has_unsupported_changes()).then(|| {
+        (!self.has_unsupported_changes()).then(|| {
             sign_settlement_transaction(
                 &[self.checkpoint_proposal_instruction(
                     portal_program_id,
@@ -276,8 +303,13 @@ impl SettlementPlan {
             ],
             data: borsh::to_vec(&PortalInstruction::ProposeCheckpoint(ProposeCheckpoint {
                 er_slot: self.er_slot,
+                step_count: 1,
                 previous_state_root,
                 new_state_root: self.checksum,
+                trace_root: self.checksum,
+                tx_effect_root: self.checksum,
+                readonly_l1_root: [0; 32],
+                da_commitment: self.checksum,
                 effect_commitment: self.checksum,
                 challenge_window_slots,
             }))
@@ -495,6 +527,56 @@ impl SettlementPlan {
         });
         instructions
     }
+}
+
+pub fn token_withdrawal_transactions(
+    withdrawals: &[TokenWithdrawalSettlement],
+    portal_program_id: Pubkey,
+    session_pda: Pubkey,
+    er_slot: Slot,
+    checksum: [u8; 32],
+    validator: &Keypair,
+    recent_blockhash: Hash,
+) -> Vec<Transaction> {
+    let checkpoint = Pubkey::new_from_array(
+        find_checkpoint_pda(
+            &portal_program_id.to_bytes(),
+            &session_pda.to_bytes(),
+            er_slot,
+        )
+        .0,
+    );
+    withdrawals
+        .iter()
+        .map(|withdrawal| {
+            let instruction = Instruction {
+                program_id: withdrawal.bridge_program,
+                accounts: vec![
+                    AccountMeta::new_readonly(validator.pubkey(), true),
+                    AccountMeta::new_readonly(session_pda, false),
+                    AccountMeta::new_readonly(checkpoint, false),
+                    AccountMeta::new_readonly(withdrawal.session_bridge, false),
+                    AccountMeta::new(withdrawal.vault, false),
+                    AccountMeta::new_readonly(withdrawal.er_token_account, false),
+                    AccountMeta::new(withdrawal.vault_token_account, false),
+                    AccountMeta::new(withdrawal.l1_destination_token_account, false),
+                    AccountMeta::new_readonly(withdrawal.mint, false),
+                    AccountMeta::new_readonly(withdrawal.token_program, false),
+                ],
+                data: borsh::to_vec(
+                    &northstar_token_bridge::instruction::TokenBridgeInstruction::SettleWithdrawal {
+                        er_slot,
+                        checksum,
+                        amount: withdrawal.amount,
+                        withdrawn: withdrawal.withdrawn,
+                        decimals: withdrawal.decimals,
+                    },
+                )
+                .unwrap(),
+            };
+            sign_settlement_transaction(&[instruction], validator, recent_blockhash)
+        })
+        .collect()
 }
 
 fn sign_settlement_transaction(
@@ -1273,6 +1355,18 @@ mod tests {
                 Pubkey::new_unique()
             )
             .is_empty());
+        assert!(
+            plan.checkpoint_proposal_transaction(
+                Pubkey::new_unique(),
+                Pubkey::new_unique(),
+                &Keypair::new(),
+                Hash::new_unique(),
+                10,
+                [0; 32],
+            )
+            .is_some(),
+            "token-only settlement still needs a checkpoint proposal",
+        );
     }
 
     #[test]

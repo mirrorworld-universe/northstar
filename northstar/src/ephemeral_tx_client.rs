@@ -1,5 +1,8 @@
 use {
-    crate::{settlement::WithdrawalPayoutEvent, unsettled_state::UnsettledStateStore},
+    crate::{
+        settlement::{TokenWithdrawalPayoutEvent, WithdrawalPayoutEvent},
+        unsettled_state::UnsettledStateStore,
+    },
     log::{debug, trace, warn},
     solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
     solana_clock::Slot,
@@ -68,6 +71,7 @@ pub struct EphemeralTransactionClient {
     portal_program_id: Pubkey,
     session_pda: Arc<RwLock<Option<Pubkey>>>,
     withdrawal_payout_events: Arc<RwLock<Vec<WithdrawalPayoutEvent>>>,
+    token_withdrawal_payout_events: Arc<RwLock<Vec<TokenWithdrawalPayoutEvent>>>,
     /// Successful ER signatures persist across L1 reanchors, whose new bank has
     /// the L1 parent's status cache rather than the old ER bank's cache.
     processed_signatures: Arc<RwLock<HashMap<solana_signature::Signature, Slot>>>,
@@ -90,6 +94,7 @@ impl Clone for EphemeralTransactionClient {
             portal_program_id: self.portal_program_id,
             session_pda: Arc::clone(&self.session_pda),
             withdrawal_payout_events: Arc::clone(&self.withdrawal_payout_events),
+            token_withdrawal_payout_events: Arc::clone(&self.token_withdrawal_payout_events),
             processed_signatures: Arc::clone(&self.processed_signatures),
             unsettled_state_store: Arc::clone(&self.unsettled_state_store),
         }
@@ -105,6 +110,7 @@ pub(crate) struct EphemeralTransactionClientOptions {
     session_pda: Arc<RwLock<Option<Pubkey>>>,
     withdrawal_payout_events: Arc<RwLock<Vec<WithdrawalPayoutEvent>>>,
     unsettled_state_store: Arc<UnsettledStateStore>,
+    token_withdrawal_payout_events: Arc<RwLock<Vec<TokenWithdrawalPayoutEvent>>>,
 }
 
 impl EphemeralTransactionClientOptions {
@@ -122,6 +128,7 @@ impl EphemeralTransactionClientOptions {
             session_pda: Arc::new(RwLock::new(None)),
             withdrawal_payout_events: Arc::new(RwLock::new(Vec::new())),
             unsettled_state_store: Arc::new(UnsettledStateStore::default()),
+            token_withdrawal_payout_events: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -135,10 +142,12 @@ impl EphemeralTransactionClientOptions {
         portal_program_id: Pubkey,
         session_pda: Arc<RwLock<Option<Pubkey>>>,
         withdrawal_payout_events: Arc<RwLock<Vec<WithdrawalPayoutEvent>>>,
+        token_withdrawal_payout_events: Arc<RwLock<Vec<TokenWithdrawalPayoutEvent>>>,
     ) -> Self {
         self.portal_program_id = portal_program_id;
         self.session_pda = session_pda;
         self.withdrawal_payout_events = withdrawal_payout_events;
+        self.token_withdrawal_payout_events = token_withdrawal_payout_events;
         self
     }
 
@@ -296,6 +305,7 @@ impl EphemeralTransactionClient {
             portal_program_id: options.portal_program_id,
             session_pda: options.session_pda,
             withdrawal_payout_events: options.withdrawal_payout_events,
+            token_withdrawal_payout_events: options.token_withdrawal_payout_events,
             processed_signatures: Arc::new(RwLock::new(HashMap::new())),
             unsettled_state_store: options.unsettled_state_store,
         }
@@ -599,6 +609,7 @@ impl EphemeralTransactionClient {
             .collect::<Vec<_>>();
         let touched_accounts = writable_accounts.iter().copied().collect::<Vec<_>>();
         let payout_events = self.withdrawal_payout_events.read().unwrap().clone();
+        let token_payout_events = self.token_withdrawal_payout_events.read().unwrap().clone();
         let processed = self.processed_signatures.read().unwrap();
         let processed_signatures = txs
             .iter()
@@ -612,6 +623,7 @@ impl EphemeralTransactionClient {
             &accounts,
             &touched_accounts,
             Some(&payout_events),
+            Some(&token_payout_events),
             &processed_signatures,
         )
     }
@@ -786,6 +798,7 @@ impl EphemeralTransactionClient {
 
         self.record_transaction_history_for_batch(bank, &txs, &commit_results, balance_collector);
         self.record_withdrawal_payout_events_for_batch(bank, &txs, &commit_results);
+        self.record_token_withdrawal_payout_events_for_batch(bank, &txs, &commit_results);
         self.notify_transaction_subscribers(bank, &txs);
 
         for (tx_idx, result) in commit_results.iter().enumerate() {
@@ -957,6 +970,97 @@ impl EphemeralTransactionClient {
             return 0;
         };
         receipt.withdrawn
+    }
+
+    fn record_token_withdrawal_payout_events_for_batch(
+        &self,
+        bank: &Bank,
+        txs: &[VersionedTransaction],
+        commit_results: &[TransactionCommitResult],
+    ) {
+        if self.session_pda.read().unwrap().is_none() {
+            return;
+        }
+        let mut events = Vec::new();
+        for (tx, commit_result) in txs.iter().zip(commit_results) {
+            let Ok(committed_tx) = commit_result else {
+                continue;
+            };
+            if committed_tx.status.is_err() {
+                continue;
+            }
+            let loaded_addresses = Self::load_transaction_addresses(bank, tx).unwrap_or_default();
+            let account_keys = Self::full_account_keys(tx, &loaded_addresses);
+            let Some(signature) = tx.signatures.first().copied() else {
+                continue;
+            };
+            for ix in tx.message.instructions() {
+                let Some(program_id) = account_keys.get(ix.program_id_index as usize) else {
+                    continue;
+                };
+                let Ok(instruction) = borsh::from_slice::<
+                    northstar_token_bridge::instruction::TokenBridgeInstruction,
+                >(&ix.data) else {
+                    continue;
+                };
+                let northstar_token_bridge::instruction::TokenBridgeInstruction::StartWithdrawal {
+                    amount,
+                    decimals,
+                } = instruction
+                else {
+                    continue;
+                };
+                if amount == 0 || ix.accounts.len() < 6 {
+                    continue;
+                }
+                let (
+                    Some(_owner),
+                    Some(er_token_account),
+                    Some(session_bridge),
+                    Some(portal),
+                    Some(destination),
+                    Some(_token_program),
+                ) = (
+                    account_keys.get(ix.accounts[0] as usize),
+                    account_keys.get(ix.accounts[1] as usize),
+                    account_keys.get(ix.accounts[2] as usize),
+                    account_keys.get(ix.accounts[3] as usize),
+                    account_keys.get(ix.accounts[4] as usize),
+                    account_keys.get(ix.accounts[5] as usize),
+                )
+                else {
+                    continue;
+                };
+                if !tx.message.is_signer(ix.accounts[0] as usize)
+                    || portal != &self.portal_program_id
+                {
+                    continue;
+                }
+                debug!(
+                    "Recorded ER token withdrawal payout: bridge={}, account={}, destination={}, \
+                     amount={}",
+                    program_id, er_token_account, destination, amount
+                );
+                events.push(TokenWithdrawalPayoutEvent {
+                    bridge_program: *program_id,
+                    session_bridge: *session_bridge,
+                    er_token_account: *er_token_account,
+                    l1_destination_token_account: *destination,
+                    amount,
+                    decimals,
+                    signature,
+                    er_slot: bank.slot(),
+                });
+            }
+        }
+        if !events.is_empty() {
+            let mut payout_events = self.token_withdrawal_payout_events.write().unwrap();
+            payout_events.extend(events);
+            if payout_events.len() > 10_000 {
+                let dropped = payout_events.len() - 10_000;
+                payout_events.drain(..dropped);
+            }
+        }
     }
 
     fn system_transfer_lamports(data: &[u8]) -> Option<u64> {

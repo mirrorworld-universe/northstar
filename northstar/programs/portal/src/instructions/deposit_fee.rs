@@ -80,11 +80,43 @@ pub fn process_deposit_fee(
         return Err(PortalError::InvalidPdaSeeds.into());
     }
 
+    let new_receipt_state = DepositReceipt {
+        discriminator: DepositReceipt::DISCRIMINATOR,
+        session: *session_key,
+        recipient: *recipient_key,
+        balance: 0,
+        withdrawn: 0,
+        bump: receipt_bump,
+    };
+    let receipt_size = crate::account_size(&new_receipt_state);
+    let receipt_rent_exempt = Rent::get()?.minimum_balance(receipt_size);
+    let pre_escrow = if deposit_receipt.data_is_empty() {
+        0
+    } else {
+        deposit_receipt
+            .lamports()
+            .checked_sub(receipt_rent_exempt)
+            .ok_or(PortalError::InsufficientFees)?
+    };
+    let post_escrow = pre_escrow
+        .checked_add(lamports)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    emit_transfer_event(&NorthstarTransferEvent {
+        version: NorthstarTransferEvent::VERSION,
+        kind: TransferEventKind::Deposit,
+        from: *depositor.key(),
+        to: *recipient_key,
+        lamports,
+        pre_balance: pre_escrow,
+        post_balance: post_escrow,
+        slot: clock.slot,
+        timestamp: clock.unix_timestamp,
+    });
+
     // Create or update DepositReceipt
     if deposit_receipt.data_is_empty() {
         // First deposit — create the PDA
-        let rent = Rent::get()?;
-        let receipt_lamports = rent.minimum_balance(DepositReceipt::LEN);
+        let receipt_lamports = receipt_rent_exempt;
 
         let receipt_bump_bytes = [receipt_bump];
         let receipt_seeds = &[
@@ -100,25 +132,13 @@ pub fn process_deposit_fee(
             depositor,
             deposit_receipt,
             receipt_lamports,
-            DepositReceipt::LEN as u64,
+            receipt_size as u64,
             program_id,
             receipt_signer,
         )?;
 
-        let receipt_state = DepositReceipt {
-            discriminator: DepositReceipt::DISCRIMINATOR,
-            session: *session_key,
-            recipient: *recipient_key,
-            balance: 0,
-            withdrawn: 0,
-            bump: receipt_bump,
-        };
         let mut receipt_data = deposit_receipt.try_borrow_mut_data()?;
-        BorshSerialize::serialize(
-            &receipt_state,
-            &mut &mut receipt_data[..DepositReceipt::LEN],
-        )
-        .unwrap();
+        BorshSerialize::serialize(&new_receipt_state, &mut &mut receipt_data[..]).unwrap();
     } else {
         // Subsequent deposit — update existing receipt
         let receipt_state = DepositReceipt::try_from_slice(&deposit_receipt.try_borrow_data()?)
@@ -138,11 +158,6 @@ pub fn process_deposit_fee(
         }
     }
 
-    let receipt_rent_exempt = Rent::get()?.minimum_balance(DepositReceipt::LEN);
-    let pre_escrow = deposit_receipt
-        .lamports()
-        .checked_sub(receipt_rent_exempt)
-        .ok_or(PortalError::InsufficientFees)?;
     // Transfer lamports from depositor to the deposit_receipt PDA
     Transfer {
         from: depositor,
@@ -150,22 +165,6 @@ pub fn process_deposit_fee(
         lamports,
     }
     .invoke()?;
-
-    let post_escrow = deposit_receipt
-        .lamports()
-        .checked_sub(receipt_rent_exempt)
-        .ok_or(PortalError::InsufficientFees)?;
-    emit_transfer_event(&NorthstarTransferEvent {
-        version: NorthstarTransferEvent::VERSION,
-        kind: TransferEventKind::Deposit,
-        from: *depositor.key(),
-        to: *recipient_key,
-        lamports,
-        pre_balance: pre_escrow,
-        post_balance: post_escrow,
-        slot: clock.slot,
-        timestamp: clock.unix_timestamp,
-    });
 
     pinocchio_log::log!("DepositFee success");
 

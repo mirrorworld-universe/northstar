@@ -889,8 +889,8 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
                 .takes_value(true)
                 .default_value(&DEFAULT_PORTAL_PROGRAM_ID)
                 .help(
-                    "Deploy the NorthStar portal program at this address and enable the ephemeral \
-                     rollup service.",
+                    "Deploy the NorthStar portal program at this address, deploy the default SPL \
+                     token bridge program, and enable the ephemeral rollup service.",
                 ),
         )
         // Sonic: Ephemeral RPC port for the rollup server

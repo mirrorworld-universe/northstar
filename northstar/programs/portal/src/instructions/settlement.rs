@@ -96,7 +96,7 @@ fn load_session(program_id: &Pubkey, session: &AccountInfo) -> Result<Session, P
 
 fn store_session(session: &AccountInfo, session_state: &Session) -> ProgramResult {
     let mut session_data = session.try_borrow_mut_data()?;
-    BorshSerialize::serialize(session_state, &mut &mut session_data[..Session::LEN]).unwrap();
+    BorshSerialize::serialize(session_state, &mut &mut session_data[..]).unwrap();
     Ok(())
 }
 
@@ -165,11 +165,7 @@ fn load_checkpoint_for_settlement(
 
 fn store_checkpoint(checkpoint: &AccountInfo, checkpoint_state: &Checkpoint) -> ProgramResult {
     let mut checkpoint_data = checkpoint.try_borrow_mut_data()?;
-    BorshSerialize::serialize(
-        checkpoint_state,
-        &mut &mut checkpoint_data[..Checkpoint::LEN],
-    )
-    .unwrap();
+    BorshSerialize::serialize(checkpoint_state, &mut &mut checkpoint_data[..]).unwrap();
     Ok(())
 }
 
@@ -195,8 +191,7 @@ fn load_cursor(
 
 fn store_cursor(cursor: &AccountInfo, cursor_state: &CheckpointCursor) -> ProgramResult {
     let mut cursor_data = cursor.try_borrow_mut_data()?;
-    BorshSerialize::serialize(cursor_state, &mut &mut cursor_data[..CheckpointCursor::LEN])
-        .unwrap();
+    BorshSerialize::serialize(cursor_state, &mut &mut cursor_data[..]).unwrap();
     Ok(())
 }
 
@@ -385,11 +380,7 @@ pub fn process_settle_account_owner(
 
     delegation_state.owner_program = owner;
     let mut delegation_data = delegation_record.try_borrow_mut_data()?;
-    BorshSerialize::serialize(
-        &delegation_state,
-        &mut &mut delegation_data[..DelegationRecord::LEN],
-    )
-    .unwrap();
+    BorshSerialize::serialize(&delegation_state, &mut &mut delegation_data[..]).unwrap();
     drop(delegation_data);
 
     session_state.settlement_accumulator = accumulate_owner_checksum(

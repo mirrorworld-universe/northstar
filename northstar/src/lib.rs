@@ -3,7 +3,7 @@ use {
     northstar_portal::{
         find_checkpoint_cursor_pda, find_checkpoint_pda,
         find_delegation_record_pda as find_portal_delegation_record_pda, Checkpoint,
-        CheckpointStatus, DepositReceipt, SettlementStatus,
+        CheckpointStatus, SettlementStatus, MAX_CHALLENGE_WINDOW_SLOTS,
     },
     portal_state::{try_parse_raw_portal_account, PortalAccount},
     solana_account::{AccountSharedData, ReadableAccount},
@@ -59,8 +59,8 @@ fn scale_l1_slot_age_for_er(l1_slot_age: usize, slot_duration: Duration) -> usiz
     (l1_slot_age * solana_clock::DEFAULT_MS_PER_SLOT as usize).div_ceil(er_slot_ms)
 }
 
-fn deposit_receipt_escrow_lamports(lamports: u64) -> u64 {
-    lamports.saturating_sub(Rent::default().minimum_balance(DepositReceipt::LEN))
+fn deposit_receipt_escrow_lamports(lamports: u64, data_len: usize) -> u64 {
+    lamports.saturating_sub(Rent::default().minimum_balance(data_len))
 }
 
 /// Fixed ER account that receives all bridged SOL withdrawals.
@@ -163,6 +163,15 @@ pub enum L1Event {
         delta: u64,
         /// Who gets credited on L2
         depositor: Pubkey,
+    },
+    /// SPL tokens locked on L1 for a delegated ER token account.
+    TokenDeposited {
+        session_pda: Pubkey,
+        session_bridge: Pubkey,
+        bridge_program: Pubkey,
+        er_token_account: Pubkey,
+        amount: u64,
+        delta: u64,
     },
 }
 
@@ -399,13 +408,29 @@ impl Manager {
         let runtime = self.runtime.as_ref()?;
         let session_pda = (*runtime.session_pda().read().unwrap())?;
         let diff = runtime.state_diff_from_l1();
+        let er_slot = runtime.bank().slot();
         let receipt_balances = runtime.settlement_receipt_balances(session_pda);
         build_settlement_plan(
             &diff,
             &runtime.delegated_accounts(),
-            runtime.bank().slot(),
+            er_slot,
             receipt_balances,
         )
+        .or_else(|| {
+            (!runtime.settlement_token_withdrawals(er_slot).is_empty()).then(|| {
+                let mut plan = SettlementPlan {
+                    er_slot,
+                    checksum: [0; 32],
+                    chunks: vec![],
+                    owner_changes: vec![],
+                    lamport_changes: vec![],
+                    receipt_balances: vec![],
+                    unsupported_changes: vec![],
+                };
+                plan.checksum = plan.recomputed_checksum();
+                plan
+            })
+        })
     }
 
     /// Build Portal settlement instructions for current data-only diff.
@@ -747,9 +772,10 @@ impl Manager {
         challenge_window_slots: u64,
         recent_blockhash: Hash,
     ) -> Option<Vec<Transaction>> {
-        let challenge_window_slots = challenge_window_slots
-            .max(1)
-            .max(DEFAULT_CHECKPOINT_CHALLENGE_WINDOW_SLOTS);
+        let challenge_window_slots = challenge_window_slots.clamp(
+            DEFAULT_CHECKPOINT_CHALLENGE_WINDOW_SLOTS,
+            MAX_CHALLENGE_WINDOW_SLOTS,
+        );
         if let Some((checkpoint_pda, checkpoint)) =
             self.active_checkpoint_for_session(l1_bank, session_pda)
         {
@@ -898,13 +924,31 @@ impl Manager {
         .then_some((checkpoint_pda, checkpoint))
     }
 
-    fn challenge_resolution_deadline(checkpoint: &Checkpoint) -> Option<u64> {
-        let challenge_window_slots = checkpoint
-            .challenge_deadline_l1_slot
-            .checked_sub(checkpoint.proposed_at_l1_slot)?;
-        checkpoint
-            .challenged_at_l1_slot
-            .checked_add(challenge_window_slots)
+    fn settlement_transactions_for_plan(
+        &self,
+        plan: &SettlementPlan,
+        session_pda: Pubkey,
+        recent_blockhash: Hash,
+    ) -> Vec<Transaction> {
+        let mut transactions = plan.portal_transactions(
+            self.config.portal_program_id,
+            session_pda,
+            self.config.manager_account.as_ref(),
+            recent_blockhash,
+        );
+        if let Some(runtime) = &self.runtime {
+            let token_withdrawals = runtime.settlement_token_withdrawals(plan.er_slot);
+            transactions.extend(settlement::token_withdrawal_transactions(
+                &token_withdrawals,
+                self.config.portal_program_id,
+                session_pda,
+                plan.er_slot,
+                plan.checksum,
+                self.config.manager_account.as_ref(),
+                recent_blockhash,
+            ));
+        }
+        transactions
     }
 
     fn transactions_for_existing_checkpoint(
@@ -956,10 +1000,9 @@ impl Manager {
                     self.config.manager_account.as_ref(),
                     recent_blockhash,
                 )];
-                transactions.extend(plan.portal_transactions(
-                    self.config.portal_program_id,
+                transactions.extend(self.settlement_transactions_for_plan(
+                    plan,
                     session_pda,
-                    self.config.manager_account.as_ref(),
                     recent_blockhash,
                 ));
                 Some(transactions)
@@ -969,50 +1012,18 @@ impl Manager {
                     "Portal checkpoint committed; settling er_slot={} checksum={:?}",
                     plan.er_slot, plan.checksum,
                 );
-                Some(plan.portal_transactions(
-                    self.config.portal_program_id,
-                    session_pda,
-                    self.config.manager_account.as_ref(),
-                    recent_blockhash,
-                ))
+                Some(self.settlement_transactions_for_plan(plan, session_pda, recent_blockhash))
             }
             CheckpointStatus::Challenged => {
-                let Some(resolution_deadline) = Self::challenge_resolution_deadline(&checkpoint)
-                else {
-                    warn!(
-                        "Portal checkpoint has invalid challenge timing: \
-                         checkpoint={checkpoint_pda}"
-                    );
-                    return None;
-                };
-                if l1_bank.slot() < resolution_deadline {
-                    warn!(
-                        "Portal checkpoint challenged; waiting for challenge timeout: er_slot={} \
-                         checkpoint={} current_l1_slot={} resolution_deadline={}",
-                        plan.er_slot,
-                        checkpoint_pda,
-                        l1_bank.slot(),
-                        resolution_deadline,
-                    );
-                    return None;
-                }
-                info!(
-                    "Portal challenged checkpoint timed out; committing er_slot={} checksum={:?}",
-                    plan.er_slot, plan.checksum,
+                warn!(
+                    "Portal checkpoint challenged; explicit resolution required: er_slot={} \
+                     checkpoint={} current_l1_slot={} hard_deadline={}",
+                    plan.er_slot,
+                    checkpoint_pda,
+                    l1_bank.slot(),
+                    checkpoint.challenge_deadline_l1_slot,
                 );
-                let mut transactions = vec![plan.checkpoint_commit_transaction(
-                    self.config.portal_program_id,
-                    session_pda,
-                    self.config.manager_account.as_ref(),
-                    recent_blockhash,
-                )];
-                transactions.extend(plan.portal_transactions(
-                    self.config.portal_program_id,
-                    session_pda,
-                    self.config.manager_account.as_ref(),
-                    recent_blockhash,
-                ));
-                Some(transactions)
+                None
             }
             CheckpointStatus::Settled => {
                 debug!(
@@ -1091,10 +1102,14 @@ impl Manager {
                     .and_then(|parent| parent.get_account(&pubkey))
                     .and_then(|account| {
                         portal_state::try_parse_raw_portal_account(account.data())?;
-                        Some(deposit_receipt_escrow_lamports(account.lamports()))
+                        Some(deposit_receipt_escrow_lamports(
+                            account.lamports(),
+                            account.data().len(),
+                        ))
                     })
                     .unwrap_or(0);
-                let escrow = deposit_receipt_escrow_lamports(account.lamports());
+                let escrow =
+                    deposit_receipt_escrow_lamports(account.lamports(), account.data().len());
 
                 (escrow > prev_escrow).then(|| L1Event::FeeDeposited {
                     session_pda: receipt.session.into(),
@@ -1105,13 +1120,81 @@ impl Manager {
             }
             Some(PortalAccount::Checkpoint(_))
             | Some(PortalAccount::CheckpointCursor(_))
-            | Some(PortalAccount::StepProofAccount(_)) => None,
+            | Some(PortalAccount::Challenge(_))
+            | Some(PortalAccount::DataAvailabilityProof(_))
+            | Some(PortalAccount::StepProofAccount(_))
+            | Some(PortalAccount::SessionBridge(_)) => None,
             None => {
                 // Unrecognized — log and skip
                 debug!("Unrecognized portal account at {pubkey}");
                 None
             }
         }
+    }
+
+    fn parse_token_bridge_event(
+        &self,
+        bank: &Bank,
+        pubkey: Pubkey,
+        account: &AccountSharedData,
+    ) -> Option<L1Event> {
+        let receipt =
+            borsh::from_slice::<northstar_token_bridge::state::TokenDepositReceipt>(account.data())
+                .ok()?;
+        if !receipt.is_valid() {
+            return None;
+        }
+
+        let session_bridge_key = Pubkey::new_from_array(receipt.session_bridge);
+        let session_bridge_account = bank.get_account(&session_bridge_key)?;
+        if session_bridge_account.owner() != &self.config.portal_program_id {
+            return None;
+        }
+        let PortalAccount::SessionBridge(session_bridge) =
+            portal_state::try_parse_raw_portal_account(session_bridge_account.data())?
+        else {
+            return None;
+        };
+        let bridge_program = Pubkey::new_from_array(session_bridge.bridge_program);
+        if account.owner() != &bridge_program {
+            return None;
+        }
+        let er_token_account = Pubkey::new_from_array(receipt.er_token_account);
+        let expected_receipt = northstar_token_bridge::find_token_deposit_receipt_pda(
+            &bridge_program,
+            &session_bridge_key,
+            &er_token_account,
+        )
+        .0;
+        if pubkey != expected_receipt {
+            return None;
+        }
+
+        let previous_balance = bank
+            .parent()
+            .and_then(|parent| parent.get_account(&pubkey))
+            .filter(|previous| previous.owner() == &bridge_program)
+            .and_then(|previous| {
+                borsh::from_slice::<northstar_token_bridge::state::TokenDepositReceipt>(
+                    previous.data(),
+                )
+                .ok()
+            })
+            .filter(|previous| {
+                previous.is_valid()
+                    && previous.session_bridge == receipt.session_bridge
+                    && previous.er_token_account == receipt.er_token_account
+            })
+            .map(|previous| previous.balance)
+            .unwrap_or(0);
+        (receipt.balance > previous_balance).then_some(L1Event::TokenDeposited {
+            session_pda: Pubkey::new_from_array(session_bridge.session),
+            session_bridge: session_bridge_key,
+            bridge_program,
+            er_token_account,
+            amount: receipt.balance,
+            delta: receipt.balance - previous_balance,
+        })
     }
 
     pub fn get_l1_events(&self, bank: &Bank) -> Vec<L1Event> {
@@ -1130,6 +1213,7 @@ impl Manager {
                             parent_account.owner() == &self.config.portal_program_id
                         })
                         .and_then(|_| self.parse_zeroed_account(bank, &pubkey))
+                        .or_else(|| self.parse_token_bridge_event(bank, pubkey, &account))
                 }
             })
             .collect()
@@ -1330,6 +1414,7 @@ impl Manager {
                 accounts: vec![],
                 touched_accounts: vec![],
                 payout_events: vec![],
+                token_payout_events: vec![],
                 processed_signatures: vec![],
             });
         }
@@ -1340,10 +1425,11 @@ impl Manager {
             Ok(outcome) => {
                 match outcome.disposition {
                     RecoveryDisposition::Recovered => info!(
-                        "Recovered persisted unsettled ER state: accounts={}, payouts={}, \
-                         signatures={}",
+                        "Recovered persisted unsettled ER state: accounts={}, SOL payouts={}, \
+                         token payouts={}, signatures={}",
                         outcome.state.accounts.len(),
                         outcome.state.payout_events.len(),
+                        outcome.state.token_payout_events.len(),
                         outcome.state.processed_signatures.len(),
                     ),
                     RecoveryDisposition::DroppedIdentityMismatch => warn!(
@@ -1604,6 +1690,22 @@ impl Manager {
         }
     }
 
+    pub fn credit_token_deposit(
+        &self,
+        bridge_program: &Pubkey,
+        session_bridge: &Pubkey,
+        er_token_account: &Pubkey,
+        amount: u64,
+    ) {
+        if let Some(runtime) = &self.runtime {
+            if !runtime.is_active() {
+                warn!("Ignoring token deposit for {er_token_account}: no active session");
+                return;
+            }
+            runtime.credit_token_deposit(bridge_program, session_bridge, er_token_account, amount);
+        }
+    }
+
     /// Re-anchor the active ER onto the latest L1 block while preserving the
     /// in-memory ER account overlay.
     pub fn reanchor_to_l1_parent(&mut self, bank: Arc<Bank>) {
@@ -1673,8 +1775,8 @@ mod portal_e2e_tests {
         super::*,
         agave_logger::setup,
         northstar_portal::{
-            ChallengeCheckpoint, Checkpoint, CheckpointCursor, CheckpointStatus, CommitCheckpoint,
-            DelegationRecord, OpenSession, PortalInstruction, ProposeCheckpoint, Session,
+            Checkpoint, CheckpointCursor, CheckpointStatus, CommitCheckpoint, DelegationRecord,
+            OpenChallenge, OpenSession, PortalInstruction, ProposeCheckpoint, Session,
         },
         solana_account::{AccountSharedData, WritableAccount},
         solana_accounts_db::{
@@ -1688,7 +1790,7 @@ mod portal_e2e_tests {
         solana_keypair::{Keypair, Signer},
         solana_lattice_hash::lt_hash::LtHash,
         solana_leader_schedule::SlotLeader,
-        solana_net_utils::{sockets::bind_to, SocketAddrSpace},
+        solana_net_utils::SocketAddrSpace,
         solana_rent::Rent,
         solana_rpc_client::rpc_client::RpcClient,
         solana_runtime::{
@@ -1701,7 +1803,6 @@ mod portal_e2e_tests {
         solana_transaction::Transaction,
         std::{
             collections::HashSet,
-            net::{IpAddr, Ipv4Addr, TcpListener},
             sync::RwLock,
             time::{Duration, Instant},
         },
@@ -1898,8 +1999,13 @@ mod portal_e2e_tests {
             discriminator: Checkpoint::DISCRIMINATOR,
             session: session.to_bytes(),
             er_slot,
+            step_count: 1,
             previous_state_root: [0; 32],
             new_state_root: [0; 32],
+            trace_root: effect_commitment,
+            tx_effect_root: effect_commitment,
+            readonly_l1_root: [0; 32],
+            da_commitment: effect_commitment,
             effect_commitment,
             proposer: proposer.to_bytes(),
             proposed_at_l1_slot: bank.slot(),
@@ -1948,8 +2054,13 @@ mod portal_e2e_tests {
         let (cursor_pda, _) = find_checkpoint_cursor_pda(&program_id, &session_pda);
         let ix = PortalInstruction::ProposeCheckpoint(ProposeCheckpoint {
             er_slot,
+            step_count: 1,
             previous_state_root: [0; 32],
             new_state_root: [1; 32],
+            trace_root: effect_commitment,
+            tx_effect_root: effect_commitment,
+            readonly_l1_root: [0; 32],
+            da_commitment: effect_commitment,
             effect_commitment,
             challenge_window_slots,
         });
@@ -1996,13 +2107,21 @@ mod portal_e2e_tests {
         er_slot: u64,
     ) -> Instruction {
         let (checkpoint_pda, _) = find_checkpoint_pda(&program_id, &session_pda, er_slot);
-        let ix = PortalInstruction::ChallengeCheckpoint(ChallengeCheckpoint { er_slot });
+        let (challenge, _) = northstar_portal::find_challenge_pda(
+            &program_id.to_bytes(),
+            &checkpoint_pda.to_bytes(),
+        );
+        let (da_proof, _) = northstar_portal::find_da_proof_pda(&program_id.to_bytes(), &challenge);
+        let ix = PortalInstruction::OpenChallenge(OpenChallenge { er_slot });
         Instruction {
             program_id,
             accounts: vec![
-                AccountMeta::new_readonly(challenger, true),
+                AccountMeta::new(challenger, true),
                 AccountMeta::new_readonly(session_pda, false),
                 AccountMeta::new(checkpoint_pda, false),
+                AccountMeta::new(Pubkey::new_from_array(challenge), false),
+                AccountMeta::new(Pubkey::new_from_array(da_proof), false),
+                AccountMeta::new_readonly(system_program::id(), false),
             ],
             data: borsh::to_vec(&ix).unwrap(),
         }
@@ -2072,13 +2191,7 @@ mod portal_e2e_tests {
     }
 
     fn find_free_addr() -> SocketAddr {
-        loop {
-            let udp = bind_to(IpAddr::V4(Ipv4Addr::LOCALHOST), 0).unwrap();
-            let addr = udp.local_addr().unwrap();
-            if TcpListener::bind(addr).is_ok() {
-                return addr;
-            }
-        }
+        crate::ephemeral_runtime::find_free_test_addr()
     }
 
     fn wait_for_rpc_ready(rpc_client: &RpcClient) {
@@ -2846,6 +2959,78 @@ mod portal_e2e_tests {
     }
 
     #[test]
+    fn test_token_deposit_receipt_emits_l1_event() {
+        setup();
+        let (bank, _bank_forks, portal_program, _mint_keypair) = setup_bank_with_portal();
+        let bridge_program = Pubkey::new_unique();
+        let session = Pubkey::new_unique();
+        let session_bridge = Pubkey::new_unique();
+        let er_token_account = Pubkey::new_unique();
+        let mint = Pubkey::new_unique();
+        let bridge_state = northstar_portal::SessionBridge {
+            discriminator: northstar_portal::SessionBridge::DISCRIMINATOR,
+            session: session.to_bytes(),
+            mint: mint.to_bytes(),
+            bridge_program: bridge_program.to_bytes(),
+            vault: Pubkey::new_unique().to_bytes(),
+            token_program: Pubkey::new_unique().to_bytes(),
+            bump: 255,
+        };
+        let bridge_data = borsh::to_vec(&bridge_state).unwrap();
+        let mut bridge_account =
+            AccountSharedData::new(1_000_000, bridge_data.len(), &portal_program);
+        bridge_account
+            .data_as_mut_slice()
+            .copy_from_slice(&bridge_data);
+        bank.store_account(&session_bridge, &bridge_account);
+        bank.freeze();
+
+        let deposit_bank = Bank::new_from_parent(bank, SlotLeader::new_unique(), 2);
+        let (deposit_receipt, bump) = northstar_token_bridge::find_token_deposit_receipt_pda(
+            &bridge_program,
+            &session_bridge,
+            &er_token_account,
+        );
+        let receipt_state = northstar_token_bridge::state::TokenDepositReceipt {
+            discriminator: northstar_token_bridge::state::TokenDepositReceipt::DISCRIMINATOR,
+            session_bridge: session_bridge.to_bytes(),
+            er_token_account: er_token_account.to_bytes(),
+            balance: 600_000_000,
+            withdrawn: 0,
+            bump,
+        };
+        let receipt_data = borsh::to_vec(&receipt_state).unwrap();
+        let mut receipt_account =
+            AccountSharedData::new(1_000_000, receipt_data.len(), &bridge_program);
+        receipt_account
+            .data_as_mut_slice()
+            .copy_from_slice(&receipt_data);
+        deposit_bank.store_account(&deposit_receipt, &receipt_account);
+        deposit_bank.freeze();
+
+        let manager = Manager::new(ManagerConfig {
+            portal_program_id: portal_program,
+            manager_account: Arc::new(Keypair::new()),
+            checkpoint_plan_dir: None,
+        });
+        let events = manager.get_l1_events(&deposit_bank);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            L1Event::TokenDeposited {
+                session_pda,
+                session_bridge: event_session_bridge,
+                bridge_program: event_bridge,
+                er_token_account: event_account,
+                amount: 600_000_000,
+                delta: 600_000_000,
+            } if *session_pda == session
+                && *event_session_bridge == session_bridge
+                && *event_bridge == bridge_program
+                && *event_account == er_token_account
+        )));
+    }
+
+    #[test]
     fn test_e2e_deposit_fee_detected() {
         setup();
 
@@ -3093,7 +3278,10 @@ mod portal_e2e_tests {
         };
         assert_eq!(receipt.balance, deposit_amount - withdraw_amount);
         assert_eq!(
-            deposit_receipt_escrow_lamports(receipt_account.lamports()),
+            deposit_receipt_escrow_lamports(
+                receipt_account.lamports(),
+                receipt_account.data().len(),
+            ),
             deposit_amount - withdraw_amount
         );
     }
@@ -3314,7 +3502,7 @@ mod portal_e2e_tests {
             delegated_account,
             _owner_program,
             l1_data,
-            er_data,
+            _er_data,
         ) = setup_checkpoint_flow_fixture();
         let due_slot = bank.slot() + 10;
         let due_bank = Bank::new_from_parent(bank, SlotLeader::default(), due_slot);
@@ -3431,39 +3619,17 @@ mod portal_e2e_tests {
         let expired_bank = Bank::new_from_parent(
             Arc::new(original_deadline_bank),
             SlotLeader::default(),
-            Manager::challenge_resolution_deadline(&challenged_checkpoint).unwrap(),
+            challenged_checkpoint.challenge_deadline_l1_slot + 1,
         );
-        let (_er_slot, _checksum, transactions) = manager
-            .settlement_transactions_if_due(&expired_bank, expired_bank.last_blockhash())
-            .expect("challenge-timeout checkpoint should produce commit plus settlement");
-        assert!(matches!(
-            first_portal_instruction(&transactions[0]),
-            PortalInstruction::CommitCheckpoint(_)
-        ));
-        assert!(transactions.iter().skip(1).any(|transaction| matches!(
-            first_portal_instruction(transaction),
-            PortalInstruction::BeginSettlement(_)
-        )));
-
-        expired_bank.process_transaction(&transactions[0]).unwrap();
-        assert_eq!(
-            expired_bank.get_account(&delegated_account).unwrap().data(),
-            l1_data.as_slice(),
-            "checkpoint commit must not mutate delegated L1 data",
-        );
-        for transaction in transactions.iter().skip(1) {
-            expired_bank.process_transaction(transaction).unwrap();
-        }
-        assert_eq!(
-            expired_bank.get_account(&delegated_account).unwrap().data(),
-            er_data.as_slice(),
-            "delegated L1 data should change only after checkpoint-backed settlement",
-        );
-        let _ =
-            manager.settlement_transactions_if_due(&expired_bank, expired_bank.last_blockhash());
         assert!(
-            !checkpoint_plan_path.exists(),
-            "settled checkpoint should remove durable settlement plan"
+            manager
+                .settlement_transactions_if_due(&expired_bank, expired_bank.last_blockhash())
+                .is_none(),
+            "challenged checkpoint must remain blocked until explicit resolution"
+        );
+        assert!(
+            checkpoint_plan_path.exists(),
+            "unresolved checkpoint must retain durable settlement plan"
         );
         manager.shutdown_runtime();
 
@@ -4322,7 +4488,7 @@ mod ephemeral_accounts_background_service_regression {
         solana_keypair::Keypair,
         solana_leader_schedule::SlotLeader,
         solana_message::Message,
-        solana_net_utils::{sockets::bind_to, SocketAddrSpace},
+        solana_net_utils::SocketAddrSpace,
         solana_pubkey::Pubkey,
         solana_runtime::{
             accounts_background_service::{
@@ -4338,7 +4504,6 @@ mod ephemeral_accounts_background_service_regression {
         solana_system_interface::instruction::transfer,
         solana_transaction::Transaction,
         std::{
-            net::{IpAddr, Ipv4Addr, TcpListener},
             num::NonZeroU64,
             sync::{
                 atomic::{AtomicBool, Ordering},
@@ -4351,13 +4516,7 @@ mod ephemeral_accounts_background_service_regression {
     };
 
     fn find_free_addr() -> std::net::SocketAddr {
-        loop {
-            let udp = bind_to(IpAddr::V4(Ipv4Addr::LOCALHOST), 0).unwrap();
-            let addr = udp.local_addr().unwrap();
-            if TcpListener::bind(addr).is_ok() {
-                return addr;
-            }
-        }
+        crate::ephemeral_runtime::find_free_test_addr()
     }
 
     fn cluster_info() -> Arc<ClusterInfo> {

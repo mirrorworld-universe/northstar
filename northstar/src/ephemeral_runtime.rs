@@ -2,7 +2,10 @@ use {
     crate::{
         ephemeral_tpu::EphemeralTpu,
         ephemeral_tx_client::{EphemeralTransactionClient, EphemeralTransactionClientOptions},
-        settlement::{ReceiptBalanceSettlement, WithdrawalPayoutEvent},
+        settlement::{
+            ReceiptBalanceSettlement, TokenWithdrawalPayoutEvent, TokenWithdrawalSettlement,
+            WithdrawalPayoutEvent,
+        },
         slot_advancer::SlotAdvancer,
         unsettled_state::{
             RecoveredUnsettledState, RecoveryOutcome, UnsettledSessionIdentity, UnsettledStateStore,
@@ -73,6 +76,29 @@ impl DropCallback for NoopDropCallback {
 }
 
 const MAX_WITHDRAWAL_PAYOUT_EVENTS: usize = 10_000;
+
+#[cfg(test)]
+static TEST_SOCKET_ADDRS: Mutex<Vec<SocketAddr>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) fn find_free_test_addr() -> SocketAddr {
+    loop {
+        let udp = solana_net_utils::sockets::bind_to(IpAddr::V4(Ipv4Addr::LOCALHOST), 0).unwrap();
+        let addr = udp.local_addr().unwrap();
+        if std::net::TcpListener::bind(addr).is_err() {
+            continue;
+        }
+
+        // Test threads probe ports concurrently. Retain chosen addresses so another
+        // thread cannot reuse a just-probed port before its runtime binds it.
+        let mut allocated = TEST_SOCKET_ADDRS.lock().unwrap();
+        if allocated.contains(&addr) {
+            continue;
+        }
+        allocated.push(addr);
+        return addr;
+    }
+}
 
 #[cfg(test)]
 #[allow(clippy::type_complexity)]
@@ -172,6 +198,7 @@ pub struct EphemeralRuntime {
     /// Successful ER SOL withdrawal transfers paired with payout recipient memos.
     withdrawal_payout_events: Arc<RwLock<Vec<WithdrawalPayoutEvent>>>,
     unsettled_state_store: Arc<UnsettledStateStore>,
+    token_withdrawal_payout_events: Arc<RwLock<Vec<TokenWithdrawalPayoutEvent>>>,
     portal_program_id: Pubkey,
 
     _tx_client: EphemeralTransactionClient,
@@ -566,6 +593,7 @@ impl EphemeralRuntime {
         let er_history_store = Arc::new(ErHistoryStore::new(er_history_max_retained_slots));
         let withdrawal_payout_events = Arc::new(RwLock::new(Vec::new()));
         let unsettled_state_store = Arc::new(UnsettledStateStore::default());
+        let token_withdrawal_payout_events = Arc::new(RwLock::new(Vec::new()));
 
         let ledger_dir = TempDir::new().map_err(|e| e.to_string())?;
         let blockstore = Arc::new(Blockstore::open(ledger_dir.path()).map_err(|e| e.to_string())?);
@@ -597,6 +625,7 @@ impl EphemeralRuntime {
                 portal_program_id,
                 session_pda.clone(),
                 withdrawal_payout_events.clone(),
+                token_withdrawal_payout_events.clone(),
             )
             .with_unsettled_state_store(unsettled_state_store.clone()),
         );
@@ -781,6 +810,7 @@ impl EphemeralRuntime {
             er_history_store,
             withdrawal_payout_events,
             unsettled_state_store,
+            token_withdrawal_payout_events,
             portal_program_id,
 
             settings,
@@ -861,6 +891,7 @@ impl EphemeralRuntime {
         let mut session_pda = self.session_pda.write().unwrap();
         if *session_pda != Some(pda) {
             self.withdrawal_payout_events.write().unwrap().clear();
+            self.token_withdrawal_payout_events.write().unwrap().clear();
             self._tx_client.clear_processed_signatures();
         }
         *session_pda = Some(pda);
@@ -893,6 +924,7 @@ impl EphemeralRuntime {
         if recovered.accounts.is_empty()
             && recovered.touched_accounts.is_empty()
             && recovered.payout_events.is_empty()
+            && recovered.token_payout_events.is_empty()
             && recovered.processed_signatures.is_empty()
         {
             return;
@@ -911,6 +943,7 @@ impl EphemeralRuntime {
             .unwrap()
             .extend(recovered.touched_accounts);
         *self.withdrawal_payout_events.write().unwrap() = recovered.payout_events;
+        *self.token_withdrawal_payout_events.write().unwrap() = recovered.token_payout_events;
         self._tx_client
             .restore_processed_signatures(recovered.processed_signatures);
         self.publish_bank_for_rpc();
@@ -928,10 +961,14 @@ impl EphemeralRuntime {
         touched_accounts: &[Pubkey],
         payout_events: Option<&[WithdrawalPayoutEvent]>,
     ) {
-        if let Err(err) =
-            self.unsettled_state_store
-                .append_update(accounts, touched_accounts, payout_events, &[])
-        {
+        let token_payout_events = self.token_withdrawal_payout_events.read().unwrap().clone();
+        if let Err(err) = self.unsettled_state_store.append_update(
+            accounts,
+            touched_accounts,
+            payout_events,
+            Some(&token_payout_events),
+            &[],
+        ) {
             self.active.store(false, Ordering::Relaxed);
             warn!("Failed to persist ER state mutation; deactivating ER: {err}");
         }
@@ -1542,8 +1579,7 @@ impl EphemeralRuntime {
                     return None;
                 };
                 let escrow_balance = receipt_account.lamports().saturating_sub(
-                    solana_rent::Rent::default()
-                        .minimum_balance(northstar_portal::DepositReceipt::LEN),
+                    solana_rent::Rent::default().minimum_balance(receipt_account.data().len()),
                 );
                 Some((
                     *er_source,
@@ -1639,6 +1675,96 @@ impl EphemeralRuntime {
                 .then_with(|| a.l1_recipient.to_bytes().cmp(&b.l1_recipient.to_bytes()))
         });
         receipt_balances
+    }
+
+    pub fn settlement_token_withdrawals(
+        &self,
+        through_er_slot: Slot,
+    ) -> Vec<TokenWithdrawalSettlement> {
+        let mut events = self
+            .token_withdrawal_payout_events
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|event| event.er_slot <= through_er_slot)
+            .cloned()
+            .collect::<Vec<_>>();
+        events.sort_by(|a, b| {
+            a.er_slot
+                .cmp(&b.er_slot)
+                .then_with(|| a.signature.to_string().cmp(&b.signature.to_string()))
+                .then_with(|| {
+                    a.er_token_account
+                        .to_bytes()
+                        .cmp(&b.er_token_account.to_bytes())
+                })
+        });
+        let mut cumulative_by_bridge = HashMap::<Pubkey, u64>::new();
+        let mut settlements = Vec::new();
+        for event in events {
+            let Some(session_bridge_account) =
+                self.l1_anchor_bank.get_account(&event.session_bridge)
+            else {
+                continue;
+            };
+            let Some(crate::portal_state::PortalAccount::SessionBridge(bridge)) =
+                crate::portal_state::try_parse_raw_portal_account(session_bridge_account.data())
+            else {
+                continue;
+            };
+            if Pubkey::new_from_array(bridge.bridge_program) != event.bridge_program {
+                continue;
+            }
+            let vault = Pubkey::new_from_array(bridge.vault);
+            let Some(vault_account) = self.l1_anchor_bank.get_account(&vault) else {
+                continue;
+            };
+            let Ok(vault_state) = borsh::from_slice::<northstar_token_bridge::state::TokenVault>(
+                vault_account.data(),
+            ) else {
+                continue;
+            };
+            if !vault_state.is_valid()
+                || vault_state.session_bridge != event.session_bridge.to_bytes()
+            {
+                continue;
+            }
+
+            let cumulative = cumulative_by_bridge
+                .entry(event.session_bridge)
+                .or_insert(0);
+            let Some(next_cumulative) = cumulative.checked_add(event.amount) else {
+                continue;
+            };
+            if next_cumulative > vault_state.deposited {
+                warn!(
+                    "Ignoring token withdrawal exceeding vault deposits: bridge={}, withdrawn={}, \
+                     deposited={}",
+                    event.session_bridge, next_cumulative, vault_state.deposited
+                );
+                continue;
+            }
+            let payout = next_cumulative.saturating_sub((*cumulative).max(vault_state.withdrawn));
+            *cumulative = next_cumulative;
+            if payout == 0 {
+                continue;
+            }
+
+            settlements.push(TokenWithdrawalSettlement {
+                bridge_program: event.bridge_program,
+                session_bridge: event.session_bridge,
+                er_token_account: event.er_token_account,
+                vault,
+                vault_token_account: Pubkey::new_from_array(vault_state.vault_token_account),
+                l1_destination_token_account: event.l1_destination_token_account,
+                mint: Pubkey::new_from_array(bridge.mint),
+                token_program: Pubkey::new_from_array(bridge.token_program),
+                amount: payout,
+                withdrawn: next_cumulative,
+                decimals: event.decimals,
+            });
+        }
+        settlements
     }
 
     /// Returns the initial snapshot of a delegated account.
@@ -1836,6 +1962,28 @@ impl EphemeralRuntime {
         l1_bank: Option<&Bank>,
     ) {
         let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
+        if let Some(existing) = self
+            .er_account_overlay
+            .read()
+            .unwrap()
+            .get(delegated_account)
+        {
+            let existing_token =
+                borsh::from_slice::<northstar_token_bridge::state::ErTokenAccount>(existing.data());
+            let incoming_token = borsh::from_slice::<northstar_token_bridge::state::ErTokenAccount>(
+                account_data.data(),
+            );
+            if matches!(
+                (existing_token, incoming_token),
+                (Ok(existing), Ok(incoming)) if existing.amount > incoming.amount
+            ) {
+                debug!(
+                    "Ignoring stale L1 hydration for unsettled ER token account \
+                     {delegated_account}"
+                );
+                return;
+            }
+        }
         let bank = self.bank();
         let mut er_account = account_data.clone();
         if let Some(owner_program) = owner_program {
@@ -2081,6 +2229,80 @@ impl EphemeralRuntime {
             lamports, depositor, base_balance, new_balance
         );
     }
+    pub fn credit_token_deposit(
+        &self,
+        bridge_program: &Pubkey,
+        session_bridge: &Pubkey,
+        er_token_account: &Pubkey,
+        amount: u64,
+    ) -> bool {
+        let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
+        if !self
+            .delegated_accounts
+            .read()
+            .unwrap()
+            .contains(er_token_account)
+        {
+            warn!(
+                "Ignoring token deposit for non-delegated ER account {}",
+                er_token_account
+            );
+            return false;
+        }
+
+        let bank = self.bank();
+        let Some(mut account) = bank.get_account(er_token_account) else {
+            warn!("Ignoring token deposit for missing ER account {er_token_account}");
+            return false;
+        };
+        if account.owner() != bridge_program {
+            warn!(
+                "Ignoring token deposit for {} owned by {}, expected {}",
+                er_token_account,
+                account.owner(),
+                bridge_program
+            );
+            return false;
+        }
+        let Ok(mut state) =
+            borsh::from_slice::<northstar_token_bridge::state::ErTokenAccount>(account.data())
+        else {
+            warn!("Ignoring token deposit for invalid ER token account {er_token_account}");
+            return false;
+        };
+        if !state.is_valid() || state.session_bridge != session_bridge.to_bytes() {
+            return false;
+        }
+        let Some(new_amount) = state.amount.checked_add(amount) else {
+            warn!("Ignoring overflowing token deposit for {er_token_account}");
+            return false;
+        };
+        state.amount = new_amount;
+        let Ok(data) = borsh::to_vec(&state) else {
+            return false;
+        };
+        if data.len() != account.data().len() {
+            return false;
+        }
+        account.data_as_mut_slice().copy_from_slice(&data);
+
+        bank.store_account(er_token_account, &account);
+        self.er_account_overlay
+            .write()
+            .unwrap()
+            .insert(*er_token_account, account.clone());
+        self.touched_accounts
+            .write()
+            .unwrap()
+            .insert(*er_token_account);
+        self.persist_unsettled_update(&[(*er_token_account, account)], &[*er_token_account], None);
+        self.publish_bank_for_rpc();
+        info!(
+            "Credited {} tokens to {} on ER (new amount: {})",
+            amount, er_token_account, new_amount
+        );
+        true
+    }
 }
 
 impl Drop for EphemeralRuntime {
@@ -2110,7 +2332,7 @@ mod tests {
         solana_keypair::{Keypair, Signer},
         solana_lattice_hash::lt_hash::LtHash,
         solana_message::{Message, SanitizedMessage},
-        solana_net_utils::{sockets::bind_to, SocketAddrSpace},
+        solana_net_utils::SocketAddrSpace,
         solana_rpc_client::rpc_client::RpcClient,
         solana_rpc_client_types::config::{
             CommitmentConfig, RpcSendTransactionConfig, RpcSimulateTransactionConfig,
@@ -2128,7 +2350,6 @@ mod tests {
         },
         std::{
             collections::HashSet,
-            net::{IpAddr, Ipv4Addr, TcpListener},
             sync::{atomic::AtomicU64, mpsc},
             time::{Duration, Instant},
         },
@@ -2162,13 +2383,7 @@ mod tests {
     }
 
     fn find_free_addr() -> SocketAddr {
-        loop {
-            let udp = bind_to(IpAddr::V4(Ipv4Addr::LOCALHOST), 0).unwrap();
-            let addr = udp.local_addr().unwrap();
-            if TcpListener::bind(addr).is_ok() {
-                return addr;
-            }
-        }
+        crate::ephemeral_runtime::find_free_test_addr()
     }
 
     fn wait_for_rpc_ready(rpc_client: &RpcClient) {
@@ -2242,16 +2457,15 @@ mod tests {
             withdrawn,
             bump,
         };
+        let receipt_data = borsh::to_vec(&receipt).unwrap();
         let mut account = AccountSharedData::new(
             solana_rent::Rent::default()
-                .minimum_balance(DepositReceipt::LEN)
+                .minimum_balance(receipt_data.len())
                 .saturating_add(balance),
-            DepositReceipt::LEN,
+            receipt_data.len(),
             portal_program_id,
         );
-        account
-            .data_as_mut_slice()
-            .copy_from_slice(&borsh::to_vec(&receipt).unwrap());
+        account.data_as_mut_slice().copy_from_slice(&receipt_data);
         bank.store_account(&receipt_pda, &account);
     }
 
@@ -2270,7 +2484,7 @@ mod tests {
         let mut receipt = bank.get_account(&receipt_pda).unwrap();
         receipt.set_lamports(
             solana_rent::Rent::default()
-                .minimum_balance(DepositReceipt::LEN)
+                .minimum_balance(receipt.data().len())
                 .saturating_add(escrow_lamports),
         );
         bank.store_account(&receipt_pda, &receipt);
@@ -2510,6 +2724,167 @@ mod tests {
         assert_eq!(er_account.lamports(), 7);
         assert_eq!(er_account.owner(), &system_program::id());
         assert!(er_account.data().is_empty());
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_token_deposit_credits_delegated_er_account() {
+        let parent_bank = create_test_bank();
+        let bridge_program = Pubkey::new_unique();
+        let er_token_account = Pubkey::new_unique();
+        let session_bridge = Pubkey::new_unique();
+        let state = northstar_token_bridge::state::ErTokenAccount {
+            discriminator: northstar_token_bridge::state::ErTokenAccount::DISCRIMINATOR,
+            session_bridge: session_bridge.to_bytes(),
+            owner: Pubkey::new_unique().to_bytes(),
+            mint: Pubkey::new_unique().to_bytes(),
+            amount: 0,
+            bump: 255,
+        };
+        let data = borsh::to_vec(&state).unwrap();
+        let mut account = AccountSharedData::new(1_000_000, data.len(), &bridge_program);
+        account.data_as_mut_slice().copy_from_slice(&data);
+        parent_bank.store_account(&er_token_account, &account);
+        parent_bank.freeze();
+
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.handle_delegation(&er_token_account, account.clone());
+
+        assert!(runtime.credit_token_deposit(
+            &bridge_program,
+            &session_bridge,
+            &er_token_account,
+            600_000_000,
+        ));
+        let credited = runtime.bank().get_account(&er_token_account).unwrap();
+        let credited_state =
+            borsh::from_slice::<northstar_token_bridge::state::ErTokenAccount>(credited.data())
+                .unwrap();
+        assert_eq!(credited_state.amount, 600_000_000);
+
+        runtime.handle_delegation(&er_token_account, account);
+        let rehydrated = runtime.bank().get_account(&er_token_account).unwrap();
+        let rehydrated_state =
+            borsh::from_slice::<northstar_token_bridge::state::ErTokenAccount>(rehydrated.data())
+                .unwrap();
+        assert_eq!(
+            rehydrated_state.amount, 600_000_000,
+            "duplicate L1 delegation hydration must preserve unsettled ER state",
+        );
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_token_withdrawal_settles_from_session_vault_after_er_transfer() {
+        let parent_bank = create_test_bank();
+        let portal_program = Pubkey::new_unique();
+        let bridge_program = Pubkey::new_unique();
+        let session = Pubkey::new_unique();
+        let session_bridge = Pubkey::new_unique();
+        let vault = Pubkey::new_unique();
+        let vault_token_account = Pubkey::new_unique();
+        let mint = Pubkey::new_unique();
+        let token_program = Pubkey::new_unique();
+        let er_token_account = Pubkey::new_unique();
+        let destination = Pubkey::new_unique();
+
+        let bridge_state = northstar_portal::SessionBridge {
+            discriminator: northstar_portal::SessionBridge::DISCRIMINATOR,
+            session: session.to_bytes(),
+            mint: mint.to_bytes(),
+            bridge_program: bridge_program.to_bytes(),
+            vault: vault.to_bytes(),
+            token_program: token_program.to_bytes(),
+            bump: 255,
+        };
+        let bridge_data = borsh::to_vec(&bridge_state).unwrap();
+        let mut bridge_account =
+            AccountSharedData::new(1_000_000, bridge_data.len(), &portal_program);
+        bridge_account
+            .data_as_mut_slice()
+            .copy_from_slice(&bridge_data);
+        parent_bank.store_account(&session_bridge, &bridge_account);
+
+        let vault_state = northstar_token_bridge::state::TokenVault {
+            discriminator: northstar_token_bridge::state::TokenVault::DISCRIMINATOR,
+            session_bridge: session_bridge.to_bytes(),
+            mint: mint.to_bytes(),
+            vault_token_account: vault_token_account.to_bytes(),
+            token_program: token_program.to_bytes(),
+            deposited: 600_000_000,
+            withdrawn: 0,
+            bump: 254,
+        };
+        let vault_data = borsh::to_vec(&vault_state).unwrap();
+        let mut vault_account =
+            AccountSharedData::new(1_000_000, vault_data.len(), &bridge_program);
+        vault_account
+            .data_as_mut_slice()
+            .copy_from_slice(&vault_data);
+        parent_bank.store_account(&vault, &vault_account);
+        parent_bank.freeze();
+
+        let settings = EphemeralRollupSettings {
+            session_pda: session,
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            portal_program,
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime
+            .token_withdrawal_payout_events
+            .write()
+            .unwrap()
+            .push(TokenWithdrawalPayoutEvent {
+                bridge_program,
+                session_bridge,
+                er_token_account,
+                l1_destination_token_account: destination,
+                amount: 200_000_000,
+                decimals: 6,
+                signature: solana_signature::Signature::from([7; 64]),
+                er_slot: 10,
+            });
+
+        assert!(runtime.settlement_token_withdrawals(9).is_empty());
+        let settlements = runtime.settlement_token_withdrawals(10);
+        assert_eq!(settlements.len(), 1);
+        assert_eq!(settlements[0].amount, 200_000_000);
+        assert_eq!(settlements[0].withdrawn, 200_000_000);
+        assert_eq!(settlements[0].vault, vault);
+        assert_eq!(settlements[0].l1_destination_token_account, destination);
 
         runtime.shutdown();
     }

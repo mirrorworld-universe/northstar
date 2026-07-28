@@ -1,7 +1,7 @@
 use {
     crate::{
-        Checkpoint, CheckpointCursor, DelegationRecord, DepositReceipt, FeeVault, Session,
-        StepProofAccount,
+        Challenge, Checkpoint, CheckpointCursor, DataAvailabilityProof, DelegationRecord,
+        DepositReceipt, FeeVault, Session, SessionBridge, StepProofAccount,
     },
     pinocchio::pubkey::Pubkey,
 };
@@ -48,6 +48,16 @@ pub fn find_checkpoint_cursor_pda(program_id: &Pubkey, session: &Pubkey) -> (Pub
     find_program_address(seeds, program_id)
 }
 
+pub fn find_challenge_pda(program_id: &Pubkey, checkpoint: &Pubkey) -> (Pubkey, u8) {
+    let seeds = &[Challenge::SEED_PREFIX, checkpoint.as_ref()];
+    find_program_address(seeds, program_id)
+}
+
+pub fn find_da_proof_pda(program_id: &Pubkey, challenge: &Pubkey) -> (Pubkey, u8) {
+    let seeds = &[DataAvailabilityProof::SEED_PREFIX, challenge.as_ref()];
+    find_program_address(seeds, program_id)
+}
+
 pub fn find_step_proof_pda(program_id: &Pubkey, checkpoint: &Pubkey) -> (Pubkey, u8) {
     let seeds = &[StepProofAccount::SEED_PREFIX, checkpoint.as_ref()];
     find_program_address(seeds, program_id)
@@ -63,5 +73,14 @@ pub fn find_deposit_receipt_pda(
         session.as_ref(),
         recipient.as_ref(),
     ];
+    find_program_address(seeds, program_id)
+}
+
+pub fn find_session_bridge_pda(
+    program_id: &Pubkey,
+    session: &Pubkey,
+    mint: &Pubkey,
+) -> (Pubkey, u8) {
+    let seeds = &[SessionBridge::SEED_PREFIX, session.as_ref(), mint.as_ref()];
     find_program_address(seeds, program_id)
 }
