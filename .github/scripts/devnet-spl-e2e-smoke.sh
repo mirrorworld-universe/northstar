@@ -13,6 +13,7 @@ ER_FEE_PAYER_KEYPAIR=${ER_FEE_PAYER_KEYPAIR:-/tmp/northstar-spl-e2e-fee-payer.js
 STATE_PATH=${STATE_PATH:-/tmp/northstar-spl-e2e-state.env}
 REPORT_PATH=${REPORT_PATH:-/tmp/northstar-spl-e2e-report.txt}
 TOKEN_BRIDGE_KEYPAIR=${TOKEN_BRIDGE_KEYPAIR:-/solana/northstar/token-bridge-keypair.json}
+PORTAL_ADDRESS=${PORTAL_ADDRESS:-}
 PHASE=initialize
 STARTED_AT=$(date +%s)
 
@@ -103,6 +104,10 @@ run_devnet_smoke() {
 
 PHASE=resolve_configuration
 test -f "$DEPLOYER_KEYPAIR"
+if [ -z "$PORTAL_ADDRESS" ]; then
+  test -z "$RESTART_COMMAND"
+  PORTAL_ADDRESS=$(systemctl cat "$SERVICE" | sed -n 's/.*--portal \([^ ]*\).*/\1/p' | tail -n 1)
+fi
 test -n "$PORTAL_ADDRESS"
 if [ -z "${TOKEN_BRIDGE_ADDRESS:-}" ]; then
   test -f "$TOKEN_BRIDGE_KEYPAIR"
