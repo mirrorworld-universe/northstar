@@ -1,6 +1,9 @@
 pub mod instruction;
 pub mod state;
 
+#[cfg(any(target_os = "solana", test))]
+mod portal_abi;
+
 #[cfg(target_os = "solana")]
 mod processor;
 #[cfg(target_os = "solana")]

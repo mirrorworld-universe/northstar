@@ -1,9 +1,11 @@
 use {
     crate::{
         instruction::TokenBridgeInstruction,
-        state::{BridgeBuffer, ErTokenAccount, TokenDepositReceipt, TokenVault},
+        portal_abi::{is_valid_settlement_checkpoint, is_valid_settlement_session},
+        state::{account_size, BridgeBuffer, ErTokenAccount, TokenDepositReceipt, TokenVault},
     },
     borsh::{BorshDeserialize, BorshSerialize},
+    northstar_portal::{Checkpoint, Session},
     pinocchio::{
         account_info::AccountInfo,
         entrypoint::deserialize,
@@ -189,12 +191,22 @@ fn process_initialize_vault(program_id: &Pubkey, accounts: &[AccountInfo]) -> Pr
         return Err(ProgramError::InvalidAccountData);
     }
 
+    let state = TokenVault {
+        discriminator: TokenVault::DISCRIMINATOR,
+        session_bridge: key_bytes(session_bridge.key()),
+        mint: bridge.mint,
+        vault_token_account: key_bytes(vault_token_account.key()),
+        token_program: bridge.token_program,
+        deposited: 0,
+        withdrawn: 0,
+        bump,
+    };
     if vault.lamports() == 0 {
         let bump_seed = [bump];
         create_pda(
             payer,
             vault,
-            TokenVault::LEN,
+            account_size(&state),
             program_id,
             [
                 Seed::from(TokenVault::SEED_PREFIX),
@@ -207,17 +219,7 @@ fn process_initialize_vault(program_id: &Pubkey, accounts: &[AccountInfo]) -> Pr
         return Err(ProgramError::InvalidAccountOwner);
     }
 
-    let state = TokenVault {
-        discriminator: TokenVault::DISCRIMINATOR,
-        session_bridge: key_bytes(session_bridge.key()),
-        mint: bridge.mint,
-        vault_token_account: key_bytes(vault_token_account.key()),
-        token_program: bridge.token_program,
-        deposited: 0,
-        withdrawn: 0,
-        bump,
-    };
-    store(vault, &state, TokenVault::LEN)
+    store(vault, &state)
 }
 
 fn process_initialize_er_token_account(
@@ -241,12 +243,20 @@ fn process_initialize_er_token_account(
         return Err(ProgramError::InvalidSeeds);
     }
 
+    let state = ErTokenAccount {
+        discriminator: ErTokenAccount::DISCRIMINATOR,
+        session_bridge: key_bytes(session_bridge.key()),
+        owner,
+        mint: bridge.mint,
+        amount: 0,
+        bump,
+    };
     if er_token_account.lamports() == 0 {
         let bump_seed = [bump];
         create_pda(
             payer,
             er_token_account,
-            ErTokenAccount::LEN,
+            account_size(&state),
             program_id,
             [
                 Seed::from(ErTokenAccount::SEED_PREFIX),
@@ -260,15 +270,7 @@ fn process_initialize_er_token_account(
         return Err(ProgramError::InvalidAccountOwner);
     }
 
-    let state = ErTokenAccount {
-        discriminator: ErTokenAccount::DISCRIMINATOR,
-        session_bridge: key_bytes(session_bridge.key()),
-        owner,
-        mint: bridge.mint,
-        amount: 0,
-        bump,
-    };
-    store(er_token_account, &state, ErTokenAccount::LEN)
+    store(er_token_account, &state)
 }
 
 fn process_deposit(
@@ -337,12 +339,20 @@ fn process_deposit(
     }
     .invoke()?;
 
+    let initial_receipt = TokenDepositReceipt {
+        discriminator: TokenDepositReceipt::DISCRIMINATOR,
+        session_bridge: key_bytes(session_bridge.key()),
+        er_token_account: key_bytes(er_token_account.key()),
+        balance: 0,
+        withdrawn: 0,
+        bump: receipt_bump,
+    };
     if deposit_receipt.lamports() == 0 {
         let bump_seed = [receipt_bump];
         create_pda(
             owner,
             deposit_receipt,
-            TokenDepositReceipt::LEN,
+            account_size(&initial_receipt),
             program_id,
             [
                 Seed::from(TokenDepositReceipt::SEED_PREFIX),
@@ -357,14 +367,7 @@ fn process_deposit(
     }
 
     let mut receipt = if deposit_receipt.try_borrow_data()?[0] == 0 {
-        TokenDepositReceipt {
-            discriminator: TokenDepositReceipt::DISCRIMINATOR,
-            session_bridge: key_bytes(session_bridge.key()),
-            er_token_account: key_bytes(er_token_account.key()),
-            balance: 0,
-            withdrawn: 0,
-            bump: receipt_bump,
-        }
+        initial_receipt
     } else {
         TokenDepositReceipt::try_from_slice(&deposit_receipt.try_borrow_data()?)
             .map_err(|_| ProgramError::InvalidAccountData)?
@@ -380,19 +383,19 @@ fn process_deposit(
         .balance
         .checked_add(amount)
         .ok_or(ProgramError::ArithmeticOverflow)?;
-    store(deposit_receipt, &receipt, TokenDepositReceipt::LEN)?;
+    store(deposit_receipt, &receipt)?;
     vault_state.deposited = vault_state
         .deposited
         .checked_add(amount)
         .ok_or(ProgramError::ArithmeticOverflow)?;
-    store(vault, &vault_state, TokenVault::LEN)?;
+    store(vault, &vault_state)?;
 
     if !is_delegated {
         er_state.amount = er_state
             .amount
             .checked_add(amount)
             .ok_or(ProgramError::ArithmeticOverflow)?;
-        store(er_token_account, &er_state, ErTokenAccount::LEN)?;
+        store(er_token_account, &er_state)?;
     }
     Ok(())
 }
@@ -420,8 +423,8 @@ fn process_transfer(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) 
         .amount
         .checked_add(amount)
         .ok_or(ProgramError::ArithmeticOverflow)?;
-    store(source, &source_state, ErTokenAccount::LEN)?;
-    store(destination, &destination_state, ErTokenAccount::LEN)
+    store(source, &source_state)?;
+    store(destination, &destination_state)
 }
 
 fn process_withdraw(
@@ -484,8 +487,8 @@ fn process_withdraw(
     }
     .invoke_signed(&[vault_signer])?;
 
-    store(vault, &vault_state, TokenVault::LEN)?;
-    store(er_token_account, &er_state, ErTokenAccount::LEN)
+    store(vault, &vault_state)?;
+    store(er_token_account, &er_state)
 }
 
 fn process_start_withdrawal(
@@ -518,7 +521,7 @@ fn process_start_withdrawal(
         .amount
         .checked_sub(amount)
         .ok_or(ProgramError::InsufficientFunds)?;
-    store(er_token_account, &er_state, ErTokenAccount::LEN)
+    store(er_token_account, &er_state)
 }
 
 fn process_settle_withdrawal(
@@ -558,17 +561,12 @@ fn process_settle_withdrawal(
     if expected_checkpoint != *checkpoint.key() {
         return Err(ProgramError::InvalidSeeds);
     }
-    let session_data = session.try_borrow_data()?;
-    let checkpoint_data = checkpoint.try_borrow_data()?;
-    if session_data.len() != 219
-        || session_data[0] != 1
-        || session_data[81..113] != validator.key()[..]
-        || checkpoint_data.len() != 237
-        || checkpoint_data[0] != 5
-        || checkpoint_data[1..33] != session.key()[..]
-        || u64::from_le_bytes(checkpoint_data[33..41].try_into().unwrap()) != er_slot
-        || checkpoint_data[105..137] != checksum
-        || !matches!(checkpoint_data[185], 1 | 3)
+    let session_state = Session::try_from_slice(&session.try_borrow_data()?)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+    let checkpoint_state = Checkpoint::try_from_slice(&checkpoint.try_borrow_data()?)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+    if !is_valid_settlement_session(&session_state, validator.key())
+        || !is_valid_settlement_checkpoint(&checkpoint_state, session.key(), er_slot, &checksum)
     {
         return Err(ProgramError::InvalidAccountData);
     }
@@ -632,7 +630,7 @@ fn process_settle_withdrawal(
         decimals,
     }
     .invoke_signed(&[vault_signer])?;
-    store(vault, &vault_state, TokenVault::LEN)
+    store(vault, &vault_state)
 }
 
 fn process_delegate_er_token_account(
@@ -899,10 +897,14 @@ fn unpack_token_account(account: &AccountInfo) -> Result<SplTokenAccount, Progra
         .map_err(|_| ProgramError::InvalidAccountData)
 }
 
-fn store<T: BorshSerialize>(account: &AccountInfo, state: &T, len: usize) -> ProgramResult {
+fn store<T: BorshSerialize>(account: &AccountInfo, state: &T) -> ProgramResult {
     let mut data = account.try_borrow_mut_data()?;
-    BorshSerialize::serialize(state, &mut &mut data[..len])
-        .map_err(|_| ProgramError::InvalidAccountData)
+    let mut output = &mut data[..];
+    BorshSerialize::serialize(state, &mut output).map_err(|_| ProgramError::InvalidAccountData)?;
+    if !output.is_empty() {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    Ok(())
 }
 
 fn create_pda<const N: usize>(

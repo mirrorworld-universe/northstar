@@ -4,6 +4,7 @@ use {
         compute_budget::{ComputeUnitConfig, WithComputeUnitConfig},
         nonce::check_nonce_account,
     },
+    borsh::BorshDeserialize,
     clap::{App, AppSettings, Arg, ArgMatches, SubCommand},
     northstar_portal::{DelegationRecord, OpenSession, PortalInstruction, WITHDRAWAL_SINK},
     solana_account::Account,
@@ -633,24 +634,15 @@ fn find_deposit_receipt_pda(program_id: &Pubkey, session: &Pubkey, recipient: &P
 }
 
 fn delegation_record_owner_program(account: &Account) -> Result<Pubkey, CliError> {
-    if account.data.len() != DelegationRecord::LEN {
-        return Err(CliError::BadParameter(format!(
-            "Delegation record has invalid size: expected {}, got {}",
-            DelegationRecord::LEN,
-            account.data.len()
-        )));
+    let record = DelegationRecord::try_from_slice(&account.data).map_err(|_| {
+        CliError::BadParameter("Delegation record has invalid account data".to_owned())
+    })?;
+    if !record.is_valid() {
+        return Err(CliError::BadParameter(
+            "Delegation record has invalid discriminator".to_owned(),
+        ));
     }
-    if account.data[0] != DelegationRecord::DISCRIMINATOR {
-        return Err(CliError::BadParameter(format!(
-            "Delegation record has invalid discriminator: expected {}, got {}",
-            DelegationRecord::DISCRIMINATOR,
-            account.data[0]
-        )));
-    }
-
-    let mut owner_program = [0; 32];
-    owner_program.copy_from_slice(&account.data[1..33]);
-    Ok(Pubkey::from(owner_program))
+    Ok(Pubkey::new_from_array(record.owner_program))
 }
 
 fn default_owner_program_for_delegate(
@@ -1374,9 +1366,13 @@ mod tests {
     #[test]
     fn test_delegation_record_owner_program_decodes_owner() {
         let owner_program = Pubkey::new_unique();
-        let mut data = vec![0; DelegationRecord::LEN];
-        data[0] = DelegationRecord::DISCRIMINATOR;
-        data[1..33].copy_from_slice(owner_program.as_ref());
+        let data = borsh::to_vec(&DelegationRecord {
+            discriminator: DelegationRecord::DISCRIMINATOR,
+            owner_program: owner_program.to_bytes(),
+            grid_id: 0,
+            bump: 0,
+        })
+        .unwrap();
         let account = Account {
             lamports: 1,
             data,
@@ -1389,6 +1385,10 @@ mod tests {
             delegation_record_owner_program(&account).unwrap(),
             owner_program
         );
+
+        let mut malformed = account;
+        malformed.data.push(0);
+        assert!(delegation_record_owner_program(&malformed).is_err());
     }
 
     #[test]

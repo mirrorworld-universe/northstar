@@ -41,24 +41,19 @@ fn load_session(program_id: &Pubkey, session: &AccountInfo) -> Result<Session, P
 
 fn store_checkpoint(checkpoint: &AccountInfo, checkpoint_state: &Checkpoint) -> ProgramResult {
     let mut checkpoint_data = checkpoint.try_borrow_mut_data()?;
-    BorshSerialize::serialize(
-        checkpoint_state,
-        &mut &mut checkpoint_data[..Checkpoint::LEN],
-    )
-    .unwrap();
+    BorshSerialize::serialize(checkpoint_state, &mut &mut checkpoint_data[..]).unwrap();
     Ok(())
 }
 
 fn store_cursor(cursor: &AccountInfo, cursor_state: &CheckpointCursor) -> ProgramResult {
     let mut cursor_data = cursor.try_borrow_mut_data()?;
-    BorshSerialize::serialize(cursor_state, &mut &mut cursor_data[..CheckpointCursor::LEN])
-        .unwrap();
+    BorshSerialize::serialize(cursor_state, &mut &mut cursor_data[..]).unwrap();
     Ok(())
 }
 
 fn store_challenge(challenge: &AccountInfo, challenge_state: &Challenge) -> ProgramResult {
     let mut data = challenge.try_borrow_mut_data()?;
-    BorshSerialize::serialize(challenge_state, &mut &mut data[..Challenge::LEN]).unwrap();
+    BorshSerialize::serialize(challenge_state, &mut &mut data[..]).unwrap();
     Ok(())
 }
 
@@ -84,7 +79,7 @@ fn load_challenge(
 
 fn store_da_proof(account: &AccountInfo, state: &DataAvailabilityProof) -> ProgramResult {
     let mut data = account.try_borrow_mut_data()?;
-    BorshSerialize::serialize(state, &mut &mut data[..DataAvailabilityProof::LEN]).unwrap();
+    BorshSerialize::serialize(state, &mut &mut data[..]).unwrap();
     Ok(())
 }
 
@@ -112,7 +107,7 @@ fn load_da_proof(
 
 fn store_step_proof(proof: &AccountInfo, proof_state: &StepProofAccount) -> ProgramResult {
     let mut proof_data = proof.try_borrow_mut_data()?;
-    BorshSerialize::serialize(proof_state, &mut &mut proof_data[..StepProofAccount::LEN]).unwrap();
+    BorshSerialize::serialize(proof_state, &mut &mut proof_data[..]).unwrap();
     Ok(())
 }
 
@@ -151,7 +146,7 @@ fn resolve_checkpoint_bond(
         return Err(PortalError::CheckpointBondInsufficient.into());
     }
 
-    let rent_lamports = Rent::get()?.minimum_balance(Checkpoint::LEN);
+    let rent_lamports = Rent::get()?.minimum_balance(crate::account_size(checkpoint_state));
     let minimum_locked_lamports = rent_lamports
         .checked_add(bond_lamports)
         .ok_or(PortalError::ArithmeticOverflow)?;
@@ -259,8 +254,19 @@ fn create_cursor(
         return Err(PortalError::InvalidPdaSeeds.into());
     }
 
+    let cursor_state = CheckpointCursor {
+        discriminator: CheckpointCursor::DISCRIMINATOR,
+        session: *session_key,
+        latest_finalized_checkpoint: [0; 32],
+        latest_finalized_er_slot: 0,
+        latest_finalized_state_root: [0; 32],
+        active_checkpoint: [0; 32],
+        active_er_slot: 0,
+        bump: cursor_bump,
+    };
     let rent = Rent::get()?;
-    let cursor_lamports = rent.minimum_balance(CheckpointCursor::LEN);
+    let cursor_size = crate::account_size(&cursor_state);
+    let cursor_lamports = rent.minimum_balance(cursor_size);
     let cursor_bump_bytes = [cursor_bump];
     let cursor_seeds = &[
         Seed::from(CheckpointCursor::SEED_PREFIX),
@@ -273,21 +279,11 @@ fn create_cursor(
         payer,
         cursor,
         cursor_lamports,
-        CheckpointCursor::LEN as u64,
+        cursor_size as u64,
         program_id,
         cursor_signer,
     )?;
 
-    let cursor_state = CheckpointCursor {
-        discriminator: CheckpointCursor::DISCRIMINATOR,
-        session: *session_key,
-        latest_finalized_checkpoint: [0; 32],
-        latest_finalized_er_slot: 0,
-        latest_finalized_state_root: [0; 32],
-        active_checkpoint: [0; 32],
-        active_er_slot: 0,
-        bump: cursor_bump,
-    };
     store_cursor(cursor, &cursor_state)?;
     Ok(cursor_state)
 }
@@ -450,8 +446,34 @@ pub fn process_propose_checkpoint(
         return Err(PortalError::InvalidPdaSeeds.into());
     }
 
+    let checkpoint_state = Checkpoint {
+        discriminator: Checkpoint::DISCRIMINATOR,
+        session: *session_key,
+        er_slot,
+        step_count,
+        previous_state_root,
+        new_state_root,
+        trace_root,
+        tx_effect_root,
+        readonly_l1_root,
+        da_commitment,
+        effect_commitment,
+        proposer: *proposer.key(),
+        proposed_at_l1_slot: current_slot,
+        challenge_deadline_l1_slot: current_slot
+            .checked_add(challenge_window_slots)
+            .ok_or(PortalError::ArithmeticOverflow)?,
+        status: CheckpointStatus::Pending,
+        bond_lamports: CHECKPOINT_PROPOSER_BOND_LAMPORTS,
+        bond_status: CheckpointBondStatus::Locked,
+        challenger: [0; 32],
+        challenged_at_l1_slot: 0,
+        challenge_resolved: false,
+        bump: checkpoint_bump,
+    };
     let rent = Rent::get()?;
-    let checkpoint_rent_lamports = rent.minimum_balance(Checkpoint::LEN);
+    let checkpoint_size = crate::account_size(&checkpoint_state);
+    let checkpoint_rent_lamports = rent.minimum_balance(checkpoint_size);
     if checkpoint.data_is_empty() {
         let checkpoint_lamports = checkpoint_rent_lamports
             .checked_add(CHECKPOINT_PROPOSER_BOND_LAMPORTS)
@@ -470,7 +492,7 @@ pub fn process_propose_checkpoint(
             proposer,
             checkpoint,
             checkpoint_lamports,
-            Checkpoint::LEN as u64,
+            checkpoint_size as u64,
             program_id,
             checkpoint_signer,
         )?;
@@ -497,31 +519,6 @@ pub fn process_propose_checkpoint(
         .invoke()?;
     }
 
-    let checkpoint_state = Checkpoint {
-        discriminator: Checkpoint::DISCRIMINATOR,
-        session: *session_key,
-        er_slot,
-        step_count,
-        previous_state_root,
-        new_state_root,
-        trace_root,
-        tx_effect_root,
-        readonly_l1_root,
-        da_commitment,
-        effect_commitment,
-        proposer: *proposer.key(),
-        proposed_at_l1_slot: current_slot,
-        challenge_deadline_l1_slot: current_slot
-            .checked_add(challenge_window_slots)
-            .ok_or(PortalError::ArithmeticOverflow)?,
-        status: CheckpointStatus::Pending,
-        bond_lamports: CHECKPOINT_PROPOSER_BOND_LAMPORTS,
-        bond_status: CheckpointBondStatus::Locked,
-        challenger: [0; 32],
-        challenged_at_l1_slot: 0,
-        challenge_resolved: false,
-        bump: checkpoint_bump,
-    };
     store_checkpoint(checkpoint, &checkpoint_state)?;
 
     cursor_state.active_checkpoint = *checkpoint.key();
@@ -672,50 +669,6 @@ pub fn process_open_challenge(
     if challenge.key() != &expected_challenge_key {
         return Err(PortalError::InvalidPdaSeeds.into());
     }
-    if challenge.data_is_empty() {
-        let challenge_bump_bytes = [challenge_bump];
-        let challenge_seeds = &[
-            Seed::from(Challenge::SEED_PREFIX),
-            Seed::from(checkpoint.key().as_ref()),
-            Seed::from(challenge_bump_bytes.as_ref()),
-        ];
-        initialize_pda_account(
-            challenger,
-            challenge,
-            Rent::get()?.minimum_balance(Challenge::LEN),
-            Challenge::LEN as u64,
-            program_id,
-            Signer::from(challenge_seeds),
-        )?;
-    } else if load_challenge(program_id, checkpoint.key(), challenge)?.status
-        == ChallengeStatus::Active
-    {
-        return Err(PortalError::CheckpointChallenged.into());
-    }
-
-    let (expected_da_key, da_bump) = find_da_proof_pda(program_id, challenge.key());
-    if da_proof.key() != &expected_da_key {
-        return Err(PortalError::InvalidPdaSeeds.into());
-    }
-    if da_proof.data_is_empty() {
-        let da_bump_bytes = [da_bump];
-        let da_seeds = &[
-            Seed::from(DataAvailabilityProof::SEED_PREFIX),
-            Seed::from(challenge.key().as_ref()),
-            Seed::from(da_bump_bytes.as_ref()),
-        ];
-        initialize_pda_account(
-            challenger,
-            da_proof,
-            Rent::get()?.minimum_balance(DataAvailabilityProof::LEN),
-            DataAvailabilityProof::LEN as u64,
-            program_id,
-            Signer::from(da_seeds),
-        )?;
-    } else {
-        load_da_proof(program_id, challenge.key(), checkpoint.key(), da_proof)?;
-    }
-
     let challenge_state = Challenge {
         discriminator: Challenge::DISCRIMINATOR,
         checkpoint: *checkpoint.key(),
@@ -738,8 +691,32 @@ pub fn process_open_challenge(
         rounds: 0,
         bump: challenge_bump,
     };
-    store_challenge(challenge, &challenge_state)?;
+    let challenge_size = crate::account_size(&challenge_state);
+    if challenge.data_is_empty() {
+        let challenge_bump_bytes = [challenge_bump];
+        let challenge_seeds = &[
+            Seed::from(Challenge::SEED_PREFIX),
+            Seed::from(checkpoint.key().as_ref()),
+            Seed::from(challenge_bump_bytes.as_ref()),
+        ];
+        initialize_pda_account(
+            challenger,
+            challenge,
+            Rent::get()?.minimum_balance(challenge_size),
+            challenge_size as u64,
+            program_id,
+            Signer::from(challenge_seeds),
+        )?;
+    } else if load_challenge(program_id, checkpoint.key(), challenge)?.status
+        == ChallengeStatus::Active
+    {
+        return Err(PortalError::CheckpointChallenged.into());
+    }
 
+    let (expected_da_key, da_bump) = find_da_proof_pda(program_id, challenge.key());
+    if da_proof.key() != &expected_da_key {
+        return Err(PortalError::InvalidPdaSeeds.into());
+    }
     let da_state = DataAvailabilityProof {
         discriminator: DataAvailabilityProof::DISCRIMINATOR,
         challenge: *challenge.key(),
@@ -751,6 +728,28 @@ pub fn process_open_challenge(
         status: DataAvailabilityStatus::Missing,
         bump: da_bump,
     };
+    let da_size = crate::account_size(&da_state);
+    if da_proof.data_is_empty() {
+        let da_bump_bytes = [da_bump];
+        let da_seeds = &[
+            Seed::from(DataAvailabilityProof::SEED_PREFIX),
+            Seed::from(challenge.key().as_ref()),
+            Seed::from(da_bump_bytes.as_ref()),
+        ];
+        initialize_pda_account(
+            challenger,
+            da_proof,
+            Rent::get()?.minimum_balance(da_size),
+            da_size as u64,
+            program_id,
+            Signer::from(da_seeds),
+        )?;
+    } else {
+        load_da_proof(program_id, challenge.key(), checkpoint.key(), da_proof)?;
+    }
+
+    store_challenge(challenge, &challenge_state)?;
+
     store_da_proof(da_proof, &da_state)?;
 
     checkpoint_state.status = CheckpointStatus::Challenged;
@@ -1020,27 +1019,6 @@ pub fn process_create_step_proof(
         return Err(PortalError::InvalidPdaSeeds.into());
     }
 
-    let rent = Rent::get()?;
-    let proof_lamports = rent.minimum_balance(StepProofAccount::LEN);
-    if proof.data_is_empty() {
-        let proof_bump_bytes = [proof_bump];
-        let proof_seeds = &[
-            Seed::from(StepProofAccount::SEED_PREFIX),
-            Seed::from(checkpoint.key().as_ref()),
-            Seed::from(proof_bump_bytes.as_ref()),
-        ];
-        initialize_pda_account(
-            authority,
-            proof,
-            proof_lamports,
-            StepProofAccount::LEN as u64,
-            program_id,
-            Signer::from(proof_seeds),
-        )?;
-    } else if proof.owner() != program_id || proof.lamports() < proof_lamports {
-        return Err(PortalError::StepProofStateInvalid.into());
-    }
-
     let mut proof_state = StepProofAccount {
         discriminator: StepProofAccount::DISCRIMINATOR,
         checkpoint: *checkpoint.key(),
@@ -1067,6 +1045,28 @@ pub fn process_create_step_proof(
         &challenge_state,
         &proof_state,
     );
+    let rent = Rent::get()?;
+    let proof_size = crate::account_size(&proof_state);
+    let proof_lamports = rent.minimum_balance(proof_size);
+    if proof.data_is_empty() {
+        let proof_bump_bytes = [proof_bump];
+        let proof_seeds = &[
+            Seed::from(StepProofAccount::SEED_PREFIX),
+            Seed::from(checkpoint.key().as_ref()),
+            Seed::from(proof_bump_bytes.as_ref()),
+        ];
+        initialize_pda_account(
+            authority,
+            proof,
+            proof_lamports,
+            proof_size as u64,
+            program_id,
+            Signer::from(proof_seeds),
+        )?;
+    } else if proof.owner() != program_id || proof.lamports() < proof_lamports {
+        return Err(PortalError::StepProofStateInvalid.into());
+    }
+
     store_step_proof(proof, &proof_state)
 }
 

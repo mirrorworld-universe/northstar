@@ -9,11 +9,13 @@ mod instructions;
 mod pda;
 mod state;
 
+#[cfg(not(feature = "no-entrypoint"))]
+use pinocchio::no_allocator;
 use {
     borsh::BorshDeserialize,
     pinocchio::{
-        account_info::AccountInfo, entrypoint::deserialize, no_allocator,
-        program_error::ProgramError, ProgramResult, SUCCESS,
+        account_info::AccountInfo, entrypoint::deserialize, program_error::ProgramError,
+        ProgramResult, SUCCESS,
     },
 };
 pub use {error::*, events::*, instruction::*, pda::*, state::*};
@@ -39,9 +41,10 @@ pub const CHALLENGE_TURN_WINDOW_SLOTS: u64 = 750;
 pub const MAX_STEP_PROOF_BYTES: usize = 256;
 pub const MAX_STEP_PROOF_CHUNK: usize = 128;
 
+#[cfg(not(feature = "no-entrypoint"))]
 no_allocator!();
 
-#[cfg(target_os = "solana")]
+#[cfg(all(target_os = "solana", not(feature = "no-entrypoint")))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
     loop {}

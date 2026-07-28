@@ -3,6 +3,10 @@ use {
     pinocchio::pubkey::Pubkey,
 };
 
+pub fn account_size<T: BorshSerialize + ?Sized>(account: &T) -> usize {
+    borsh::object_length(account).expect("account serialization length overflow")
+}
+
 /// Fixed ER account that holds withdrawn SOL until L1 settlement.
 pub const WITHDRAWAL_SINK: Pubkey = [
     0x05, 0x7d, 0x77, 0xa2, 0x13, 0x37, 0xb6, 0x2d, 0xb7, 0x7d, 0xba, 0x7e, 0x26, 0xf8, 0xe1, 0x47,
@@ -90,7 +94,6 @@ pub enum CheckpointBondStatus {
 }
 
 impl Checkpoint {
-    pub const LEN: usize = 373;
     pub const SEED_PREFIX: &[u8] = b"checkpoint";
     pub const DISCRIMINATOR: u8 = 5;
 
@@ -156,7 +159,6 @@ pub enum ChallengeTurn {
 }
 
 impl Challenge {
-    pub const LEN: usize = 248;
     pub const SEED_PREFIX: &[u8] = b"challenge";
     pub const DISCRIMINATOR: u8 = 9;
 
@@ -191,7 +193,6 @@ pub enum DataAvailabilityStatus {
 }
 
 impl DataAvailabilityProof {
-    pub const LEN: usize = 171;
     pub const SEED_PREFIX: &[u8] = b"da_proof";
     pub const DISCRIMINATOR: u8 = 10;
 
@@ -223,7 +224,6 @@ pub struct StepProofAccount {
 }
 
 impl StepProofAccount {
-    pub const LEN: usize = 529;
     pub const SEED_PREFIX: &[u8] = b"step_proof";
     pub const DISCRIMINATOR: u8 = 7;
 
@@ -234,7 +234,6 @@ impl StepProofAccount {
 }
 
 impl CheckpointCursor {
-    pub const LEN: usize = 146;
     pub const SEED_PREFIX: &[u8] = b"checkpoint_cursor";
     pub const DISCRIMINATOR: u8 = 6;
 
@@ -245,7 +244,6 @@ impl CheckpointCursor {
 }
 
 impl Session {
-    pub const LEN: usize = 219;
     pub const SEED_PREFIX: &[u8] = b"session";
     pub const DISCRIMINATOR: u8 = 1;
 
@@ -269,7 +267,6 @@ pub struct FeeVault {
 }
 
 impl FeeVault {
-    pub const LEN: usize = 34; // 1 + 32 + 1
     pub const SEED_PREFIX: &[u8] = b"fee_vault";
     pub const DISCRIMINATOR: u8 = 2;
 
@@ -289,7 +286,6 @@ pub struct DelegationRecord {
 }
 
 impl DelegationRecord {
-    pub const LEN: usize = 42;
     pub const SEED_PREFIX: &[u8] = b"delegation";
     pub const DISCRIMINATOR: u8 = 3;
 
@@ -313,7 +309,6 @@ pub struct DepositReceipt {
 }
 
 impl DepositReceipt {
-    pub const LEN: usize = 82; // 1 + 32 + 32 + 8 + 8 + 1
     pub const SEED_PREFIX: &[u8] = b"deposit_receipt";
     pub const DISCRIMINATOR: u8 = 4;
 
@@ -336,7 +331,6 @@ pub struct SessionBridge {
 }
 
 impl SessionBridge {
-    pub const LEN: usize = 162; // 1 + 32 * 5 + 1
     pub const SEED_PREFIX: &[u8] = b"session_bridge";
     pub const DISCRIMINATOR: u8 = 8;
 
@@ -372,7 +366,7 @@ mod tests {
             bump: 255,
         };
         let serialized = borsh::to_vec(&session).unwrap();
-        assert_eq!(serialized.len(), Session::LEN);
+        assert_eq!(serialized.len(), account_size(&session));
     }
 
     #[test]
@@ -383,7 +377,7 @@ mod tests {
             bump: 128,
         };
         let serialized = borsh::to_vec(&vault).unwrap();
-        assert_eq!(serialized.len(), FeeVault::LEN);
+        assert_eq!(serialized.len(), account_size(&vault));
     }
 
     #[test]
@@ -397,7 +391,7 @@ mod tests {
             bump: 77,
         };
         let serialized = borsh::to_vec(&receipt).unwrap();
-        assert_eq!(serialized.len(), DepositReceipt::LEN);
+        assert_eq!(serialized.len(), account_size(&receipt));
     }
 
     #[test]
@@ -409,7 +403,7 @@ mod tests {
             bump: 77,
         };
         let serialized = borsh::to_vec(&record).unwrap();
-        assert_eq!(serialized.len(), DelegationRecord::LEN);
+        assert_eq!(serialized.len(), account_size(&record));
     }
 
     #[test]
@@ -438,7 +432,7 @@ mod tests {
             bump: 99,
         };
         let serialized = borsh::to_vec(&checkpoint).unwrap();
-        assert_eq!(serialized.len(), Checkpoint::LEN);
+        assert_eq!(serialized.len(), account_size(&checkpoint));
     }
 
     #[test]
@@ -454,7 +448,7 @@ mod tests {
             bump: 99,
         };
         let serialized = borsh::to_vec(&cursor).unwrap();
-        assert_eq!(serialized.len(), CheckpointCursor::LEN);
+        assert_eq!(serialized.len(), account_size(&cursor));
     }
 
     #[test]
@@ -478,7 +472,10 @@ mod tests {
             rounds: 0,
             bump: 7,
         };
-        assert_eq!(borsh::to_vec(&challenge).unwrap().len(), Challenge::LEN);
+        assert_eq!(
+            borsh::to_vec(&challenge).unwrap().len(),
+            account_size(&challenge)
+        );
 
         let da_proof = DataAvailabilityProof {
             discriminator: DataAvailabilityProof::DISCRIMINATOR,
@@ -493,7 +490,7 @@ mod tests {
         };
         assert_eq!(
             borsh::to_vec(&da_proof).unwrap().len(),
-            DataAvailabilityProof::LEN
+            account_size(&da_proof)
         );
     }
 
@@ -518,7 +515,7 @@ mod tests {
             data: [0xAB; crate::MAX_STEP_PROOF_BYTES],
         };
         let serialized = borsh::to_vec(&proof).unwrap();
-        assert_eq!(serialized.len(), StepProofAccount::LEN);
+        assert_eq!(serialized.len(), account_size(&proof));
     }
 
     #[test]
@@ -533,7 +530,7 @@ mod tests {
             bump: 88,
         };
         let serialized = borsh::to_vec(&bridge).unwrap();
-        assert_eq!(serialized.len(), SessionBridge::LEN);
+        assert_eq!(serialized.len(), account_size(&bridge));
     }
 
     #[test]
