@@ -95,21 +95,12 @@ pub const DEFAULT_TOKEN_BRIDGE_PROGRAM_ID: Pubkey =
     Pubkey::from_str_const("HeVLVaSa9WnFai9aTRJ3UR2c4jwbMe5nbjagmDP1GbXR");
 
 /// Sonic: Portal program binary embedded at compile time.
-#[cfg(not(northstar_skip_portal_program_binary))]
-static PORTAL_PROGRAM_BINARY: &[u8] = include_bytes!(env!("NORTHSTAR_PORTAL_PROGRAM_SO"));
-
-/// Sonic: Clippy only type-checks this crate and does not need the embedded SBF binary.
-#[cfg(northstar_skip_portal_program_binary)]
-static PORTAL_PROGRAM_BINARY: &[u8] = &[];
+static PORTAL_PROGRAM_BINARY: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/northstar_portal.so"));
 
 /// Sonic: SPL token bridge binary embedded at compile time.
-#[cfg(not(northstar_skip_token_bridge_program_binary))]
 static TOKEN_BRIDGE_PROGRAM_BINARY: &[u8] =
-    include_bytes!(env!("NORTHSTAR_TOKEN_BRIDGE_PROGRAM_SO"));
-
-/// Sonic: Clippy only type-checks this crate and does not need the embedded SBF binary.
-#[cfg(northstar_skip_token_bridge_program_binary)]
-static TOKEN_BRIDGE_PROGRAM_BINARY: &[u8] = &[];
+    include_bytes!(concat!(env!("OUT_DIR"), "/northstar_token_bridge.so"));
 
 #[derive(Clone)]
 pub struct AccountInfo<'a> {
@@ -1546,6 +1537,12 @@ impl Drop for TestValidator {
 #[cfg(test)]
 mod test {
     use {super::*, solana_feature_gate_interface::Feature};
+
+    #[test]
+    fn bundled_northstar_programs_are_elf_binaries() {
+        assert!(PORTAL_PROGRAM_BINARY.starts_with(b"\x7fELF"));
+        assert!(TOKEN_BRIDGE_PROGRAM_BINARY.starts_with(b"\x7fELF"));
+    }
 
     #[test]
     fn get_health() {

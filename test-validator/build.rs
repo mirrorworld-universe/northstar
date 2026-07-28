@@ -1,23 +1,13 @@
 use std::{
-    env,
-    fs::{self, OpenOptions},
+    env, fs,
     path::{Path, PathBuf},
     process::{Command, Output},
-    thread::sleep,
-    time::{Duration, SystemTime},
 };
-
-const BUILD_SBF_GUARD: &str = "NORTHSTAR_TEST_VALIDATOR_BUILD_SBF_RUNNING";
-const SBF_BUILD_LOCK: &str = "northstar_test_validator_sbf_build.lock";
-const STALE_LOCK_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 struct BundledProgram {
     name: &'static str,
     manifest: &'static str,
-    src: &'static str,
-    so: &'static str,
-    env: &'static str,
-    skip_cfg: &'static str,
+    binary: &'static str,
     target_subdir: &'static str,
 }
 
@@ -25,19 +15,13 @@ const BUNDLED_PROGRAMS: &[BundledProgram] = &[
     BundledProgram {
         name: "portal",
         manifest: "northstar/programs/portal/Cargo.toml",
-        src: "northstar/programs/portal/src",
-        so: "northstar_portal.so",
-        env: "NORTHSTAR_PORTAL_PROGRAM_SO",
-        skip_cfg: "northstar_skip_portal_program_binary",
+        binary: "northstar_portal.so",
         target_subdir: "portal-sbf-target",
     },
     BundledProgram {
         name: "token bridge",
         manifest: "northstar/programs/token-bridge/Cargo.toml",
-        src: "northstar/programs/token-bridge/src",
-        so: "northstar_token_bridge.so",
-        env: "NORTHSTAR_TOKEN_BRIDGE_PROGRAM_SO",
-        skip_cfg: "northstar_skip_token_bridge_program_binary",
+        binary: "northstar_token_bridge.so",
         target_subdir: "token-bridge-sbf-target",
     },
 ];
@@ -45,95 +29,63 @@ const BUNDLED_PROGRAMS: &[BundledProgram] = &[
 fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let workspace_root = find_workspace_root(&manifest_dir);
-    let sbf_out_dir = env::var_os("BPF_OUT_DIR")
-        .or_else(|| env::var_os("SBF_OUT_DIR"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace_root.join("target/deploy"));
-    let sbf_out_dir = absolute_path(sbf_out_dir);
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
 
-    println!("cargo:rerun-if-env-changed=BPF_OUT_DIR");
-    println!("cargo:rerun-if-env-changed=SBF_OUT_DIR");
-
+    println!("cargo:rerun-if-changed=build.rs");
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root.join("Cargo.toml").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root.join("Cargo.lock").display()
+    );
     for program in BUNDLED_PROGRAMS {
         let manifest = workspace_root.join(program.manifest);
-        let src = workspace_root.join(program.src);
-        let program_so = sbf_out_dir.join(program.so);
-
-        println!("cargo:rerun-if-changed={}", manifest.display());
-        println!("cargo:rerun-if-changed={}", src.display());
-        println!("cargo:rerun-if-changed={}", program_so.display());
-        println!("cargo:rustc-check-cfg=cfg({})", program.skip_cfg);
-        println!("cargo:rustc-env={}={}", program.env, program_so.display());
+        println!(
+            "cargo:rerun-if-changed={}",
+            manifest.parent().unwrap().display()
+        );
     }
 
     if running_under_clippy() {
         for program in BUNDLED_PROGRAMS {
-            println!("cargo:rustc-cfg={}", program.skip_cfg);
+            fs::write(out_dir.join(program.binary), []).unwrap();
         }
         return;
     }
 
-    fs::create_dir_all(&sbf_out_dir).unwrap_or_else(|err| {
-        panic!(
-            "failed to create SBF output directory {}: {err}",
-            sbf_out_dir.display()
-        )
-    });
-
-    let _lock = SbfBuildLock::acquire(&sbf_out_dir);
     for program in BUNDLED_PROGRAMS {
         let manifest = workspace_root.join(program.manifest);
-        let src = workspace_root.join(program.src);
-        let program_so = sbf_out_dir.join(program.so);
+        let target_dir = out_dir.join(program.target_subdir);
+        let output = run_cargo_build_sbf(&manifest, &out_dir, &target_dir, false);
+        if !output.status.success() {
+            emit_command_output(&output);
+            if should_retry_with_force_tools_install(&output) {
+                let retry = run_cargo_build_sbf(&manifest, &out_dir, &target_dir, true);
+                if !retry.status.success() {
+                    emit_command_output(&retry);
+                    panic!(
+                        "`cargo build-sbf --force-tools-install` for {} failed with status {}",
+                        program.name, retry.status
+                    );
+                }
+            } else {
+                panic!(
+                    "`cargo build-sbf` for {} failed with status {}",
+                    program.name, output.status
+                );
+            }
+        }
 
-        build_program_if_needed(program, &manifest, &src, &sbf_out_dir, &program_so);
-
-        if !program_so.exists() {
+        let binary = out_dir.join(program.binary);
+        if !binary.is_file() {
             panic!(
                 "{} program binary missing at {}; `cargo build-sbf --manifest-path {}` should \
                  have produced it",
                 program.name,
-                program_so.display(),
+                binary.display(),
                 manifest.display()
-            );
-        }
-    }
-}
-
-fn build_program_if_needed(
-    program: &BundledProgram,
-    manifest: &Path,
-    src: &Path,
-    sbf_out_dir: &Path,
-    program_so: &Path,
-) {
-    if !needs_program_build(manifest, src, program_so) {
-        return;
-    }
-
-    let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    let target_dir = out_dir.join(program.target_subdir);
-    let output = run_cargo_build_sbf(manifest, sbf_out_dir, &target_dir, false);
-    if !output.status.success() {
-        emit_command_output(&output);
-        if should_retry_with_force_tools_install(&output) {
-            eprintln!(
-                "`cargo build-sbf` for {} failed with status {}; retrying with \
-                 `--force-tools-install` in case cached Solana platform tools are corrupt",
-                program.name, output.status
-            );
-            let retry_output = run_cargo_build_sbf(manifest, sbf_out_dir, &target_dir, true);
-            if !retry_output.status.success() {
-                emit_command_output(&retry_output);
-                panic!(
-                    "`cargo build-sbf --force-tools-install` for {} failed with status {}",
-                    program.name, retry_output.status
-                );
-            }
-        } else {
-            panic!(
-                "`cargo build-sbf` for {} failed with status {}",
-                program.name, output.status
             );
         }
     }
@@ -141,7 +93,7 @@ fn build_program_if_needed(
 
 fn run_cargo_build_sbf(
     manifest: &Path,
-    sbf_out_dir: &Path,
+    out_dir: &Path,
     target_dir: &Path,
     force_tools_install: bool,
 ) -> Output {
@@ -155,13 +107,11 @@ fn run_cargo_build_sbf(
         .arg("--manifest-path")
         .arg(manifest)
         .arg("--sbf-out-dir")
-        .arg(sbf_out_dir)
+        .arg(out_dir)
         .arg("--")
         .arg("--target-dir")
-        .arg(target_dir)
-        .env(BUILD_SBF_GUARD, "1");
+        .arg(target_dir);
     remove_cargo_driver_env(&mut command);
-
     command
         .output()
         .unwrap_or_else(|err| panic!("failed to run `cargo build-sbf`: {err}"))
@@ -176,7 +126,6 @@ fn should_retry_with_force_tools_install(output: &Output) -> bool {
     let mut text = String::new();
     text.push_str(&String::from_utf8_lossy(&output.stdout));
     text.push_str(&String::from_utf8_lossy(&output.stderr));
-
     text.contains("--force-tools-install")
         || (text.contains("platform-tools")
             && (text.contains("not a directory")
@@ -184,86 +133,11 @@ fn should_retry_with_force_tools_install(output: &Output) -> bool {
                 || text.contains("corrupt")))
 }
 
-fn needs_program_build(manifest: &Path, src: &Path, program_so: &Path) -> bool {
-    let Ok(program_mtime) = mtime(program_so) else {
-        return true;
-    };
-
-    [manifest, src]
-        .iter()
-        .any(|path| newest_mtime(path).is_some_and(|input_mtime| input_mtime > program_mtime))
-}
-
-fn newest_mtime(path: &Path) -> Option<SystemTime> {
-    let metadata = fs::metadata(path).ok()?;
-    if metadata.is_dir() {
-        let mut newest = metadata.modified().ok();
-        for entry in fs::read_dir(path).ok()? {
-            let entry = entry.ok()?;
-            if let Some(entry_mtime) = newest_mtime(&entry.path()) {
-                newest = Some(newest.map_or(entry_mtime, |mtime| mtime.max(entry_mtime)));
-            }
-        }
-        newest
-    } else {
-        metadata.modified().ok()
-    }
-}
-
-fn mtime(path: &Path) -> std::io::Result<SystemTime> {
-    fs::metadata(path)?.modified()
-}
-
-fn absolute_path(path: PathBuf) -> PathBuf {
-    if path.is_absolute() {
-        path
-    } else {
-        env::current_dir()
-            .unwrap_or_else(|err| panic!("failed to determine current directory: {err}"))
-            .join(path)
-    }
-}
-
 fn running_under_clippy() -> bool {
     ["RUSTC_WORKSPACE_WRAPPER", "RUSTC_WRAPPER", "RUSTC"]
         .iter()
         .filter_map(env::var_os)
         .any(|value| value.to_string_lossy().contains("clippy"))
-}
-
-struct SbfBuildLock {
-    path: PathBuf,
-}
-
-impl SbfBuildLock {
-    fn acquire(sbf_out_dir: &Path) -> Self {
-        let path = sbf_out_dir.join(SBF_BUILD_LOCK);
-        loop {
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(_) => return Self { path },
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if lock_is_stale(&path) {
-                        let _ = fs::remove_file(&path);
-                    } else {
-                        sleep(Duration::from_millis(250));
-                    }
-                }
-                Err(err) => panic!("failed to acquire SBF build lock {}: {err}", path.display()),
-            }
-        }
-    }
-}
-
-impl Drop for SbfBuildLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-fn lock_is_stale(path: &Path) -> bool {
-    mtime(path)
-        .and_then(|mtime| mtime.elapsed().map_err(std::io::Error::other))
-        .is_ok_and(|elapsed| elapsed > STALE_LOCK_TIMEOUT)
 }
 
 fn remove_cargo_driver_env(command: &mut Command) {
