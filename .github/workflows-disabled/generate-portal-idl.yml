@@ -30,7 +30,7 @@ jobs:
         run: cargo install shank-cli --version 0.4.8 --locked
 
       - name: Type-check IDL annotations
-        run: NORTHSTAR_PORTAL_BUILD_SBF_RUNNING=1 cargo check -p northstar-portal --features idl
+        run: cargo check -p northstar-portal --features idl
 
       - name: Generate portal IDL
         run: |
