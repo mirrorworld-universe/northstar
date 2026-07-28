@@ -92,7 +92,7 @@ jobs:
       - name: Run SPL token bridge validator E2E
         run: BPF_OUT_DIR="$PWD/target/deploy" cargo test -p northstar-token-bridge --test validator_e2e -- --nocapture
       - name: Run Northstar crate tests
-        run: cargo test -p northstar -p northstar-portal --no-fail-fast
+        run: BPF_OUT_DIR="$PWD/target/deploy" cargo test -p northstar -p northstar-portal --no-fail-fast
       - name: Run Northstar SVM regression tests
         run: cargo test -p solana-svm northstar --no-fail-fast
       - name: Run Northstar core service tests
@@ -125,19 +125,19 @@ jobs:
           fi
           echo "Changed files:"
           echo "$CHANGED_FILES"
-          if echo "$CHANGED_FILES" | grep -qE '^northstar/programs/portal/'; then
+          if echo "$CHANGED_FILES" | grep -qE '^(Cargo\.(toml|lock)|northstar/programs/portal/)'; then
             echo "portal_changed=true" >> "$GITHUB_OUTPUT"
-            echo "Portal program files changed"
+            echo "Portal program inputs changed"
           else
             echo "portal_changed=false" >> "$GITHUB_OUTPUT"
-            echo "No portal program file changes"
+            echo "No portal program input changes"
           fi
-          if echo "$CHANGED_FILES" | grep -qE '^northstar/programs/token-bridge/'; then
+          if echo "$CHANGED_FILES" | grep -qE '^(Cargo\.(toml|lock)|northstar/programs/(portal|token-bridge)/)'; then
             echo "token_bridge_changed=true" >> "$GITHUB_OUTPUT"
-            echo "Token bridge program files changed"
+            echo "Token bridge program inputs changed"
           else
             echo "token_bridge_changed=false" >> "$GITHUB_OUTPUT"
-            echo "No token bridge program file changes"
+            echo "No token bridge program input changes"
           fi
 
       - uses: ./.github/actions/ensure-rust-toolchain
@@ -145,23 +145,30 @@ jobs:
       - name: Ensure Solana CLI is available
         run: |
           set -euo pipefail
-          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+          SOLANA_BIN="$HOME/.local/share/solana/install/active_release/bin"
+          export PATH="$SOLANA_BIN:$PATH"
           if ! command -v solana >/dev/null 2>&1; then
             sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
-            echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
           fi
+          echo "$SOLANA_BIN" >> "$GITHUB_PATH"
           solana --version
 
       - name: Build SBF programs
         run: |
           set -euo pipefail
-          mkdir -p /solana/northstar/deploy
-          SBF_OUT_DIR=/solana/northstar/deploy ./cargo-build-sbf --manifest-path northstar/programs/portal/Cargo.toml
-          SBF_OUT_DIR=/solana/northstar/deploy ./cargo-build-sbf --manifest-path northstar/programs/token-bridge/Cargo.toml
+          DEPLOY_DIR=/solana/northstar/deploy
+          mkdir -p "$DEPLOY_DIR"
+          rm -f "$DEPLOY_DIR/northstar_portal.so" "$DEPLOY_DIR/northstar_token_bridge.so"
+          ./cargo-build-sbf \
+            --manifest-path northstar/programs/portal/Cargo.toml \
+            --sbf-out-dir "$DEPLOY_DIR"
+          ./cargo-build-sbf \
+            --manifest-path northstar/programs/token-bridge/Cargo.toml \
+            --sbf-out-dir "$DEPLOY_DIR"
+          test -s "$DEPLOY_DIR/northstar_portal.so"
+          test -s "$DEPLOY_DIR/northstar_token_bridge.so"
 
       - name: Build validator binary
-        env:
-          SBF_OUT_DIR: /solana/northstar/deploy
         run: cargo build --release --target-dir /solana/northstar/ --bin agave-validator
 
       - name: Build Northstar Solana CLI
@@ -349,6 +356,10 @@ jobs:
           SPL_SMOKE_OUTCOME: ${{ steps.spl_e2e_smoke.outcome }}
         run: |
           set -euo pipefail
+          if [ "$STATUS" != "success" ]; then
+            exit 0
+          fi
+
           if ! command -v jq >/dev/null 2>&1; then
             sudo apt-get update && sudo apt-get install -y jq
           fi
@@ -387,13 +398,7 @@ jobs:
             MENTIONS="$MENTIONS<@$USER_ID> "
           done
 
-          if [ "$STATUS" = "success" ]; then
-            STATUS_EMOJI=":white_check_mark:"
-          else
-            STATUS_EMOJI=":x:"
-          fi
-
-          LINES=("$STATUS_EMOJI NorthStar validator deployment completed with status: *$STATUS*")
+          LINES=(":white_check_mark: NorthStar validator deployment succeeded.")
           if [ "$PORTAL_CHANGED" = "true" ] && [ -n "$PORTAL_ADDRESS" ]; then
             LINES+=(
               ":rocket: Portal program changed and deployed at: \`$PORTAL_ADDRESS\`"
