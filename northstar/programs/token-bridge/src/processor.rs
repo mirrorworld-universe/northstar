@@ -1,6 +1,7 @@
 use {
     crate::{
         instruction::TokenBridgeInstruction,
+        portal_abi::{is_valid_settlement_checkpoint, is_valid_settlement_session},
         state::{BridgeBuffer, ErTokenAccount, TokenDepositReceipt, TokenVault},
     },
     borsh::{BorshDeserialize, BorshSerialize},
@@ -560,15 +561,8 @@ fn process_settle_withdrawal(
     }
     let session_data = session.try_borrow_data()?;
     let checkpoint_data = checkpoint.try_borrow_data()?;
-    if session_data.len() != 219
-        || session_data[0] != 1
-        || session_data[81..113] != validator.key()[..]
-        || checkpoint_data.len() != 237
-        || checkpoint_data[0] != 5
-        || checkpoint_data[1..33] != session.key()[..]
-        || u64::from_le_bytes(checkpoint_data[33..41].try_into().unwrap()) != er_slot
-        || checkpoint_data[105..137] != checksum
-        || !matches!(checkpoint_data[185], 1 | 3)
+    if !is_valid_settlement_session(&session_data, validator.key())
+        || !is_valid_settlement_checkpoint(&checkpoint_data, session.key(), er_slot, &checksum)
     {
         return Err(ProgramError::InvalidAccountData);
     }
