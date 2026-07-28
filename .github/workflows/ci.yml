@@ -160,8 +160,6 @@ jobs:
           SBF_OUT_DIR=/solana/northstar/deploy ./cargo-build-sbf --manifest-path northstar/programs/token-bridge/Cargo.toml
 
       - name: Build validator binary
-        env:
-          SBF_OUT_DIR: /solana/northstar/deploy
         run: cargo build --release --target-dir /solana/northstar/ --bin agave-validator
 
       - name: Build Northstar Solana CLI
@@ -349,6 +347,10 @@ jobs:
           SPL_SMOKE_OUTCOME: ${{ steps.spl_e2e_smoke.outcome }}
         run: |
           set -euo pipefail
+          if [ "$STATUS" != "success" ]; then
+            exit 0
+          fi
+
           if ! command -v jq >/dev/null 2>&1; then
             sudo apt-get update && sudo apt-get install -y jq
           fi
@@ -387,13 +389,7 @@ jobs:
             MENTIONS="$MENTIONS<@$USER_ID> "
           done
 
-          if [ "$STATUS" = "success" ]; then
-            STATUS_EMOJI=":white_check_mark:"
-          else
-            STATUS_EMOJI=":x:"
-          fi
-
-          LINES=("$STATUS_EMOJI NorthStar validator deployment completed with status: *$STATUS*")
+          LINES=(":white_check_mark: NorthStar validator deployment succeeded.")
           if [ "$PORTAL_CHANGED" = "true" ] && [ -n "$PORTAL_ADDRESS" ]; then
             LINES+=(
               ":rocket: Portal program changed and deployed at: \`$PORTAL_ADDRESS\`"
