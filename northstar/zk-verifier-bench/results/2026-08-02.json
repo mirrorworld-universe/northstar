@@ -1,0 +1,69 @@
+{
+  "schema": "northstar-groth16-live-sbf-benchmark-v1",
+  "date": "2026-08-02",
+  "agave_version": "4.2.0-alpha.0",
+  "groth16_solana_revision": "43fee1a67e91c0df7bb4edad5ba87ae4602aa208",
+  "execution": "solana-program-test loading the compiled SBF ELF",
+  "default_compute_limit": 200000,
+  "max_legacy_transaction_bytes": 1232,
+  "sbf_elf_bytes": 24584,
+  "upgradeable_program_account_bytes": 36,
+  "upgradeable_programdata_account_bytes": 24629,
+  "cases": [
+    {
+      "public_inputs": 8,
+      "proof_bytes": 256,
+      "public_input_bytes": 256,
+      "instruction_bytes": 513,
+      "minimal_transaction_bytes": 683,
+      "portal_envelope_transaction_bytes": 914,
+      "raw_verifying_key_bytes": 1024,
+      "compute_units": 108915,
+      "one_transaction": true
+    },
+    {
+      "public_inputs": 12,
+      "proof_bytes": 256,
+      "public_input_bytes": 384,
+      "instruction_bytes": 641,
+      "minimal_transaction_bytes": 811,
+      "portal_envelope_transaction_bytes": 1042,
+      "raw_verifying_key_bytes": 1280,
+      "compute_units": 126141,
+      "one_transaction": true
+    },
+    {
+      "public_inputs": 16,
+      "proof_bytes": 256,
+      "public_input_bytes": 512,
+      "instruction_bytes": 769,
+      "minimal_transaction_bytes": 939,
+      "portal_envelope_transaction_bytes": 1170,
+      "raw_verifying_key_bytes": 1536,
+      "compute_units": 143584,
+      "one_transaction": true
+    }
+  ],
+  "failure_modes": [
+    {
+      "case": "short payload",
+      "result": "InvalidInstructionData",
+      "compute_units": 64
+    },
+    {
+      "case": "public input equal to BN254 Fr modulus",
+      "result": "Groth16Error::PublicInputGreaterThanFieldSize (custom 9)",
+      "compute_units": 155
+    },
+    {
+      "case": "mutated proof point",
+      "result": "Groth16Error::ProofVerificationFailed (custom 1)",
+      "compute_units": 143585
+    },
+    {
+      "case": "Portal verifier with 100000-CU limit",
+      "result": "ComputationalBudgetExceeded",
+      "compute_units": 99850
+    }
+  ]
+}

@@ -133,6 +133,7 @@ members = [
     "northstar/programs/token-bridge",
     "northstar/zk-prover",
     "northstar/zk-types",
+    "northstar/zk-verifier-bench",
 ]
 
 exclude = [

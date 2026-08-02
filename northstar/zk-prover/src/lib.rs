@@ -73,6 +73,11 @@ pub struct OneAccountTransitionCircuitV1 {
     pub witness: OneAccountTransitionWitnessV1,
 }
 
+#[derive(Clone, Debug)]
+pub struct PaddedPublicInputCircuitV1<const N: usize> {
+    pub transition: OneAccountTransitionCircuitV1,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Groth16VerifyingKeyRaw {
     pub alpha_g1: [u8; 64],
@@ -371,6 +376,20 @@ impl ConstraintSynthesizer<Fr> for OneAccountTransitionCircuitV1 {
             &params,
         )?;
         tx_effect_root.enforce_equal(&public[5])?;
+        Ok(())
+    }
+}
+
+impl<const N: usize> ConstraintSynthesizer<Fr> for PaddedPublicInputCircuitV1<N> {
+    fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
+        if N < 8 {
+            return Err(SynthesisError::Unsatisfiable);
+        }
+        self.transition.generate_constraints(cs.clone())?;
+        for _ in 8..N {
+            let padding = FpVar::new_input(cs.clone(), || Ok(Fr::from(0u64)))?;
+            padding.enforce_equal(&FpVar::zero())?;
+        }
         Ok(())
     }
 }

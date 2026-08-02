@@ -4941,6 +4941,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "northstar-zk-verifier-bench"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "groth16-solana",
+ "hex",
+ "serde_json",
+ "solana-account 4.3.0",
+ "solana-account-info",
+ "solana-instruction",
+ "solana-program-entrypoint",
+ "solana-program-error",
+ "solana-program-test",
+ "solana-pubkey 4.2.0",
+ "solana-sdk-ids",
+ "solana-signer",
+ "solana-transaction",
+ "tokio",
+]
+
+[[package]]
 name = "num"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
