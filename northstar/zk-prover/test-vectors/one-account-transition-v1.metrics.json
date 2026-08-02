@@ -1,0 +1,21 @@
+{
+  "constraints": 21972,
+  "proving_key_compressed_bytes": 4460720,
+  "setup_ms": 317.31788,
+  "solana_proof_bytes": 256,
+  "solana_verifying_key_bytes": 1024,
+  "verifying_key_compressed_bytes": 520,
+  "warm_proving_median_ms": 343.4603715,
+  "warm_proving_ms": [
+    320.970882,
+    327.388819,
+    336.41474500000004,
+    336.664447,
+    343.255918,
+    343.664825,
+    346.053548,
+    358.94903700000003,
+    362.904362,
+    365.610453
+  ]
+}

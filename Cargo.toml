@@ -131,6 +131,7 @@ members = [
     "northstar",
     "northstar/programs/portal",
     "northstar/programs/token-bridge",
+    "northstar/zk-prover",
     "northstar/zk-types",
 ]
 
@@ -576,6 +577,7 @@ zstd = "0.13.3"
 # Sonic:
 northstar = { path = "northstar" }
 northstar-portal.path = "northstar/programs/portal"
+northstar-zk-prover.path = "northstar/zk-prover"
 northstar-zk-types.path = "northstar/zk-types"
 
 [profile.dev]
