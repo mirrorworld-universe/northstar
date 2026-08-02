@@ -19,6 +19,7 @@ use {
         sysvars::{clock::Clock, rent::Rent, Sysvar},
         ProgramResult,
     },
+    pinocchio_idl_macros::p_instruction,
     pinocchio_system::instructions::Transfer,
     solana_sha256_hasher::hashv,
 };
@@ -384,6 +385,28 @@ fn step_proof_public_input_hash(
     .to_bytes()
 }
 
+#[p_instruction(
+    id = 14,
+    accounts = [
+        proposer(signer, mut),
+        session(state = Session),
+        checkpoint(mut, state = Checkpoint),
+        checkpoint_cursor(mut, state = CheckpointCursor),
+        system_program
+    ],
+    data = [
+        er_slot: u64,
+        step_count: u64,
+        previous_state_root: Hash32,
+        new_state_root: Hash32,
+        trace_root: Hash32,
+        tx_effect_root: Hash32,
+        readonly_l1_root: Hash32,
+        da_commitment: Hash32,
+        effect_commitment: Hash32,
+        challenge_window_slots: u64
+    ]
+)]
 pub fn process_propose_checkpoint(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -528,6 +551,17 @@ pub fn process_propose_checkpoint(
     Ok(())
 }
 
+#[p_instruction(
+    id = 15,
+    accounts = [
+        committer(signer),
+        session(state = Session),
+        checkpoint(mut, state = Checkpoint),
+        checkpoint_cursor(mut, state = CheckpointCursor),
+        proposer(mut)
+    ],
+    data = [er_slot: u64]
+)]
 pub fn process_commit_checkpoint(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -583,6 +617,16 @@ pub fn process_commit_checkpoint(
     Ok(())
 }
 
+#[p_instruction(
+    id = 16,
+    accounts = [
+        proposer(signer, mut),
+        session(state = Session),
+        checkpoint(mut, state = Checkpoint),
+        checkpoint_cursor(mut, state = CheckpointCursor)
+    ],
+    data = [er_slot: u64]
+)]
 pub fn process_cancel_checkpoint(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -631,6 +675,18 @@ pub fn process_cancel_checkpoint(
     Ok(())
 }
 
+#[p_instruction(
+    id = 17,
+    accounts = [
+        challenger(signer, mut),
+        session(state = Session),
+        checkpoint(mut, state = Checkpoint),
+        challenge(mut, state = Challenge),
+        da_proof(mut, state = DataAvailabilityProof),
+        system_program
+    ],
+    data = [er_slot: u64]
+)]
 pub fn process_open_challenge(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -758,6 +814,23 @@ pub fn process_open_challenge(
     store_checkpoint(checkpoint, &checkpoint_state)
 }
 
+#[p_instruction(
+    id = 23,
+    accounts = [
+        validator(signer),
+        session(state = Session),
+        checkpoint(state = Checkpoint),
+        challenge(mut, state = Challenge),
+        da_proof(mut, state = DataAvailabilityProof)
+    ],
+    data = [
+        er_slot: u64,
+        claimed_step: u64,
+        claimed_state_root: Hash32,
+        da_payload_root: Hash32,
+        da_inclusion_proof_hash: Hash32
+    ]
+)]
 pub fn process_respond_challenge(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -847,6 +920,16 @@ pub fn process_respond_challenge(
     store_challenge(challenge, &challenge_state)
 }
 
+#[p_instruction(
+    id = 24,
+    accounts = [
+        challenger(signer),
+        session(state = Session),
+        checkpoint(state = Checkpoint),
+        challenge(mut, state = Challenge)
+    ],
+    data = [er_slot: u64, dispute_upper: bool]
+)]
 pub fn process_bisect_challenge(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -899,6 +982,19 @@ pub fn process_bisect_challenge(
     store_challenge(challenge, &state)
 }
 
+#[p_instruction(
+    id = 25,
+    accounts = [
+        caller(signer),
+        session(state = Session),
+        checkpoint(mut, state = Checkpoint),
+        challenge(mut, state = Challenge),
+        da_proof(mut, state = DataAvailabilityProof),
+        bond_recipient(mut),
+        checkpoint_cursor(mut, state = CheckpointCursor)
+    ],
+    data = [er_slot: u64]
+)]
 pub fn process_timeout_challenge(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -960,6 +1056,26 @@ pub fn process_timeout_challenge(
     store_challenge(challenge, &challenge_state)
 }
 
+#[p_instruction(
+    id = 18,
+    accounts = [
+        authority(signer, mut),
+        session(state = Session),
+        checkpoint(state = Checkpoint),
+        challenge(state = Challenge),
+        step_proof(mut, state = StepProofAccount),
+        system_program
+    ],
+    data = [
+        er_slot: u64,
+        proof_kind: u8,
+        proof_version: u8,
+        step_index: u64,
+        tx_effect_root: Hash32,
+        readonly_l1_root: Hash32,
+        settlement_effect_root: Hash32
+    ]
+)]
 pub fn process_create_step_proof(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -1070,6 +1186,22 @@ pub fn process_create_step_proof(
     store_step_proof(proof, &proof_state)
 }
 
+#[p_instruction(
+    id = 19,
+    accounts = [
+        authority(signer),
+        session(state = Session),
+        checkpoint(state = Checkpoint),
+        challenge(state = Challenge),
+        step_proof(mut, state = StepProofAccount)
+    ],
+    data = [
+        er_slot: u64,
+        offset: u32,
+        chunk_len: u16,
+        chunk: [u8; 128]
+    ]
+)]
 pub fn process_write_step_proof(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -1133,6 +1265,17 @@ pub fn process_write_step_proof(
     Ok(())
 }
 
+#[p_instruction(
+    id = 20,
+    accounts = [
+        authority(signer),
+        session(state = Session),
+        checkpoint(state = Checkpoint),
+        challenge(state = Challenge),
+        step_proof(mut, state = StepProofAccount)
+    ],
+    data = [er_slot: u64, proof_len: u32]
+)]
 pub fn process_seal_step_proof(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -1222,6 +1365,20 @@ fn verify_step_proof_test_only(proof_state: &StepProofAccount) -> StepProofVerif
     }
 }
 
+#[p_instruction(
+    id = 21,
+    accounts = [
+        submitter(signer),
+        session(state = Session),
+        checkpoint(mut, state = Checkpoint),
+        challenge(mut, state = Challenge),
+        da_proof(state = DataAvailabilityProof),
+        step_proof(state = StepProofAccount),
+        bond_recipient(mut),
+        checkpoint_cursor(mut, state = CheckpointCursor)
+    ],
+    data = [er_slot: u64, verifier_mode: StepProofVerifierMode]
+)]
 pub fn process_resolve_challenge(
     program_id: &Pubkey,
     accounts: &[AccountInfo],

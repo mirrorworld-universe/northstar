@@ -32,7 +32,10 @@ fn verifier_instruction() -> Instruction {
     proof_bytes[64..192].copy_from_slice(&decode::<128>(proof["b"].as_str().unwrap()));
     proof_bytes[192..].copy_from_slice(&decode::<64>(proof["c"].as_str().unwrap()));
     let public = vector["public_inputs_be"].as_array().unwrap();
-    let public_inputs = core::array::from_fn(|index| decode::<32>(public[index].as_str().unwrap()));
+    let mut public_inputs = [0; 256];
+    for (output, input) in public_inputs.chunks_exact_mut(32).zip(public) {
+        output.copy_from_slice(&decode::<32>(input.as_str().unwrap()));
+    }
     Instruction {
         program_id: PORTAL_PROGRAM_ID,
         accounts: vec![],

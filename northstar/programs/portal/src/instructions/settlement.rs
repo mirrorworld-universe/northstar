@@ -15,6 +15,7 @@ use {
         sysvars::{clock::Clock, rent::Rent, Sysvar},
         ProgramResult,
     },
+    pinocchio_idl_macros::p_instruction,
     solana_sha256_hasher::hashv,
 };
 
@@ -239,6 +240,11 @@ fn load_delegation_record(
     Ok(delegation_state)
 }
 
+#[p_instruction(
+    id = 5,
+    accounts = [validator(signer), session(mut, state = Session), checkpoint(state = Checkpoint)],
+    data = [er_slot: u64, checksum: Hash32]
+)]
 pub fn process_begin_settlement(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -284,6 +290,22 @@ pub fn process_begin_settlement(
     Ok(())
 }
 
+#[p_instruction(
+    id = 6,
+    accounts = [
+        validator(signer),
+        session(mut, state = Session),
+        delegated_account(mut),
+        delegation_record(state = DelegationRecord)
+    ],
+    data = [
+        er_slot: u64,
+        checksum: Hash32,
+        account_data_offset: u32,
+        chunk_len: u16,
+        chunk: [u8; 700]
+    ]
+)]
 pub fn process_write_settlement_chunk(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -346,6 +368,16 @@ pub fn process_write_settlement_chunk(
     Ok(())
 }
 
+#[p_instruction(
+    id = 11,
+    accounts = [
+        validator(signer),
+        session(mut, state = Session),
+        delegated_account(mut),
+        delegation_record(mut, state = DelegationRecord)
+    ],
+    data = [er_slot: u64, checksum: Hash32, owner: Pubkey]
+)]
 pub fn process_settle_account_owner(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -393,6 +425,16 @@ pub fn process_settle_account_owner(
     Ok(())
 }
 
+#[p_instruction(
+    id = 12,
+    accounts = [validator(signer), session(mut, state = Session)],
+    data = [
+        er_slot: u64,
+        checksum: Hash32,
+        account_count: u8,
+        lamports: [u64; 7]
+    ]
+)]
 pub fn process_settle_account_lamports(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -473,6 +515,16 @@ pub fn process_settle_account_lamports(
     Ok(())
 }
 
+#[p_instruction(
+    id = 7,
+    accounts = [
+        validator(signer),
+        session(mut, state = Session),
+        checkpoint(mut, state = Checkpoint),
+        checkpoint_cursor(mut, state = CheckpointCursor)
+    ],
+    data = [er_slot: u64, checksum: Hash32]
+)]
 pub fn process_finish_settlement(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -526,6 +578,10 @@ pub fn process_finish_settlement(
     Ok(())
 }
 
+#[p_instruction(
+    id = 8,
+    accounts = [authority_or_validator(signer), session(mut, state = Session)]
+)]
 pub fn process_abort_settlement(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     pinocchio_log::log!("Instruction: AbortSettlement");
 

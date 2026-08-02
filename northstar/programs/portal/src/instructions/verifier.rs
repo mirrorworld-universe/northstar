@@ -2,20 +2,34 @@ use {
     crate::{PortalError, VerifyErStepProofV1},
     groth16_solana::groth16::Groth16Verifier,
     northstar_zk_types::{ErStepPublicInputsV1, Groth16ProofRaw},
-    pinocchio::ProgramResult,
+    pinocchio::{account_info::AccountInfo, ProgramResult},
+    pinocchio_idl_macros::p_instruction,
 };
 
 mod verifier_key;
 
+#[p_instruction(
+    id = 26,
+    data = [proof: [u8; 256], public_inputs: [u8; 256]]
+)]
 pub fn process_verify_er_step_proof_v1(
+    accounts: &[AccountInfo],
     VerifyErStepProofV1 {
         proof,
         public_inputs,
     }: VerifyErStepProofV1,
 ) -> ProgramResult {
+    let _ = accounts;
     let proof = Groth16ProofRaw::from_bytes(&proof)
         .map_err(|_| PortalError::StepProofVerificationFailed)?;
-    let public_inputs = ErStepPublicInputsV1::from_array(public_inputs)
+    let mut groth16_inputs = [[0; 32]; 8];
+    for (output, input) in groth16_inputs
+        .iter_mut()
+        .zip(public_inputs.chunks_exact(32))
+    {
+        output.copy_from_slice(input);
+    }
+    let public_inputs = ErStepPublicInputsV1::from_array(groth16_inputs)
         .map_err(|_| PortalError::StepProofVerificationFailed)?
         .to_array();
     let mut verifier = Groth16Verifier::<8>::new(
@@ -51,8 +65,10 @@ mod tests {
         proof_bytes[64..192].copy_from_slice(&decode::<128>(proof["b"].as_str().unwrap()));
         proof_bytes[192..].copy_from_slice(&decode::<64>(proof["c"].as_str().unwrap()));
         let public = vector["public_inputs_be"].as_array().unwrap();
-        let public_inputs =
-            core::array::from_fn(|index| decode::<32>(public[index].as_str().unwrap()));
+        let mut public_inputs = [0; 256];
+        for (output, input) in public_inputs.chunks_exact_mut(32).zip(public) {
+            output.copy_from_slice(&decode::<32>(input.as_str().unwrap()));
+        }
         VerifyErStepProofV1 {
             proof: proof_bytes,
             public_inputs,
@@ -61,7 +77,7 @@ mod tests {
 
     #[test]
     fn verifies_generated_transition_vector() {
-        process_verify_er_step_proof_v1(test_instruction()).unwrap();
+        process_verify_er_step_proof_v1(&[], test_instruction()).unwrap();
     }
 
     #[test]
@@ -69,7 +85,7 @@ mod tests {
         let mut instruction = test_instruction();
         instruction.proof[63] ^= 1;
         assert_eq!(
-            process_verify_er_step_proof_v1(instruction),
+            process_verify_er_step_proof_v1(&[], instruction),
             Err(PortalError::StepProofVerificationFailed.into())
         );
     }
@@ -77,9 +93,9 @@ mod tests {
     #[test]
     fn rejects_mutated_public_input() {
         let mut instruction = test_instruction();
-        instruction.public_inputs[7][31] ^= 1;
+        instruction.public_inputs[255] ^= 1;
         assert_eq!(
-            process_verify_er_step_proof_v1(instruction),
+            process_verify_er_step_proof_v1(&[], instruction),
             Err(PortalError::StepProofVerificationFailed.into())
         );
     }
@@ -87,9 +103,9 @@ mod tests {
     #[test]
     fn rejects_noncanonical_public_input() {
         let mut instruction = test_instruction();
-        instruction.public_inputs[0] = BN254_FR_MODULUS_BE;
+        instruction.public_inputs[..32].copy_from_slice(&BN254_FR_MODULUS_BE);
         assert_eq!(
-            process_verify_er_step_proof_v1(instruction),
+            process_verify_er_step_proof_v1(&[], instruction),
             Err(PortalError::StepProofVerificationFailed.into())
         );
     }

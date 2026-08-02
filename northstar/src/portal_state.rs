@@ -19,40 +19,47 @@ pub enum PortalAccount {
 }
 
 pub fn try_parse_raw_portal_account(data: &[u8]) -> Option<PortalAccount> {
-    if data.is_empty() {
-        return None;
-    }
-    match data[0] {
-        Session::DISCRIMINATOR => borsh::from_slice::<Session>(data)
+    if data.starts_with(&Session::DISCRIMINATOR) {
+        borsh::from_slice::<Session>(data)
             .ok()
-            .map(PortalAccount::Session),
-        FeeVault::DISCRIMINATOR => borsh::from_slice::<FeeVault>(data)
+            .map(PortalAccount::Session)
+    } else if data.starts_with(&FeeVault::DISCRIMINATOR) {
+        borsh::from_slice::<FeeVault>(data)
             .ok()
-            .map(PortalAccount::FeeVault),
-        DelegationRecord::DISCRIMINATOR => borsh::from_slice::<DelegationRecord>(data)
+            .map(PortalAccount::FeeVault)
+    } else if data.starts_with(&DelegationRecord::DISCRIMINATOR) {
+        borsh::from_slice::<DelegationRecord>(data)
             .ok()
-            .map(PortalAccount::DelegationRecord),
-        DepositReceipt::DISCRIMINATOR => borsh::from_slice::<DepositReceipt>(data)
+            .map(PortalAccount::DelegationRecord)
+    } else if data.starts_with(&DepositReceipt::DISCRIMINATOR) {
+        borsh::from_slice::<DepositReceipt>(data)
             .ok()
-            .map(PortalAccount::DepositReceipt),
-        Checkpoint::DISCRIMINATOR => borsh::from_slice::<Checkpoint>(data)
+            .map(PortalAccount::DepositReceipt)
+    } else if data.starts_with(&Checkpoint::DISCRIMINATOR) {
+        borsh::from_slice::<Checkpoint>(data)
             .ok()
-            .map(PortalAccount::Checkpoint),
-        CheckpointCursor::DISCRIMINATOR => borsh::from_slice::<CheckpointCursor>(data)
+            .map(PortalAccount::Checkpoint)
+    } else if data.starts_with(&CheckpointCursor::DISCRIMINATOR) {
+        borsh::from_slice::<CheckpointCursor>(data)
             .ok()
-            .map(PortalAccount::CheckpointCursor),
-        Challenge::DISCRIMINATOR => borsh::from_slice::<Challenge>(data)
+            .map(PortalAccount::CheckpointCursor)
+    } else if data.starts_with(&Challenge::DISCRIMINATOR) {
+        borsh::from_slice::<Challenge>(data)
             .ok()
-            .map(PortalAccount::Challenge),
-        DataAvailabilityProof::DISCRIMINATOR => borsh::from_slice::<DataAvailabilityProof>(data)
+            .map(PortalAccount::Challenge)
+    } else if data.starts_with(&DataAvailabilityProof::DISCRIMINATOR) {
+        borsh::from_slice::<DataAvailabilityProof>(data)
             .ok()
-            .map(PortalAccount::DataAvailabilityProof),
-        StepProofAccount::DISCRIMINATOR => borsh::from_slice::<StepProofAccount>(data)
+            .map(PortalAccount::DataAvailabilityProof)
+    } else if data.starts_with(&StepProofAccount::DISCRIMINATOR) {
+        borsh::from_slice::<StepProofAccount>(data)
             .ok()
-            .map(PortalAccount::StepProofAccount),
-        SessionBridge::DISCRIMINATOR => borsh::from_slice::<SessionBridge>(data)
+            .map(PortalAccount::StepProofAccount)
+    } else if data.starts_with(&SessionBridge::DISCRIMINATOR) {
+        borsh::from_slice::<SessionBridge>(data)
             .ok()
-            .map(PortalAccount::SessionBridge),
-        _ => None,
+            .map(PortalAccount::SessionBridge)
+    } else {
+        None
     }
 }

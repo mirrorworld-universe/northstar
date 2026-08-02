@@ -8,8 +8,19 @@ use {
     pinocchio::{
         account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, ProgramResult,
     },
+    pinocchio_idl_macros::p_instruction,
 };
 
+#[p_instruction(
+    id = 1,
+    accounts = [
+        closer(signer, mut),
+        session(mut, state = Session),
+        fee_vault(mut, state = FeeVault),
+        system_program,
+        checkpoint_cursor(mut, state = CheckpointCursor)
+    ]
+)]
 pub fn process_close_session(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     pinocchio_log::log!("Instruction: CloseSession");
 

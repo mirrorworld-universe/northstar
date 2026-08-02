@@ -15,8 +15,27 @@ use {
         sysvars::{clock::Clock, rent::Rent, Sysvar},
         ProgramResult,
     },
+    pinocchio_idl_macros::p_instruction,
 };
 
+#[p_instruction(
+    id = 9,
+    accounts = [
+        validator(signer),
+        session(mut, state = Session),
+        deposit_receipt(mut, state = DepositReceipt),
+        er_source,
+        l1_recipient(mut)
+    ],
+    data = [
+        er_slot: u64,
+        checksum: Hash32,
+        balance: u64,
+        withdrawn: u64,
+        payout_lamports: u64,
+        l1_recipient: Pubkey
+    ]
+)]
 pub fn process_settle_deposit_receipt(
     program_id: &Pubkey,
     accounts: &[AccountInfo],

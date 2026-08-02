@@ -11,7 +11,6 @@ crate-type = ["cdylib", "lib"]
 default = []
 no-entrypoint = []
 bpf-entrypoint = []
-idl = ["dep:shank"]
 test-verifier = []
 zk-verifier-prototype = ["dep:groth16-solana", "dep:northstar-zk-types"]
 
@@ -24,7 +23,7 @@ borsh = { version = "1", default-features = false, features = ["derive"] }
 groth16-solana = { git = "https://github.com/Lightprotocol/groth16-solana", rev = "43fee1a67e91c0df7bb4edad5ba87ae4602aa208", optional = true }
 northstar-zk-types = { workspace = true, optional = true }
 solana-sha256-hasher = { workspace = true, features = ["sha2"] }
-shank = { version = "0.4.8", optional = true }
+pinocchio-idl-macros = "=0.1.1"
 
 [target.'cfg(not(target_os = "solana"))'.dependencies]
 solana-pubkey = { workspace = true, features = ["curve25519"] }

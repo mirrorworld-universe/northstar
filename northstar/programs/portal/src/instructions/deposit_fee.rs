@@ -15,9 +15,21 @@ use {
         sysvars::{clock::Clock, rent::Rent, Sysvar},
         ProgramResult,
     },
+    pinocchio_idl_macros::p_instruction,
     pinocchio_system::instructions::Transfer,
 };
 
+#[p_instruction(
+    id = 2,
+    accounts = [
+        depositor(signer, mut),
+        session(state = Session),
+        deposit_receipt(mut, state = DepositReceipt),
+        recipient,
+        system_program
+    ],
+    data = [lamports: u64]
+)]
 pub fn process_deposit_fee(
     program_id: &Pubkey,
     accounts: &[AccountInfo],

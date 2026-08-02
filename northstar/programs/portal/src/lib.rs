@@ -138,9 +138,8 @@ fn process_instruction(
             instructions::process_timeout_challenge(program_id, accounts, timeout)
         }),
         #[cfg(feature = "zk-verifier-prototype")]
-        Ok((26, payload)) => {
-            deserialize_args(payload).and_then(instructions::process_verify_er_step_proof_v1)
-        }
+        Ok((26, payload)) => deserialize_args(payload)
+            .and_then(|proof| instructions::process_verify_er_step_proof_v1(accounts, proof)),
         Ok((_, _)) | Err(_) => Err(ProgramError::InvalidInstructionData),
     }
 }
