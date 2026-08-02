@@ -185,6 +185,9 @@ pub enum PortalInstruction {
     #[cfg_attr(feature = "idl", account(5, name = "bond_recipient", mut))]
     #[cfg_attr(feature = "idl", account(6, name = "checkpoint_cursor", mut))]
     TimeoutChallenge(TimeoutChallenge),
+
+    #[cfg(feature = "zk-verifier-prototype")]
+    VerifyErStepProofV1(VerifyErStepProofV1),
 }
 
 #[cfg_attr(feature = "idl", derive(shank::ShankType))]
@@ -356,4 +359,12 @@ pub struct BisectChallenge {
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
 pub struct TimeoutChallenge {
     pub er_slot: u64,
+}
+
+#[cfg(feature = "zk-verifier-prototype")]
+#[cfg_attr(feature = "idl", derive(shank::ShankType))]
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+pub struct VerifyErStepProofV1 {
+    pub proof: [u8; 256],
+    pub public_inputs: [[u8; 32]; 8],
 }

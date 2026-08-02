@@ -14,6 +14,8 @@ pub mod settle_deposit_receipt;
 pub mod settlement;
 pub mod start_withdrawal;
 pub mod undelegate;
+#[cfg(feature = "zk-verifier-prototype")]
+pub mod verifier;
 
 fn initialize_pda_account(
     payer: &AccountInfo,
@@ -52,6 +54,8 @@ fn initialize_pda_account(
     Ok(())
 }
 
+#[cfg(feature = "zk-verifier-prototype")]
+pub use verifier::process_verify_er_step_proof_v1;
 pub use {
     checkpoint::{
         process_bisect_challenge, process_cancel_checkpoint, process_commit_checkpoint,

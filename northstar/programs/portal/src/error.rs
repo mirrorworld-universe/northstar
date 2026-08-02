@@ -67,6 +67,7 @@ pub enum PortalError {
     DataAvailabilityDeserializeFailed = 62,
     DataAvailabilityCommitmentMismatch = 63,
     CheckpointChallengeWindowTooLong = 64,
+    StepProofVerificationFailed = 65,
 }
 
 impl From<PortalError> for ProgramError {
