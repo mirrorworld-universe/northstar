@@ -838,7 +838,8 @@ mod test {
             votor_event_sender,
             test_leader_schedule_cache(&child),
         );
-        run.reinitialize_state(&blockstore, &child, &mut ProcessShredsStats::default());
+        run.reinitialize_state(&blockstore, &child, &mut ProcessShredsStats::default())
+            .unwrap();
 
         assert_eq!(run.parent_block_id, parent.block_id().unwrap());
     }
@@ -854,9 +855,10 @@ mod test {
             test_leader_schedule_cache(&bank),
         );
 
-        run.reinitialize_state(&blockstore, &bank, &mut ProcessShredsStats::default());
-
-        assert_eq!(run.parent_block_id, Hash::default());
+        let err = run
+            .reinitialize_state(&blockstore, &bank, &mut ProcessShredsStats::default())
+            .unwrap_err();
+        assert_matches!(err, Error::WindowSkipped(slot) if slot == bank.slot());
     }
 
     #[test]
