@@ -108,7 +108,6 @@ members = [
     "test-validator",
     "tls-utils",
     "tokens",
-    "tps-client",
     "tpu-client",
     "tpu-client-next",
     "transaction-context",
@@ -231,7 +230,7 @@ bytesize = "2.4.0"
 bzip2 = "0.6.1"
 caps = "0.5.6"
 cfg-if = "1.0.4"
-chrono = { version = "0.4.44", default-features = false }
+chrono = { version = "0.4.45", default-features = false }
 chrono-humanize = "0.2.3"
 clap = { version = "2.33.1", default-features = false, features = ["suggestions"] }
 console = "0.16.3"
@@ -270,7 +269,7 @@ hex = "0.4.3"
 hex-literal = "1.1.0"
 hidapi = { version = "2.6.6", default-features = false }
 histogram = "0.6.9"
-http = "1.4.1"
+http = "1.4.2"
 humantime = "2.3.0"
 hyper-util = "0.1.20"
 imbl = "7.0.0"
@@ -299,7 +298,7 @@ libsecp256k1 = { version = "0.7.2", default-features = false, features = [
     "std",
     "static-context",
 ] }
-log = "0.4.31"
+log = "0.4.32"
 lru = "0.18.0"
 lz4 = "1.28.1"
 memmap2 = "0.9.10"
@@ -323,7 +322,7 @@ pretty-hex = "0.4.2"
 pretty_assertions = "1.4.1"
 proptest = "1.11"
 prost = "0.14.4"
-prost-types = "0.14.3"
+prost-types = "0.14.4"
 protobuf-src = "1.1.0"
 protosol = "=8.2.0"
 qualifier_attr = { version = "0.2.2", default-features = false }
@@ -358,7 +357,7 @@ smallvec = { version = "1.15.1", default-features = false, features = ["union"] 
 smpl_jwt = "0.9.0"
 socket2 = "0.6.3"
 soketto = "0.8"
-solana-account = "4.3.0"
+solana-account = "4.3.1"
 solana-account-decoder = { path = "account-decoder", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
 solana-account-decoder-client-types = { path = "account-decoder-client-types", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
 solana-account-info = "3.1.1"
@@ -409,7 +408,7 @@ solana-epoch-schedule = "3.1.0"
 solana-faucet = { path = "faucet", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
 solana-feature-gate-interface = "4.0.0"
 solana-fee = { path = "fee", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
-solana-fee-calculator = "3.2.1"
+solana-fee-calculator = "3.2.2"
 solana-fee-structure = "3.0.0"
 solana-file-download = "3.1.4"
 solana-frozen-abi = "3.6.0"
@@ -468,7 +467,7 @@ solana-pubsub-client = { path = "pubsub-client", version = "=4.2.0-alpha.0" }
 solana-quic-client = { path = "quic-client", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
 solana-rayon-threadlimit = { path = "rayon-threadlimit", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
 solana-remote-wallet = { path = "remote-wallet", version = "=4.2.0-alpha.0", default-features = false, features = ["agave-unstable-api"] }
-solana-rent = "4.2.0"
+solana-rent = "4.2.1"
 solana-reward-info = "6.2.0"
 solana-rpc = { path = "rpc", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
 solana-rpc-client = { path = "rpc-client", version = "=4.2.0-alpha.0", default-features = false }

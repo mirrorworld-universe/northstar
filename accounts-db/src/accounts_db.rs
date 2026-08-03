@@ -99,7 +99,7 @@ use {
 };
 
 // when the accounts write cache exceeds this many bytes, we will flush it
-// this can be specified on the command line, too (--accounts-db-cache-limit-mb)
+// this can be specified on the command line, too (--accounts-db-write-cache-limit)
 const WRITE_CACHE_LIMIT_BYTES_DEFAULT: u64 = 15_000_000_000;
 const SCAN_SLOT_PAR_ITER_THRESHOLD: usize = 4000;
 
@@ -3078,7 +3078,7 @@ impl AccountsDb {
         old_store: Arc<AccountStorageEntry>,
         size: u64,
     ) -> ShrinkInProgress<'_> {
-        let shrunken_store = self.create_store(slot, size, "shrink", self.paths.as_slice());
+        let shrunken_store = self.create_store(slot, size, "shrink");
         self.storage
             .shrinking_in_progress(slot, old_store, shrunken_store)
     }
@@ -3819,8 +3819,7 @@ impl AccountsDb {
         //          |                             |
         //          V                             |
         // P3 purge_slots_from_cache_and_store()/ | index
-        //       purge_slot_cache()/              |
-        //          purge_slot_cache_pubkeys()    | (removes existing store_id, offset for cache)
+        //       remove_dead_slots_metadata()     | (removes index roots metadata for cached slot)
         //       purge_slot_storage()/            |
         //          purge_keys_exact()            | (removes accounts index entries)
         //          handle_reclaims()             | (removes storage entries)
@@ -4162,16 +4161,11 @@ impl AccountsDb {
         }
     }
 
-    fn create_store(
-        &self,
-        slot: Slot,
-        size: u64,
-        from: &str,
-        paths: &[PathBuf],
-    ) -> Arc<AccountStorageEntry> {
+    fn create_store(&self, slot: Slot, size: u64, from: &str) -> Arc<AccountStorageEntry> {
         self.stats
             .create_store_count
             .fetch_add(1, Ordering::Relaxed);
+        let paths = &self.paths;
         let path_index = rng().random_range(0..paths.len());
         let store = Arc::new(self.new_storage_entry(slot, Path::new(&paths[path_index]), size));
 
@@ -4188,23 +4182,14 @@ impl AccountsDb {
         store
     }
 
+    #[cfg(test)]
     fn create_and_insert_store(
         &self,
         slot: Slot,
         size: u64,
         from: &str,
     ) -> Arc<AccountStorageEntry> {
-        self.create_and_insert_store_with_paths(slot, size, from, &self.paths)
-    }
-
-    fn create_and_insert_store_with_paths(
-        &self,
-        slot: Slot,
-        size: u64,
-        from: &str,
-        paths: &[PathBuf],
-    ) -> Arc<AccountStorageEntry> {
-        let store = self.create_store(slot, size, from, paths);
+        let store = self.create_store(slot, size, from);
         self.storage.insert(store.clone());
         store
     }
@@ -4268,11 +4253,31 @@ impl AccountsDb {
                 // the slot and from the Accounts Index
                 num_cached_slots_removed += 1;
                 total_removed_cached_bytes += slot_cache.total_bytes();
-                self.purge_slot_cache(*remove_slot, &slot_cache);
+                self.remove_dead_slots_metadata(iter::once(remove_slot));
                 remove_cache_elapsed.stop();
                 remove_cache_elapsed_across_slots += remove_cache_elapsed.as_us();
                 // Nobody else should have removed the slot cache entry yet
-                assert!(self.accounts_cache.remove_slot(*remove_slot).is_some());
+                let pubkeys_removed = self
+                    .accounts_cache
+                    .remove_slot(*remove_slot)
+                    .expect("slot cache entry must still be present");
+                // Cache writes populate the secondary indexes but not the primary index, so a
+                // cache-only account dropped here without ever being flushed would leak its
+                // secondary entry.
+                // Explicitly ignore the return value as there is no need to purge the account
+                // from the primary index as well
+                //
+                // Narrow race: If a write re-adds the same pubkey key between `remove_slot` and
+                // `handle_dead_keys`, the new secondary entry will be dropped. Only
+                // secondary-index scans observe it (no consensus impact), and it self-heals: the
+                // entry is re-added when that slot flushes, or stays correctly removed if the slot
+                // is later purged.
+                if !self.account_indexes.is_empty() {
+                    let _ = self
+                        .accounts_index
+                        .handle_dead_keys(&pubkeys_removed, &self.account_indexes);
+                }
+                self.accounts_index.write_through_pubkeys(pubkeys_removed);
             } else {
                 self.purge_slot_storage(*remove_slot, purge_stats);
             }
@@ -4367,34 +4372,6 @@ impl AccountsDb {
         self.stats
             .dropped_stores
             .fetch_add(num_stored_slots_removed as u64, Ordering::Relaxed);
-    }
-
-    fn purge_slot_cache(&self, purged_slot: Slot, slot_cache: &SlotCache) {
-        let pubkeys = slot_cache.iter().map(|account| *account.key());
-        self.purge_slot_cache_pubkeys(purged_slot, pubkeys, true);
-    }
-
-    fn purge_slot_cache_pubkeys(
-        &self,
-        purged_slot: Slot,
-        pubkeys: impl IntoIterator<Item = Pubkey>,
-        is_dead: bool,
-    ) {
-        // Slot purged from cache should not exist in the backing store
-        assert!(
-            self.storage
-                .get_slot_storage_entry_shrinking_in_progress_ok(purged_slot)
-                .is_none()
-        );
-        let mut num_purged_keys = 0;
-        let (reclaims, _) = self.purge_keys_exact(pubkeys.into_iter().map(|key| {
-            num_purged_keys += 1;
-            (key, purged_slot)
-        }));
-        assert_eq!(reclaims.len(), num_purged_keys);
-        if is_dead {
-            self.remove_dead_slots_metadata(std::iter::once(&purged_slot));
-        }
     }
 
     fn purge_slot_storage(&self, remove_slot: Slot, purge_stats: &PurgeStats) {
@@ -4652,6 +4629,11 @@ impl AccountsDb {
                 i64
             ),
             ("select_pubkeys_us", flush_stats.select_pubkeys_us.0, i64),
+            (
+                "disk_index_write_through_us",
+                flush_stats.disk_index_write_through_us.0,
+                i64
+            ),
         );
     }
 
@@ -4787,7 +4769,6 @@ impl AccountsDb {
         debug_assert!(self.accounts_index.is_alive_root(slot));
         let mut flush_stats = FlushStats::default();
         let iter_items: Vec<_> = slot_cache.iter().collect();
-        let mut purged_pubkeys: Vec<Pubkey> = vec![];
 
         let accounts: Vec<(&Pubkey, &AccountSharedData)> = iter_items
             .iter()
@@ -4804,9 +4785,7 @@ impl AccountsDb {
                     flush_stats.num_accounts_flushed += 1;
                     Some((key, account))
                 } else {
-                    // If we don't flush, we have to remove the entry from the
-                    // index, since it's equivalent to purging
-                    purged_pubkeys.push(*key);
+                    // A newer version wins, so this one isn't written
                     flush_stats.num_bytes_purged +=
                         AppendVec::calculate_stored_size(account.data().len()) as u64;
                     flush_stats.num_accounts_purged += 1;
@@ -4814,11 +4793,6 @@ impl AccountsDb {
                 }
             })
             .collect();
-
-        let is_dead_slot = accounts.is_empty();
-        // Remove the account index entries from earlier roots that are outdated by later roots.
-        // Safe because queries to the index will be reading updates from later roots.
-        self.purge_slot_cache_pubkeys(slot, purged_pubkeys, is_dead_slot);
 
         // Use ReclaimOldSlots to reclaim old slots if marking obsolete accounts and cleaning.
         // Cleaning is enabled if pubkeys_to_flush is PubkeysToFlush::Only
@@ -4830,15 +4804,13 @@ impl AccountsDb {
             PubkeysToFlush::All => UpsertReclaim::IgnoreReclaims,
         };
 
-        if !is_dead_slot {
+        if !accounts.is_empty() {
             // This ensures that all updates are written to an AppendVec, before any
             // updates to the index happen, so anybody that sees a real entry in the index,
             // will be able to find the account in storage
-            let flushed_store = self.create_and_insert_store(
-                slot,
-                flush_stats.num_bytes_flushed.0,
-                "flush_slot_cache",
-            );
+            let flushed_store =
+                self.create_store(slot, flush_stats.num_bytes_flushed.0, "flush_slot_cache");
+            self.storage.insert(Arc::clone(&flushed_store));
 
             let (store_accounts_timing_inner, store_accounts_total_inner_us) =
                 measure_us!(self.store_accounts_for_flush(
@@ -4854,14 +4826,27 @@ impl AccountsDb {
             // all the data for the slot
             assert!(self.storage.get_slot_storage_entry(slot).is_some());
             self.reopen_storage_as_readonly_shrinking_in_progress_ok(slot);
+        } else {
+            // Every account in this slot was superseded by a newer root, so it flushes to no
+            // storage. Drop the now-dead slot from the index roots metadata
+            self.remove_dead_slots_metadata(iter::once(&slot));
         }
 
         // Remove this slot from the cache, which will to AccountsDb's new readers should look like an
         // atomic switch from the cache to storage.
         // There is some racy condition for existing readers who just has read exactly while
         // flushing. That case is handled by retry_to_get_account_accessor()
-        assert!(self.accounts_cache.remove_slot(slot).is_some());
+        let pubkeys_removed = self
+            .accounts_cache
+            .remove_slot(slot)
+            .expect("slot must be in the cache when flushing");
 
+        // Now that this slot has left the cache, any pubkey that no longer appears
+        // in any cached slot is eligible to be written through so its in-mem entry
+        // becomes clean and can be evicted.
+        let (_, disk_index_write_through_us) =
+            measure_us!(self.accounts_index.write_through_pubkeys(pubkeys_removed));
+        flush_stats.disk_index_write_through_us = Saturating(disk_index_write_through_us);
         // Add `accounts` to uncleaned_pubkeys since they were written to storage
         // and should be visited by `clean`.
         // If old slots were reclaimed, accounts were already cleaned,
@@ -4884,8 +4869,8 @@ impl AccountsDb {
     }
 
     /// `pubkeys_to_flush` selects which accounts are written to storage: `Only(set)` flushes
-    /// just the pubkeys in the set (purging the rest from the index), while `All` flushes
-    /// every account in the slot.
+    /// just the pubkeys in the set, dropping the rest with the cache, while `All` flushes every
+    /// account in the slot.
     fn flush_slot_cache(
         &self,
         slot: Slot,
@@ -5144,60 +5129,54 @@ impl AccountsDb {
         }
     }
 
-    /// Updates the accounts index with the given accounts. If store_account is false, skip storing
-    /// the account in the index as the account was not stored in the cache
+    /// Updates the secondary index with the given accounts. If store_account is false, skip storing
+    /// the account in the secondary index as the account was not stored in the cache
     /// Used for cached accounts only.
-    fn update_index_cached_accounts<'a>(
+    fn update_secondary_index_cached_accounts<'a>(
         &self,
         accounts: &impl StorableAccounts<'a>,
         store_account: &BitVec,
         update_index_thread_selection: UpdateIndexThreadSelection,
     ) {
-        let target_slot = accounts.target_slot();
-        let len = accounts.len();
-        assert_eq!(accounts.len() as u64, store_account.len());
+        if !self.account_indexes.is_empty() {
+            let len = accounts.len();
+            assert_eq!(accounts.len() as u64, store_account.len());
 
-        let update = |start, end| {
-            (start..end).for_each(|i| {
-                if store_account[i as u64] {
-                    accounts.account(i, |account| {
-                        let info =
-                            AccountInfo::new(StorageLocation::Cached, account.is_zero_lamport());
-                        self.accounts_index.upsert(
-                            target_slot,
-                            target_slot,
-                            account.pubkey(),
-                            info,
-                            ReclaimsSlotList::default().as_mut(),
-                            UpsertReclaim::PreviousSlotEntryWasCached,
-                        );
-                        self.accounts_index.update_secondary_indexes(
-                            account.pubkey(),
-                            &account,
-                            &self.account_indexes,
-                        );
-                    });
-                }
-            });
-        };
+            // Cache writes do not upsert the accounts index; it only ever holds storage entries,
+            // populated on flush. Readers find cache-only accounts through the write cache. Only
+            // the secondary indexes are updated here.
+            let update = |start, end| {
+                (start..end).for_each(|i| {
+                    if store_account[i as u64] {
+                        accounts.account(i, |account| {
+                            self.accounts_index.update_secondary_indexes(
+                                account.pubkey(),
+                                &account,
+                                &self.account_indexes,
+                            );
+                        });
+                    }
+                });
+            };
 
-        let threshold = 1;
-        if matches!(
-            update_index_thread_selection,
-            UpdateIndexThreadSelection::PoolWithThreshold,
-        ) && len > threshold
-        {
-            let chunk_size = len.div_ceil(self.thread_pool_foreground.current_num_threads());
-            let batches = 1 + len / chunk_size;
-            self.thread_pool_foreground.install(|| {
-                (0..batches).into_par_iter().for_each(|batch| {
-                    let start = batch * chunk_size;
-                    let end = std::cmp::min(start + chunk_size, len);
-                    update(start, end)
-                })
-            });
-        } else {
-            update(0, len);
+            let threshold = 1;
+            if matches!(
+                update_index_thread_selection,
+                UpdateIndexThreadSelection::PoolWithThreshold,
+            ) && len > threshold
+            {
+                let chunk_size = len.div_ceil(self.thread_pool_foreground.current_num_threads());
+                let batches = 1 + len / chunk_size;
+                self.thread_pool_foreground.install(|| {
+                    (0..batches).into_par_iter().for_each(|batch| {
+                        let start = batch * chunk_size;
+                        let end = std::cmp::min(start + chunk_size, len);
+                        update(start, end)
+                    })
+                });
+            } else {
+                update(0, len);
+            }
         }
     }
 
@@ -5683,9 +5662,13 @@ impl AccountsDb {
             self.write_accounts_to_cache(accounts.target_slot(), &accounts, ancestors);
         let write_accounts_us = write_accounts_time.end_as_us();
 
-        // Update the index
+        // Update the secondary index
         let update_index_time = Measure::start("update_index");
-        self.update_index_cached_accounts(&accounts, &store_account, update_index_thread_selection);
+        self.update_secondary_index_cached_accounts(
+            &accounts,
+            &store_account,
+            update_index_thread_selection,
+        );
         let update_index_us = update_index_time.end_as_us();
 
         let stats = &self.store_accounts_unfrozen_stats;
@@ -5990,7 +5973,8 @@ impl AccountsDb {
                         infos.len(),
                         accounts_and_meta_to_store.len()
                     );
-                    self.create_and_insert_store(slot, data_len * 2, "large create");
+                    let store = self.create_store(slot, data_len * 2, "large create");
+                    self.storage.insert(store);
                 }
                 continue;
             };

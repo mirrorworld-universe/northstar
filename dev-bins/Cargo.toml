@@ -68,7 +68,7 @@ serde_json = "1.0.150"
 serde_yaml = "0.9.34"
 serial_test = "3.2.0"
 signal-hook = "0.4.4"
-solana-account = "4.3.0"
+solana-account = "4.3.1"
 solana-account-decoder = { path = "../account-decoder", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
 solana-accounts-db = { path = "../accounts-db", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
 solana-bpf-loader-program = { path = "../programs/bpf_loader", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
@@ -89,7 +89,7 @@ solana-cost-model = { path = "../cost-model", version = "=4.2.0-alpha.0", featur
 solana-entry = { path = "../entry", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
 solana-faucet = { path = "../faucet", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
 solana-feature-gate-interface = "4.0.0"
-solana-fee-calculator = "3.2.1"
+solana-fee-calculator = "3.2.2"
 solana-genesis = { path = "../genesis", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
 solana-genesis-config = "4.0.0"
 solana-genesis-utils = { path = "../genesis-utils", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
@@ -113,7 +113,7 @@ solana-precompile-error = "3.0.0"
 solana-program-runtime = { path = "../program-runtime", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
 solana-pubkey = { version = "4.2.0", default-features = false }
 solana-quic-client = { path = "../quic-client", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
-solana-rent = "4.2.0"
+solana-rent = "4.2.1"
 solana-rpc = { path = "../rpc", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
 solana-rpc-client = { path = "../rpc-client", version = "=4.2.0-alpha.0", default-features = false }
 solana-rpc-client-api = { path = "../rpc-client-api", version = "=4.2.0-alpha.0" }
@@ -139,7 +139,6 @@ solana-system-program = { path = "../programs/system", version = "=4.2.0-alpha.0
 solana-sysvar-id = "3.1.0"
 solana-test-validator = { path = "../test-validator", version = "=4.2.0-alpha.0" }
 solana-time-utils = "3.0.0"
-solana-tps-client = { path = "../tps-client", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
 solana-tpu-client = { path = "../tpu-client", version = "=4.2.0-alpha.0", default-features = false, features = ["agave-unstable-api"] }
 solana-transaction = "4.1.0"
 solana-transaction-context = { path = "../transaction-context", version = "=4.2.0-alpha.0", features = ["agave-unstable-api", "bincode"] }
