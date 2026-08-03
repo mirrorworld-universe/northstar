@@ -108,6 +108,7 @@ dependencies = [
  "solana-measure",
  "solana-metrics",
  "solana-net-utils",
+ "solana-packet 4.1.0",
  "solana-perf",
  "solana-pubkey 4.2.0",
  "solana-runtime",
@@ -7684,6 +7685,7 @@ dependencies = [
  "solana-pubkey 4.2.0",
  "solana-sdk-ids",
  "solana-slot-hashes",
+ "wincode",
 ]
 
 [[package]]
@@ -9480,7 +9482,6 @@ dependencies = [
  "agave-votor-messages",
  "anyhow",
  "assert_matches",
- "bincode",
  "bitflags 2.12.1",
  "bs58",
  "bytes",
@@ -9660,6 +9661,8 @@ dependencies = [
  "solana-message",
  "solana-native-token",
  "solana-net-utils",
+ "solana-packet 4.1.0",
+ "solana-perf",
  "solana-poh-config",
  "solana-program-binaries",
  "solana-pubkey 4.2.0",
@@ -11173,6 +11176,7 @@ dependencies = [
  "solana-system-interface 3.2.0",
  "solana-sysvar",
  "solana-sysvar-id",
+ "wincode",
 ]
 
 [[package]]
