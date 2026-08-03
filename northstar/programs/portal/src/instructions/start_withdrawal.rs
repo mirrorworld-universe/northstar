@@ -8,9 +8,21 @@ use {
         account_info::AccountInfo, program_error::ProgramError, sysvars::clock::Clock,
         ProgramResult,
     },
+    pinocchio_idl_macros::p_instruction,
     pinocchio_system::instructions::Transfer,
 };
 
+#[p_instruction(
+    id = 13,
+    accounts = [
+        source(signer, mut),
+        l1_recipient,
+        withdrawal_sink(mut),
+        system_program,
+        clock
+    ],
+    data = [lamports: u64]
+)]
 pub fn process_start_withdrawal(accounts: &[AccountInfo], lamports: u64) -> ProgramResult {
     pinocchio_log::log!("Instruction: StartWithdrawal, lamports={}", lamports);
 

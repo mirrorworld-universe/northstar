@@ -13,8 +13,25 @@ use {
         sysvars::{clock::Clock, rent::Rent, Sysvar},
         ProgramResult,
     },
+    pinocchio_idl_macros::p_instruction,
 };
 
+#[p_instruction(
+    id = 0,
+    accounts = [
+        payer(signer, mut),
+        session(mut, state = Session),
+        fee_vault(mut, state = FeeVault),
+        system_program
+    ],
+    data = [
+        grid_id: u64,
+        ttl_slots: u64,
+        fee_cap: u64,
+        validator: Pubkey,
+        settlement_interval_slots: u64
+    ]
+)]
 pub fn process_open_session(
     program_id: &Pubkey,
     accounts: &[AccountInfo],

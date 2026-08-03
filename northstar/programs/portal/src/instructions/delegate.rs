@@ -13,6 +13,7 @@ use {
         sysvars::{rent::Rent, Sysvar},
         ProgramResult,
     },
+    pinocchio_idl_macros::p_instruction,
     pinocchio_system::instructions::CreateAccount,
 };
 
@@ -34,6 +35,19 @@ use {
 /// - `[]` owner_program (stored in `DelegationRecord.owner_program`)
 /// - `[writable]` delegation_record PDA (`["delegation", delegated_account]` under Portal)
 /// - `[]` buffer
+#[p_instruction(
+    id = 3,
+    accounts = [
+        payer(signer, mut),
+        system_program,
+        session(state = Session),
+        delegated_account(signer, mut),
+        owner_program,
+        delegation_record(mut, state = DelegationRecord),
+        buffer
+    ],
+    data = [grid_id: u64]
+)]
 pub fn process_delegate(
     program_id: &Pubkey,
     accounts: &[AccountInfo],

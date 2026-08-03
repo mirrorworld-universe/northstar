@@ -12,6 +12,7 @@ use {
         sysvars::{rent::Rent, Sysvar},
         ProgramResult,
     },
+    pinocchio_idl_macros::p_instruction,
     pinocchio_system::instructions::CreateAccount,
 };
 
@@ -25,6 +26,21 @@ use {
 /// 1. `[]` session PDA
 /// 2. `[writable]` session_bridge PDA (`["session_bridge", session, mint]`)
 /// 3. `[]` system_program
+#[p_instruction(
+    id = 22,
+    accounts = [
+        authority(signer, mut),
+        session(state = Session),
+        session_bridge(mut, state = SessionBridge),
+        system_program
+    ],
+    data = [
+        mint: Pubkey,
+        bridge_program: Pubkey,
+        vault: Pubkey,
+        token_program: Pubkey
+    ]
+)]
 pub fn process_register_session_bridge(
     program_id: &Pubkey,
     accounts: &[AccountInfo],

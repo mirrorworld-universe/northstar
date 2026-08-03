@@ -8,7 +8,6 @@ pub const TRANSFER_EVENT_LOG_PREFIX: &str = "Transfer Data: ";
 pub const TRANSFER_EVENT_SERIALIZED_LEN: usize = 106;
 pub const TRANSFER_EVENT_BASE64_LEN: usize = TRANSFER_EVENT_SERIALIZED_LEN.div_ceil(3) * 4;
 
-#[cfg_attr(feature = "idl", derive(shank::ShankType))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 #[borsh(use_discriminant = true)]
 #[repr(u8)]
@@ -26,7 +25,6 @@ impl TransferEventKind {
     }
 }
 
-#[cfg_attr(feature = "idl", derive(shank::ShankType))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct NorthstarTransferEvent {
     pub version: u8,

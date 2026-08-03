@@ -1,11 +1,14 @@
 use {
     borsh::{BorshDeserialize, BorshSerialize},
     pinocchio::pubkey::Pubkey,
+    pinocchio_idl_macros::p_state,
 };
 
 pub fn account_size<T: BorshSerialize + ?Sized>(account: &T) -> usize {
     borsh::object_length(account).expect("account serialization length overflow")
 }
+
+pub type Hash32 = [u8; 32];
 
 /// Fixed ER account that holds withdrawn SOL until L1 settlement.
 pub const WITHDRAWAL_SINK: Pubkey = [
@@ -13,10 +16,10 @@ pub const WITHDRAWAL_SINK: Pubkey = [
     0x06, 0x35, 0xbd, 0x36, 0x53, 0x76, 0xa6, 0x7d, 0x7f, 0xf5, 0xa1, 0x82, 0x3e, 0xe0, 0x8f, 0xb8,
 ];
 
-#[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
+#[p_state]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Session {
-    pub discriminator: u8,
+    pub discriminator: [u8; 8],
     pub grid_id: u64,
     pub ttl_slots: u64,
     pub fee_cap: u64,
@@ -29,13 +32,12 @@ pub struct Session {
     pub last_settled_er_slot: u64,
     pub settlement_status: SettlementStatus,
     pub settlement_er_slot: u64,
-    pub settlement_checksum: [u8; 32],
-    pub settlement_accumulator: [u8; 32],
+    pub settlement_checksum: Hash32,
+    pub settlement_accumulator: Hash32,
     pub settlement_started_l1_slot: u64,
     pub bump: u8,
 }
 
-#[cfg_attr(feature = "idl", derive(shank::ShankType))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 #[borsh(use_discriminant = true)]
 #[repr(u8)]
@@ -44,20 +46,20 @@ pub enum SettlementStatus {
     InProgress = 1,
 }
 
-#[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
+#[p_state]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Checkpoint {
-    pub discriminator: u8,
+    pub discriminator: [u8; 8],
     pub session: Pubkey,
     pub er_slot: u64,
     pub step_count: u64,
-    pub previous_state_root: [u8; 32],
-    pub new_state_root: [u8; 32],
-    pub trace_root: [u8; 32],
-    pub tx_effect_root: [u8; 32],
-    pub readonly_l1_root: [u8; 32],
-    pub da_commitment: [u8; 32],
-    pub effect_commitment: [u8; 32],
+    pub previous_state_root: Hash32,
+    pub new_state_root: Hash32,
+    pub trace_root: Hash32,
+    pub tx_effect_root: Hash32,
+    pub readonly_l1_root: Hash32,
+    pub da_commitment: Hash32,
+    pub effect_commitment: Hash32,
     pub proposer: Pubkey,
     pub proposed_at_l1_slot: u64,
     pub challenge_deadline_l1_slot: u64,
@@ -70,7 +72,6 @@ pub struct Checkpoint {
     pub bump: u8,
 }
 
-#[cfg_attr(feature = "idl", derive(shank::ShankType))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 #[borsh(use_discriminant = true)]
 #[repr(u8)]
@@ -83,7 +84,6 @@ pub enum CheckpointStatus {
     Invalid = 5,
 }
 
-#[cfg_attr(feature = "idl", derive(shank::ShankType))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 #[borsh(use_discriminant = true)]
 #[repr(u8)]
@@ -95,7 +95,7 @@ pub enum CheckpointBondStatus {
 
 impl Checkpoint {
     pub const SEED_PREFIX: &[u8] = b"checkpoint";
-    pub const DISCRIMINATOR: u8 = 5;
+    pub const DISCRIMINATOR: [u8; 8] = [199, 62, 186, 186, 98, 119, 211, 139];
 
     #[inline]
     pub fn is_valid(&self) -> bool {
@@ -103,23 +103,23 @@ impl Checkpoint {
     }
 }
 
-#[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
+#[p_state]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct CheckpointCursor {
-    pub discriminator: u8,
+    pub discriminator: [u8; 8],
     pub session: Pubkey,
     pub latest_finalized_checkpoint: Pubkey,
     pub latest_finalized_er_slot: u64,
-    pub latest_finalized_state_root: [u8; 32],
+    pub latest_finalized_state_root: Hash32,
     pub active_checkpoint: Pubkey,
     pub active_er_slot: u64,
     pub bump: u8,
 }
 
-#[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
+#[p_state]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Challenge {
-    pub discriminator: u8,
+    pub discriminator: [u8; 8],
     pub checkpoint: Pubkey,
     pub challenger: Pubkey,
     pub respondent: Pubkey,
@@ -129,16 +129,15 @@ pub struct Challenge {
     pub start_step: u64,
     pub end_step: u64,
     pub midpoint_step: u64,
-    pub start_state_root: [u8; 32],
-    pub end_state_root: [u8; 32],
-    pub midpoint_state_root: [u8; 32],
+    pub start_state_root: Hash32,
+    pub end_state_root: Hash32,
+    pub midpoint_state_root: Hash32,
     pub status: ChallengeStatus,
     pub turn: ChallengeTurn,
     pub rounds: u32,
     pub bump: u8,
 }
 
-#[cfg_attr(feature = "idl", derive(shank::ShankType))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 #[borsh(use_discriminant = true)]
 #[repr(u8)]
@@ -148,7 +147,6 @@ pub enum ChallengeStatus {
     ValidatorWon = 2,
 }
 
-#[cfg_attr(feature = "idl", derive(shank::ShankType))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 #[borsh(use_discriminant = true)]
 #[repr(u8)]
@@ -160,7 +158,7 @@ pub enum ChallengeTurn {
 
 impl Challenge {
     pub const SEED_PREFIX: &[u8] = b"challenge";
-    pub const DISCRIMINATOR: u8 = 9;
+    pub const DISCRIMINATOR: [u8; 8] = [119, 250, 161, 121, 119, 81, 22, 208];
 
     #[inline]
     pub fn is_valid(&self) -> bool {
@@ -168,21 +166,20 @@ impl Challenge {
     }
 }
 
-#[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
+#[p_state]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct DataAvailabilityProof {
-    pub discriminator: u8,
+    pub discriminator: [u8; 8],
     pub challenge: Pubkey,
     pub checkpoint: Pubkey,
-    pub commitment: [u8; 32],
-    pub payload_root: [u8; 32],
-    pub inclusion_proof_hash: [u8; 32],
+    pub commitment: Hash32,
+    pub payload_root: Hash32,
+    pub inclusion_proof_hash: Hash32,
     pub revealed_at_l1_slot: u64,
     pub status: DataAvailabilityStatus,
     pub bump: u8,
 }
 
-#[cfg_attr(feature = "idl", derive(shank::ShankType))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 #[borsh(use_discriminant = true)]
 #[repr(u8)]
@@ -194,7 +191,7 @@ pub enum DataAvailabilityStatus {
 
 impl DataAvailabilityProof {
     pub const SEED_PREFIX: &[u8] = b"da_proof";
-    pub const DISCRIMINATOR: u8 = 10;
+    pub const DISCRIMINATOR: [u8; 8] = [24, 139, 155, 40, 135, 132, 79, 129];
 
     #[inline]
     pub fn is_valid(&self) -> bool {
@@ -202,30 +199,31 @@ impl DataAvailabilityProof {
     }
 }
 
-#[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
+#[p_state]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct StepProofAccount {
-    pub discriminator: u8,
+    pub discriminator: [u8; 8],
     pub checkpoint: Pubkey,
     pub challenge: Pubkey,
     pub authority: Pubkey,
     pub proof_kind: u8,
     pub proof_version: u8,
     pub step_index: u64,
-    pub tx_effect_root: [u8; 32],
-    pub readonly_l1_root: [u8; 32],
-    pub settlement_effect_root: [u8; 32],
-    pub public_input_hash: [u8; 32],
+    pub tx_effect_root: Hash32,
+    pub readonly_l1_root: Hash32,
+    pub settlement_effect_root: Hash32,
+    pub public_input_hash: Hash32,
     pub written_len: u32,
     pub sealed: bool,
-    pub proof_hash: [u8; 32],
+    pub proof_hash: Hash32,
     pub bump: u8,
-    pub data: [u8; crate::MAX_STEP_PROOF_BYTES],
+    // IDL schemas require literal array lengths.
+    pub data: [u8; 256],
 }
 
 impl StepProofAccount {
     pub const SEED_PREFIX: &[u8] = b"step_proof";
-    pub const DISCRIMINATOR: u8 = 7;
+    pub const DISCRIMINATOR: [u8; 8] = [62, 34, 242, 0, 245, 185, 56, 19];
 
     #[inline]
     pub fn is_valid(&self) -> bool {
@@ -235,7 +233,7 @@ impl StepProofAccount {
 
 impl CheckpointCursor {
     pub const SEED_PREFIX: &[u8] = b"checkpoint_cursor";
-    pub const DISCRIMINATOR: u8 = 6;
+    pub const DISCRIMINATOR: [u8; 8] = [251, 223, 216, 188, 51, 244, 129, 196];
 
     #[inline]
     pub fn is_valid(&self) -> bool {
@@ -245,7 +243,7 @@ impl CheckpointCursor {
 
 impl Session {
     pub const SEED_PREFIX: &[u8] = b"session";
-    pub const DISCRIMINATOR: u8 = 1;
+    pub const DISCRIMINATOR: [u8; 8] = [243, 81, 72, 115, 214, 188, 72, 144];
 
     #[inline]
     pub fn is_expired(&self, current_slot: u64) -> bool {
@@ -258,17 +256,17 @@ impl Session {
     }
 }
 
-#[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
+#[p_state]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct FeeVault {
-    pub discriminator: u8,
+    pub discriminator: [u8; 8],
     pub authority: [u8; 32],
     pub bump: u8,
 }
 
 impl FeeVault {
     pub const SEED_PREFIX: &[u8] = b"fee_vault";
-    pub const DISCRIMINATOR: u8 = 2;
+    pub const DISCRIMINATOR: [u8; 8] = [192, 178, 69, 232, 58, 149, 157, 132];
 
     #[inline]
     pub fn is_valid(&self) -> bool {
@@ -276,10 +274,10 @@ impl FeeVault {
     }
 }
 
-#[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
+#[p_state]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct DelegationRecord {
-    pub discriminator: u8,
+    pub discriminator: [u8; 8],
     pub owner_program: Pubkey,
     pub grid_id: u64,
     pub bump: u8,
@@ -287,7 +285,7 @@ pub struct DelegationRecord {
 
 impl DelegationRecord {
     pub const SEED_PREFIX: &[u8] = b"delegation";
-    pub const DISCRIMINATOR: u8 = 3;
+    pub const DISCRIMINATOR: [u8; 8] = [203, 185, 161, 226, 129, 251, 132, 155];
 
     #[inline]
     pub fn is_valid(&self) -> bool {
@@ -295,10 +293,10 @@ impl DelegationRecord {
     }
 }
 
-#[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
+#[p_state]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct DepositReceipt {
-    pub discriminator: u8,
+    pub discriminator: [u8; 8],
     pub session: Pubkey,
     pub recipient: Pubkey,
     pub balance: u64,
@@ -310,7 +308,7 @@ pub struct DepositReceipt {
 
 impl DepositReceipt {
     pub const SEED_PREFIX: &[u8] = b"deposit_receipt";
-    pub const DISCRIMINATOR: u8 = 4;
+    pub const DISCRIMINATOR: [u8; 8] = [64, 175, 24, 183, 138, 109, 70, 78];
 
     #[inline]
     pub fn is_valid(&self) -> bool {
@@ -318,10 +316,10 @@ impl DepositReceipt {
     }
 }
 
-#[cfg_attr(feature = "idl", derive(shank::ShankAccount))]
+#[p_state]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct SessionBridge {
-    pub discriminator: u8,
+    pub discriminator: [u8; 8],
     pub session: Pubkey,
     pub mint: Pubkey,
     pub bridge_program: Pubkey,
@@ -332,7 +330,7 @@ pub struct SessionBridge {
 
 impl SessionBridge {
     pub const SEED_PREFIX: &[u8] = b"session_bridge";
-    pub const DISCRIMINATOR: u8 = 8;
+    pub const DISCRIMINATOR: [u8; 8] = [145, 47, 8, 254, 118, 119, 114, 215];
 
     #[inline]
     pub fn is_valid(&self) -> bool {
@@ -366,7 +364,7 @@ mod tests {
             bump: 255,
         };
         let serialized = borsh::to_vec(&session).unwrap();
-        assert_eq!(serialized.len(), account_size(&session));
+        assert_eq!(serialized.len(), 226);
     }
 
     #[test]
@@ -377,7 +375,7 @@ mod tests {
             bump: 128,
         };
         let serialized = borsh::to_vec(&vault).unwrap();
-        assert_eq!(serialized.len(), account_size(&vault));
+        assert_eq!(serialized.len(), 41);
     }
 
     #[test]
@@ -391,7 +389,7 @@ mod tests {
             bump: 77,
         };
         let serialized = borsh::to_vec(&receipt).unwrap();
-        assert_eq!(serialized.len(), account_size(&receipt));
+        assert_eq!(serialized.len(), 89);
     }
 
     #[test]
@@ -403,7 +401,7 @@ mod tests {
             bump: 77,
         };
         let serialized = borsh::to_vec(&record).unwrap();
-        assert_eq!(serialized.len(), account_size(&record));
+        assert_eq!(serialized.len(), 49);
     }
 
     #[test]
@@ -432,7 +430,7 @@ mod tests {
             bump: 99,
         };
         let serialized = borsh::to_vec(&checkpoint).unwrap();
-        assert_eq!(serialized.len(), account_size(&checkpoint));
+        assert_eq!(serialized.len(), 380);
     }
 
     #[test]
@@ -448,7 +446,7 @@ mod tests {
             bump: 99,
         };
         let serialized = borsh::to_vec(&cursor).unwrap();
-        assert_eq!(serialized.len(), account_size(&cursor));
+        assert_eq!(serialized.len(), 153);
     }
 
     #[test]
@@ -472,10 +470,7 @@ mod tests {
             rounds: 0,
             bump: 7,
         };
-        assert_eq!(
-            borsh::to_vec(&challenge).unwrap().len(),
-            account_size(&challenge)
-        );
+        assert_eq!(borsh::to_vec(&challenge).unwrap().len(), 255);
 
         let da_proof = DataAvailabilityProof {
             discriminator: DataAvailabilityProof::DISCRIMINATOR,
@@ -488,10 +483,7 @@ mod tests {
             status: DataAvailabilityStatus::Revealed,
             bump: 7,
         };
-        assert_eq!(
-            borsh::to_vec(&da_proof).unwrap().len(),
-            account_size(&da_proof)
-        );
+        assert_eq!(borsh::to_vec(&da_proof).unwrap().len(), 178);
     }
 
     #[test]
@@ -515,7 +507,7 @@ mod tests {
             data: [0xAB; crate::MAX_STEP_PROOF_BYTES],
         };
         let serialized = borsh::to_vec(&proof).unwrap();
-        assert_eq!(serialized.len(), account_size(&proof));
+        assert_eq!(serialized.len(), 536);
     }
 
     #[test]
@@ -530,7 +522,51 @@ mod tests {
             bump: 88,
         };
         let serialized = borsh::to_vec(&bridge).unwrap();
-        assert_eq!(serialized.len(), account_size(&bridge));
+        assert_eq!(serialized.len(), 169);
+    }
+
+    #[test]
+    fn account_discriminators_are_anchor_compatible() {
+        assert_eq!(
+            Session::DISCRIMINATOR,
+            [243, 81, 72, 115, 214, 188, 72, 144]
+        );
+        assert_eq!(
+            FeeVault::DISCRIMINATOR,
+            [192, 178, 69, 232, 58, 149, 157, 132]
+        );
+        assert_eq!(
+            DelegationRecord::DISCRIMINATOR,
+            [203, 185, 161, 226, 129, 251, 132, 155]
+        );
+        assert_eq!(
+            DepositReceipt::DISCRIMINATOR,
+            [64, 175, 24, 183, 138, 109, 70, 78]
+        );
+        assert_eq!(
+            Checkpoint::DISCRIMINATOR,
+            [199, 62, 186, 186, 98, 119, 211, 139]
+        );
+        assert_eq!(
+            CheckpointCursor::DISCRIMINATOR,
+            [251, 223, 216, 188, 51, 244, 129, 196]
+        );
+        assert_eq!(
+            Challenge::DISCRIMINATOR,
+            [119, 250, 161, 121, 119, 81, 22, 208]
+        );
+        assert_eq!(
+            DataAvailabilityProof::DISCRIMINATOR,
+            [24, 139, 155, 40, 135, 132, 79, 129]
+        );
+        assert_eq!(
+            StepProofAccount::DISCRIMINATOR,
+            [62, 34, 242, 0, 245, 185, 56, 19]
+        );
+        assert_eq!(
+            SessionBridge::DISCRIMINATOR,
+            [145, 47, 8, 254, 118, 119, 114, 215]
+        );
     }
 
     #[test]

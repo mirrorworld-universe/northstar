@@ -8,6 +8,7 @@ use {
     pinocchio::{
         account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, ProgramResult,
     },
+    pinocchio_idl_macros::p_instruction,
 };
 
 /// Undelegate an account, returning ownership to `owner_program`.
@@ -28,11 +29,33 @@ use {
 /// 3. `[writable]` delegation_record PDA (closed)
 /// 4. `[]` system_program
 /// 5. `[]` session
+#[p_instruction(
+    id = 4,
+    accounts = [
+        authority(signer, mut),
+        delegated_account(mut),
+        owner_program,
+        delegation_record(mut, state = DelegationRecord),
+        system_program,
+        session(state = Session)
+    ]
+)]
 pub fn process_undelegate(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     pinocchio_log::log!("Instruction: Undelegate");
     process_undelegate_inner(program_id, accounts, false)
 }
 
+#[p_instruction(
+    id = 10,
+    accounts = [
+        authority(signer, mut),
+        delegated_account(mut),
+        owner_program,
+        delegation_record(mut, state = DelegationRecord),
+        system_program,
+        session(state = Session)
+    ]
+)]
 pub fn process_undelegate_handoff(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     pinocchio_log::log!("Instruction: UndelegateHandoff");
     process_undelegate_inner(program_id, accounts, true)

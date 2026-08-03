@@ -1,0 +1,155 @@
+name: Generate Portal IDL
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [release]
+
+concurrency:
+  group: generate-portal-idl-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  generate:
+    name: Generate IDL
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/ensure-rust-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install Pinocchio IDL CLI
+        run: cargo install pinocchio-idl --version 0.1.1 --locked
+
+      - name: Type-check Portal IDL annotations
+        run: cargo check -p northstar-portal
+
+      - name: Generate Portal IDL
+        run: |
+          mkdir -p target/idl
+          cargo pinocchio-idl generate \
+            --manifest-path northstar/programs/portal/Cargo.toml \
+            --out target/idl/northstar_portal.json
+
+      - name: Resolve Portal custom types
+        run: |
+          python3 - <<'PY'
+          import copy
+          import json
+          import pathlib
+
+          idl_path = pathlib.Path("target/idl/northstar_portal.json")
+          catalog_path = pathlib.Path("northstar/programs/portal/idl/custom-types.json")
+          idl = json.loads(idl_path.read_text())
+          catalog = {item["name"]: item for item in json.loads(catalog_path.read_text())}
+          primitives = {
+              "bool", "bytes", "f32", "f64", "i8", "i16", "i32", "i64", "i128",
+              "pubkey", "string", "u8", "u16", "u32", "u64", "u128",
+          }
+          referenced = set()
+
+          def normalize_type(value):
+              if isinstance(value, str):
+                  if value in primitives:
+                      return value
+                  if value not in catalog:
+                      raise ValueError(f"unresolved IDL type: {value}")
+                  referenced.add(value)
+                  return {"defined": {"name": value}}
+              if not isinstance(value, dict):
+                  return value
+              if "defined" in value:
+                  defined = value["defined"]
+                  referenced.add(defined["name"] if isinstance(defined, dict) else defined)
+                  return value
+              for wrapper in ("option", "vec"):
+                  if wrapper in value:
+                      value[wrapper] = normalize_type(value[wrapper])
+              if "array" in value:
+                  value["array"][0] = normalize_type(value["array"][0])
+              return value
+
+          def normalize_definition(definition):
+              body = definition["type"]
+              kind = body["kind"]
+              if kind == "struct":
+                  for field in body.get("fields", []):
+                      field["type"] = normalize_type(field["type"])
+              elif kind == "enum":
+                  for variant in body["variants"]:
+                      fields = variant.get("fields", [])
+                      if isinstance(fields, list):
+                          for index, field in enumerate(fields):
+                              if isinstance(field, dict) and "name" in field:
+                                  field["type"] = normalize_type(field["type"])
+                              else:
+                                  fields[index] = normalize_type(field)
+              elif kind == "type":
+                  body["alias"] = normalize_type(body["alias"])
+              else:
+                  raise ValueError(f"unsupported IDL definition kind: {kind}")
+
+          for instruction in idl["instructions"]:
+              instruction["args"] = instruction.get("args") or []
+              for argument in instruction["args"]:
+                  argument["type"] = normalize_type(argument["type"])
+          for definition in idl["types"]:
+              normalize_definition(definition)
+
+          definitions = {definition["name"] for definition in idl["types"]}
+          while missing := sorted(referenced - definitions):
+              for name in missing:
+                  if name not in catalog:
+                      raise ValueError(f"missing IDL definition: {name}")
+                  definition = copy.deepcopy(catalog[name])
+                  normalize_definition(definition)
+                  idl["types"].append(definition)
+                  definitions.add(name)
+
+          if set(catalog) != referenced:
+              raise ValueError(f"unused custom IDL types: {sorted(set(catalog) - referenced)}")
+          idl_path.write_text(json.dumps(idl, indent=2) + "\n")
+          print(f"resolved {len(referenced)} custom IDL types")
+          PY
+
+      - name: Validate Portal IDL
+        run: |
+          python3 - <<'PY'
+          import json
+          import pathlib
+
+          path = pathlib.Path("target/idl/northstar_portal.json")
+          idl = json.loads(path.read_text())
+          instructions = idl["instructions"]
+          assert len(instructions) == 27
+          assert sorted(ix["discriminator"][0] for ix in instructions) == list(range(27))
+          assert len(idl["accounts"]) == 10
+          assert all(len(account["discriminator"]) == 8 for account in idl["accounts"])
+          assert len(idl["types"]) == 18
+          definitions = {definition["name"] for definition in idl["types"]}
+          assert {
+              "Hash32",
+              "SettlementStatus",
+              "CheckpointStatus",
+              "CheckpointBondStatus",
+              "ChallengeStatus",
+              "ChallengeTurn",
+              "DataAvailabilityStatus",
+              "StepProofVerifierMode",
+          } <= definitions
+          print(f"validated {len(instructions)} instructions and {len(idl['accounts'])} accounts")
+          PY
+
+      - name: Upload IDL artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: northstar-portal-idl
+          path: target/idl/northstar_portal.json
+          if-no-files-found: error
