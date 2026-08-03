@@ -229,6 +229,19 @@ fn deprecated_arguments() -> Vec<DeprecatedArg> {
         replaced_by: "xdp-zero-copy",
     );
     add_arg!(
+        // deprecated in v4.3.0
+        Arg::with_name("limit_ledger_size")
+            .long("limit-ledger-size")
+            .value_name("SHRED_COUNT")
+            .takes_value(true)
+            .min_values(0)
+            .max_values(1)
+            /* .default_value() intentionally not used here! */
+            .conflicts_with("limit_blockstore_size")
+            .help("Keep this amount of shreds in root slots."),
+        replaced_by: "limit-blockstore-size",
+    );
+    add_arg!(
         // deprecated in v4.0.0
         Arg::with_name("tpu_connection_pool_size")
             .long("tpu-connection-pool-size")
@@ -807,12 +820,27 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
                 ),
         )
         .arg(
+            // deprecated in v4.3.0
             Arg::with_name("limit_ledger_size")
                 .long("limit-ledger-size")
                 .value_name("SHRED_COUNT")
                 .takes_value(true)
-                .default_value(default_args.limit_ledger_size.as_str())
+                .min_values(0)
+                .max_values(1)
+                .conflicts_with("limit_blockstore_size")
                 .help("Keep this amount of shreds in root slots."),
+        )
+        .arg(
+            Arg::with_name("limit_blockstore_size")
+                .long("limit-blockstore-size")
+                .value_name("SHRED_COUNT")
+                .takes_value(true)
+                .default_value(default_args.limit_blockstore_size.as_str())
+                .help(
+                    "Limit the number of total shreds that the Blockstore retains. Once the \
+                     Blockstore reaches this capacity, shreds will be purged in a FIFO (oldest \
+                     slots first) manner.",
+                ),
         )
         .arg(
             Arg::with_name("faucet_sol")
@@ -980,7 +1008,7 @@ pub struct DefaultTestArgs {
     pub rpc_port: String,
     pub faucet_port: String,
     pub dynamic_port_range: String,
-    pub limit_ledger_size: String,
+    pub limit_blockstore_size: String,
     pub faucet_sol: String,
     pub faucet_time_slice_secs: String,
 }
@@ -991,11 +1019,9 @@ impl DefaultTestArgs {
             rpc_port: 8899.to_string(),
             faucet_port: FAUCET_PORT.to_string(),
             dynamic_port_range: format!("{}-{}", VALIDATOR_PORT_RANGE.0, VALIDATOR_PORT_RANGE.1),
-            /* 10,000 was derived empirically by watching the size
-             * of the rocksdb/ directory self-limit itself to the
-             * 40MB-150MB range when running `solana-test-validator`
-             */
-            limit_ledger_size: 10_000.to_string(),
+            // See comments in ledger/src/blockstore/cleanup_service.rs for more
+            // details, but 800k shreds is approximately 1 GB of space
+            limit_blockstore_size: 800_000.to_string(),
             faucet_sol: (1_000_000.).to_string(),
             faucet_time_slice_secs: (faucet::TIME_SLICE).to_string(),
         }

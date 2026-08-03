@@ -54,8 +54,11 @@ use {
     },
     solana_keypair::Keypair,
     solana_ledger::{
-        blockstore::{Blockstore, MAX_COMPLETED_SLOTS_IN_CHANNEL, UpdateParentReceiver},
-        blockstore_cleanup_service::BlockstoreCleanupService,
+        blockstore::{
+            Blockstore, BlockstoreCleanupService, MAX_COMPLETED_SLOTS_IN_CHANNEL,
+            UpdateParentReceiver,
+        },
+        blockstore_options::BlockstoreCleanupStrategy,
         entry_notifier_service::EntryNotifierSender,
         leader_schedule_cache::LeaderScheduleCache,
         shred::filter::TurbineMode,
@@ -141,7 +144,7 @@ pub struct TvuSockets {
 }
 
 pub struct TvuConfig {
-    pub max_ledger_shreds: Option<u64>,
+    pub blockstore_cleanup_strategy: BlockstoreCleanupStrategy,
     pub shred_version: u16,
     // Validators from which repairs are requested
     pub repair_validators: Option<HashSet<Pubkey>>,
@@ -159,7 +162,7 @@ pub struct TvuConfig {
 impl Default for TvuConfig {
     fn default() -> Self {
         Self {
-            max_ledger_shreds: None,
+            blockstore_cleanup_strategy: BlockstoreCleanupStrategy::None,
             shred_version: 0,
             repair_validators: None,
             repair_whitelist: Arc::new(RwLock::new(HashSet::default())),
@@ -624,7 +627,7 @@ impl Tvu {
 
         let blockstore_cleanup_service = BlockstoreCleanupService::new(
             blockstore.clone(),
-            tvu_config.max_ledger_shreds,
+            tvu_config.blockstore_cleanup_strategy,
             exit.clone(),
         );
 

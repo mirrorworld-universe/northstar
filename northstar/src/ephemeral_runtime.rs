@@ -4626,7 +4626,7 @@ mod tests {
                 .rc
                 .accounts
                 .accounts_db
-                .get_pubkeys_for_slot(*slot)
+                .get_pubkey_account_for_slot(*slot)
                 .is_empty()
         }));
 
@@ -4650,7 +4650,7 @@ mod tests {
                     .rc
                     .accounts
                     .accounts_db
-                    .get_pubkeys_for_slot(slot)
+                    .get_pubkey_account_for_slot(slot)
                     .is_empty(),
                 "old ER slot {slot} should be purged during async retirement"
             );
