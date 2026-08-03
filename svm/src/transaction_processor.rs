@@ -2201,7 +2201,6 @@ mod tests {
             TransactionBatchProcessor::new(0, 0, Arc::downgrade(&fork_graph), None);
 
         let key = Pubkey::new_unique();
-        let name = "a_builtin_name";
         let register_fn: BuiltinFunctionRegisterer = |p, n| {
             p.register_function(
                 n,
@@ -2211,7 +2210,7 @@ mod tests {
                 ),
             )
         };
-        let program = ProgramCacheEntry::new_builtin(0, name.len(), register_fn);
+        let program = ProgramCacheEntry::new_builtin(0, register_fn);
         batch_processor.add_builtin(key, program);
 
         let mut loaded_programs_for_tx_batch = ProgramCacheForTxBatch::new(0);
@@ -2236,7 +2235,7 @@ mod tests {
         let entry = loaded_programs_for_tx_batch.find(&key).unwrap();
 
         // Repeating code because ProgramCacheEntry does not implement clone.
-        let program = ProgramCacheEntry::new_builtin(0, name.len(), register_fn);
+        let program = ProgramCacheEntry::new_builtin(0, register_fn);
         assert_eq!(entry, Arc::new(program));
     }
 
@@ -2246,7 +2245,6 @@ mod tests {
         let parent = TransactionBatchProcessor::new(0, 0, Arc::downgrade(&fork_graph), None);
 
         let key = Pubkey::new_unique();
-        let name = "isolated_builtin";
         let register_fn: BuiltinFunctionRegisterer = |p, n| {
             p.register_function(
                 n,
@@ -2256,7 +2254,7 @@ mod tests {
                 ),
             )
         };
-        let program = ProgramCacheEntry::new_builtin(0, name.len(), register_fn);
+        let program = ProgramCacheEntry::new_builtin(0, register_fn);
         parent.add_builtin(key, program);
 
         let isolated = parent.new_from_isolated_cache(1, 0);
@@ -2284,7 +2282,7 @@ mod tests {
         let entry = program_cache_for_tx_batch.find(&key).unwrap();
 
         // Repeating code because ProgramCacheEntry does not implement clone.
-        let program = ProgramCacheEntry::new_builtin(0, name.len(), register_fn);
+        let program = ProgramCacheEntry::new_builtin(0, register_fn);
         assert_eq!(&*entry, &program);
     }
 

@@ -1,27 +1,21 @@
 use {
     super::BuildRewardCertsRespError,
-    crate::block_creation_loop::rewards::msg_types::RewardRespSucc,
+    crate::block_creation_loop::rewards::{
+        certs_builder::entry::partial_cert::BuildResult, msg_types::RewardRespSucc,
+    },
+    agave_votor::aggregate_accumulator::AggregateAccumulatorError,
     agave_votor_messages::{
-        aggregate_accumulator::AggregateAccumulatorError, consensus_message::VoteMessage,
-        reward_certificate::SkipRewardCertificate, sig_verified_messages::VoteAggregate,
-        vote::Vote,
+        consensus_message::VoteMessage, reward_certificate::SkipRewardCertificate,
+        sig_verified_messages::VoteAggregate, vote::Vote,
     },
     notar_entry::NotarEntry,
-    partial_cert::{BuildSigBitmapError, PartialCert},
+    partial_cert::PartialCert,
     solana_clock::Slot,
     solana_pubkey::Pubkey,
-    thiserror::Error,
 };
 
 mod notar_entry;
 mod partial_cert;
-
-/// Different types of errors that can be returned from adding votes.
-#[derive(Debug, Error)]
-pub(super) enum AddAggregateError {
-    #[error("AggregateAccumulator failed with {0}")]
-    Accumulating(#[from] AggregateAccumulatorError),
-}
 
 #[derive(Clone)]
 /// Per slot container for storing notar and skip votes for creating rewards certificates.
@@ -49,7 +43,7 @@ impl Entry {
         &mut self,
         aggregate: VoteAggregate,
         vote_account_pubkeys: Vec<Pubkey>,
-    ) -> Result<(), AddAggregateError> {
+    ) -> Result<(), AggregateAccumulatorError> {
         match *aggregate.vote() {
             Vote::Notarize(notar) => self.notar.add_aggregate(
                 aggregate,
@@ -67,7 +61,7 @@ impl Entry {
         &mut self,
         vote_msg: VoteMessage,
         vote_account_pubkey: Pubkey,
-    ) -> Result<(), AddAggregateError> {
+    ) -> Result<(), AggregateAccumulatorError> {
         match vote_msg.vote {
             Vote::Notarize(notar) => self.notar.add_own_msg(
                 vote_msg,
@@ -87,15 +81,15 @@ impl Entry {
     ) -> Result<RewardRespSucc, BuildRewardCertsRespError> {
         let notar = self.notar.build_cert(reward_slot)?;
         let skip = match self.skip.build_sig_bitmap() {
-            Err(e) => match e {
-                BuildSigBitmapError::Empty => None,
-                BuildSigBitmapError::Accumulating(e) => {
-                    return Err(BuildRewardCertsRespError::RewardCertTryNew(e.into()));
-                }
-            },
-            Ok((signature, bitmap, skip_validators)) => {
+            BuildResult::Empty | BuildResult::Identity => None,
+            BuildResult::EncodingError(e) => return Err(BuildRewardCertsRespError::Encoding(e)),
+            BuildResult::Success {
+                signature,
+                bitmap,
+                validators,
+            } => {
                 let cert = SkipRewardCertificate::try_new(reward_slot, signature, bitmap)?;
-                Some((cert, skip_validators))
+                Some((cert, validators))
             }
         };
 
@@ -125,10 +119,14 @@ mod tests {
     use {
         super::*,
         agave_votor_messages::{
-            consensus_message::Block, vote::Vote, wire::get_vote_payload_to_sign,
+            consensus_message::Block,
+            vote::Vote,
+            wire::{VotePayloadToSign, get_vote_payload_to_sign},
         },
         rand::Rng,
-        solana_bls_signatures::{Keypair as BlsKeypair, PubkeyCompressed as BlsPubkeyCompressed},
+        solana_bls_signatures::{
+            Keypair as BlsKeypair, PubkeyCompressed as BlsPubkeyCompressed, SignatureProjective,
+        },
         solana_epoch_schedule::EpochSchedule,
         solana_hash::Hash,
         solana_pubkey::Pubkey,
@@ -171,6 +169,31 @@ mod tests {
         };
         let aggregate = VoteAggregate::new_from_verified_vote(keypairs.len(), vote_msg);
         (aggregate, vec![Pubkey::new_unique()])
+    }
+
+    pub(crate) fn new_identity_reward_vote_aggregate(
+        vote: Vote,
+        max_validators: usize,
+        ranks_and_stakes: &[(u16, u64)],
+        shred_version: u16,
+    ) -> (VoteAggregate, Vec<Pubkey>) {
+        // This models the aggregate produced by individually valid votes whose signatures cancel.
+        let aggregate = VoteAggregate::new_from_verified_votes(
+            max_validators,
+            VotePayloadToSign::new_from_vote(vote, shred_version),
+            ranks_and_stakes.iter().map(|(rank, stake)| {
+                (
+                    *rank,
+                    NonZero::new(*stake).expect("test stake must be nonzero"),
+                )
+            }),
+            SignatureProjective::identity(),
+        );
+        let validators = ranks_and_stakes
+            .iter()
+            .map(|_| Pubkey::new_unique())
+            .collect();
+        (aggregate, validators)
     }
 
     pub(crate) fn get_keypairs(max_validators: usize, slot: Slot) -> Vec<BlsKeypair> {
@@ -285,5 +308,71 @@ mod tests {
         assert_eq!(notar.slot, slot);
         assert_eq!(notar.block_id, blockid1);
         validate_bitmap(notar.bitmap(), 3, 5);
+    }
+
+    #[test]
+    fn identity_skip_cert_is_omitted_without_dropping_notar_cert() {
+        let slot = 123;
+        let max_validators = 3;
+        let shred_version = rand::rng().random();
+        let keypairs = (0..max_validators)
+            .map(|_| BlsKeypair::new())
+            .collect::<Vec<_>>();
+        let mut entry = Entry::new(max_validators);
+
+        let skip = Vote::new_skip_vote(slot);
+        let (aggregate, skip_validators) = new_identity_reward_vote_aggregate(
+            skip,
+            max_validators,
+            &[(0, 100), (1, 100)],
+            shred_version,
+        );
+        entry.add_aggregate(aggregate, skip_validators).unwrap();
+
+        let block_id = Hash::new_unique();
+        let notar = Vote::new_notarization_vote(Block { slot, block_id });
+        let (aggregate, notar_validators) =
+            new_reward_vote_aggregate(notar, 2, &keypairs, None, shred_version);
+        entry
+            .add_aggregate(aggregate, notar_validators.clone())
+            .unwrap();
+
+        let resp = entry.build_certs(slot).unwrap();
+        assert!(resp.skip.is_none());
+        assert_eq!(resp.notar.unwrap().block_id, block_id);
+        assert_eq!(resp.validators, notar_validators);
+    }
+
+    #[test]
+    fn identity_notar_cert_is_omitted_without_dropping_skip_cert() {
+        let slot = 123;
+        let max_validators = 3;
+        let shred_version = rand::rng().random();
+        let keypairs = (0..max_validators)
+            .map(|_| BlsKeypair::new())
+            .collect::<Vec<_>>();
+        let mut entry = Entry::new(max_validators);
+
+        let block_id = Hash::new_unique();
+        let notar = Vote::new_notarization_vote(Block { slot, block_id });
+        let (aggregate, notar_validators) = new_identity_reward_vote_aggregate(
+            notar,
+            max_validators,
+            &[(0, 100), (1, 100)],
+            shred_version,
+        );
+        entry.add_aggregate(aggregate, notar_validators).unwrap();
+
+        let skip = Vote::new_skip_vote(slot);
+        let (aggregate, skip_validators) =
+            new_reward_vote_aggregate(skip, 2, &keypairs, None, shred_version);
+        entry
+            .add_aggregate(aggregate, skip_validators.clone())
+            .unwrap();
+
+        let resp = entry.build_certs(slot).unwrap();
+        assert!(resp.notar.is_none());
+        assert_eq!(resp.skip.unwrap().slot, slot);
+        assert_eq!(resp.validators, skip_validators);
     }
 }

@@ -84,15 +84,16 @@ impl From<ProgramCacheEntryOwner> for Pubkey {
     - Loaded => Loaded (with different account_owner)
 
     Eviction and unloading (in the same slot):
-    - Unloaded => Loaded in ProgramCache::assign_program
+    - Unloaded => Loaded / FailedVerification in ProgramCache::assign_program
     - Loaded => Unloaded in ProgramCache::unload_program_entry
 
     At epoch boundary (when feature set and environment changes):
     - Loaded => FailedVerification in Bank::_new_from_parent
     - FailedVerification => Loaded in Bank::_new_from_parent
 
-    Through pruning (when on orphan fork or overshadowed on the rooted fork):
-    - Closed / Unloaded / Loaded / Builtin => Empty in ProgramCache::prune
+    Through pruning:
+    - Closed / Unloaded / Loaded / Builtin => Empty in ProgramCache::prune (when on orphan fork or overshadowed on the rooted fork)
+    - FailedVerification / Unloaded / Loaded => Unloaded in ProgramCache::prune (when on outdated program runtime environment)
 */
 
 /// Actual payload of [ProgramCacheEntry].
@@ -152,14 +153,12 @@ impl ProgramCacheEntryType {
 /// Holds a program version at a specific address and on a specific slot / fork.
 ///
 /// It contains the actual program in [ProgramCacheEntryType] and a bunch of meta-data.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct ProgramCacheEntry {
     /// The program of this entry
     pub program: ProgramCacheEntryType,
     /// The loader of this entry
     pub account_owner: ProgramCacheEntryOwner,
-    /// Size of account that stores the program and program data
-    pub account_size: usize,
     /// Slot in which the program was (re)deployed
     pub deployment_slot: Slot,
     /// Slot in which this entry will become active (can be in the future)
@@ -169,6 +168,24 @@ pub struct ProgramCacheEntry {
     pub latest_access_slot: AtomicU64,
 }
 
+impl std::fmt::Debug for ProgramCacheEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProgramCacheEntry")
+            .field("slot", &self.deployment_slot)
+            .field(
+                "env",
+                &self
+                    .program
+                    .get_environment()
+                    .map(|env| Arc::as_ptr(env))
+                    .unwrap_or(std::ptr::null()),
+            )
+            .field("type", &self.program)
+            .finish()
+    }
+}
+
+#[cfg(feature = "dev-context-only-utils")]
 impl PartialEq for ProgramCacheEntry {
     fn eq(&self, other: &Self) -> bool {
         self.effective_slot == other.effective_slot
@@ -186,7 +203,6 @@ impl ProgramCacheEntry {
         deployment_slot: Slot,
         effective_slot: Slot,
         elf_bytes: &[u8],
-        account_size: usize,
         #[cfg(feature = "metrics")] metrics: &mut LoadProgramMetrics,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_internal(
@@ -195,7 +211,6 @@ impl ProgramCacheEntry {
             deployment_slot,
             effective_slot,
             elf_bytes,
-            account_size,
             #[cfg(feature = "metrics")]
             metrics,
             false, /* reloading */
@@ -216,7 +231,6 @@ impl ProgramCacheEntry {
         deployment_slot: Slot,
         effective_slot: Slot,
         elf_bytes: &[u8],
-        account_size: usize,
         #[cfg(feature = "metrics")] metrics: &mut LoadProgramMetrics,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_internal(
@@ -225,7 +239,6 @@ impl ProgramCacheEntry {
             deployment_slot,
             effective_slot,
             elf_bytes,
-            account_size,
             #[cfg(feature = "metrics")]
             metrics,
             true, /* reloading */
@@ -238,10 +251,13 @@ impl ProgramCacheEntry {
         deployment_slot: Slot,
         effective_slot: Slot,
         elf_bytes: &[u8],
-        account_size: usize,
         #[cfg(feature = "metrics")] metrics: &mut LoadProgramMetrics,
         reloading: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        debug_assert_eq!(
+            effective_slot,
+            deployment_slot.saturating_add(DELAY_VISIBILITY_SLOT_OFFSET),
+        );
         let entry_stats = ProgramStatistics::default();
         #[cfg(feature = "metrics")]
         let load_elf_time = solana_svm_measure::measure::Measure::start("load_elf_time");
@@ -277,7 +293,6 @@ impl ProgramCacheEntry {
         Ok(Self {
             deployment_slot,
             account_owner: ProgramCacheEntryOwner::try_from(loader_key).unwrap(),
-            account_size,
             effective_slot,
             program: ProgramCacheEntryType::Loaded(executable),
             stats: entry_stats.into(),
@@ -285,21 +300,20 @@ impl ProgramCacheEntry {
         })
     }
 
-    pub fn to_unloaded(&self) -> Option<Self> {
+    pub fn to_unloaded_in_env(&self, environment: ProgramRuntimeEnvironment) -> Option<Self> {
         match &self.program {
-            ProgramCacheEntryType::Loaded(_) => {}
-            ProgramCacheEntryType::FailedVerification(_)
-            | ProgramCacheEntryType::Closed
+            ProgramCacheEntryType::Loaded(_)
+            | ProgramCacheEntryType::FailedVerification(_)
+            | ProgramCacheEntryType::Unloaded(_) => {}
+            ProgramCacheEntryType::Closed
             | ProgramCacheEntryType::DelayVisibility
-            | ProgramCacheEntryType::Unloaded(_)
             | ProgramCacheEntryType::Builtin(_) => {
                 return None;
             }
         }
         Some(Self {
-            program: ProgramCacheEntryType::Unloaded(self.program.get_environment()?.clone()),
+            program: ProgramCacheEntryType::Unloaded(environment),
             account_owner: self.account_owner,
-            account_size: self.account_size,
             deployment_slot: self.deployment_slot,
             effective_slot: self.effective_slot,
             stats: Arc::clone(&self.stats),
@@ -307,18 +321,19 @@ impl ProgramCacheEntry {
         })
     }
 
+    pub fn to_unloaded(&self) -> Option<Self> {
+        self.to_unloaded_in_env(ProgramRuntimeEnvironment::clone(
+            self.program.get_environment()?,
+        ))
+    }
+
     /// Creates a new built-in program
-    pub fn new_builtin(
-        deployment_slot: Slot,
-        account_size: usize,
-        register_fn: BuiltinFunctionRegisterer,
-    ) -> Self {
+    pub fn new_builtin(deployment_slot: Slot, register_fn: BuiltinFunctionRegisterer) -> Self {
         let mut program = BuiltinProgram::new_builtin();
         register_fn(&mut program, "entrypoint").unwrap();
         Self {
             deployment_slot,
             account_owner: ProgramCacheEntryOwner::NativeLoader,
-            account_size,
             effective_slot: deployment_slot,
             program: ProgramCacheEntryType::Builtin(program),
             stats: Arc::default(),
@@ -343,7 +358,6 @@ impl ProgramCacheEntry {
         let tombstone = Self {
             program: reason,
             account_owner,
-            account_size: 0,
             deployment_slot: slot,
             effective_slot: slot,
             stats,
@@ -441,7 +455,7 @@ mod tests {
             compilation_time_ema: AtomicU64::new(u64::MAX),
             ..Default::default()
         };
-        let program = new_test_entry_with_usage(0, 0, stats);
+        let program = new_test_entry_with_usage(0, 1, stats);
         program.update_access_slot(1);
         assert!(
             dbg!(program.retention_score()) <= 129,
