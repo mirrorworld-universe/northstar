@@ -1721,10 +1721,11 @@ mod tests {
         let delegated_account_keypair = Keypair::new();
         let delegated_account = delegated_account_keypair.pubkey();
         let delegate_buffer = Pubkey::new_unique();
-        let delegated_portal_account = AccountSharedData::new(1_000_000, 0, &program_id);
+        let delegated_owner_account =
+            AccountSharedData::new(1_000_000, 0, &delegated_owner_program);
         let delegate_buffer_account =
             AccountSharedData::new(1_000_000, 0, &delegated_owner_program);
-        root_bank.store_account(&delegated_account, &delegated_portal_account);
+        root_bank.store_account(&delegated_account, &delegated_owner_account);
         root_bank.store_account(&delegate_buffer, &delegate_buffer_account);
 
         let grid_id = 7u64;
@@ -1811,6 +1812,11 @@ mod tests {
             bank_for_open.clone(),
             SlotLeader::new_unique(),
             bank_for_open.slot() + 1,
+        );
+        // Owner programs transfer ownership immediately before the Portal CPI.
+        delegate_bank.store_account(
+            &delegated_account,
+            &AccountSharedData::new(1_000_000, 0, &program_id),
         );
         let delegate_ix = build_delegate_ix(
             program_id,
