@@ -210,7 +210,7 @@ assert_cmd = "2.2.2"
 assert_matches = "1.5.0"
 async-lock = "3.4.2"
 async-trait = "0.1.89"
-aya = "0.13"
+aya = "0.14"
 aya-ebpf = "0.1.1"
 base64 = "0.22.1"
 bencher = "0.1.5"
@@ -226,7 +226,7 @@ bs58 = { version = "0.5.1", default-features = false }
 bv = "0.11.1"
 bytemuck = "1.25.0"
 bytemuck_derive = "1.10.2"
-bytes = "1.11.1"
+bytes = "1.12.0"
 bytesize = "2.4.0"
 bzip2 = "0.6.1"
 caps = "0.5.6"
@@ -403,7 +403,7 @@ solana-download-utils = { path = "download-utils", version = "=4.2.0-alpha.0", f
 solana-ed25519-program = "3.0.0"
 solana-entry = { path = "entry", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
 solana-epoch-info = "3.1.0"
-solana-epoch-rewards = "3.0.2"
+solana-epoch-rewards = "3.1.0"
 solana-epoch-rewards-hasher = "3.1.0"
 solana-epoch-schedule = "3.2.0"
 solana-faucet = { path = "faucet", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
@@ -499,7 +499,7 @@ solana-signer-store = "0.1.0"
 solana-slot-hashes = "3.1.0"
 solana-slot-history = "3.0.1"
 solana-stable-layout = "3.0.1"
-solana-stake-interface = "4.2.0"
+solana-stake-interface = "4.3.0"
 solana-storage-bigtable = { path = "storage-bigtable", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
 solana-storage-proto = { path = "storage-proto", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
 solana-streamer = { path = "streamer", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
@@ -522,7 +522,7 @@ solana-time-utils = "3.0.0"
 solana-tls-utils = { path = "tls-utils", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
 solana-tpu-client = { path = "tpu-client", version = "=4.2.0-alpha.0", default-features = false, features = ["agave-unstable-api"] }
 solana-tpu-client-next = { path = "tpu-client-next", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
-solana-transaction = "4.1.3"
+solana-transaction = "4.1.4"
 solana-transaction-context = { path = "transaction-context", version = "=4.2.0-alpha.0", features = ["agave-unstable-api", "bincode"] }
 solana-transaction-error = "3.3.0"
 solana-transaction-status = { path = "transaction-status", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
