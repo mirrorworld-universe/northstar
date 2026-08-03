@@ -5309,9 +5309,9 @@ fn test_bank_hash_consistency(deprecate_rent_exemption_threshold: bool) {
             assert_eq!(
                 bank.hash().to_string(),
                 if deprecate_rent_exemption_threshold {
-                    "5PG7F5xaWbdVbGqMK4swGStgw6Dc3CRBwg3aYcDmY9q"
+                    "7JJ15D1ce8yW5NceFtK3YN4JMeRV9epZRbpNjiw4Y2BW"
                 } else {
-                    "BKPZ9wePLfR5995UW3zc487emH7KXh7fAMTG1unYBYbC"
+                    "GFDc9UWSp6E6sbjgk9EhZLBrX3bUyC8bkh9YmLUxsH23"
                 },
             );
         }
@@ -5320,9 +5320,9 @@ fn test_bank_hash_consistency(deprecate_rent_exemption_threshold: bool) {
             assert_eq!(
                 bank.hash().to_string(),
                 if deprecate_rent_exemption_threshold {
-                    "6P7mQgYgfCKXJT4giFVG9AUTG1k2oqbEz9oaJkQFzaFZ"
+                    "AxoMcCKN43V2JPtAc3ivoCFTfS2wmjB7xpZkn7u9KbLQ"
                 } else {
-                    "9X9n98FSzPHCrEns4We6giA6QnsQEeYXqbxxULT5tHL1"
+                    "79wpAVbcHWEJGLWtW4rDNjwdHnuRKbJheEstvsx9g3Xf"
                 },
             );
             break;
@@ -12507,7 +12507,7 @@ fn test_new_for_txn_tests_system_transfer() {
 
     let refs: Vec<_> = owned_accounts.iter().map(|(k, v)| (k, v)).collect();
     let ancestors = Ancestors::from(vec![parent_slot]);
-    accounts.store_accounts_seq((parent_slot, refs.as_slice()), None, &ancestors);
+    accounts.store_accounts_seq((parent_slot, refs.as_slice()), 0, None, &ancestors);
     accounts.accounts_db.add_root(parent_slot);
 
     let bank_rc = BankRc::new(accounts);
@@ -12686,7 +12686,7 @@ fn test_new_for_block_tests_with_vote_account() {
 
     let refs: Vec<_> = owned_accounts.iter().map(|(k, v)| (k, v)).collect();
     let ancestors = Ancestors::from(vec![parent_slot]);
-    accounts.store_accounts_seq((parent_slot, refs.as_slice()), None, &ancestors);
+    accounts.store_accounts_seq((parent_slot, refs.as_slice()), 0, None, &ancestors);
     accounts.accounts_db.add_root(parent_slot);
 
     let bank_rc = BankRc::new(accounts);

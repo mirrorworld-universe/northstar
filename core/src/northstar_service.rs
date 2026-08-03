@@ -869,7 +869,7 @@ mod tests {
             .unwrap();
         sender
             .send((
-                BankNotification::OptimisticallyConfirmed(bank2.slot()),
+                BankNotification::OptimisticallyConfirmed(bank2.slot(), bank2.hash()),
                 None,
             ))
             .unwrap();

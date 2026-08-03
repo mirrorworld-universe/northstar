@@ -8,7 +8,6 @@ use {
     solana_clock::Slot,
     solana_keypair::Keypair,
     solana_leader_schedule::SlotLeader,
-    solana_ledger::transaction_balances::compile_collected_balances,
     solana_message::{v0::LoadedAddresses, AddressLoader, VersionedMessage},
     solana_pubkey::Pubkey,
     solana_rpc::{er_history::ErHistoryStore, rpc_subscriptions::RpcSubscriptions},
@@ -16,6 +15,7 @@ use {
         bank::Bank,
         bank_forks::BankForks,
         commitment::{BlockCommitmentCache, CommitmentSlots},
+        transaction_balances::compile_collected_balances,
     },
     solana_sdk_ids::{bpf_loader, bpf_loader_upgradeable, system_program, sysvar},
     solana_send_transaction_service::{
