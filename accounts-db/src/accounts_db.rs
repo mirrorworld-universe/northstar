@@ -5199,10 +5199,10 @@ impl AccountsDb {
     }
 
     /// Updates the accounts index with the given `infos` and `accounts`.
-    /// Used when storing accounts to storage.
+    /// Used when storing accounts to storage for flush.
     /// Returns a vector of `SlotList<AccountInfo>` containing the reclaims for each batch processed.
     /// The element of the returned vector is guaranteed to be non-empty.
-    fn update_index_stored_accounts<'a>(
+    fn update_index_for_flush<'a>(
         &self,
         infos: Vec<AccountInfo>,
         accounts: &impl StorableAccounts<'a>,
@@ -5227,22 +5227,28 @@ impl AccountsDb {
             (start..end).for_each(|i| {
                 let info: AccountInfo = infos[i];
                 debug_assert!(!info.is_cached());
-                accounts.account(i, |account| {
-                    let old_slot = accounts.slot(i);
-                    self.accounts_index.upsert(
-                        target_slot,
-                        old_slot,
-                        account.pubkey(),
-                        info,
-                        &mut reclaims,
-                        reclaim,
-                    );
-                    self.accounts_index.update_secondary_indexes(
-                        account.pubkey(),
-                        &account,
-                        &self.account_indexes,
-                    );
-                });
+                let old_slot = accounts.slot(i);
+                let pubkey = accounts.pubkey(i);
+                self.accounts_index.upsert(
+                    target_slot,
+                    old_slot,
+                    pubkey,
+                    info,
+                    &mut reclaims,
+                    reclaim,
+                );
+
+                if !self.account_indexes.is_empty() {
+                    // Since StorableAccounts::account() may read the account from disk,
+                    // avoid calling it unless secondary indexes are enabled.
+                    accounts.account(i, |account| {
+                        self.accounts_index.update_secondary_indexes(
+                            pubkey,
+                            &account,
+                            &self.account_indexes,
+                        );
+                    });
+                }
             });
             reclaims
         };
@@ -5297,11 +5303,10 @@ impl AccountsDb {
             (start..end).for_each(|i| {
                 let info: AccountInfo = infos[i];
                 debug_assert!(!info.is_cached());
-                accounts.account(i, |account| {
-                    let old_slot = accounts.slot(i);
-                    self.accounts_index
-                        .replace(target_slot, old_slot, account.pubkey(), info);
-                });
+                let old_slot = accounts.slot(i);
+                let pubkey = accounts.pubkey(i);
+                self.accounts_index
+                    .replace(target_slot, old_slot, pubkey, info);
             });
         };
 
@@ -5817,7 +5822,7 @@ impl AccountsDb {
         let mark_zero_lamport_us = mark_zero_lamport_time.end_as_us();
 
         let update_index_time = Measure::start("update_index");
-        let reclaims = self.update_index_stored_accounts(
+        let reclaims = self.update_index_for_flush(
             infos,
             &accounts,
             reclaim_handling,
@@ -6123,13 +6128,8 @@ impl AccountsDb {
                     i64
                 ),
                 (
-                    "read_only_accounts_cache_evictor_wakeup_count_all",
-                    read_cache_stats.evictor_wakeup_count_all,
-                    i64
-                ),
-                (
-                    "read_only_accounts_cache_evictor_wakeup_count_productive",
-                    read_cache_stats.evictor_wakeup_count_productive,
+                    "read_only_accounts_cache_evict_run_count",
+                    read_cache_stats.evict_run_count,
                     i64
                 ),
                 (

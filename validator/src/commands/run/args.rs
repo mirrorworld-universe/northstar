@@ -30,7 +30,7 @@ use {
     solana_send_transaction_service::send_transaction_service::Config as SendTransactionServiceConfig,
     solana_signer::Signer,
     solana_unified_scheduler_pool::DefaultSchedulerPool,
-    std::{collections::HashSet, net::SocketAddr, path::PathBuf, str::FromStr},
+    std::{collections::HashSet, net::SocketAddr, path::PathBuf},
 };
 
 const EXCLUDE_KEY: &str = "account-index-exclude-key";
@@ -959,12 +959,11 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
     )
     .arg(
         Arg::with_name("poh_pinned_cpu_core")
-            .hidden(hidden_unless_forced())
-            .long("experimental-poh-pinned-cpu-core")
+            .long("poh-pinned-cpu-core")
             .takes_value(true)
             .value_name("CPU_ID")
-            .validator(|s| usize::from_str(&s).map(|_| ()).map_err(|e| e.to_string()))
-            .help("Specify which CPU core PoH is pinned to"),
+            .validator(is_parsable::<usize>)
+            .help("Specify which CPU core PoH is pinned to. Defaults to CPU 0 on Linux"),
     )
     .arg(
         Arg::with_name("poh_hashes_per_batch")
@@ -1234,17 +1233,17 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .help("Disables the banking trace"),
     )
     .arg(
-        Arg::with_name("delay_leader_block_for_pending_fork")
+        Arg::with_name("no_delay_leader_block_for_pending_fork")
             .hidden(hidden_unless_forced())
-            .long("delay-leader-block-for-pending-fork")
+            .long("no-delay-leader-block-for-pending-fork")
             .takes_value(false)
             .help(
-                "Delay leader block creation while replaying a block which descends from the \
-                 current fork and has a lower slot than our next leader slot. If we don't delay \
-                 here, our new leader block will be on a different fork from the block we are \
-                 replaying and there is a high chance that the cluster will confirm that block's \
-                 fork rather than our leader block's fork because it was created before we \
-                 started creating ours.",
+                "Disable delaying leader block creation while replaying a block which descends \
+                 from the current fork and has a lower slot than our next leader slot. If we \
+                 don't delay here, our new leader block will be on a different fork from the \
+                 block we are replaying and there is a high chance that the cluster will confirm \
+                 that block's fork rather than our leader block's fork because it was created \
+                 before we started creating ours.",
             ),
     )
     .arg(

@@ -4,6 +4,13 @@
 */
 
 use {
+    agave_bls_sigverify::{
+        bls_vote_sigverify::{
+            VotePayload, aggregate_pubkeys_by_payload, aggregate_signatures,
+            verify_individual_votes, verify_votes_optimistic,
+        },
+        stats::SigVerifyVoteStats,
+    },
     agave_votor_messages::{
         consensus_message::{Block, VoteMessage},
         vote::Vote,
@@ -11,13 +18,6 @@ use {
     criterion::{BatchSize, Criterion, criterion_group, criterion_main},
     rayon::{ThreadPool, ThreadPoolBuilder},
     solana_bls_signatures::{Keypair as BLSKeypair, PreparedHashedMessage, VerifySignature},
-    solana_core::bls_sigverify::{
-        bls_vote_sigverify::{
-            VotePayload, aggregate_pubkeys_by_payload, aggregate_signatures,
-            verify_individual_votes, verify_votes_optimistic,
-        },
-        stats::SigVerifyVoteStats,
-    },
     solana_hash::Hash,
     solana_keypair::Keypair,
     solana_signer::Signer,
@@ -83,9 +83,9 @@ fn generate_test_data(num_distinct_messages: usize, batch_size: usize) -> Vec<Vo
 
         votes_to_verify.push(VotePayload {
             vote_message,
-            bls_pubkey: bls_keypair.public,
-            pubkey: Keypair::new().pubkey(),
-            remote_pubkey: Keypair::new().pubkey(),
+            sender_bls_pubkey: bls_keypair.public,
+            sender_vote_account_pubkey: Keypair::new().pubkey(),
+            sender_identity_pubkey: Keypair::new().pubkey(),
             prepared_payload: None,
         });
     }
