@@ -569,6 +569,7 @@ name = "agave-xdp"
 version = "4.3.0-alpha.2"
 dependencies = [
  "agave-cpu-utils",
+ "agave-xdp",
  "agave-xdp-ebpf",
  "arc-swap",
  "arrayvec",
@@ -9708,6 +9709,7 @@ dependencies = [
  "rocksdb",
  "scopeguard",
  "serde",
+ "smallvec",
  "solana-account 4.3.1",
  "solana-accounts-db",
  "solana-address-lookup-table-interface",
