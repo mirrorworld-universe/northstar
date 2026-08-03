@@ -351,3 +351,12 @@ place, it adds up over time. Thus, if your code can be expected to run often:
 Inventing new terms is allowed, but should only be done when the term is widely
 used and understood. Avoid introducing new 3-letter terms, which can be
 confused with 3-letter acronyms.
+
+[Terms currently in use](https://solana.com/docs/terminology)
+
+
+## Design Proposals
+
+Design proposals are now tracked as Solana Improvement Documents (SIMDs) in the
+[solana-foundation/solana-improvement-documents](https://github.com/solana-foundation/solana-improvement-documents)
+repository.
