@@ -411,6 +411,18 @@ fn main() {
     });
 
     let features_to_deactivate = pubkeys_of(&matches, "deactivate_feature").unwrap_or_default();
+    if matches.is_present("alpenglow")
+        && features_to_deactivate.iter().any(|feature| {
+            *feature == agave_feature_set::alpenglow::id()
+                || *feature == agave_feature_set::validator_admission_ticket::id()
+        })
+    {
+        println!(
+            "Error: --alpenglow requires both the alpenglow and validator_admission_ticket \
+             features to be active"
+        );
+        exit(1);
+    }
 
     if TestValidatorGenesis::ledger_exists(&ledger_path) {
         for (name, long) in &[
@@ -422,6 +434,7 @@ fn main() {
             ("slots_per_epoch", "--slots-per-epoch"),
             ("inflation_fixed", "--inflation-fixed"),
             ("faucet_sol", "--faucet-sol"),
+            ("alpenglow", "--alpenglow"),
             ("deactivate_feature", "--deactivate-feature"),
             // Sonic: Portal is a genesis-time config
             ("portal", "--portal"),
@@ -520,8 +533,7 @@ fn main() {
         .unwrap_or_else(|e| {
             println!("Error: add_accounts_from_directories failed: {e}");
             exit(1);
-        })
-        .deactivate_features(&features_to_deactivate);
+        });
 
     // Sonic: Configure portal program for ephemeral rollup
     if let Some(portal_program_id) = portal {
@@ -601,6 +613,12 @@ fn main() {
             exit(1);
         }
     }
+
+    if matches.is_present("alpenglow") {
+        genesis.activate_alpenglow();
+    }
+
+    genesis.deactivate_features(&features_to_deactivate);
 
     if let Some(warp_slot) = warp_slot {
         genesis.warp_slot(warp_slot);
