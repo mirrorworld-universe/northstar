@@ -82,7 +82,7 @@ use {
     agave_reserved_account_keys::ReservedAccountKeys,
     agave_snapshots::snapshot_hash::SnapshotHash,
     agave_votor_messages::{
-        certificate::{Certificate, CertificateType},
+        certificate::{CertSignature, Certificate, GenesisCert},
         migration::GENESIS_CERTIFICATE_ACCOUNT,
         unverified_vote_message::UnverifiedCertificate,
         wire::{WireBlockCertMessage, WireCertSignature},
@@ -270,7 +270,7 @@ static NANOSECOND_CLOCK_ACCOUNT: LazyLock<Pubkey> = LazyLock::new(|| {
 pub type BankStatusCache = StatusCache<Result<()>>;
 #[cfg_attr(
     feature = "frozen-abi",
-    frozen_abi(digest = "HvpA8mUc4TZAcDF3BpcynmYWYBK3scJRTem2qadCiF5Z")
+    frozen_abi(digest = "23uAyYmzMrmPvPDKf6SvF1YoojYstmEPmdkfAQDnpwsq")
 )]
 pub type BankSlotDelta = SlotDelta<Result<()>>;
 
@@ -278,7 +278,6 @@ pub type BankSlotDelta = SlotDelta<Result<()>>;
 pub struct SquashTiming {
     pub squash_accounts_ms: u64,
     pub squash_accounts_cache_ms: u64,
-    pub squash_accounts_index_ms: u64,
     pub squash_cache_ms: u64,
 }
 
@@ -286,7 +285,6 @@ impl AddAssign for SquashTiming {
     fn add_assign(&mut self, rhs: Self) {
         self.squash_accounts_ms += rhs.squash_accounts_ms;
         self.squash_accounts_cache_ms += rhs.squash_accounts_cache_ms;
-        self.squash_accounts_index_ms += rhs.squash_accounts_index_ms;
         self.squash_cache_ms += rhs.squash_cache_ms;
     }
 }
@@ -1070,7 +1068,7 @@ pub struct ProcessedTransactionCounts {
 
 /// Account stats for computing the bank hash
 /// This struct is serialized and stored in the snapshot.
-#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample, StableAbi, StableAbiSample))]
 #[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BankHashStats {
     pub num_updated_accounts: u64,
@@ -1933,7 +1931,7 @@ impl Bank {
 
         // Distribute rewards commission to vote accounts and cache stake rewards
         // for partitioned distribution in the upcoming slots.
-        let (epoch_validator_rewards, begin_partitioned_rewards_time_us) =
+        let (epoch_rewards, begin_partitioned_rewards_time_us) =
             measure_us!(self.begin_partitioned_rewards(
                 parent_epoch,
                 parent_slot,
@@ -1950,7 +1948,7 @@ impl Bank {
             EpochInflationAccountState::new_epoch_update_account(
                 self,
                 epoch_start_capitalization,
-                epoch_validator_rewards,
+                epoch_rewards,
             );
         }
 
@@ -3256,14 +3254,12 @@ impl Bank {
         roots.push(self.slot());
         roots.extend(self.parents_iter().map(|parent| parent.slot()));
 
-        let mut total_index_us = 0;
         let mut total_cache_us = 0;
 
         let mut squash_accounts_time = Measure::start("squash_accounts_time");
         for slot in roots.iter().rev() {
             // root forks cannot be purged
             let add_root_timing = self.rc.accounts.add_root(*slot);
-            total_index_us += add_root_timing.index_us;
             total_cache_us += add_root_timing.cache_us;
         }
         squash_accounts_time.stop();
@@ -3279,7 +3275,6 @@ impl Bank {
 
         SquashTiming {
             squash_accounts_ms: squash_accounts_time.as_ms(),
-            squash_accounts_index_ms: total_index_us / 1000,
             squash_accounts_cache_ms: total_cache_us / 1000,
             squash_cache_ms: squash_cache_time.as_ms(),
         }
@@ -3533,7 +3528,7 @@ impl Bank {
     /// - If `get_alpenglow_genesis_certificate` is called before the marker is processed by replay
     ///   this account will be empty.
     /// - If `get_alpenglow_genesis_certificate` is called after the marker is processed, we return the certificate
-    pub fn get_alpenglow_genesis_certificate(&self) -> Option<Certificate> {
+    pub fn get_alpenglow_genesis_certificate(&self) -> Option<GenesisCert> {
         let acct = self.get_account(&GENESIS_CERTIFICATE_ACCOUNT)?;
         (!acct.data().is_empty()).then(|| {
             // The address is known in advance, so the account could already exist if it was prefunded.
@@ -3541,10 +3536,12 @@ impl Bank {
             // so this deserialize is safe if the account is non-empty
             let cert: WireBlockCertMessage = wincode::deserialize(acct.data())
                 .expect("Programmer error deserializing genesis certificate");
-            Certificate {
-                cert_type: CertificateType::Genesis(cert.block),
-                signature: cert.signature.signature,
-                bitmap: cert.signature.bitmap,
+            GenesisCert {
+                block: cert.block,
+                signature: CertSignature {
+                    signature: cert.signature.signature,
+                    bitmap: cert.signature.bitmap,
+                },
             }
         })
     }
@@ -3558,14 +3555,12 @@ impl Bank {
     }
 
     /// For use in the first Alpenglow block, set the genesis certificate.
-    pub fn set_alpenglow_genesis_certificate(&self, cert: &Certificate) {
-        debug_assert!(cert.cert_type.is_genesis());
-        let block = cert.cert_type.to_block().unwrap();
+    pub fn set_alpenglow_genesis_certificate(&self, cert: &GenesisCert) {
         let cert = WireBlockCertMessage {
-            block,
+            block: cert.block,
             signature: WireCertSignature {
-                signature: cert.signature,
-                bitmap: cert.bitmap.clone(),
+                signature: cert.signature.signature,
+                bitmap: cert.signature.bitmap.clone(),
             },
         };
         let data = wincode::serialize(&cert).unwrap();
@@ -6822,12 +6817,7 @@ impl Bank {
 
     pub(crate) fn get_alpenglow_migration_slot(&self) -> Option<Slot> {
         let genesis_cert = self.get_alpenglow_genesis_certificate()?;
-        debug_assert!(
-            genesis_cert.cert_type.is_genesis(),
-            "cert_type={:?}",
-            genesis_cert.cert_type
-        );
-        Some(genesis_cert.cert_type.slot())
+        Some(genesis_cert.block.slot)
     }
 }
 

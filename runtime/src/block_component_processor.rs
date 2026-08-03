@@ -11,7 +11,7 @@ use {
         validated_reward_certificate::{Error as ValidatedRewardCertError, ValidatedRewardCert},
     },
     agave_votor_messages::{
-        certificate::{Certificate, CertificateType},
+        certificate::{CertSignature, CertificateType, GenesisCert},
         consensus_message::{Block, ConsensusMessage},
         migration::MigrationStatus,
         unverified_vote_message::UnverifiedCertificate,
@@ -55,6 +55,8 @@ pub enum BlockComponentProcessorError {
     InvalidFinalizationCertificate(#[from] BlockFinalizationCertError),
     #[error("Missing block footer")]
     MissingBlockFooter,
+    #[error("Missing genesis certificate marker")]
+    MissingGenesisCertificateMarker,
     #[error("Missing parent marker (neither a header nor an update parent was present)")]
     MissingParentMarker,
     #[error("Multiple block footers detected")]
@@ -108,6 +110,7 @@ impl BlockComponentProcessorError {
             | BlockComponentProcessorError::GenesisCertificateOnNonChild
             | BlockComponentProcessorError::GenesisCertificateFailedVerification
             | BlockComponentProcessorError::MissingBlockFooter
+            | BlockComponentProcessorError::MissingGenesisCertificateMarker
             | BlockComponentProcessorError::MultipleUpdateParents
             | BlockComponentProcessorError::SpuriousUpdateParent
             | BlockComponentProcessorError::UpdateParentNotFirstInLeaderWindow(_) => false,
@@ -120,6 +123,7 @@ pub struct BlockComponentProcessor {
     has_header: bool,
     has_footer: bool,
     has_entry_batch: bool,
+    has_genesis_certificate_marker: bool,
     update_parent: Option<VersionedUpdateParent>,
 }
 
@@ -128,7 +132,14 @@ impl BlockComponentProcessor {
         &self,
         migration_status: &MigrationStatus,
         slot: Slot,
+        parent_slot: Slot,
     ) -> Result<(), BlockComponentProcessorError> {
+        if Self::requires_genesis_certificate_marker(migration_status, parent_slot)
+            && !self.has_genesis_certificate_marker
+        {
+            return Err(BlockComponentProcessorError::MissingGenesisCertificateMarker);
+        }
+
         // Only require block markers (header/footer) for slots where they should be present
         if !migration_status.should_allow_block_markers(slot) {
             return Ok(());
@@ -144,6 +155,22 @@ impl BlockComponentProcessor {
         }
 
         Ok(())
+    }
+
+    /// Check if `parent_slot` is the alpenglow genesis block for use in enforcing
+    /// that the block has a genesis block marker
+    ///
+    /// Note: We have an exemption for Dev clusters that have alpenglow active at slot 0,
+    /// as these clusters do not need a genesis block marker
+    fn requires_genesis_certificate_marker(
+        migration_status: &MigrationStatus,
+        parent_slot: Slot,
+    ) -> bool {
+        migration_status
+            .genesis_block()
+            .is_some_and(|genesis_block| {
+                genesis_block.slot != 0 && parent_slot == genesis_block.slot
+            })
     }
 
     /// Process an entry batch.
@@ -235,7 +262,7 @@ impl BlockComponentProcessor {
 
     /// Processes the genesis block marker with full verification
     pub fn on_genesis_cert_block_marker(
-        &self,
+        &mut self,
         bank: Arc<Bank>,
         shred_version: u16,
         genesis_block_marker: GenesisCertBlockMarker,
@@ -253,7 +280,7 @@ impl BlockComponentProcessor {
     /// Processes a locally produced genesis certificate marker without
     /// re-verifying the certificate signature.
     pub fn on_genesis_cert_block_marker_leader(
-        &self,
+        &mut self,
         bank: Arc<Bank>,
         genesis_block_marker: GenesisCertBlockMarker,
         migration_status: &MigrationStatus,
@@ -277,7 +304,7 @@ impl BlockComponentProcessor {
 
     /// Performs verification if `shred_version` is specified
     fn process_genesis_cert_block_marker(
-        &self,
+        &mut self,
         bank: Arc<Bank>,
         genesis_block_marker: GenesisCertBlockMarker,
         migration_status: &MigrationStatus,
@@ -301,28 +328,23 @@ impl BlockComponentProcessor {
             return Err(BlockComponentProcessorError::GenesisCertificateAlreadyPopulated);
         }
 
-        let genesis_cert_type = CertificateType::Genesis(Block {
-            slot: genesis_block_marker.slot,
-            block_id: genesis_block_marker.block_id,
-        });
-        let genesis_cert = match shred_version {
-            Some(shred_version) => {
-                let unverified_genesis_cert = UnverifiedCertificate {
-                    cert_type: genesis_cert_type,
-                    signature: genesis_block_marker.bls_signature,
-                    bitmap: genesis_block_marker.bitmap,
-                    shred_version,
-                };
-                Self::verify_genesis_certificate(&bank, unverified_genesis_cert)?
-            }
-            None => Certificate {
-                cert_type: genesis_cert_type,
+        let genesis_cert = GenesisCert {
+            block: Block {
+                slot: genesis_block_marker.slot,
+                block_id: genesis_block_marker.block_id,
+            },
+            signature: CertSignature {
                 signature: genesis_block_marker.bls_signature,
                 bitmap: genesis_block_marker.bitmap,
             },
         };
+        if let Some(shred_version) = shred_version {
+            Self::verify_genesis_certificate(&bank, &genesis_cert, shred_version)?;
+        }
+
         bank.set_alpenglow_genesis_certificate(&genesis_cert);
         bank.set_hashes_per_tick(None);
+        self.has_genesis_certificate_marker = true;
 
         if migration_status.is_alpenglow_enabled() {
             // We participated in the migration, nothing to do
@@ -340,12 +362,7 @@ impl BlockComponentProcessor {
             migration_status.my_pubkey(),
             bank.slot()
         );
-        migration_status.set_genesis_block(
-            genesis_cert
-                .cert_type
-                .to_block()
-                .expect("Genesis cert must correspond to a block"),
-        );
+        migration_status.set_genesis_block(genesis_cert.block);
         migration_status.set_genesis_certificate(Arc::new(genesis_cert));
         assert!(migration_status.is_ready_to_enable());
 
@@ -354,12 +371,17 @@ impl BlockComponentProcessor {
 
     fn verify_genesis_certificate(
         bank: &Bank,
-        cert: UnverifiedCertificate,
-    ) -> Result<Certificate, BlockComponentProcessorError> {
-        debug_assert!(cert.cert_type.is_genesis());
-
-        let cert_slot = cert.cert_type.slot();
-        let cert = bank.verify_certificate(cert).map_err(|_| {
+        cert: &GenesisCert,
+        shred_version: u16,
+    ) -> Result<(), BlockComponentProcessorError> {
+        let cert_slot = cert.block.slot;
+        let unverified_cert = UnverifiedCertificate {
+            cert_type: CertificateType::Genesis(cert.block),
+            signature: cert.signature.signature,
+            bitmap: cert.signature.bitmap.clone(),
+            shred_version,
+        };
+        bank.verify_certificate(unverified_cert).map_err(|_| {
             warn!(
                 "Failed to verify genesis certificate for slot {cert_slot} in bank slot {}",
                 bank.slot()
@@ -367,7 +389,7 @@ impl BlockComponentProcessor {
             BlockComponentProcessorError::GenesisCertificateFailedVerification
         })?;
 
-        Ok(cert)
+        Ok(())
     }
 
     fn on_footer(
@@ -616,7 +638,7 @@ mod tests {
             genesis_utils::{activate_all_features_alpenglow, create_genesis_config},
         },
         rand::Rng,
-        solana_bls_signatures::BLS_SIGNATURE_AFFINE_SIZE,
+        solana_bls_signatures::{BLS_SIGNATURE_AFFINE_SIZE, Signature as BLSSignature},
         solana_clock::DEFAULT_MS_PER_SLOT,
         solana_entry::block_component::{
             BlockFooterV1, BlockHeaderV1, UpdateParentV1, VersionedUpdateParent,
@@ -655,9 +677,32 @@ mod tests {
         GenesisCertBlockMarker {
             slot: 0,
             block_id: Hash::default(),
-            bls_signature: solana_bls_signatures::Signature([0; BLS_SIGNATURE_AFFINE_SIZE]),
+            bls_signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
             bitmap: vec![],
         }
+    }
+
+    fn post_migration_status_with_genesis_slot(genesis_slot: Slot) -> MigrationStatus {
+        let migration_status = MigrationStatus::default();
+        let migration_slot = migration_status.record_feature_activation(0);
+        assert!(genesis_slot < migration_slot);
+
+        let genesis_block = Block {
+            slot: genesis_slot,
+            block_id: Hash::default(),
+        };
+        migration_status.set_genesis_block(genesis_block);
+        let cert = Arc::new(GenesisCert {
+            block: genesis_block,
+            signature: CertSignature {
+                signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
+                bitmap: vec![],
+            },
+        });
+        migration_status.set_genesis_certificate(cert);
+        migration_status.enable_alpenglow_during_startup();
+
+        migration_status
     }
 
     #[test]
@@ -793,11 +838,65 @@ mod tests {
         };
 
         // Try to mark slot as full without footer - should fail
-        let result = processor.on_final(&migration_status, 1);
+        let result = processor.on_final(&migration_status, 1, 0);
         assert!(matches!(
             result,
             Err(BlockComponentProcessorError::MissingBlockFooter)
         ));
+    }
+
+    #[test]
+    fn test_first_alpenglow_block_requires_genesis_certificate_marker() {
+        let migration_status = post_migration_status_with_genesis_slot(1);
+        let processor = BlockComponentProcessor {
+            has_header: true,
+            has_footer: true,
+            ..BlockComponentProcessor::default()
+        };
+
+        let result = processor.on_final(&migration_status, 2, 1);
+        assert!(matches!(
+            result,
+            Err(BlockComponentProcessorError::MissingGenesisCertificateMarker)
+        ));
+    }
+
+    #[test]
+    fn test_first_alpenglow_block_with_genesis_certificate_marker_succeeds() {
+        let migration_status = post_migration_status_with_genesis_slot(1);
+        let (genesis_bank, bank_forks) = create_test_bank();
+        let parent = create_child_bank(&bank_forks, &genesis_bank, 1);
+        let parent_block_id = Hash::new_unique();
+        parent.set_block_id(Some(parent_block_id));
+        let bank = create_child_bank(&bank_forks, &parent, 2);
+        let genesis_marker = GenesisCertBlockMarker {
+            slot: parent.slot(),
+            block_id: parent_block_id,
+            bls_signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
+            bitmap: vec![],
+        };
+        let mut processor = BlockComponentProcessor {
+            has_header: true,
+            has_footer: true,
+            ..BlockComponentProcessor::default()
+        };
+
+        processor
+            .on_genesis_cert_block_marker_leader(bank, genesis_marker, &migration_status)
+            .unwrap();
+        assert!(processor.on_final(&migration_status, 2, 1).is_ok());
+    }
+
+    #[test]
+    fn test_first_alpenglow_block_genesis_slot_zero_skips_genesis_certificate_marker_check() {
+        let migration_status = MigrationStatus::post_migration_status();
+        let processor = BlockComponentProcessor {
+            has_header: true,
+            has_footer: true,
+            ..BlockComponentProcessor::default()
+        };
+
+        assert!(processor.on_final(&migration_status, 1, 0).is_ok());
     }
 
     #[test]
@@ -1734,6 +1833,6 @@ mod tests {
             .on_footer(bank, parent, shred_version, footer, None)
             .unwrap();
 
-        assert!(processor.on_final(&migration_status, 1).is_ok());
+        assert!(processor.on_final(&migration_status, 1, 0).is_ok());
     }
 }

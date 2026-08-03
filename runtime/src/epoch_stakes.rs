@@ -71,7 +71,7 @@ pub(crate) fn bls_pubkey_compressed_bytes_to_bls_pubkey(
     bls_pubkey_compressed_bytes: [u8; BLS_PUBLIC_KEY_COMPRESSED_SIZE],
 ) -> Option<(BLSPubkeyCompressed, PopVerified<BLSPubkeyAffine>)> {
     let bls_pubkey_compressed: BLSPubkeyCompressed =
-        bincode::deserialize(&bls_pubkey_compressed_bytes).ok()?;
+        wincode::deserialize(&bls_pubkey_compressed_bytes).ok()?;
     let bls_pubkey_affine = BLSPubkeyAffine::try_from(bls_pubkey_compressed).ok()?;
     // It is safe to use `new_unchecked` here because data coming from the vote
     // state has already had its PoP verified.
@@ -175,7 +175,7 @@ impl BLSPubkeyToRankMap {
     }
 }
 
-#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample, StableAbi, StableAbiSample))]
 #[derive(Clone, Serialize, Debug, Deserialize, Default, PartialEq, Eq)]
 pub struct NodeVoteAccounts {
     pub vote_accounts: Vec<Pubkey>,
@@ -198,7 +198,10 @@ pub(crate) enum DeserializableVersionedEpochStakes {
 }
 
 #[derive(Clone, Debug, Serialize)]
-#[cfg_attr(feature = "frozen-abi", derive(AbiExample, AbiEnumVisitor))]
+#[cfg_attr(
+    feature = "frozen-abi",
+    derive(AbiExample, AbiEnumVisitor, StableAbi, StableAbiSample)
+)]
 #[cfg_attr(feature = "dev-context-only-utils", derive(PartialEq))]
 pub enum VersionedEpochStakes {
     Current {
@@ -207,6 +210,7 @@ pub enum VersionedEpochStakes {
         total_stake: u64,
         node_id_to_vote_accounts: Arc<NodeIdToVoteAccounts>,
         epoch_authorized_voters: Arc<EpochAuthorizedVoters>,
+        #[cfg_attr(feature = "frozen-abi", stable_abi_sample(with = "Default::default()"))]
         #[serde(skip)]
         bls_pubkey_to_rank_map: OnceLock<Arc<BLSPubkeyToRankMap>>,
     },
@@ -369,7 +373,7 @@ impl VersionedEpochStakes {
 
 /// The current version of epoch stakes
 #[derive(Clone, Debug, Default)]
-#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample, StableAbi, StableAbiSample))]
 #[cfg_attr(feature = "dev-context-only-utils", derive(PartialEq))]
 pub struct EpochStakes {
     epoch: Epoch,
@@ -525,7 +529,7 @@ pub(crate) mod tests {
                         let bls_pubkey_compressed: BLSPubkeyCompressed =
                             (*BLSKeypair::new().public).into();
                         let bls_pubkey_compressed_serialized =
-                            bincode::serialize(&bls_pubkey_compressed)
+                            wincode::serialize(&bls_pubkey_compressed)
                                 .unwrap()
                                 .try_into()
                                 .unwrap();
@@ -743,7 +747,7 @@ pub(crate) mod tests {
     fn test_bls_pubkey_rank_map_excludes_duplicate_bls_and_identity() {
         let new_bls_pubkey = || {
             let bls_pubkey_compressed: BLSPubkeyCompressed = (*BLSKeypair::new().public).into();
-            let bls_pubkey_compressed_serialized = bincode::serialize(&bls_pubkey_compressed)
+            let bls_pubkey_compressed_serialized = wincode::serialize(&bls_pubkey_compressed)
                 .unwrap()
                 .try_into()
                 .unwrap();
