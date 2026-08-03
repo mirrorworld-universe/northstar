@@ -1202,7 +1202,7 @@ impl EphemeralRuntime {
                     )
                     .collect::<Vec<_>>();
                 if !account_writes.is_empty() {
-                    er_bank.store_accounts((er_bank.slot(), account_writes.as_slice()));
+                    er_bank.store_accounts((er_bank.slot(), account_writes.as_slice()), None);
                 }
                 Self::remove_reloadable_programs_from_cache(
                     &er_bank,
@@ -1328,7 +1328,7 @@ impl EphemeralRuntime {
             .iter()
             .map(|(pubkey, account)| (pubkey, account))
             .collect::<Vec<_>>();
-        bank.store_accounts((bank.slot(), account_writes.as_slice()));
+        bank.store_accounts((bank.slot(), account_writes.as_slice()), None);
         overlay_snapshot.len()
     }
 
@@ -1914,7 +1914,7 @@ impl EphemeralRuntime {
                 ))
             })
             .collect::<Vec<_>>();
-        er_bank.store_accounts((er_bank.slot(), updated_accounts.as_slice()));
+        er_bank.store_accounts((er_bank.slot(), updated_accounts.as_slice()), None);
         Self::remove_reloadable_programs_from_cache(
             er_bank,
             cache_context,

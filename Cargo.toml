@@ -232,7 +232,7 @@ cfg-if = "1.0.4"
 chrono = { version = "0.4.45", default-features = false }
 chrono-humanize = "0.2.3"
 clap = { version = "2.33.1", default-features = false, features = ["suggestions"] }
-console = "0.16.3"
+console = "0.16.4"
 const_format = "0.2.36"
 criterion = "0.8.2"
 crossbeam-channel = "0.5.15"
@@ -446,7 +446,7 @@ solana-nonce = "3.2.0"
 solana-nonce-account = "4.1.0"
 solana-notifier = { path = "notifier", version = "=4.3.0-alpha.0", features = ["agave-unstable-api"] }
 solana-offchain-message = "3.0.0"
-solana-packet = "4.1.0"
+solana-packet = "4.2.0"
 solana-perf = { path = "perf", version = "=4.3.0-alpha.0", features = ["agave-unstable-api"] }
 solana-poh = { path = "poh", version = "=4.3.0-alpha.0", features = ["agave-unstable-api"] }
 solana-poh-config = "3.0.0"

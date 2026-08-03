@@ -2811,7 +2811,7 @@ impl Bank {
         );
         accounts_to_store.push((incinerator::id(), incinerator_account));
 
-        self.store_accounts((self.slot, accounts_to_store.as_slice()));
+        self.store_accounts((self.slot, accounts_to_store.as_slice()), None);
         info!(
             "Transferred total VAT of {total_vat} lamports to incinerator from staked vote \
              accounts"
@@ -4012,6 +4012,7 @@ impl Bank {
                 drop_on_failure: false,
                 all_or_nothing: false,
                 strict_nonce_size_check: true,
+                drop_noop_transactions: true,
             },
         );
 
@@ -4058,6 +4059,16 @@ impl Bank {
                         vec![],
                         Err(fees_only_tx.load_error),
                         Some(fees_only_tx.fee_details.total_fee()),
+                        None,
+                        None,
+                        None,
+                        executed_units,
+                        loaded_accounts_data_size,
+                    ),
+                    ProcessedTransaction::NoOp(no_op_tx) => (
+                        vec![],
+                        Err(no_op_tx.validation_error),
+                        None,
                         None,
                         None,
                         None,
@@ -4519,7 +4530,7 @@ impl Bank {
 
             let to_store = (self.slot(), accounts_to_store.as_slice());
             self.update_bank_hash_stats(&to_store);
-            self.enqueue_accounts_lt_hash_updates(&to_store);
+            self.enqueue_on_chain_accounts_lt_hash_updates(&to_store);
             // See https://github.com/solana-labs/solana/pull/31455 for discussion
             // on *not* updating the index within a threadpool.
             self.rc.accounts.store_accounts_seq(
@@ -4651,6 +4662,19 @@ impl Bank {
                             .1
                             .lamports(),
                     }),
+                    ProcessedTransaction::NoOp(no_op_tx) => Ok(CommittedTransaction {
+                        status: Err(no_op_tx.validation_error),
+                        log_messages: None,
+                        inner_instructions: None,
+                        return_data: None,
+                        executed_units,
+                        fee_details: FeeDetails::default(),
+                        loaded_account_stats: TransactionLoadedAccountsStats {
+                            loaded_accounts_count: 0,
+                            loaded_accounts_data_size,
+                        },
+                        fee_payer_post_balance: no_op_tx.fee_payer_balance.unwrap_or(0),
+                    }),
                 }
             })
             .collect()
@@ -4746,6 +4770,7 @@ impl Bank {
                 drop_on_failure: false,
                 all_or_nothing: false,
                 strict_nonce_size_check: false,
+                drop_noop_transactions: false,
             },
         );
 
@@ -4876,10 +4901,19 @@ impl Bank {
     /// fn store the single `account` with `pubkey`.
     /// Uses `store_accounts`, which works on a vector of accounts.
     pub fn store_account(&self, pubkey: &Pubkey, account: &AccountSharedData) {
-        self.store_accounts((self.slot(), &[(pubkey, account)][..]))
+        self.store_accounts((self.slot(), &[(pubkey, account)][..]), None)
     }
 
-    pub fn store_accounts<'a>(&self, accounts: impl StorableAccounts<'a>) {
+    // Store `accounts`.
+    //
+    // - Callers must ensure there are no duplicates in `accounts`.
+    // - `thread_pool_for_loading_accounts` is used for accounts lt hashing,
+    //   to load the previous version of accounts in parallel.
+    pub fn store_accounts<'a>(
+        &self,
+        accounts: impl StorableAccounts<'a>,
+        thread_pool_for_loading_accounts: Option<&ThreadPool>,
+    ) {
         assert!(!self.freeze_started());
         let mut m = Measure::start("stakes_cache.check_and_store");
         let new_warmup_cooldown_rate_epoch = self.new_warmup_cooldown_rate_epoch();
@@ -4895,7 +4929,7 @@ impl Bank {
                 )
             })
         });
-        self.store_accounts_without_stakes_cache(accounts);
+        self.store_accounts_without_stakes_cache(accounts, thread_pool_for_loading_accounts);
         m.stop();
         self.rc
             .accounts
@@ -4906,13 +4940,25 @@ impl Bank {
     }
 
     fn store_account_without_stakes_cache(&self, pubkey: &Pubkey, account: &AccountSharedData) {
-        self.store_accounts_without_stakes_cache((self.slot(), &[(pubkey, account)][..]))
+        self.store_accounts_without_stakes_cache((self.slot(), &[(pubkey, account)][..]), None)
     }
 
-    fn store_accounts_without_stakes_cache<'a>(&self, accounts: impl StorableAccounts<'a>) {
+    // Store `accounts`, without updating the stakes cache.
+    //
+    // - Callers must ensure there are no duplicates in `accounts`.
+    // - `thread_pool_for_loading_accounts` is used for accounts lt hashing,
+    //   to load the previous version of accounts in parallel.
+    fn store_accounts_without_stakes_cache<'a>(
+        &self,
+        accounts: impl StorableAccounts<'a>,
+        thread_pool_for_loading_accounts: Option<&ThreadPool>,
+    ) {
         assert!(!self.freeze_started());
         self.update_bank_hash_stats(&accounts);
-        self.enqueue_accounts_lt_hash_updates(&accounts);
+        self.enqueue_off_chain_accounts_lt_hash_updates(
+            &accounts,
+            thread_pool_for_loading_accounts,
+        );
         self.rc
             .accounts
             .store_accounts_par(accounts, self.bank_id(), None, &self.ancestors);
