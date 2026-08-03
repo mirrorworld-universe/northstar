@@ -17,7 +17,7 @@ use {
     crate::{
         cluster_info_metrics::{Counter, GossipStats, ScopedTimer, TimedGuard},
         contact_info::{self, ContactInfo, ContactInfoQuery, Error as ContactInfoError},
-        crds::{CRDS_SHARDS_BITS, Crds, Cursor, GossipRoute},
+        crds::{Crds, Cursor, GossipRoute},
         crds_data::{self, CrdsData, EpochSlotsIndex, LowestSlot, MAX_VOTES, SnapshotHashes, Vote},
         crds_filter::{GossipFilterDirection, should_retain_crds_value},
         crds_gossip::CrdsGossip,
@@ -82,7 +82,7 @@ use {
         iter::repeat,
         net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket},
         num::NonZeroUsize,
-        ops::Div,
+        ops::{Div, Range},
         path::{Path, PathBuf},
         rc::Rc,
         result::Result,
@@ -122,8 +122,9 @@ const CHANNEL_CONSUME_CAPACITY: usize = 1024;
 /// of `MAX_GOSSIP_TRAFFIC` (103,896).
 pub(crate) const GOSSIP_CHANNEL_CAPACITY: usize = 4096; // 2^12
 const GOSSIP_PING_CACHE_CAPACITY: usize = 126976;
-const GOSSIP_PING_CACHE_TTL: Duration = Duration::from_secs(1280);
-const GOSSIP_PING_CACHE_RATE_LIMIT_DELAY: Duration = Duration::from_secs(1280 / 64);
+pub(crate) const GOSSIP_PING_CACHE_TTL: Duration = Duration::from_secs(1280);
+/// Per-entry Pong wait timeout is drawn uniformly from this range (in milliseconds).
+pub(crate) const GOSSIP_PING_CACHE_OUTSTANDING_PING_TIMEOUT_MS: Range<u64> = 1000..2000;
 // Per-IP scan budget for incoming pull requests; validators are assumed not
 // to share IPs. Mirrors the ping-pong cache capacity.
 const GOSSIP_PULL_SCAN_BUDGET_CACHE_CAPACITY: usize = GOSSIP_PING_CACHE_CAPACITY;
@@ -132,13 +133,9 @@ const GOSSIP_PULL_SCAN_BUDGET_REFILL_PER_SEC: u64 =
     4 * crds_gossip_pull::MIN_NUM_BLOOM_ITEMS as u64;
 const GOSSIP_PULL_SCAN_BUDGET_SHARD_COUNT: usize = 64;
 
-/// Estimated CRDS shard scan work for a pull request filter.
 #[inline]
-fn pull_request_scan_cost(crds_len: usize, mask_bits: u32, bloom_hash_count: usize) -> u64 {
-    // Extra mask bits still require one full shard scan.
-    let shift = mask_bits.min(CRDS_SHARDS_BITS);
-    let scan_entries = (crds_len >> shift).max(1) as u64;
-
+fn pull_request_scan_cost(scan_entries: usize, bloom_hash_count: usize) -> u64 {
+    let scan_entries = u64::try_from(scan_entries).unwrap_or(u64::MAX).max(1);
     let bloom_hash_count = u64::try_from(bloom_hash_count)
         .unwrap_or(u64::MAX)
         .max(crds_gossip_pull::KEYS as u64);
@@ -216,7 +213,7 @@ impl ClusterInfo {
             my_contact_info: RwLock::new(contact_info),
             ping_cache: Mutex::new(PingCache::new(
                 GOSSIP_PING_CACHE_TTL,
-                GOSSIP_PING_CACHE_RATE_LIMIT_DELAY,
+                GOSSIP_PING_CACHE_OUTSTANDING_PING_TIMEOUT_MS,
                 GOSSIP_PING_CACHE_CAPACITY,
             )),
             pull_request_budget: KeyedRateLimiter::new(
@@ -1699,12 +1696,12 @@ impl ClusterInfo {
         }
     }
 
-    fn try_consume_pull_request_scan_budget(&self, request: &PullRequest, crds_len: usize) -> bool {
-        let cost = pull_request_scan_cost(
-            crds_len,
-            request.filter.get_mask_bits(),
-            request.filter.bloom_hash_count(),
-        );
+    fn try_consume_pull_request_scan_budget(
+        &self,
+        request: &PullRequest,
+        scan_entries: usize,
+    ) -> bool {
+        let cost = pull_request_scan_cost(scan_entries, request.filter.bloom_hash_count());
         if self
             .pull_request_budget
             .consume_tokens(request.addr.ip(), cost)
@@ -1752,7 +1749,9 @@ impl ClusterInfo {
                         is_full_alpenglow_epoch,
                     )
                 },
-                |request, crds_len| self.try_consume_pull_request_scan_budget(request, crds_len),
+                |request, scan_entries| {
+                    self.try_consume_pull_request_scan_budget(request, scan_entries)
+                },
                 &self.stats,
             )
         };
@@ -2700,6 +2699,78 @@ mod tests {
                     }
                 })
         }
+    }
+
+    #[test]
+    fn test_pull_request_scan_cost() {
+        assert_eq!(pull_request_scan_cost(0, 0), 8);
+        assert_eq!(pull_request_scan_cost(16, 8), 128);
+        assert_eq!(pull_request_scan_cost(16, 12), 192);
+        assert_eq!(pull_request_scan_cost(2, 8), 16);
+    }
+
+    #[test]
+    fn test_pull_request_scan_budget_production_config() {
+        assert_eq!(GOSSIP_PULL_SCAN_BUDGET_CAPACITY, 1_048_576);
+        assert_eq!(GOSSIP_PULL_SCAN_BUDGET_REFILL_PER_SEC, 262_144);
+    }
+
+    #[test]
+    fn test_pull_request_scan_budget_exhaustion_isolated_per_ip() {
+        let keypair = Arc::new(Keypair::new());
+        let contact_info = ContactInfo::new_localhost(&keypair.pubkey(), timestamp());
+        let mut cluster_info =
+            ClusterInfo::new(contact_info, keypair, SocketAddrSpace::Unspecified);
+        // Keep the test independent of wall-clock refill.
+        cluster_info.pull_request_budget = KeyedRateLimiter::new(
+            GOSSIP_PULL_SCAN_BUDGET_CACHE_CAPACITY,
+            TokenBucket::new(
+                GOSSIP_PULL_SCAN_BUDGET_CAPACITY,
+                GOSSIP_PULL_SCAN_BUDGET_CAPACITY,
+                f64::MIN_POSITIVE,
+            ),
+            GOSSIP_PULL_SCAN_BUDGET_SHARD_COUNT,
+        );
+        let request = PullRequest {
+            pubkey: Pubkey::new_unique(),
+            addr: SocketAddr::from(([127, 0, 0, 1], 12_345)),
+            wallclock: timestamp(),
+            filter: CrdsFilter::new_rand(
+                crds_gossip_pull::MIN_NUM_BLOOM_ITEMS,
+                solana_packet::PACKET_DATA_SIZE,
+            ),
+        };
+        let second_ip_request = PullRequest {
+            pubkey: request.pubkey,
+            addr: SocketAddr::from(([127, 0, 0, 2], request.addr.port())),
+            wallclock: request.wallclock,
+            filter: request.filter.clone(),
+        };
+        request.filter.sanitize().unwrap();
+        let crds_len = crds_gossip_pull::MIN_NUM_BLOOM_ITEMS;
+        let cost = pull_request_scan_cost(crds_len, request.filter.bloom_hash_count());
+        let successful_requests = GOSSIP_PULL_SCAN_BUDGET_CAPACITY / cost;
+
+        assert!(cost <= GOSSIP_PULL_SCAN_BUDGET_CAPACITY);
+        assert_eq!(
+            cluster_info
+                .stats
+                .pull_request_scan_budget_exhausted
+                .load_relaxed(),
+            0,
+        );
+        for _ in 0..successful_requests {
+            assert!(cluster_info.try_consume_pull_request_scan_budget(&request, crds_len));
+        }
+        assert!(!cluster_info.try_consume_pull_request_scan_budget(&request, crds_len));
+        assert!(cluster_info.try_consume_pull_request_scan_budget(&second_ip_request, crds_len));
+        assert_eq!(
+            cluster_info
+                .stats
+                .pull_request_scan_budget_exhausted
+                .load_relaxed(),
+            1,
+        );
     }
 
     #[test]

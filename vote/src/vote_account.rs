@@ -10,11 +10,7 @@ use solana_frozen_abi::rand::{Rng, RngCore};
 use {
     crate::vote_state_view::VoteStateView,
     log::*,
-    serde::{
-        Deserialize, Serialize,
-        de::{MapAccess, Visitor},
-        ser::Serializer,
-    },
+    serde::{Deserialize, Deserializer, Serialize, ser::Serializer},
     solana_account::{AccountSharedData, ReadableAccount},
     solana_instruction::error::InstructionError,
     solana_pubkey::Pubkey,
@@ -22,13 +18,14 @@ use {
     std::{
         cmp::Ordering,
         collections::{HashMap, hash_map::Entry},
-        fmt,
         iter::FromIterator,
         mem,
         sync::{Arc, OnceLock},
     },
     thiserror::Error,
-    wincode::{TypeMeta, WriteResult},
+    wincode::{
+        ReadError, ReadResult, SchemaRead, TypeMeta, WriteResult, config::Config, io::Reader,
+    },
 };
 #[cfg(any(feature = "dev-context-only-utils", feature = "frozen-abi"))]
 use {
@@ -62,13 +59,12 @@ struct VoteAccountInner {
 
 pub type VoteAccountsHashMap = HashMap<Pubkey, (/*stake:*/ u64, VoteAccount)>;
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample, StableAbi, StableAbiSample))]
-#[derive(Debug, Serialize, Deserialize, SchemaWrite)]
+#[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 #[cfg_attr(
     feature = "dev-context-only-utils",
     field_qualifiers(vote_accounts(pub))
 )]
 pub struct VoteAccounts {
-    #[serde(deserialize_with = "deserialize_accounts_hash_map")]
     vote_accounts: Arc<VoteAccountsHashMap>,
     // Inner Arc is meant to implement copy-on-write semantics.
     #[cfg_attr(feature = "frozen-abi", stable_abi_sample(with = "Default::default()"))]
@@ -459,6 +455,31 @@ impl Serialize for VoteAccount {
     }
 }
 
+impl<'de> Deserialize<'de> for VoteAccount {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let account = AccountSharedData::deserialize(deserializer)?;
+        VoteAccount::try_from(account).map_err(serde::de::Error::custom)
+    }
+}
+
+// Read-counterpart of the custom `SchemaWrite` above: read the inner `AccountSharedData` (the only
+// thing written) and rebuild the parsed `vote_state_view` via `try_from`, mirroring the `Deserialize`
+// impl. `VoteAccounts` then derives `SchemaRead` on top of this, just like the serde path.
+unsafe impl<'de, C: Config> SchemaRead<'de, C> for VoteAccount {
+    type Dst = Self;
+
+    fn read(reader: impl Reader<'de>, dst: &mut mem::MaybeUninit<Self::Dst>) -> ReadResult<()> {
+        let account = <AccountSharedData as SchemaRead<'de, C>>::get(reader)?;
+        let vote_account = VoteAccount::try_from(account)
+            .map_err(|_| ReadError::InvalidValue("invalid vote account"))?;
+        dst.write(vote_account);
+        Ok(())
+    }
+}
+
 impl<'a> From<&'a VoteAccount> for AccountSharedData {
     fn from(account: &'a VoteAccount) -> Self {
         account.0.account.clone()
@@ -543,53 +564,6 @@ impl FromIterator<(Pubkey, (/*stake:*/ u64, VoteAccount))> for VoteAccounts {
     {
         Self::from(Arc::new(HashMap::from_iter(iter)))
     }
-}
-
-// This custom deserializer is needed to ensure compatibility at snapshot loading with versions
-// before https://github.com/anza-xyz/agave/pull/2659 which would theoretically allow invalid vote
-// accounts in VoteAccounts.
-//
-// In the (near) future we should remove this custom deserializer and make it a hard error when we
-// find invalid vote accounts in snapshots.
-fn deserialize_accounts_hash_map<'de, D>(
-    deserializer: D,
-) -> Result<Arc<VoteAccountsHashMap>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    struct VoteAccountsVisitor;
-
-    impl<'de> Visitor<'de> for VoteAccountsVisitor {
-        type Value = Arc<VoteAccountsHashMap>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("a map of vote accounts")
-        }
-
-        fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
-        where
-            M: MapAccess<'de>,
-        {
-            let mut accounts = HashMap::new();
-
-            while let Some((pubkey, (stake, account))) =
-                access.next_entry::<Pubkey, (u64, AccountSharedData)>()?
-            {
-                match VoteAccount::try_from(account) {
-                    Ok(vote_account) => {
-                        accounts.insert(pubkey, (stake, vote_account));
-                    }
-                    Err(e) => {
-                        log::warn!("failed to deserialize vote account: {e}");
-                    }
-                }
-            }
-
-            Ok(Arc::new(accounts))
-        }
-    }
-
-    deserializer.deserialize_map(VoteAccountsVisitor)
 }
 
 #[cfg(test)]

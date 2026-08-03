@@ -2320,6 +2320,7 @@ impl Drop for EphemeralRuntime {
 mod tests {
     use {
         super::*,
+        crate::ephemeral_tx_client::TransactionClient,
         base64::{prelude::BASE64_STANDARD, Engine as _},
         northstar_portal::{DelegationRecord, DepositReceipt, NorthstarTransferEvent},
         solana_account::{
@@ -2338,10 +2339,7 @@ mod tests {
             CommitmentConfig, RpcSendTransactionConfig, RpcSimulateTransactionConfig,
         },
         solana_sdk_ids::{bpf_loader, bpf_loader_upgradeable, system_program},
-        solana_send_transaction_service::{
-            send_transaction_service_stats::SendTransactionServiceStats,
-            transaction_client::TransactionClient,
-        },
+        solana_send_transaction_service::send_transaction_service_stats::SendTransactionServiceStats,
         solana_svm::transaction_processor::ExecutionRecordingConfig,
         solana_system_interface::instruction::transfer,
         solana_transaction::{versioned::VersionedTransaction, Transaction},
@@ -5224,7 +5222,7 @@ mod tests {
         )
         .unwrap();
 
-        solana_send_transaction_service::transaction_client::TransactionClient::send_transactions_in_batch(
+        TransactionClient::send_transactions_in_batch(
             &runtime._tx_client,
             vec![wire_tx],
             &solana_send_transaction_service::send_transaction_service_stats::SendTransactionServiceStats::default(),

@@ -1,3 +1,5 @@
+#[cfg(feature = "frozen-abi")]
+use solana_frozen_abi::stable_abi;
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 use std::{
     ffi::{CStr, CString},
@@ -10,13 +12,15 @@ use {
         runtime_config::RuntimeConfig,
         snapshot_utils::StorageAndNextAccountsFileId,
         stake_account::StakeAccount,
-        stakes::{DeserializableStakes, Stakes, serialize_stake_accounts_to_delegation_format},
+        stakes::{
+            DeserializableDelegationStakes, Stakes, serialize_stake_accounts_to_delegation_format,
+        },
     },
     agave_fs::FileInfo,
     agave_snapshots::error::SnapshotError,
     bincode::{self, Error, config::Options},
     log::*,
-    serde::{Deserialize, Serialize, de::DeserializeOwned},
+    serde::{Deserialize, Serialize},
     smallvec::{SmallVec, smallvec},
     solana_accounts_db::{
         ObsoleteAccounts,
@@ -81,10 +85,65 @@ pub(crate) use {
 const MAX_STREAM_SIZE: usize = 32 * 1024 * 1024 * 1024;
 type MaxStreamSizeConfig = wincode::config::Configuration<true, MAX_STREAM_SIZE>;
 
+/// wincode read helpers mirroring serde's `default_on_eof` for the snapshot read-path structs.
+mod wincode_compat {
+    use {
+        std::{marker::PhantomData, mem::MaybeUninit},
+        wincode::{
+            ReadError, ReadResult, SchemaRead, SchemaWrite, WriteResult,
+            config::Config,
+            io::{ReadError as IoReadError, Reader, Writer},
+        },
+    };
+
+    /// Deserializes using `T` normally, but returns `T::Dst::default()` if the reader is
+    /// exhausted (EOF), for backward compatibility when new fields are appended to a struct.
+    /// Equivalent to `#[serde(deserialize_with = "default_on_eof")]`.
+    pub(super) struct DefaultOnEmptyRead<T>(PhantomData<T>);
+
+    // Note: TYPE_META is left dynamic, since during reading both 0-size or non-0-size reads are
+    // allowed, so trusted readers can't rely on encoding to be static sized.
+    unsafe impl<'de, C: Config, T> SchemaRead<'de, C> for DefaultOnEmptyRead<T>
+    where
+        T: SchemaRead<'de, C>,
+        T::Dst: Default,
+    {
+        type Dst = T::Dst;
+
+        fn read(reader: impl Reader<'de>, dst: &mut MaybeUninit<Self::Dst>) -> ReadResult<()> {
+            match <T as SchemaRead<'de, C>>::read(reader, dst) {
+                Ok(()) => Ok(()),
+                Err(ReadError::Io(IoReadError::ReadSizeLimit(_))) => {
+                    dst.write(Self::Dst::default());
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    unsafe impl<C: Config, T> SchemaWrite<C> for DefaultOnEmptyRead<T>
+    where
+        T: SchemaWrite<C>,
+    {
+        type Src = T::Src;
+
+        const TYPE_META: wincode::TypeMeta = T::TYPE_META;
+
+        fn size_of(src: &Self::Src) -> WriteResult<usize> {
+            <T as SchemaWrite<C>>::size_of(src)
+        }
+
+        fn write(writer: impl Writer, src: &Self::Src) -> WriteResult<()> {
+            <T as SchemaWrite<C>>::write(writer, src)
+        }
+    }
+}
+
 /// A slot paired with its account storage entries, used as the `slot -> [entry]` map item on both
 /// the read path ([`AccountsDbFields`]) and the write ABI type [`SerializableAccountsDbForAbi`].
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample, StableAbi, StableAbiSample))]
-#[derive(Debug, Serialize, Deserialize, SchemaWrite)]
+#[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub(crate) struct SlotAccountStorageEntries {
     slot: Slot,
     /// In a real snapshot this always holds exactly one entry; it is sampled as an arbitrary
@@ -98,8 +157,11 @@ pub(crate) struct SlotAccountStorageEntries {
     entries: SmallVec<[SerializableAccountStorageEntry; 1]>,
 }
 
-#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
-#[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "frozen-abi",
+    derive(AbiExample, Serialize, SchemaWrite, StableAbi, StableAbiSample)
+)]
+#[derive(Debug, Deserialize, SchemaRead)]
 pub(crate) struct AccountsDbFields(
     Vec<SlotAccountStorageEntries>,
     u64, // unused, formerly write_version
@@ -107,9 +169,11 @@ pub(crate) struct AccountsDbFields(
     BankHashInfo,
     /// all slots that were roots within the last epoch
     #[serde(deserialize_with = "default_on_eof")]
+    #[wincode(with = "wincode_compat::DefaultOnEmptyRead<Vec<Slot>>")]
     Vec<Slot>,
     /// slots that were roots within the last epoch for which we care about the hash value
     #[serde(deserialize_with = "default_on_eof")]
+    #[wincode(with = "wincode_compat::DefaultOnEmptyRead<Vec<(Slot, Hash)>>")]
     Vec<(Slot, Hash)>,
 );
 
@@ -150,10 +214,14 @@ struct UnusedAccounts {
     unused3: HashMap<Pubkey, u64>,
 }
 
-// Deserializable version of Bank which need not be serializable,
-// because it's handled by SerializableVersionedBank.
-// So, sync fields with it!
-#[derive(Clone, Deserialize)]
+// Deserializable version of Bank; keep fields synced with SerializableVersionedBank.
+// frozen-abi Serialize/SchemaWrite exist only to pin the read-path abi digest (see
+// DeserializableBankSnapshot).
+#[cfg_attr(
+    feature = "frozen-abi",
+    derive(Serialize, SchemaWrite, StableAbi, StableAbiSample)
+)]
+#[derive(Clone, Deserialize, SchemaRead)]
 struct DeserializableVersionedBank {
     blockhash_queue: BlockhashQueue,
     _unused_ancestors: HashMap<Slot, usize>,
@@ -183,7 +251,7 @@ struct DeserializableVersionedBank {
     _unused_rent_collector: UnusedRentCollector,
     epoch_schedule: EpochSchedule,
     inflation: Inflation,
-    stakes: DeserializableStakes<Delegation>,
+    stakes: DeserializableDelegationStakes,
     _unused_accounts: UnusedAccounts,
     unused_epoch_stakes: HashMap<Epoch, ()>,
     is_delta: bool,
@@ -399,45 +467,45 @@ where
     wincode::config::deserialize_from(reader, MaxStreamSizeConfig::new())
 }
 
-pub(crate) fn deserialize_from<R, T>(reader: R) -> bincode::Result<T>
-where
-    R: Read,
-    T: DeserializeOwned,
-{
-    bincode::options()
-        .with_limit(MAX_STREAM_SIZE as u64)
-        .with_fixint_encoding()
-        .allow_trailing_bytes()
-        .deserialize_from::<R, T>(reader)
-}
-
-fn deserialize_accounts_db_fields<R>(stream: &mut BufReader<R>) -> Result<AccountsDbFields, Error>
-where
-    R: Read,
-{
-    deserialize_from::<_, _>(stream)
-}
-
 /// Extra fields that are deserialized from the end of snapshots.
 ///
 /// Note that this struct's fields should stay synced with the fields in
 /// ExtraFieldsToSerialize with the exception that new "extra fields" should be
 /// added to this struct a minor release before they are added to the serialize
 /// struct.
-#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
-#[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(
+    feature = "frozen-abi",
+    derive(AbiExample, Serialize, SchemaWrite, StableAbi, StableAbiSample)
+)]
+#[derive(Clone, Debug, Deserialize, SchemaRead)]
 struct ExtraFieldsToDeserialize {
     #[serde(deserialize_with = "default_on_eof")]
+    #[wincode(with = "wincode_compat::DefaultOnEmptyRead<u64>")]
     lamports_per_signature: u64,
     #[serde(deserialize_with = "default_on_eof")]
+    #[wincode(
+        with = "wincode_compat::DefaultOnEmptyRead<Option<UnusedIncrementalSnapshotPersistence>>"
+    )]
     _unused_incremental_snapshot_persistence: Option<UnusedIncrementalSnapshotPersistence>,
     #[serde(deserialize_with = "default_on_eof")]
+    #[wincode(with = "wincode_compat::DefaultOnEmptyRead<Option<Hash>>")]
     _unused_epoch_accounts_hash: Option<Hash>,
     #[serde(deserialize_with = "default_on_eof")]
+    #[wincode(
+        with = "wincode_compat::DefaultOnEmptyRead<Vec<(u64, DeserializableVersionedEpochStakes)>>"
+    )]
+    // Match the serialize side's `HashMap<u64, VersionedEpochStakes>`, which samples `0..=1` entries.
+    #[cfg_attr(
+        feature = "frozen-abi",
+        stable_abi_sample(with = "stable_abi::sample_collection_sized(rng, \
+                                  stable_abi::context::SequenceLenMax(1))")
+    )]
     versioned_epoch_stakes: Vec<(u64, DeserializableVersionedEpochStakes)>,
     #[serde(deserialize_with = "default_on_eof")]
+    #[wincode(with = "wincode_compat::DefaultOnEmptyRead<Option<SerdeAccountsLtHash>>")]
     accounts_lt_hash: Option<SerdeAccountsLtHash>,
     #[serde(deserialize_with = "default_on_eof")]
+    #[wincode(with = "wincode_compat::DefaultOnEmptyRead<Option<Hash>>")]
     block_id: Option<Hash>,
 }
 
@@ -469,54 +537,73 @@ pub struct ExtraFieldsToSerialize {
     pub block_id: Option<Hash>,
 }
 
-fn deserialize_bank_fields<R>(
-    mut stream: &mut BufReader<R>,
-) -> Result<(BankFieldsToDeserialize, AccountsDbFields), Error>
-where
-    R: Read,
-{
-    let deserializable_bank = deserialize_from::<_, DeserializableVersionedBank>(&mut stream)?;
-    if !deserializable_bank.unused_epoch_stakes.is_empty() {
-        return Err(Box::new(bincode::ErrorKind::Custom(
-            "Expected deserialized bank's unused_epoch_stakes field to be empty".to_string(),
-        )));
+/// Deserializable counterpart of [`SerializableBankSnapshot`], read as one struct (wincode reads
+/// the parts sequentially, matching separate reads).
+///
+/// Its frozen-abi digest must equal [`SerializableBankSnapshotForAbi`]'s, so the read and write
+/// wire formats can't diverge.
+#[cfg_attr(
+    feature = "frozen-abi",
+    derive(Deserialize, Serialize, SchemaWrite, StableAbi, StableAbiSample),
+    frozen_abi(
+        abi_digest = "2TVKjhahaEGqUZAJtMmaaagcxWzhMPUsNrVHsSoNboK7",
+        abi_serializer = ["bincode", "wincode"],
+        test_roundtrip = "wire_only"
+    )
+)]
+#[derive(SchemaRead)]
+struct DeserializableBankSnapshot {
+    bank: DeserializableVersionedBank,
+    accounts_db: AccountsDbFields,
+    extra_fields: ExtraFieldsToDeserialize,
+}
+
+impl DeserializableBankSnapshot {
+    /// Folds the extra fields into the bank fields; errors if `unused_epoch_stakes` is non-empty.
+    fn into_fields(self) -> wincode::ReadResult<(BankFieldsToDeserialize, AccountsDbFields)> {
+        let Self {
+            bank,
+            accounts_db,
+            extra_fields,
+        } = self;
+        if !bank.unused_epoch_stakes.is_empty() {
+            return Err(wincode::ReadError::InvalidValue(
+                "Expected deserialized bank's unused_epoch_stakes field to be empty",
+            ));
+        }
+        let mut bank_fields = BankFieldsToDeserialize::from(bank);
+        let ExtraFieldsToDeserialize {
+            lamports_per_signature,
+            _unused_incremental_snapshot_persistence,
+            _unused_epoch_accounts_hash,
+            versioned_epoch_stakes,
+            accounts_lt_hash,
+            block_id,
+        } = extra_fields;
+
+        bank_fields.fee_rate_governor = bank_fields
+            .fee_rate_governor
+            .clone_with_lamports_per_signature(lamports_per_signature);
+        bank_fields.versioned_epoch_stakes = versioned_epoch_stakes;
+        bank_fields.accounts_lt_hash = accounts_lt_hash
+            .expect("snapshot must have accounts_lt_hash")
+            .into();
+        bank_fields.block_id = block_id;
+
+        Ok((bank_fields, accounts_db))
     }
-    let mut bank_fields = BankFieldsToDeserialize::from(deserializable_bank);
-    let accounts_db_fields = deserialize_accounts_db_fields(stream)?;
-    let extra_fields = deserialize_from(stream)?;
-
-    // Process extra fields
-    let ExtraFieldsToDeserialize {
-        lamports_per_signature,
-        _unused_incremental_snapshot_persistence,
-        _unused_epoch_accounts_hash,
-        versioned_epoch_stakes,
-        accounts_lt_hash,
-        block_id,
-    } = extra_fields;
-
-    bank_fields.fee_rate_governor = bank_fields
-        .fee_rate_governor
-        .clone_with_lamports_per_signature(lamports_per_signature);
-    bank_fields.versioned_epoch_stakes = versioned_epoch_stakes;
-    bank_fields.accounts_lt_hash = accounts_lt_hash
-        .expect("snapshot must have accounts_lt_hash")
-        .into();
-    bank_fields.block_id = block_id;
-
-    Ok((bank_fields, accounts_db_fields))
 }
 
 pub(crate) fn fields_from_stream<R: Read>(
     snapshot_stream: &mut BufReader<R>,
-) -> std::result::Result<(BankFieldsToDeserialize, AccountsDbFields), Error> {
-    deserialize_bank_fields(snapshot_stream)
+) -> wincode::ReadResult<(BankFieldsToDeserialize, AccountsDbFields)> {
+    deserialize_wincode_from::<_, DeserializableBankSnapshot>(snapshot_stream)?.into_fields()
 }
 
 #[cfg(feature = "dev-context-only-utils")]
 pub(crate) fn fields_from_streams(
     snapshot_streams: &mut SnapshotStreams<impl Read>,
-) -> std::result::Result<(SnapshotBankFields, SnapshotAccountsDbFields), Error> {
+) -> wincode::ReadResult<(SnapshotBankFields, SnapshotAccountsDbFields)> {
     let (full_snapshot_bank_fields, full_snapshot_accounts_db_fields) =
         fields_from_stream(snapshot_streams.full_snapshot_stream)?;
     let (incremental_snapshot_bank_fields, incremental_snapshot_accounts_db_fields) =
@@ -560,7 +647,7 @@ pub(crate) fn bank_from_streams<R>(
     accounts_db_config: AccountsDbConfig,
     accounts_update_notifier: Option<AccountsUpdateNotifier>,
     exit: Arc<AtomicBool>,
-) -> std::result::Result<(Bank, BankFromStreamsInfo), Error>
+) -> std::result::Result<(Bank, BankFromStreamsInfo), SnapshotError>
 where
     R: Read,
 {
@@ -856,7 +943,7 @@ pub(crate) fn reconstruct_bank_from_fields(
     accounts_db_config: AccountsDbConfig,
     accounts_update_notifier: Option<AccountsUpdateNotifier>,
     exit: Arc<AtomicBool>,
-) -> Result<(Bank, ReconstructedBankInfo), Error> {
+) -> Result<(Bank, ReconstructedBankInfo), SnapshotError> {
     let mut bank_fields = bank_fields.collapse_into();
     // Epoch stakes take several seconds to reconstruct, do it in parallel with loading accountsdb
     let deserializable_epoch_stakes = std::mem::take(&mut bank_fields.versioned_epoch_stakes);
@@ -1066,7 +1153,7 @@ fn reconstruct_accountsdb_from_fields(
     accounts_db_config: AccountsDbConfig,
     accounts_update_notifier: Option<AccountsUpdateNotifier>,
     exit: Arc<AtomicBool>,
-) -> Result<(AccountsDb, ReconstructedAccountsDbInfo), Error> {
+) -> Result<(AccountsDb, ReconstructedAccountsDbInfo), SnapshotError> {
     let mut accounts_db = AccountsDb::new_with_config(
         account_paths.to_vec(),
         accounts_db_config,

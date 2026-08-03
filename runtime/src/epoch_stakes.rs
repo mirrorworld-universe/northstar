@@ -17,10 +17,11 @@ use {
     std::{
         collections::HashMap,
         fmt,
+        mem::MaybeUninit,
         num::NonZero,
         sync::{Arc, OnceLock},
     },
-    wincode::{SchemaRead, SchemaWrite, WriteResult},
+    wincode::{ReadResult, SchemaRead, SchemaWrite, WriteResult, config::Config, io::Reader},
 };
 
 pub type NodeIdToVoteAccounts = HashMap<Pubkey, NodeVoteAccounts>;
@@ -200,15 +201,42 @@ pub struct NodeVoteAccounts {
 ///
 /// Its bincode serializaiton format is identical as `VersionedEpochStakes`, but allows faster
 /// deserialization by ignoring serialized stake delegations entirely.
-#[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(
+    feature = "frozen-abi",
+    derive(Serialize, SchemaWrite, AbiEnumVisitor, StableAbi, StableAbiSample)
+)]
+#[derive(Clone, Debug, Deserialize, SchemaRead)]
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
 pub(crate) enum DeserializableVersionedEpochStakes {
     Current {
+        #[cfg_attr(
+            feature = "frozen-abi",
+            stable_abi_sample(with = "stable_abi_sample_deserializable_epoch_stakes(rng)")
+        )]
         stakes: DeserializableEpochStakes,
         total_stake: u64,
         node_id_to_vote_accounts: NodeIdToVoteAccounts,
         epoch_authorized_voters: EpochAuthorizedVoters,
     },
+}
+
+/// Draws in `EpochStakes` declaration order (`epoch` first, not wire order) so the sample matches
+/// the serialize side; the serializer injects empty `stake_delegations`/zero `unused`, mirrored here.
+#[cfg(feature = "frozen-abi")]
+fn stable_abi_sample_deserializable_epoch_stakes(
+    rng: &mut (impl solana_frozen_abi::rand::RngCore + ?Sized),
+) -> DeserializableEpochStakes {
+    use solana_frozen_abi::stable_abi::StableAbi;
+    let epoch = Epoch::random(rng);
+    let vote_accounts = VoteAccounts::random(rng);
+    let stake_history = StakeHistory::random(rng);
+    DeserializableEpochStakes {
+        vote_accounts,
+        _stake_delegations: Vec::new(),
+        _unused: 0,
+        epoch,
+        stake_history,
+    }
 }
 
 #[derive(Clone, Debug, Serialize, SchemaWrite)]
@@ -471,15 +499,50 @@ impl From<SerdeStakesToStakeFormat> for EpochStakes {
 /// Customization of EpochStakes for snapshot deserialization.
 ///
 /// Needed because snapshots contain additional fields no longer present in EpochStakes.
-#[derive(Clone, Debug, Deserialize)]
+// Sampling is overridden at the parent (`DeserializableVersionedEpochStakes::Current.stakes`), so
+// no StableAbi/StableAbiSample is needed here.
+#[cfg_attr(feature = "frozen-abi", derive(Serialize, SchemaWrite))]
+#[derive(Clone, Debug, Deserialize, SchemaRead)]
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
 pub(crate) struct DeserializableEpochStakes {
     vote_accounts: VoteAccounts,
+    // Read-and-discarded (always empty); the serialize side writes it empty too.
     #[serde(deserialize_with = "deserialize_and_ignore_stake_delegations")]
-    _stake_delegations: (),
+    #[wincode(with = "IgnoredStakeDelegations")]
+    _stake_delegations: Vec<(Pubkey, Stake)>,
     _unused: u64,
     epoch: Epoch,
     stake_history: StakeHistory,
+}
+
+/// wincode `with` schema for the ignored stake delegations: reads and discards the wire's
+/// length-prefixed `Vec<(Pubkey, Stake)>`, yielding an empty `Vec`; writes it back through `Vec`
+/// (always empty, matching the serialize side).
+struct IgnoredStakeDelegations;
+
+unsafe impl<'de, C: Config> SchemaRead<'de, C> for IgnoredStakeDelegations {
+    type Dst = Vec<(Pubkey, Stake)>;
+
+    fn read(reader: impl Reader<'de>, dst: &mut MaybeUninit<Self::Dst>) -> ReadResult<()> {
+        <Vec<(Pubkey, Stake)> as SchemaRead<'de, C>>::get(reader)?;
+        dst.write(Vec::new());
+        Ok(())
+    }
+}
+
+#[cfg(feature = "frozen-abi")]
+unsafe impl<C: Config> SchemaWrite<C> for IgnoredStakeDelegations {
+    type Src = Vec<(Pubkey, Stake)>;
+
+    const TYPE_META: wincode::TypeMeta = <Vec<(Pubkey, Stake)> as SchemaWrite<C>>::TYPE_META;
+
+    fn size_of(src: &Self::Src) -> WriteResult<usize> {
+        <Vec<(Pubkey, Stake)> as SchemaWrite<C>>::size_of(src)
+    }
+
+    fn write(writer: impl wincode::io::Writer, src: &Self::Src) -> WriteResult<()> {
+        <Vec<(Pubkey, Stake)> as SchemaWrite<C>>::write(writer, src)
+    }
 }
 
 impl From<DeserializableEpochStakes> for EpochStakes {
@@ -502,14 +565,16 @@ impl From<DeserializableEpochStakes> for EpochStakes {
 /// Snapshot epoch stakes contain delegations, but the main EpochStakes no longer uses them.
 /// This fn does custom deserialization to visit-and-ignore the delegations,
 /// avoiding the need to construct an expensive imbl::HashMap.
-fn deserialize_and_ignore_stake_delegations<'de, D>(deserializer: D) -> Result<(), D::Error>
+fn deserialize_and_ignore_stake_delegations<'de, D>(
+    deserializer: D,
+) -> Result<Vec<(Pubkey, Stake)>, D::Error>
 where
     D: Deserializer<'de>,
 {
     struct IgnoredStakeDelegationsVisitor;
 
     impl<'de> Visitor<'de> for IgnoredStakeDelegationsVisitor {
-        type Value = ();
+        type Value = Vec<(Pubkey, Stake)>;
 
         fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
             formatter.write_str("a sequence of serialized stake delegations")
@@ -522,7 +587,7 @@ where
             while seq.next_element::<(Pubkey, Stake)>()?.is_some() {
                 // nothing to do here, ignore the delegations
             }
-            Ok(())
+            Ok(Vec::new())
         }
     }
 
@@ -533,7 +598,9 @@ where
 pub(crate) mod tests {
     use {
         super::*,
-        crate::{stake_account::StakeAccount, stakes::Stakes},
+        crate::{
+            serde_snapshot::deserialize_wincode_from, stake_account::StakeAccount, stakes::Stakes,
+        },
         solana_account::AccountSharedData,
         solana_bls_signatures::keypair::Keypair as BLSKeypair,
         solana_rent::Rent,
@@ -1051,9 +1118,11 @@ pub(crate) mod tests {
         }
 
         let deserialized_epoch_stakes: VersionedEpochStakes =
-            bincode::deserialize::<DeserializableVersionedEpochStakes>(&serialized_bytes)
-                .unwrap()
-                .into();
+            deserialize_wincode_from::<_, DeserializableVersionedEpochStakes>(
+                std::io::Cursor::new(&serialized_bytes),
+            )
+            .unwrap()
+            .into();
         assert_eq!(
             deserialized_epoch_stakes
                 .stakes()

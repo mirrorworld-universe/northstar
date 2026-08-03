@@ -18,10 +18,7 @@ use {
         transaction_balances::compile_collected_balances,
     },
     solana_sdk_ids::{bpf_loader, bpf_loader_upgradeable, system_program, sysvar},
-    solana_send_transaction_service::{
-        send_transaction_service_stats::SendTransactionServiceStats,
-        transaction_client::TransactionClient,
-    },
+    solana_send_transaction_service::send_transaction_service_stats::SendTransactionServiceStats,
     solana_svm::{
         transaction_balances::BalanceCollector, transaction_commit_result::TransactionCommitResult,
         transaction_processor::ExecutionRecordingConfig,
@@ -41,6 +38,15 @@ use {
         },
     },
 };
+
+/// Sonic: Local ER batch interface retained after upstream specialized its sender to TPU.
+pub(crate) trait TransactionClient {
+    fn send_transactions_in_batch(
+        &self,
+        wire_transactions: Vec<Vec<u8>>,
+        stats: &SendTransactionServiceStats,
+    );
+}
 
 pub struct EphemeralTransactionClient {
     bank_forks: Arc<RwLock<BankForks>>,

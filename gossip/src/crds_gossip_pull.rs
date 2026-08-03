@@ -65,9 +65,6 @@ pub struct CrdsFilter {
     mask_bits: u32,
 }
 
-#[cfg(debug_assertions)]
-pub(crate) const MIN_NUM_BLOOM_ITEMS: usize = 512;
-#[cfg(not(debug_assertions))]
 pub(crate) const MIN_NUM_BLOOM_ITEMS: usize = 65_536;
 
 // Loosest mask_bits floor accepted for incoming pull requests.
@@ -513,7 +510,6 @@ impl CrdsGossipPull {
         let mut dropped_requests = 0usize;
         let mut total_skipped = 0usize;
         let crds = crds.read().unwrap();
-        let crds_len = crds.len();
         let apply_filter = |request: &PullRequest| {
             if output_size_limit == 0 {
                 return Vec::default();
@@ -524,8 +520,9 @@ impl CrdsGossipPull {
                 dropped_requests += 1;
                 return Vec::default();
             }
+            let scan_len = crds.filter_bitmask_scan_count(filter.mask, filter.mask_bits);
             // Charge only requests that passed cheaper pre-scan checks.
-            if !try_consume_scan_budget(request, crds_len) {
+            if !try_consume_scan_budget(request, scan_len) {
                 return Vec::default();
             }
             let caller_wallclock = caller_wallclock.checked_add(jitter).unwrap_or(0);
@@ -678,7 +675,11 @@ pub(crate) fn get_max_bloom_filter_bytes(caller: &CrdsValue) -> usize {
 pub(crate) mod tests {
     use {
         super::*,
-        crate::{crds_data::CrdsData, protocol::Protocol},
+        crate::{
+            cluster_info::{GOSSIP_PING_CACHE_OUTSTANDING_PING_TIMEOUT_MS, GOSSIP_PING_CACHE_TTL},
+            crds_data::CrdsData,
+            protocol::Protocol,
+        },
         itertools::Itertools,
         rand::{SeedableRng, prelude::IndexedRandom as _},
         rand_chacha::ChaChaRng,
@@ -692,11 +693,7 @@ pub(crate) mod tests {
         test_case::test_case,
     };
 
-    // Active filter slots per request set for these small-CRDS tests:
-    // `ceil(buckets / SAMPLE_RATE)`, with 1 bucket in debug and 64 in release.
-    #[cfg(debug_assertions)]
-    pub(crate) const MIN_NUM_BLOOM_FILTERS: usize = 1usize.div_ceil(super::SAMPLE_RATE);
-    #[cfg(not(debug_assertions))]
+    // Active filter slots per request set for these tests:
     pub(crate) const MIN_NUM_BLOOM_FILTERS: usize = 64usize.div_ceil(super::SAMPLE_RATE);
 
     impl CrdsGossipPull {
@@ -746,9 +743,9 @@ pub(crate) mod tests {
 
     fn new_ping_cache() -> PingCache {
         PingCache::new(
-            Duration::from_secs(20 * 60),      // ttl
-            Duration::from_secs(20 * 60) / 64, // rate_limit_delay
-            128,                               // capacity
+            GOSSIP_PING_CACHE_TTL,
+            GOSSIP_PING_CACHE_OUTSTANDING_PING_TIMEOUT_MS,
+            128, // capacity (small for tests)
         )
     }
 
@@ -783,6 +780,24 @@ pub(crate) mod tests {
             let hash = Hash::new_unique();
             assert!(filter.test_mask(&hash));
         }
+    }
+
+    #[test]
+    fn test_crds_filter_sanitize_mask_bits_floor() {
+        use solana_sanitize::{Sanitize, SanitizeError};
+
+        assert_eq!(MIN_NUM_BLOOM_ITEMS, 65_536);
+        assert_eq!(*MIN_PULL_REQUEST_MASK_BITS, 6);
+        let filter = CrdsFilter {
+            mask_bits: 5,
+            ..CrdsFilter::default()
+        };
+        assert_eq!(filter.sanitize(), Err(SanitizeError::InvalidValue));
+        let filter = CrdsFilter {
+            mask_bits: 6,
+            ..CrdsFilter::default()
+        };
+        assert_eq!(filter.sanitize(), Ok(()));
     }
 
     #[test]
