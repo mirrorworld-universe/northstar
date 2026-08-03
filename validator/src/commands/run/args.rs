@@ -1199,6 +1199,7 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
         Arg::with_name("allow_private_addr")
             .long("allow-private-addr")
             .takes_value(false)
+            .requires("no_xdp")
             .help("Allow contacting private ip addresses")
             .hidden(hidden_unless_forced()),
     )
@@ -1308,27 +1309,40 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .help(DefaultSchedulerPool::cli_message()),
     )
     .arg(
+        Arg::with_name("no_xdp")
+            .long("no-xdp")
+            .takes_value(false)
+            .help("Disable XDP transmit and fall back to UDP sockets"),
+    )
+    .arg(
         Arg::with_name("xdp_interface")
             .long("xdp-interface")
             .takes_value(true)
             .value_name("INTERFACE")
-            .requires("xdp_cpu_cores")
-            .help("Network interface to use for XDP"),
+            .conflicts_with("no_xdp")
+            .help(
+                "Network interface to use for XDP transmit. Auto-detected from default route if \
+                 not specified",
+            ),
     )
     .arg(
         Arg::with_name("xdp_cpu_cores")
             .long("xdp-cpu-cores")
             .takes_value(true)
             .value_name("CPU_LIST")
+            .conflicts_with("no_xdp")
             .validator(|value| validate_cpu_ranges(value, "--xdp-cpu-cores"))
-            .help("Use the specified CPU cores for XDP"),
+            .help(
+                "CPU cores to reserve for XDP transmit (e.g. \"2-4,7\"). Defaults to 1 \
+                 auto-selected core",
+            ),
     )
     .arg(
         Arg::with_name("xdp_zero_copy")
             .long("xdp-zero-copy")
             .takes_value(false)
-            .requires("xdp_cpu_cores")
-            .help("Enable XDP zero copy. Requires hardware support"),
+            .conflicts_with("no_xdp")
+            .help("Enable XDP zero copy mode. Requires hardware and driver support"),
     )
     .args(&pub_sub_config::args(/*test_validator:*/ false))
     .args(&json_rpc_config::args())
@@ -1949,7 +1963,7 @@ mod tests {
         };
         verify_args_struct_by_command_run_with_identity_setup(
             default_run_args,
-            vec!["--allow-private-addr"],
+            vec!["--allow-private-addr", "--no-xdp"],
             expected_args,
         );
     }

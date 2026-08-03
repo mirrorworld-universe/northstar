@@ -5,6 +5,7 @@ use {
         crds_gossip_pull::CrdsFilter,
         crds_value::CrdsValue,
         ping_pong::{self, Pong},
+        verifying_key_cache::VerifyingKeyCache,
     },
     serde::{Deserialize, Serialize},
     solana_keypair::signable::Signable,
@@ -59,7 +60,7 @@ type GossipProtocolWincodeConfig =
     feature = "frozen-abi",
     derive(StableAbi, StableAbiSample),
     frozen_abi(
-        abi_digest = "8VFHarXNCkGKv89tUFR4uQVLcSum4km8yobxxq16LzmJ",
+        abi_digest = "D3Hqum16i1KHnejUD65odaQSbQnJtTQnTJSUoUrjzY2a",
         abi_serializer = ["bincode", "wincode"],
         // `Protocol` has no `PartialEq` and embeds `CrdsValue` (whose `hash` is
         // recomputed on deserialize), so verify the wire round-trip only.
@@ -133,11 +134,15 @@ impl Protocol {
 
     // Returns true if all signatures verify.
     #[must_use]
-    pub(crate) fn verify(&self) -> bool {
+    pub(crate) fn verify(&self, vk_cache: &VerifyingKeyCache) -> bool {
         match self {
-            Self::PullRequest(_, caller) => caller.verify(),
-            Self::PullResponse(_, data) => data.iter().all(CrdsValue::verify),
-            Self::PushMessage(_, data) => data.iter().all(CrdsValue::verify),
+            Self::PullRequest(_, caller) => caller.verify_with_cache(vk_cache),
+            Self::PullResponse(_, data) => {
+                data.iter().all(|value| value.verify_with_cache(vk_cache))
+            }
+            Self::PushMessage(_, data) => {
+                data.iter().all(|value| value.verify_with_cache(vk_cache))
+            }
             Self::PruneMessage(_, data) => data.verify(),
             Self::PingMessage(ping) => ping.verify(),
             Self::PongMessage(pong) => pong.verify(),

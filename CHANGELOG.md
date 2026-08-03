@@ -27,6 +27,11 @@ Release channels have their own copy of this changelog:
   `getLatestBlockhash` response together with its context (notably `context.slot`).
 ### Validator
 #### Breaking
+* XDP transmit in SKB (copy) mode is now enabled by default on Linux. The validator requires
+  `CAP_NET_ADMIN` and `CAP_NET_RAW` capabilities (plus `CAP_BPF` and `CAP_PERFMON` for
+  `--xdp-zero-copy`). Pass `--no-xdp` to fall back to UDP sockets. The XDP CPU
+  core is auto-selected to avoid overlapping the PoH core; passing `--xdp-cpu-cores`
+  with a core that conflicts with the PoH core is an error.
 #### Deprecations
 * `--accounts-db-access-storages-method` is now deprecated and a no-op (the `mmap` value was
   deprecated in v4.0.0; mmap mode has now been removed entirely). The flag is still accepted for
@@ -35,10 +40,12 @@ Release channels have their own copy of this changelog:
 * `--experimental-poh-pinned-cpu-core` is now deprecated. Use `--poh-pinned-cpu-core` instead.
 #### Changes
 * Turbine shred ingestion now rejects shreds more than half an epoch in the future (previously up to 2 full epochs ahead was accepted).
+* When XDP is enabled, gossip egress does not support private and loopback addresses. Operators running with `--allow-private-addr` must also pass `--no-xdp`.
 ### CLI
 #### Breaking
 #### Changes
 * `vote-account` supports Alpenglow and as such `vote-account --output json` breaks compatibility with older versions.
+* Support Keystone hardware wallets using `usb://keystone`
 
 ## 4.1.0
 ### RPC

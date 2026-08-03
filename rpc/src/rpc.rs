@@ -541,7 +541,7 @@ impl JsonRpcRequestProcessor {
     #[cfg(test)]
     pub fn new_from_bank(bank: Bank, socket_addr_space: SocketAddrSpace) -> Self {
         use {
-            crate::rpc_service::service_runtime,
+            crate::rpc_service::service_runtime, crossbeam_channel::bounded,
             solana_send_transaction_service::test_utils::create_client_for_tests,
         };
 
@@ -560,7 +560,7 @@ impl JsonRpcRequestProcessor {
         });
 
         let my_tpu_address = cluster_info.my_contact_info().tpu(Protocol::QUIC).unwrap();
-        let (transaction_sender, transaction_receiver) = unbounded();
+        let (transaction_sender, transaction_receiver) = bounded(1024);
 
         let config = JsonRpcConfig::default();
         let JsonRpcConfig {
@@ -4875,6 +4875,8 @@ pub fn populate_blockstore_for_tests(
     blockstore: Arc<Blockstore>,
     max_complete_transaction_status_slot: Arc<AtomicU64>,
 ) {
+    use crossbeam_channel::bounded;
+
     let slot = bank.slot();
     let parent_slot = bank.parent_slot();
     let shreds =
@@ -4882,8 +4884,8 @@ pub fn populate_blockstore_for_tests(
     blockstore.insert_shreds(shreds, None, false).unwrap();
     blockstore.set_roots(std::iter::once(&slot)).unwrap();
 
-    let (transaction_status_sender, transaction_status_receiver) = unbounded();
-    let (replay_vote_sender, _replay_vote_receiver) = unbounded();
+    let (transaction_status_sender, transaction_status_receiver) = bounded(1024);
+    let (replay_vote_sender, _replay_vote_receiver) = bounded(1024);
     let tss_exit = Arc::new(AtomicBool::new(false));
     let transaction_status_service =
         crate::transaction_status_service::TransactionStatusService::new(
@@ -7254,8 +7256,7 @@ pub mod tests {
         // ER history is canonical for ER-only signatures, so the standard polling
         // form must work even without `searchTransactionHistory: true`.
         let req = format!(
-            r#"{{"jsonrpc":"2.0","id":1,"method":"getSignatureStatuses","params":[["{}"]]}}"#,
-            signature
+            r#"{{"jsonrpc":"2.0","id":1,"method":"getSignatureStatuses","params":[["{signature}"]]}}"#
         );
         let res = io.handle_request_sync(&req, meta.clone());
         let json: Value = serde_json::from_str(&res.unwrap()).unwrap();
@@ -7271,8 +7272,7 @@ pub mod tests {
 
         // `confirmed` ER queries should not wait for slot finalization; ER has no forks.
         let req = format!(
-            r#"{{"jsonrpc":"2.0","id":1,"method":"getTransaction","params":["{}",{{"encoding":"json","commitment":"confirmed"}}]}}"#,
-            signature
+            r#"{{"jsonrpc":"2.0","id":1,"method":"getTransaction","params":["{signature}",{{"encoding":"json","commitment":"confirmed"}}]}}"#
         );
         let res = io.handle_request_sync(&req, meta.clone());
         let json: Value = serde_json::from_str(&res.unwrap()).unwrap();
@@ -7280,8 +7280,7 @@ pub mod tests {
         assert!(json["result"]["meta"]["err"].is_null());
 
         let req = format!(
-            r#"{{"jsonrpc":"2.0","id":1,"method":"getSignaturesForAddress","params":["{}",{{"limit":10,"commitment":"confirmed"}}]}}"#,
-            recipient
+            r#"{{"jsonrpc":"2.0","id":1,"method":"getSignaturesForAddress","params":["{recipient}",{{"limit":10,"commitment":"confirmed"}}]}}"#
         );
         let res = io.handle_request_sync(&req, meta);
         let json: Value = serde_json::from_str(&res.unwrap()).unwrap();

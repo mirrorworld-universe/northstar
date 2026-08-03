@@ -683,7 +683,6 @@ mod test {
     use {
         super::*,
         assert_matches::assert_matches,
-        crossbeam_channel::unbounded,
         rand::Rng,
         solana_entry::entry::create_ticks,
         solana_genesis_config::GenesisConfig,
@@ -799,9 +798,9 @@ mod test {
             bank: bank.clone(),
             last_tick_height: bank.tick_height() + ticks.len() as u64,
         };
-        let (socket_sender, _socket_receiver) = unbounded();
-        let (blockstore_sender, _blockstore_receiver) = unbounded();
-        let (votor_event_sender, _votor_event_receiver) = unbounded();
+        let (socket_sender, _socket_receiver) = bounded(1024);
+        let (blockstore_sender, _blockstore_receiver) = bounded(1024);
+        let (votor_event_sender, _votor_event_receiver) = bounded(1024);
         let mut standard_broadcast_run = StandardBroadcastRun::new(
             0,
             Arc::new(MigrationStatus::default()),
@@ -839,7 +838,7 @@ mod test {
         let child = Bank::new_from_parent(parent.clone(), *parent.leader(), parent.slot() + 1);
         child.freeze();
 
-        let (votor_event_sender, _) = unbounded();
+        let (votor_event_sender, _) = bounded(1024);
         let mut run = StandardBroadcastRun::new(
             0,
             Arc::new(MigrationStatus::default()),
@@ -854,7 +853,7 @@ mod test {
     #[test]
     fn test_reinitialize_state_handles_bank_without_parent() {
         let (blockstore, _, _, bank, _, _, _) = setup(10);
-        let (votor_event_sender, _) = unbounded();
+        let (votor_event_sender, _) = bounded(1024);
         let mut run = StandardBroadcastRun::new(
             0,
             Arc::new(MigrationStatus::default()),
@@ -870,7 +869,7 @@ mod test {
     #[test]
     fn test_interrupted_slot_last_shred() {
         let keypair = Arc::new(Keypair::new());
-        let (votor_event_sender, _votor_event_receiver) = unbounded();
+        let (votor_event_sender, _votor_event_receiver) = bounded(1024);
         let bank = Bank::new_for_tests(&create_genesis_config(10_000).genesis_config);
         let mut run = StandardBroadcastRun::new(
             0,
@@ -927,7 +926,7 @@ mod test {
         };
 
         // Step 1: Make an incomplete transmission for slot 1
-        let (votor_event_sender, _votor_event_receiver) = unbounded();
+        let (votor_event_sender, _votor_event_receiver) = bounded(1024);
         let mut standard_broadcast_run = StandardBroadcastRun::new(
             0,
             Arc::new(migration_status),
@@ -1075,9 +1074,9 @@ mod test {
             _bank_forks,
         ) = setup(num_shreds_per_slot);
         let bank = new_child_bank(&parent_bank, 1);
-        let (bsend, brecv) = unbounded();
-        let (ssend, _srecv) = unbounded();
-        let (votor_event_sender, _votor_event_receiver) = unbounded();
+        let (bsend, brecv) = bounded(1024);
+        let (ssend, _srecv) = bounded(1024);
+        let (votor_event_sender, _votor_event_receiver) = bounded(1024);
         let mut last_tick_height = bank.tick_height();
         let mut standard_broadcast_run = StandardBroadcastRun::new(
             0,
@@ -1151,7 +1150,7 @@ mod test {
             last_tick_height: bank.tick_height() + ticks.len() as u64,
         };
 
-        let (votor_event_sender, _votor_event_receiver) = unbounded();
+        let (votor_event_sender, _votor_event_receiver) = bounded(1024);
         let mut standard_broadcast_run = StandardBroadcastRun::new(
             0,
             Arc::new(MigrationStatus::default()),
@@ -1197,15 +1196,15 @@ mod test {
             )
             .unwrap();
 
-        let (votor_event_sender, _votor_event_receiver) = unbounded();
+        let (votor_event_sender, _votor_event_receiver) = bounded(1024);
         let mut standard_broadcast_run = StandardBroadcastRun::new(
             0,
             Arc::new(MigrationStatus::default()),
             votor_event_sender,
             test_leader_schedule_cache(&bank1),
         );
-        let (bsend, brecv) = unbounded();
-        let (ssend, srecv) = unbounded();
+        let (bsend, brecv) = bounded(1024);
+        let (ssend, srecv) = bounded(1024);
 
         let ticks = create_ticks(1, 0, genesis_config.hash());
         let err = standard_broadcast_run
@@ -1308,7 +1307,7 @@ mod test {
     fn test_component_to_shreds_max() {
         agave_logger::setup();
         let keypair = Keypair::new();
-        let (votor_event_sender, _votor_event_receiver) = unbounded();
+        let (votor_event_sender, _votor_event_receiver) = bounded(1024);
         let bank = Bank::new_for_tests(&create_genesis_config(10_000).genesis_config);
         let mut bs = StandardBroadcastRun::new(
             0,
@@ -1345,7 +1344,7 @@ mod test {
     #[test]
     fn test_update_parent() {
         let keypair = Keypair::new();
-        let (votor_event_sender, _votor_event_receiver) = unbounded();
+        let (votor_event_sender, _votor_event_receiver) = bounded(1024);
         let bank = Bank::new_for_tests(&create_genesis_config(10_000).genesis_config);
         let mut bs = StandardBroadcastRun::new(
             0,

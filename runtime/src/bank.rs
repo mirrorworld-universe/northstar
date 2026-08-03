@@ -81,7 +81,12 @@ use {
     agave_precompiles::{get_precompile, get_precompiles, is_precompile},
     agave_reserved_account_keys::ReservedAccountKeys,
     agave_snapshots::snapshot_hash::SnapshotHash,
-    agave_votor_messages::{certificate::Certificate, migration::GENESIS_CERTIFICATE_ACCOUNT},
+    agave_votor_messages::{
+        certificate::{Certificate, CertificateType},
+        migration::GENESIS_CERTIFICATE_ACCOUNT,
+        unverified_vote_message::UnverifiedCertificate,
+        wire::{WireBlockCertMessage, WireCertSignature},
+    },
     ahash::AHashSet,
     log::*,
     partitioned_epoch_rewards::PartitionedRewardsCalculation,
@@ -196,7 +201,6 @@ use {
     std::{
         collections::{HashMap, HashSet},
         fmt,
-        num::NonZero,
         ops::AddAssign,
         path::PathBuf,
         slice,
@@ -210,6 +214,7 @@ use {
         },
         time::{Duration, Instant},
     },
+    thiserror::Error,
 };
 #[cfg(feature = "dev-context-only-utils")]
 use {
@@ -224,11 +229,6 @@ use {
     solana_program_runtime::sysvar_cache::SysvarCache,
     solana_svm::program_loader::load_program_with_pubkey,
 };
-
-/// params to `verify_accounts_hash`
-struct VerifyAccountsHashConfig {
-    require_rooted_bank: bool,
-}
 
 mod accounts_lt_hash;
 mod address_lookup_table;
@@ -270,7 +270,7 @@ static NANOSECOND_CLOCK_ACCOUNT: LazyLock<Pubkey> = LazyLock::new(|| {
 pub type BankStatusCache = StatusCache<Result<()>>;
 #[cfg_attr(
     feature = "frozen-abi",
-    frozen_abi(digest = "23uAyYmzMrmPvPDKf6SvF1YoojYstmEPmdkfAQDnpwsq")
+    frozen_abi(digest = "HvpA8mUc4TZAcDF3BpcynmYWYBK3scJRTem2qadCiF5Z")
 )]
 pub type BankSlotDelta = SlotDelta<Result<()>>;
 
@@ -462,6 +462,16 @@ impl TransactionLogCollector {
             }),
         }
     }
+}
+
+#[derive(Error, Debug, Serialize, Deserialize)]
+pub enum VATHealthError {
+    #[error("vote account not found")]
+    VoteAccountNotFound,
+    #[error("missing BLS pubkey")]
+    NoBLSPubkey,
+    #[error("insufficient lamports in vote account: {0} < {1}")]
+    InsufficientFundsInVoteAccount(u64, u64),
 }
 
 /// Bank's common fields shared by all supported snapshot versions for deserialization.
@@ -2934,6 +2944,36 @@ impl Bank {
         self.current_slot_params().vat_to_burn_per_epoch()
     }
 
+    pub fn get_vat_health_for_next_epoch(
+        &self,
+        vote_account_pubkey: &Pubkey,
+    ) -> std::result::Result<(), VATHealthError> {
+        let vote_accounts = self.vote_accounts();
+
+        let Some((_, vote_account)) = vote_accounts.get(vote_account_pubkey) else {
+            return Err(VATHealthError::VoteAccountNotFound);
+        };
+
+        if vote_account
+            .vote_state_view()
+            .bls_pubkey_compressed()
+            .is_none()
+        {
+            return Err(VATHealthError::NoBLSPubkey);
+        }
+
+        let my_balance = vote_account.lamports();
+        let minimum_vote_account_balance_for_vat = self.minimum_vote_account_balance_for_vat();
+        if vote_account.lamports() < minimum_vote_account_balance_for_vat {
+            return Err(VATHealthError::InsufficientFundsInVoteAccount(
+                my_balance,
+                minimum_vote_account_balance_for_vat,
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Returns the effective slot duration for `slot`.
     pub fn ns_per_slot_at_slot(&self, slot: Slot) -> u128 {
         self.slot_params_at_slot(slot).ns_per_slot()
@@ -3484,14 +3524,28 @@ impl Bank {
             // The address is known in advance, so the account could already exist if it was prefunded.
             // However this account cannot be written to except by us in `set_alpenglow_genesis_certificate`,
             // so this deserialize is safe if the account is non-empty
-            wincode::deserialize(acct.data())
-                .expect("Programmer error deserializing genesis certificate")
+            let cert: WireBlockCertMessage = wincode::deserialize(acct.data())
+                .expect("Programmer error deserializing genesis certificate");
+            Certificate {
+                cert_type: CertificateType::Genesis(cert.block),
+                signature: cert.signature.signature,
+                bitmap: cert.signature.bitmap,
+            }
         })
     }
 
     /// For use in the first Alpenglow block, set the genesis certificate.
     pub fn set_alpenglow_genesis_certificate(&self, cert: &Certificate) {
-        let data = wincode::serialize(cert).unwrap();
+        debug_assert!(cert.cert_type.is_genesis());
+        let block = cert.cert_type.to_block().unwrap();
+        let cert = WireBlockCertMessage {
+            block,
+            signature: WireCertSignature {
+                signature: cert.signature,
+                bitmap: cert.bitmap.clone(),
+            },
+        };
+        let data = wincode::serialize(&cert).unwrap();
         let lamports = Rent::default().minimum_balance(data.len());
         let mut cert_acct = AccountSharedData::new(lamports, data.len(), &system_program::ID);
         cert_acct.set_data_from_slice(&data);
@@ -5468,12 +5522,7 @@ impl Bank {
     pub fn run_final_hash_calc(&self) {
         self.force_flush_accounts_cache();
         // note that this slot may not be a root
-        _ = self.verify_accounts(
-            VerifyAccountsHashConfig {
-                require_rooted_bank: false,
-            },
-            None,
-        );
+        _ = self.verify_accounts(None);
     }
 
     /// Verify the account state as part of startup, typically from a snapshot.
@@ -5489,30 +5538,8 @@ impl Bank {
     ///
     /// Only intended to be called at startup, or from tests/ledger-tool.
     #[must_use]
-    fn verify_accounts(
-        &self,
-        config: VerifyAccountsHashConfig,
-        calculated_accounts_lt_hash: Option<&AccountsLtHash>,
-    ) -> bool {
+    fn verify_accounts(&self, calculated_accounts_lt_hash: Option<&AccountsLtHash>) -> bool {
         let accounts_db = &self.rc.accounts.accounts_db;
-
-        let slot = self.slot();
-
-        if config.require_rooted_bank && !accounts_db.accounts_index.is_alive_root(slot) {
-            if let Some(parent) = self.parent() {
-                info!(
-                    "slot {slot} is not a root, so verify accounts hash on parent bank at slot {}",
-                    parent.slot(),
-                );
-                // The calculated_accounts_lt_hash parameter is only valid for the current slot, so
-                // we must fall back to calculating the accounts lt hash with the index.
-                return parent.verify_accounts(config, None);
-            } else {
-                // this will result in mismatch errors
-                // accounts hash calc doesn't include unrooted slots
-                panic!("cannot verify accounts hash because slot {slot} is not a root");
-            }
-        }
 
         fn check_lt_hash(
             expected_accounts_lt_hash: &AccountsLtHash,
@@ -5714,12 +5741,7 @@ impl Bank {
         let (verified_accounts, verify_accounts_time_us) = measure_us!({
             let should_verify_accounts = !self.rc.accounts.accounts_db.skip_initial_hash_calc;
             if should_verify_accounts {
-                self.verify_accounts(
-                    VerifyAccountsHashConfig {
-                        require_rooted_bank: false,
-                    },
-                    calculated_accounts_lt_hash,
-                )
+                self.verify_accounts(calculated_accounts_lt_hash)
             } else {
                 info!("Verifying accounts... Skipped.");
                 true
@@ -5908,23 +5930,23 @@ impl Bank {
     /// Verify a BLS certificate's signature using this bank's epoch stakes.
     pub fn verify_certificate(
         &self,
-        cert: &Certificate,
-    ) -> std::result::Result<(), CertVerifyError> {
+        cert: UnverifiedCertificate,
+    ) -> std::result::Result<Certificate, CertVerifyError> {
         let slot = cert.cert_type.slot();
         let epoch_stakes = self
             .epoch_stakes_from_slot(slot)
             .ok_or(CertVerifyError::MissingRankMap)?;
         let key_to_rank_map = epoch_stakes.bls_pubkey_to_rank_map();
-        let total_stake =
-            NonZero::new(key_to_rank_map.total_stake()).expect("total stake cannot be 0");
+        let total_stake = key_to_rank_map.total_stake();
 
-        cert_verify::verify_certificate(cert, key_to_rank_map.len(), total_stake, |rank| {
-            key_to_rank_map
-                .get_pubkey_stake_entry(rank)
-                .map(|entry| (entry.stake, entry.bls_pubkey))
-        })?;
+        let cert =
+            cert_verify::verify_certificate(cert, key_to_rank_map.len(), total_stake, |rank| {
+                key_to_rank_map
+                    .get_pubkey_stake_entry(rank)
+                    .map(|entry| (entry.stake, entry.bls_pubkey))
+            })?;
 
-        Ok(())
+        Ok(cert)
     }
 
     pub fn epoch_stakes_map(&self) -> &HashMap<Epoch, VersionedEpochStakes> {

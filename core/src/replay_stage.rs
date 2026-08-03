@@ -93,7 +93,6 @@ use {
         vote_sender_types::{ReplayVoteMessage, ReplayVoteSender},
     },
     solana_signer::Signer,
-    solana_svm_timings::ExecuteTimings,
     solana_time_utils::timestamp,
     solana_transaction::Transaction,
     solana_vote::vote_transaction::VoteTransaction,
@@ -109,7 +108,6 @@ use {
         thread::{self, Builder, JoinHandle},
         time::{Duration, Instant},
     },
-    thiserror::Error,
 };
 
 mod dead_slots;
@@ -140,16 +138,6 @@ const MAX_REPAIR_RETRY_LOOP_ATTEMPTS: usize = 10;
 const REFRESH_VOTE_BLOCKHEIGHT: usize = 16;
 
 const VAT_STATUS_CHECK_INTERVAL_SECS: u64 = 30;
-
-#[derive(Error, Debug)]
-enum VATHealthError {
-    #[error("vote account not found")]
-    VoteAccountNotFound,
-    #[error("missing BLS pubkey")]
-    NoBLSPubkey,
-    #[error("insufficient lamports in vote account: {0} < {1}")]
-    InsufficientFundsInVoteAccount(u64, u64),
-}
 
 #[derive(PartialEq, Eq, Debug)]
 pub enum HeaviestForkFailures {
@@ -1006,6 +994,7 @@ impl ReplayStage {
                     (r_bank_forks.ancestors(), r_bank_forks.descendants())
                 };
                 let new_frozen_slots = Self::process_active_banks(
+                    cluster_info.my_shred_version(),
                     &process_active_banks_context,
                     &mut progress,
                     &mut async_verification_freelist,
@@ -1224,6 +1213,7 @@ impl ReplayStage {
                     if last_genesis_vote_refresh_time.elapsed() > GENESIS_VOTE_REFRESH
                         && migration_status.is_in_migration()
                         && Self::maybe_send_genesis_vote(
+                            cluster_info.my_shred_version(),
                             migration_status.as_ref(),
                             bank_forks.as_ref(),
                             vote_account,
@@ -1614,8 +1604,11 @@ impl ReplayStage {
             let bank_forks_r = bank_forks.read().unwrap();
             new_frozen_slots
                 .iter()
-                .filter(|slot| migration_status.should_allow_fast_leader_handover(**slot))
                 .filter_map(|slot| bank_forks_r.get(*slot))
+                .filter(|bank| {
+                    bank.feature_set.snapshot().alpenglow_fast_leader_handover
+                        && migration_status.should_allow_block_markers(bank.slot())
+                })
                 .collect_vec()
         };
         for bank in flh_candidate_banks {
@@ -1747,6 +1740,7 @@ impl ReplayStage {
     /// If we have an eligible genesis block, send out a genesis vote
     /// Returns false if no eligible block was found
     fn maybe_send_genesis_vote(
+        my_shred_version: u16,
         migration_status: &MigrationStatus,
         bank_forks: &RwLock<BankForks>,
         vote_account: Pubkey,
@@ -1765,6 +1759,7 @@ impl ReplayStage {
             vote,
             bank_forks.read().unwrap().root_bank().as_ref(),
             vote_account,
+            my_shred_version,
             identity_keypair,
             authorized_voter_keypairs,
             None,
@@ -2663,6 +2658,8 @@ impl ReplayStage {
                 } else if let Some(prev_hash) =
                     duplicate_confirmed_slots.insert(confirmed_slot, duplicate_confirmed_hash)
                 {
+                    // This assertion is intentional - it is not possible to split the cluster to get 52% on two versions
+                    // without a massive turbine failure
                     assert_eq!(
                         prev_hash, duplicate_confirmed_hash,
                         "Additional duplicate confirmed notification for slot {confirmed_slot} \
@@ -2988,6 +2985,7 @@ impl ReplayStage {
     }
 
     fn replay_blockstore_into_bank(
+        my_shred_version: u16,
         process_active_banks_context: &ProcessActiveBanksContext,
         bank: &BankWithScheduler,
         replay_stats: &RwLock<ReplaySlotStats>,
@@ -3003,6 +3001,7 @@ impl ReplayStage {
         blockstore_processor::confirm_slot(
             &process_active_banks_context.blockstore,
             bank,
+            my_shred_version,
             &process_active_banks_context.replay_tx_thread_pool,
             &mut w_replay_stats,
             &mut w_replay_progress,
@@ -3171,7 +3170,7 @@ impl ReplayStage {
         }
 
         let epoch = bank.epoch();
-        if let Err(vat_failure_reason) = Self::check_vat_health(&bank, vote_account) {
+        if let Err(vat_failure_reason) = bank.get_vat_health_for_next_epoch(vote_account) {
             warn!(
                 "VAT Health Check: Currently you will fail the VAT check at the start of epoch {} \
                  meaning that you will be unable to vote or produce blocks in epoch {}. Reason: {}",
@@ -3187,33 +3186,6 @@ impl ReplayStage {
                 epoch.saturating_add(2),
             );
         }
-    }
-
-    fn check_vat_health(bank: &Bank, vote_account_pubkey: &Pubkey) -> Result<(), VATHealthError> {
-        let vote_accounts = bank.vote_accounts();
-
-        let Some((_, vote_account)) = vote_accounts.get(vote_account_pubkey) else {
-            return Err(VATHealthError::VoteAccountNotFound);
-        };
-
-        if vote_account
-            .vote_state_view()
-            .bls_pubkey_compressed()
-            .is_none()
-        {
-            return Err(VATHealthError::NoBLSPubkey);
-        }
-
-        let my_balance = vote_account.lamports();
-        let minimum_vote_account_balance_for_vat = bank.minimum_vote_account_balance_for_vat();
-        if vote_account.lamports() < minimum_vote_account_balance_for_vat {
-            return Err(VATHealthError::InsufficientFundsInVoteAccount(
-                my_balance,
-                minimum_vote_account_balance_for_vat,
-            ));
-        }
-
-        Ok(())
     }
 
     fn generate_vote_tx(
@@ -3695,6 +3667,7 @@ impl ReplayStage {
     }
 
     fn replay_active_bank(
+        my_shred_version: u16,
         process_active_banks_context: &ProcessActiveBanksContext,
         bank_replay_result_tracker: BankReplayResultTracker,
         my_pubkey: &Pubkey,
@@ -3747,6 +3720,7 @@ impl ReplayStage {
 
         let mut replay_blockstore_time = Measure::start("replay_blockstore_into_bank");
         let blockstore_result = Self::replay_blockstore_into_bank(
+            my_shred_version,
             process_active_banks_context,
             &bank,
             &replay_stats,
@@ -3768,6 +3742,7 @@ impl ReplayStage {
     }
 
     fn replay_active_banks(
+        my_shred_version: u16,
         process_active_banks_context: &ProcessActiveBanksContext,
         bank_replay_result_trackers: Vec<BankReplayResultTracker>,
         replay_timing: &mut ReplayLoopTiming,
@@ -3791,6 +3766,7 @@ impl ReplayStage {
                                 );
                                 let (replay_result, replay_blockstore_us) =
                                     Self::replay_active_bank(
+                                        my_shred_version,
                                         process_active_banks_context,
                                         bank_replay_result_tracker,
                                         my_pubkey,
@@ -3819,6 +3795,7 @@ impl ReplayStage {
                         bank_replay_result_tracker.replay_result.bank_slot
                     );
                     let (replay_result, replay_blockstore_us) = Self::replay_active_bank(
+                        my_shred_version,
                         process_active_banks_context,
                         bank_replay_result_tracker,
                         my_pubkey,
@@ -3847,8 +3824,6 @@ impl ReplayStage {
         let bank_forks = &process_active_banks_context.bank_forks;
 
         // TODO: See if processing of blockstore replay results and bank completion can be made thread safe.
-        let mut tx_count = 0;
-        let mut execute_timings = ExecuteTimings::default();
         let mut new_frozen_slots = vec![];
         for replay_result in replay_result_vec {
             if replay_result.is_slot_dead {
@@ -3862,7 +3837,7 @@ impl ReplayStage {
             };
             if let Some(replay_result) = &replay_result.replay_result {
                 match replay_result {
-                    Ok(replay_tx_count) => tx_count += replay_tx_count,
+                    Ok(_) => {}
                     Err(BlockstoreProcessorError::BlockComponentProcessor(
                         BlockComponentProcessorError::AbandonedBank(update_parent),
                     )) => {
@@ -4232,7 +4207,6 @@ impl ReplayStage {
                     bank_complete_time.as_us(),
                     is_unified_scheduler_enabled,
                 );
-                execute_timings.accumulate(&r_replay_stats.batch_execute.totals);
             } else {
                 trace!(
                     "bank {} not completed tick_height: {}, max_tick_height: {}",
@@ -4248,6 +4222,7 @@ impl ReplayStage {
 
     #[allow(clippy::too_many_arguments)]
     fn process_active_banks(
+        my_shred_version: u16,
         process_active_banks_context: &ProcessActiveBanksContext,
         progress: &mut ProgressMap,
         async_verification_freelist: &mut Vec<AsyncVerificationProgress>,
@@ -4273,6 +4248,7 @@ impl ReplayStage {
 
         // Perform replay execution.
         let replay_result_vec = Self::replay_active_banks(
+            my_shred_version,
             process_active_banks_context,
             bank_replay_result_trackers,
             replay_timing,

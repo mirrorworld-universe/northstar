@@ -25,7 +25,7 @@ use {
         consensus_message::{Block, ConsensusMessage},
         migration::MigrationStatus,
     },
-    crossbeam_channel::{Receiver, Sender, TrySendError, select},
+    crossbeam_channel::{Receiver, Sender, TrySendError, select_biased},
     solana_clock::Slot,
     solana_gossip::cluster_info::ClusterInfo,
     solana_ledger::{blockstore::Blockstore, leader_schedule_cache::LeaderScheduleCache},
@@ -111,15 +111,21 @@ impl ConsensusPoolService {
         consensus_pool.maybe_prune(bank.slot());
         stats.prune_old_state_called += 1;
         // Send new certificates to peers
-        Self::send_certificates(ctx, new_certificates_to_send, stats)
+        Self::send_certificates(
+            ctx,
+            BLSOp::PushCertificates {
+                certificates: new_certificates_to_send,
+            },
+            stats,
+        )
     }
 
     fn send_certificates(
         ctx: &ConsensusPoolContext,
-        certificates_to_send: Vec<Arc<Certificate>>,
+        op: BLSOp,
         stats: &mut ConsensusPoolServiceStats,
     ) -> Result<(), ()> {
-        let num_certs = certificates_to_send.len();
+        let num_certs = Self::num_certificates(&op);
         if num_certs == 0 {
             return Ok(());
         }
@@ -130,7 +136,7 @@ impl ConsensusPoolService {
             stats.certificates_skipped_unstaked += num_certs;
             return Ok(());
         }
-        Self::enqueue_certificates(ctx, certificates_to_send, stats)
+        Self::enqueue_certificates(ctx, op, stats)
     }
 
     fn is_current_identity_staked(ctx: &ConsensusPoolContext) -> bool {
@@ -141,16 +147,22 @@ impl ConsensusPoolService {
             .is_some_and(|stake| *stake > 0)
     }
 
+    fn num_certificates(op: &BLSOp) -> usize {
+        match op {
+            BLSOp::PushCertificates { certificates }
+            | BLSOp::RefreshCertificates { certificates } => certificates.len(),
+            _ => unreachable!("expected a certificate BLSOp"),
+        }
+    }
+
     fn enqueue_certificates(
         ctx: &ConsensusPoolContext,
-        certificates: Vec<Arc<Certificate>>,
+        op: BLSOp,
         stats: &mut ConsensusPoolServiceStats,
     ) -> Result<(), ()> {
-        let num_certs = certificates.len();
-        match ctx
-            .bls_sender
-            .try_send(BLSOp::PushCertificates { certificates })
-        {
+        let num_certs = Self::num_certificates(&op);
+
+        match ctx.bls_sender.try_send(op) {
             Ok(()) => {
                 stats.certificates_sent += num_certs;
                 Ok(())
@@ -345,6 +357,7 @@ impl ConsensusPoolService {
                     events.push(VotorEvent::Standstill(
                         consensus_pool
                             .highest_finalized_slot()
+                            .map(|s| s.slot())
                             .unwrap_or(ctx.sharable_banks.root().slot()),
                     ));
                 }
@@ -352,7 +365,9 @@ impl ConsensusPoolService {
                 standstill_timer = Instant::now();
                 match Self::send_certificates(
                     &ctx,
-                    consensus_pool.get_certs_for_standstill(),
+                    BLSOp::RefreshCertificates {
+                        certificates: consensus_pool.get_certs_for_standstill(),
+                    },
                     &mut stats,
                 ) {
                     Ok(()) => (),
@@ -389,19 +404,19 @@ impl ConsensusPoolService {
                 Duration::from_millis(20)
             };
 
-            let ret = select! {
-                recv(ctx.consensus_message_receiver) -> msg => {
-                    let Ok(first) = msg else {
-                        return Self::handle_channel_disconnected(&mut ctx, "consensus_message_receiver channel");
-                    };
-                    Self::handle_sig_verified_batch(&mut ctx, &mut consensus_pool, &mut events, &mut standstill_timer, first, &mut stats)
-                },
+            let ret = select_biased! {
                 recv(ctx.own_message_receiver) -> msg => {
                     let Ok(first) = msg else {
                         return Self::handle_channel_disconnected(&mut ctx, "own_message_receiver channel");
                     };
                     Self::handle_own_message(&mut ctx, &mut consensus_pool, &mut events, &mut standstill_timer, first, &mut stats)
                 }
+                recv(ctx.consensus_message_receiver) -> msg => {
+                    let Ok(first) = msg else {
+                        return Self::handle_channel_disconnected(&mut ctx, "consensus_message_receiver channel");
+                    };
+                    Self::handle_sig_verified_batch(&mut ctx, &mut consensus_pool, &mut events, &mut standstill_timer, first, &mut stats)
+                },
                 default(wait_timeout) => continue
             };
 
@@ -554,7 +569,10 @@ impl ConsensusPoolService {
             }
         }
 
-        let highest_finalized = consensus_pool.highest_finalized_slot().unwrap_or(0);
+        let highest_finalized = consensus_pool
+            .highest_finalized_slot()
+            .map(|s| s.slot())
+            .unwrap_or(0);
 
         pending_safe_to_notar.retain(|&block| {
             // Discard if slot is at or below highest finalized
@@ -660,6 +678,7 @@ mod tests {
             certificate::CertificateType,
             consensus_message::{BLS_KEYPAIR_DERIVE_SEED, VoteMessage},
             vote::Vote,
+            wire::get_vote_payload_to_sign,
         },
         crossbeam_channel::{bounded, unbounded},
         solana_bls_signatures::{
@@ -794,7 +813,8 @@ mod tests {
             let vote_keypair = &ctx.validator_keypairs[my_rank].vote_keypair;
             let bls_keypair =
                 BLSKeypair::derive_from_signer(vote_keypair, BLS_KEYPAIR_DERIVE_SEED).unwrap();
-            let vote_serialized = wincode::serialize(&notarize_vote).unwrap();
+            let vote_serialized =
+                get_vote_payload_to_sign(notarize_vote, ctx.ctx.cluster_info.my_shred_version());
             let message = ConsensusMessage::Vote(VoteMessage {
                 vote: notarize_vote,
                 signature: bls_keypair.sign(&vote_serialized).into(),
@@ -1093,8 +1113,13 @@ mod tests {
         ];
 
         let mut stats = ConsensusPoolServiceStats::new();
-        let result =
-            ConsensusPoolService::send_certificates(&ctx.ctx, certificates.clone(), &mut stats);
+        let result = ConsensusPoolService::send_certificates(
+            &ctx.ctx,
+            BLSOp::PushCertificates {
+                certificates: certificates.clone(),
+            },
+            &mut stats,
+        );
         assert!(result.is_ok());
         assert_eq!(stats.certificates_sent.0, 2);
 
@@ -1111,6 +1136,38 @@ mod tests {
         assert!(matches!(
             certificates[1].cert_type,
             CertificateType::Skip(2)
+        ));
+    }
+
+    #[test]
+    fn test_send_certificates_refresh() {
+        let ctx = TestContext::default();
+
+        let certificates = vec![Arc::new(Certificate {
+            cert_type: CertificateType::Skip(1),
+            signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
+            bitmap: vec![],
+        })];
+
+        let mut stats = ConsensusPoolServiceStats::new();
+        ConsensusPoolService::send_certificates(
+            &ctx.ctx,
+            BLSOp::RefreshCertificates {
+                certificates: certificates.clone(),
+            },
+            &mut stats,
+        )
+        .unwrap();
+        assert_eq!(stats.certificates_sent.0, 1);
+
+        let BLSOp::RefreshCertificates { certificates } = ctx.bls_receiver.try_recv().unwrap()
+        else {
+            panic!("invalid type");
+        };
+        assert_eq!(certificates.len(), 1);
+        assert!(matches!(
+            certificates[0].cert_type,
+            CertificateType::Skip(1)
         ));
     }
 
@@ -1133,7 +1190,12 @@ mod tests {
         let cluster_info = get_cluster_info(unstaked_identity);
         ctx.ctx.cluster_info = cluster_info;
         let mut stats = ConsensusPoolServiceStats::new();
-        ConsensusPoolService::send_certificates(&ctx.ctx, certificates, &mut stats).unwrap();
+        ConsensusPoolService::send_certificates(
+            &ctx.ctx,
+            BLSOp::PushCertificates { certificates },
+            &mut stats,
+        )
+        .unwrap();
         assert_eq!(stats.certificates_sent.0, 0);
         assert_eq!(stats.certificates_skipped_unstaked.0, 2);
         assert!(ctx.bls_receiver.try_recv().is_err());
@@ -1151,7 +1213,11 @@ mod tests {
         })];
 
         let mut stats = ConsensusPoolServiceStats::new();
-        let result = ConsensusPoolService::send_certificates(&ctx.ctx, certificates, &mut stats);
+        let result = ConsensusPoolService::send_certificates(
+            &ctx.ctx,
+            BLSOp::PushCertificates { certificates },
+            &mut stats,
+        );
         assert_eq!(result.unwrap_err(), ());
     }
 
