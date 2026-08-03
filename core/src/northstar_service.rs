@@ -100,23 +100,22 @@ fn submit_settlement_transactions(
         return Ok(());
     }
 
-    let mut packet_batches = to_packet_batches(transactions, NUM_PACKETS);
-    for packet_batch in packet_batches.iter_mut() {
+    for mut packet_batch in to_packet_batches(transactions, NUM_PACKETS) {
         for mut packet in packet_batch.iter_mut() {
             packet.meta_mut().flags |= PacketFlags::FROM_STAKED_NODE;
         }
-    }
-    let batch = BankingPacketBatch::new(packet_batches);
-    sender
-        .send(batch.clone())
-        .map_err(SettlementSubmitError::Local)?;
+        let batch = BankingPacketBatch::new(packet_batch);
+        sender
+            .send(batch.clone())
+            .map_err(SettlementSubmitError::Local)?;
 
-    if let Some(forward_sender) = forward_sender {
-        match forward_sender.try_send((batch, false)) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => return Err(SettlementSubmitError::ForwardFull),
-            Err(TrySendError::Disconnected(_)) => {
-                return Err(SettlementSubmitError::ForwardDisconnected);
+        if let Some(forward_sender) = forward_sender {
+            match forward_sender.try_send((batch, false)) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => return Err(SettlementSubmitError::ForwardFull),
+                Err(TrySendError::Disconnected(_)) => {
+                    return Err(SettlementSubmitError::ForwardDisconnected);
+                }
             }
         }
     }
@@ -887,15 +886,13 @@ mod tests {
     }
 
     fn packet_count(batch: &BankingPacketBatch) -> usize {
-        batch.iter().map(|packets| packets.len()).sum()
+        batch.len()
     }
 
     fn all_packets_marked_from_staked_node(batch: &BankingPacketBatch) -> bool {
-        batch.iter().all(|packets| {
-            packets
-                .iter()
-                .all(|packet| packet.meta().flags.contains(PacketFlags::FROM_STAKED_NODE))
-        })
+        batch
+            .iter()
+            .all(|packet| packet.meta().flags.contains(PacketFlags::FROM_STAKED_NODE))
     }
 
     #[test]

@@ -116,6 +116,7 @@ fn create_store_for_shrink_tests(
     file_size: u64,
     alive_bytes: usize,
     num_zero_lamport_single_ref_accounts: usize,
+    accounts_file_provider: AccountsFileProvider,
 ) -> (TempDir, Arc<AccountStorageEntry>) {
     let temp_dir = TempDir::new().unwrap();
     let store = Arc::new(AccountStorageEntry::new(
@@ -123,7 +124,7 @@ fn create_store_for_shrink_tests(
         slot,
         slot as AccountsFileId,
         file_size,
-        AccountsFileProvider::AppendVec,
+        accounts_file_provider,
     ));
     accounts_db.storage.insert(Arc::clone(&store));
     store.add_accounts(num_zero_lamport_single_ref_accounts.max(1), alive_bytes);
@@ -178,7 +179,7 @@ fn run_generate_index_duplicates_within_slot_test(db: AccountsDb, reverse: bool)
 
     let pubkey = Pubkey::from([1; 32]);
 
-    let append_vec = db.create_and_insert_store(slot0, 1000);
+    let append_vec = db.create_store(slot0, 1000);
 
     let mut account_small = AccountSharedData::default();
     account_small.set_data(vec![1]);
@@ -200,6 +201,7 @@ fn run_generate_index_duplicates_within_slot_test(db: AccountsDb, reverse: bool)
 
     // construct append vec with account to generate an index from
     append_vec.accounts.write_accounts(&storable_accounts);
+    db.storage.insert(Arc::new(append_vec));
 
     assert!(!db.accounts_index.contains(&pubkey));
     let storage = db.get_storage_for_slot(slot0).unwrap();
@@ -229,12 +231,14 @@ fn test_generate_index_for_single_ref_zero_lamport_slot() {
     let db = AccountsDb::new_single_for_tests();
     let slot0 = 0;
     let pubkey = Pubkey::from([1; 32]);
-    let append_vec = db.create_and_insert_store(slot0, 1000);
+    let append_vec = db.create_store(slot0, 1000);
     let account = AccountSharedData::default();
 
     let data = [(&pubkey, &account)];
     let storable_accounts = (slot0, &data[..]);
     append_vec.accounts.write_accounts(&storable_accounts);
+    let append_vec = Arc::new(append_vec);
+    db.storage.insert(Arc::clone(&append_vec));
     assert!(!db.accounts_index.contains(&pubkey));
     let result = db.generate_index(None, false);
     let slot_list_len = db.accounts_index.get_and_then(&pubkey, |entry| {
@@ -595,7 +599,8 @@ fn test_flush_slots_with_reclaim_old_slots() {
         })
         .collect();
 
-    let storage = accounts.create_and_insert_store(new_slot, 4096);
+    let storage = Arc::new(accounts.create_store(new_slot, 4096));
+    accounts.storage.insert(Arc::clone(&storage));
 
     accounts.accounts_cache.add_root(new_slot);
 
@@ -1030,8 +1035,6 @@ fn test_account_grow() {
 
 #[test]
 fn test_clean_zero_lamport_and_dead_slot() {
-    agave_logger::setup();
-
     let accounts = AccountsDb::new_single_for_tests();
     let pubkey1 = solana_pubkey::new_rand();
     let pubkey2 = solana_pubkey::new_rand();
@@ -1073,8 +1076,6 @@ fn test_clean_zero_lamport_and_dead_slot() {
 
 #[test]
 fn test_clean_dead_slot_with_obsolete_accounts() {
-    agave_logger::setup();
-
     // This test is triggering a scenario in reclaim_accounts where the entire slot is reclaimed
     // When an entire slot is reclaimed, it normally unrefs the pubkeys, while when individual
     // accounts are reclaimed it does not unref the pubkeys
@@ -1269,7 +1270,6 @@ fn test_remove_zero_lamport_single_ref_accounts_after_shrink() {
 
 #[test]
 fn test_shrink_zero_lamport_single_ref_account() {
-    agave_logger::setup();
     // note that 'None' checks the case based on the default value of `latest_full_snapshot_slot` in `AccountsDb`
     for latest_full_snapshot_slot in [None, Some(0), Some(1), Some(2)] {
         // store a zero and non-zero lamport account
@@ -1375,7 +1375,7 @@ fn test_shrink_converts_zero_lamport_single_ref_account_to_tombstone() {
         slot1,
         10,
         DEFAULT_FILE_SIZE,
-        AccountsFileProvider::AppendVec,
+        accounts_db.accounts_file_provider,
     ));
     // store an obsolete account; it should not be marked ZLSR
     append_single_account_with_default_hash(
@@ -1417,7 +1417,7 @@ fn test_shrink_converts_zero_lamport_single_ref_account_to_tombstone() {
         true,
         Some(&accounts_db.accounts_index),
     );
-    insert_store(&accounts_db, Arc::clone(&storage1));
+    accounts_db.storage.insert(Arc::clone(&storage1));
     accounts_db.add_root(slot1);
 
     // we manually created the storage, so nothing got marked
@@ -1472,7 +1472,7 @@ fn test_shrink_converts_zero_lamport_single_ref_account_to_tombstone() {
     );
 
     // it is recorded on the new storage's tombstone list, not the zero-lamport-single-ref list
-    assert_eq!(new_storage1.tombstone_offsets_read_lock().len(), 1);
+    assert_eq!(new_storage1.num_tombstones(), 1);
     assert!(
         new_storage1
             .zero_lamport_single_ref_offsets()
@@ -1505,7 +1505,7 @@ fn test_shrink_collect_carries_forward_existing_tombstones() {
         slot,
         100,
         DEFAULT_FILE_SIZE,
-        AccountsFileProvider::AppendVec,
+        accounts_db.accounts_file_provider,
     ));
     // An ordinary alive account, present in the index.
     append_single_account_with_default_hash(
@@ -1524,7 +1524,7 @@ fn test_shrink_collect_carries_forward_existing_tombstones() {
         true,
         None,
     );
-    insert_store(&accounts_db, Arc::clone(&storage));
+    accounts_db.storage.insert(Arc::clone(&storage));
     accounts_db.add_root(slot);
 
     // Record the tombstone account's offset on the storage's tombstone list, as a prior shrink
@@ -1538,7 +1538,7 @@ fn test_shrink_collect_carries_forward_existing_tombstones() {
             }
         })
         .unwrap();
-    storage.batch_insert_tombstone_offsets(&[tombstone_offset.unwrap()]);
+    storage.batch_insert_tombstone_offsets([tombstone_offset.unwrap()]);
     assert_eq!(storage.num_zero_lamport_single_ref_accounts(), 1);
 
     // Newer than the latest full snapshot: the tombstone must be carried forward, not dropped and
@@ -1594,7 +1594,7 @@ fn test_fully_tombstoned_storage_reclaim() {
         slot,
         100,
         DEFAULT_FILE_SIZE,
-        AccountsFileProvider::AppendVec,
+        accounts_db.accounts_file_provider,
     ));
 
     // Every account is a zero-lamport account physically present but NOT in the index: i.e. the
@@ -1609,7 +1609,7 @@ fn test_fully_tombstoned_storage_reclaim() {
             None,
         );
     }
-    insert_store(&accounts_db, Arc::clone(&storage));
+    accounts_db.storage.insert(Arc::clone(&storage));
     accounts_db.add_root(slot);
 
     // Record every account's offset on the storage's tombstone list, as a prior shrink would have.
@@ -1620,12 +1620,10 @@ fn test_fully_tombstoned_storage_reclaim() {
             tombstone_offsets.push(offset);
         })
         .unwrap();
-    storage.batch_insert_tombstone_offsets(&tombstone_offsets);
+    storage.batch_insert_tombstone_offsets(tombstone_offsets);
 
     // The storage reads as entirely tombstones / fully removable.
     assert!(storage.has_only_tombstones());
-
-    let epoch_schedule = EpochSchedule::default();
 
     // Shrink routes the fully-dead slot to clean; clean retains the storage because the latest full
     // snapshot is older than the slot, so the slot is not yet eligible for shrink.
@@ -1642,24 +1640,8 @@ fn test_fully_tombstoned_storage_reclaim() {
     );
 
     // Advance the latest full snapshot past the slot so its tombstones become purgeable. Clean then
-    // queues the slot for shrink.
+    // cleans the storage and it is reclaimed.
     accounts_db.set_latest_full_snapshot_slot(slot + 1);
-    accounts_db.clean_accounts(Some(slot + 1), false);
-    // Verify that it gets queued for shrink
-    assert!(
-        accounts_db
-            .shrink_candidate_slots
-            .lock()
-            .unwrap()
-            .contains(&slot)
-    );
-
-    // Shrink finds nothing to rewrite, routes the fully-dead slot to clean via `dirty_stores`, and
-    // drains it from the shrink candidates. The storage survives until clean reclaims it.
-    accounts_db.shrink_candidate_slots(&epoch_schedule);
-    assert!(accounts_db.storage.get_slot_storage_entry(slot).is_some());
-
-    // Clean reclaims the dirty, fully-tombstoned storage.
     accounts_db.clean_accounts(Some(slot + 1), false);
     assert!(accounts_db.storage.get_slot_storage_entry(slot).is_none());
 }
@@ -1681,6 +1663,7 @@ fn test_alive_bytes_after_shrink() {
         4096, // <-- file size
         initial_alive_bytes,
         2, // <-- num zero lamport single ref accounts
+        accounts_db.accounts_file_provider,
     );
 
     // test case: latest full snapshot slot is None -- ZLSR accounts are dead
@@ -1778,22 +1761,6 @@ fn test_alive_bytes_after_shrink_with_zero_lamport_single_ref_accounts() {
     accounts_db.set_latest_full_snapshot_slot(slot);
 
     let storage = accounts_db.get_storage_for_slot(slot).unwrap();
-    accounts_db.accounts_index.scan(
-        dead_pubkeys.iter(),
-        |_pubkey, slots_refs| {
-            let (slot_list, ref_count) = slots_refs.unwrap();
-            assert_eq!(slot_list.len(), 1);
-            assert_eq!(ref_count, 1);
-
-            let (indexed_slot, acct_info) = slot_list.first().unwrap();
-            assert_eq!(*indexed_slot, slot);
-            assert!(acct_info.is_zero_lamport());
-            accounts_db.zero_lamport_single_ref_found(*indexed_slot, acct_info.offset());
-            AccountsIndexScanResult::KeepInMemory
-        },
-        None,
-        ScanFilter::All,
-    );
 
     assert_eq!(
         storage.num_zero_lamport_single_ref_accounts(),
@@ -1825,8 +1792,6 @@ fn test_alive_bytes_after_shrink_with_zero_lamport_single_ref_accounts() {
 
 #[test]
 fn test_clean_multiple_zero_lamport_decrements_index_ref_count() {
-    agave_logger::setup();
-
     let accounts = AccountsDb::new_single_for_tests();
     let pubkey1 = solana_pubkey::new_rand();
     let pubkey2 = solana_pubkey::new_rand();
@@ -1874,8 +1839,6 @@ fn test_clean_multiple_zero_lamport_decrements_index_ref_count() {
 
 #[test]
 fn test_clean_zero_lamport_and_old_roots() {
-    agave_logger::setup();
-
     let accounts = AccountsDb::new_single_for_tests();
     let pubkey = solana_pubkey::new_rand();
     let account = AccountSharedData::new(1, 0, AccountSharedData::default().owner());
@@ -1913,8 +1876,6 @@ fn test_clean_zero_lamport_and_old_roots() {
 
 #[test]
 fn test_clean_old_with_both_normal_and_zero_lamport_accounts() {
-    agave_logger::setup();
-
     let mut accounts = AccountsDb {
         account_indexes: spl_token_mint_index_enabled(),
         ..AccountsDb::new_with_config(
@@ -2052,10 +2013,79 @@ fn test_clean_old_with_both_normal_and_zero_lamport_accounts() {
     assert_eq!(found_accounts, vec![pubkey2]);
 }
 
+// Verify that purge_keys_exact does not remove pubkeys from the secondary index if the pubkey
+// is still present in the write cache
+#[test]
+fn test_clean_retains_secondary_index_for_still_cached_key() {
+    let accounts = AccountsDb {
+        account_indexes: spl_token_mint_index_enabled(),
+        ..AccountsDb::new_with_config(
+            Vec::new(),
+            ACCOUNTS_DB_CONFIG_FOR_TESTING,
+            None,
+            Arc::default(),
+        )
+    };
+    let pubkey = solana_pubkey::new_rand();
+    let index_slot = 1;
+    let cache_slot = 2;
+
+    // Set up a token account to be added to the secondary index.
+    const SPL_TOKEN_INITIALIZED_OFFSET: usize = 108;
+    let mint_key = Pubkey::new_unique();
+    let mut account_data_with_mint = vec![0; spl_generic_token::token::Account::get_packed_len()];
+    account_data_with_mint[..PUBKEY_BYTES].clone_from_slice(&(mint_key.to_bytes()));
+    account_data_with_mint[SPL_TOKEN_INITIALIZED_OFFSET] = 1;
+    let mut token_account = AccountSharedData::new(1, 0, &spl_generic_token::token::id());
+    token_account.set_data(account_data_with_mint);
+
+    let zero_account = AccountSharedData::new(0, 0, &Pubkey::default());
+
+    // Slot 1: a rooted zero-lamport tombstone. Flush with `PubkeysToFlush::All` so it is not
+    // reclaimed
+    accounts.store_for_tests((index_slot, [(&pubkey, &zero_account)].as_slice()));
+    accounts.add_root(index_slot);
+    accounts.flush_accounts_cache_slot_for_tests(index_slot);
+
+    // Slot 2: the account is written to the write cache,
+    accounts.store_for_tests((cache_slot, [(&pubkey, &token_account)].as_slice()));
+    assert_eq!(
+        accounts
+            .accounts_index
+            .get_index_key_size(&AccountIndex::SplTokenMint, &mint_key),
+        Some(1),
+    );
+
+    // Clean removes the entry from the accounts index (as the newest rooted version is zero
+    // lamport)
+    accounts.clean_accounts_for_tests();
+
+    // The pubkey is still live in the write cache, so its secondary index entry must survive.
+    assert!(accounts.accounts_cache.contains_pubkey(&pubkey));
+    assert_eq!(
+        accounts
+            .accounts_index
+            .get_index_key_size(&AccountIndex::SplTokenMint, &mint_key),
+        Some(1),
+        "clean purged the secondary index entry for a live cached account",
+    );
+
+    accounts.purge_slots_from_cache(iter::once(&cache_slot), &PurgeStats::default());
+
+    // The pubkey has been removed from both the index and the write cache. Ensure it is
+    // removed from the secondary index as well.
+    assert!(!accounts.accounts_cache.contains_pubkey(&pubkey));
+    assert_eq!(
+        accounts
+            .accounts_index
+            .get_index_key_size(&AccountIndex::SplTokenMint, &mint_key),
+        None,
+        "Entry should be removed from the secondary index, but it is not",
+    );
+}
+
 #[test]
 fn test_clean_max_slot_zero_lamport_account() {
-    agave_logger::setup();
-
     let accounts = AccountsDb::new_single_for_tests();
     let pubkey = solana_pubkey::new_rand();
     let account = AccountSharedData::new(1, 0, AccountSharedData::default().owner());
@@ -2090,7 +2120,6 @@ fn assert_no_stores(accounts: &AccountsDb, slot: Slot) {
 
 #[test]
 fn test_accounts_db_purge_keep_live() {
-    agave_logger::setup();
     let some_lamport = 223;
     let zero_lamport = 0;
     let no_data = 0;
@@ -2171,7 +2200,6 @@ fn test_accounts_db_purge_keep_live() {
 
 #[test]
 fn test_accounts_db_purge1() {
-    agave_logger::setup();
     let some_lamport = 223;
     let zero_lamport = 0;
     let no_data = 0;
@@ -2202,7 +2230,6 @@ fn test_accounts_db_purge1() {
     accounts.print_accounts_stats("pre_purge");
 
     let ancestors = linear_ancestors(current_slot);
-    info!("ancestors: {ancestors:?}");
     let hash = accounts.calculate_accounts_lt_hash_at_startup_from_index(&ancestors);
 
     accounts.clean_accounts_for_tests();
@@ -2224,7 +2251,6 @@ fn test_accounts_db_purge1() {
 
 #[test]
 fn test_accountsdb_scan_accounts() {
-    agave_logger::setup();
     let db = AccountsDb::new_single_for_tests();
     let key = Pubkey::default();
     let key0 = solana_pubkey::new_rand();
@@ -2269,7 +2295,6 @@ fn test_accountsdb_scan_accounts() {
 
 #[test]
 fn test_cleanup_key_not_removed() {
-    agave_logger::setup();
     let db = AccountsDb::new_single_for_tests();
 
     let key = Pubkey::default();
@@ -2304,7 +2329,6 @@ fn test_cleanup_key_not_removed() {
 
 #[test]
 fn test_store_large_account() {
-    agave_logger::setup();
     let db = AccountsDb::new_single_for_tests();
 
     let key = Pubkey::default();
@@ -2370,7 +2394,6 @@ fn test_hash_stored_account() {
 #[test]
 fn test_verify_bank_capitalization() {
     for pass in 0..2 {
-        agave_logger::setup();
         let db = AccountsDb::new_single_for_tests();
 
         let key = solana_pubkey::new_rand();
@@ -2409,14 +2432,14 @@ fn test_verify_bank_capitalization() {
 }
 #[test]
 fn test_storage_finder() {
-    agave_logger::setup();
     let db = AccountsDb::new_single_for_tests();
     let key = solana_pubkey::new_rand();
     let lamports = 100;
     let data_len = 8190;
     let account = AccountSharedData::new(lamports, data_len, &solana_pubkey::new_rand());
     // pre-populate with a smaller empty store
-    db.create_and_insert_store(1, 8192);
+    let storage = db.create_store(1, 8192);
+    db.storage.insert(Arc::new(storage));
     db.store_for_tests((1, [(&key, &account)].as_slice()));
 }
 
@@ -2688,8 +2711,6 @@ fn test_shrink_all_slots_none() {
 
 #[test]
 fn test_shrink_candidate_slots() {
-    agave_logger::setup();
-
     let mut accounts = AccountsDb::new_single_for_tests();
 
     let pubkey_count = 30000;
@@ -2755,7 +2776,6 @@ fn test_shrink_candidate_slots() {
 /// bytes of the two remaining alive ancient accounts.
 #[test]
 fn test_shrink_candidate_slots_with_dead_ancient_account() {
-    agave_logger::setup();
     let epoch_schedule = EpochSchedule::default();
     let db = AccountsDb::new_single_for_tests();
     const ACCOUNT_DATA_SIZES: &[usize] = &[1000, 2000, 150];
@@ -2832,7 +2852,6 @@ fn test_shrink_candidate_slots_with_dead_ancient_account() {
 #[test]
 fn test_select_candidates_by_total_usage_no_candidates() {
     // no input candidates -- none should be selected
-    agave_logger::setup();
     let candidates = ShrinkCandidates::default();
     let db = AccountsDb::new_single_for_tests();
 
@@ -2846,7 +2865,6 @@ fn test_select_candidates_by_total_usage_no_candidates() {
 #[test]
 fn test_select_candidates_by_total_usage_3_way_split_condition() {
     // three candidates, one selected for shrink, one is put back to the candidate list and one is ignored
-    agave_logger::setup();
     let mut candidates = ShrinkCandidates::default();
     let db = AccountsDb::new_single_for_tests();
 
@@ -2859,7 +2877,7 @@ fn test_select_candidates_by_total_usage_3_way_split_condition() {
         store1_slot,
         store1_slot as AccountsFileId,
         store_file_size,
-        AccountsFileProvider::AppendVec,
+        db.accounts_file_provider,
     ));
     db.storage.insert(Arc::clone(&store1));
     store1.num_alive_bytes.store(0, Ordering::Release);
@@ -2871,7 +2889,7 @@ fn test_select_candidates_by_total_usage_3_way_split_condition() {
         store2_slot,
         store2_slot as AccountsFileId,
         store_file_size,
-        AccountsFileProvider::AppendVec,
+        db.accounts_file_provider,
     ));
     db.storage.insert(Arc::clone(&store2));
     store2
@@ -2885,7 +2903,7 @@ fn test_select_candidates_by_total_usage_3_way_split_condition() {
         store3_slot,
         store3_slot as AccountsFileId,
         store_file_size,
-        AccountsFileProvider::AppendVec,
+        db.accounts_file_provider,
     ));
     db.storage.insert(Arc::clone(&store3));
     store3
@@ -2909,7 +2927,6 @@ fn test_select_candidates_by_total_usage_3_way_split_condition() {
 #[test]
 fn test_select_candidates_by_total_usage_2_way_split_condition() {
     // three candidates, 2 are selected for shrink, one is ignored
-    agave_logger::setup();
     let db = AccountsDb::new_single_for_tests();
     let mut candidates = ShrinkCandidates::default();
 
@@ -2922,7 +2939,7 @@ fn test_select_candidates_by_total_usage_2_way_split_condition() {
         store1_slot,
         store1_slot as AccountsFileId,
         store_file_size,
-        AccountsFileProvider::AppendVec,
+        db.accounts_file_provider,
     ));
     db.storage.insert(Arc::clone(&store1));
     store1.num_alive_bytes.store(0, Ordering::Release);
@@ -2934,7 +2951,7 @@ fn test_select_candidates_by_total_usage_2_way_split_condition() {
         store2_slot,
         store2_slot as AccountsFileId,
         store_file_size,
-        AccountsFileProvider::AppendVec,
+        db.accounts_file_provider,
     ));
     db.storage.insert(Arc::clone(&store2));
     store2
@@ -2948,7 +2965,7 @@ fn test_select_candidates_by_total_usage_2_way_split_condition() {
         store3_slot,
         store3_slot as AccountsFileId,
         store_file_size,
-        AccountsFileProvider::AppendVec,
+        db.accounts_file_provider,
     ));
     db.storage.insert(Arc::clone(&store3));
     store3
@@ -2969,7 +2986,6 @@ fn test_select_candidates_by_total_usage_2_way_split_condition() {
 #[test]
 fn test_select_candidates_by_total_usage_all_clean() {
     // 2 candidates, they must be selected to achieve the target alive ratio
-    agave_logger::setup();
     let db = AccountsDb::new_single_for_tests();
     let mut candidates = ShrinkCandidates::default();
 
@@ -2982,7 +2998,7 @@ fn test_select_candidates_by_total_usage_all_clean() {
         store1_slot,
         store1_slot as AccountsFileId,
         store_file_size,
-        AccountsFileProvider::AppendVec,
+        db.accounts_file_provider,
     ));
     db.storage.insert(Arc::clone(&store1));
     store1
@@ -2996,7 +3012,7 @@ fn test_select_candidates_by_total_usage_all_clean() {
         store2_slot,
         store2_slot as AccountsFileId,
         store_file_size,
-        AccountsFileProvider::AppendVec,
+        db.accounts_file_provider,
     ));
     db.storage.insert(Arc::clone(&store2));
     store2
@@ -3030,6 +3046,7 @@ fn test_select_candidates_by_total_usage_with_zero_lamport_single_ref_accounts()
         file_size as u64,
         file_size,
         num_zero_lamport_single_ref_accounts,
+        accounts_db.accounts_file_provider,
     );
     shrink_candidates.insert(slot_with_zlsr);
 
@@ -3040,6 +3057,7 @@ fn test_select_candidates_by_total_usage_with_zero_lamport_single_ref_accounts()
         file_size as u64,
         file_size * 9 / 10,
         0,
+        accounts_db.accounts_file_provider,
     );
     shrink_candidates.insert(slot_no_zlsr);
 
@@ -3110,7 +3128,6 @@ fn test_select_candidates_by_total_usage_with_zero_lamport_single_ref_accounts()
 
 #[test]
 fn test_delete_dependencies() {
-    agave_logger::setup();
     let accounts = AccountsDb::new_single_for_tests();
     let accounts_index = &accounts.accounts_index;
     let key0 = Pubkey::new_from_array([0u8; 32]);
@@ -3234,13 +3251,6 @@ fn test_delete_dependencies() {
 }
 
 #[test]
-fn test_account_balance_for_capitalization_sysvar() {
-    let normal_sysvar =
-        solana_account::create_account_for_test(&solana_slot_history::SlotHistory::default());
-    assert_eq!(normal_sysvar.lamports(), 1);
-}
-
-#[test]
 fn test_account_balance_for_capitalization_native_program() {
     let normal_native_program = create_loadable_account_for_test("foo");
     assert_eq!(normal_native_program.lamports(), 1);
@@ -3248,7 +3258,6 @@ fn test_account_balance_for_capitalization_native_program() {
 
 #[test]
 fn test_store_overhead() {
-    agave_logger::setup();
     let accounts = AccountsDb::new_single_for_tests();
     let account = AccountSharedData::new(1, 0, &Pubkey::default());
     let pubkey = solana_pubkey::new_rand();
@@ -3256,13 +3265,11 @@ fn test_store_overhead() {
     accounts.add_root_and_flush_write_cache(0);
     let store = accounts.storage.get_slot_storage_entry(0).unwrap();
     let total_len = store.accounts.len();
-    info!("total: {total_len}");
     assert_eq!(total_len, STORE_META_OVERHEAD);
 }
 
 #[test]
 fn test_store_clean_after_shrink() {
-    agave_logger::setup();
     let accounts = AccountsDb::new_single_for_tests();
     let epoch_schedule = EpochSchedule::default();
 
@@ -3329,7 +3336,6 @@ fn test_wrapping_storage_id() {
 #[test]
 #[should_panic(expected = "We've run out of storage ids!")]
 fn test_reuse_storage_id() {
-    agave_logger::setup();
     let db = AccountsDb::new_single_for_tests();
 
     let account = AccountSharedData::new(1, 0, AccountSharedData::default().owner());
@@ -4102,35 +4108,14 @@ define_accounts_db_test!(
         let alive_bytes = storage.alive_bytes();
         assert!(alive_bytes > 0);
 
-        // scan the accounts to track zlsr accounts
-        accounts_db.accounts_index.scan(
-            pubkeys.iter(),
-            |_pubkey, slots_refs| {
-                let (slot_list, ref_count) = slots_refs.unwrap();
-                assert_eq!(slot_list.len(), 1);
-                assert_eq!(ref_count, 1);
-
-                let (slot, acct_info) = slot_list.first().unwrap();
-                assert_eq!(*slot, 0);
-                accounts_db.zero_lamport_single_ref_found(*slot, acct_info.offset());
-                AccountsIndexScanResult::OnlyKeepInMemoryIfDirty
-            },
-            None,
-            ScanFilter::All,
-        );
-
         // assert the number of zlsr accounts
         assert_eq!(storage.num_zero_lamport_single_ref_accounts(), num_keys);
 
         // assert the "alive_bytes_exclude_zero_lamport_single_ref_accounts"
-        match accounts_db.accounts_file_provider {
-            AccountsFileProvider::AppendVec => {
-                assert_eq!(
-                    storage.alive_bytes_exclude_zero_lamport_single_ref_accounts(),
-                    0
-                );
-            }
-        }
+        assert_eq!(
+            storage.alive_bytes_exclude_zero_lamport_single_ref_accounts(),
+            0,
+        );
     }
 );
 
@@ -4891,8 +4876,6 @@ fn start_load_thread(
 
 #[test]
 fn test_load_account_and_cache_flush_race() {
-    agave_logger::setup();
-
     let mut db = AccountsDb::new_single_for_tests();
     db.load_delay = RACY_SLEEP_MS;
     let db = Arc::new(db);
@@ -5066,7 +5049,6 @@ fn test_load_account_and_shrink_race_without_retry() {
 
 #[test]
 fn test_collect_uncleaned_slots_up_to_slot() {
-    agave_logger::setup();
     let db = AccountsDb::new_single_for_tests();
 
     let slot1 = 11;
@@ -5096,7 +5078,6 @@ fn test_collect_uncleaned_slots_up_to_slot() {
 
 #[test]
 fn test_remove_uncleaned_slots_and_collect_pubkeys_up_to_slot() {
-    agave_logger::setup();
     let db = AccountsDb::new_single_for_tests();
 
     let slot1 = 11;
@@ -5142,7 +5123,6 @@ fn test_remove_uncleaned_slots_and_collect_pubkeys_up_to_slot() {
 
 #[test]
 fn test_shrink_productive() {
-    agave_logger::setup();
     let accounts = AccountsDb::new_single_for_tests();
     let (_temp_dirs, path) = get_temp_accounts_paths(1).unwrap();
 
@@ -5154,7 +5134,7 @@ fn test_shrink_productive() {
         slot,
         slot as AccountsFileId,
         file_size,
-        AccountsFileProvider::AppendVec,
+        accounts.accounts_file_provider,
     ));
     store.add_account(file_size as usize);
     assert!(!accounts.is_shrinking_productive(&store));
@@ -5164,7 +5144,7 @@ fn test_shrink_productive() {
         slot,
         slot as AccountsFileId,
         file_size,
-        AccountsFileProvider::AppendVec,
+        accounts.accounts_file_provider,
     ));
     store.add_account(file_size as usize / 2);
     store.add_account(file_size as usize / 4);
@@ -5177,8 +5157,6 @@ fn test_shrink_productive() {
 
 #[test]
 fn test_is_candidate_for_shrink() {
-    agave_logger::setup();
-
     let mut accounts = AccountsDb::new_single_for_tests();
     let (_temp_dirs, common_store_path) = get_temp_accounts_paths(1).unwrap();
     let store_file_size = 100_000;
@@ -5187,7 +5165,7 @@ fn test_is_candidate_for_shrink() {
         0,
         1,
         store_file_size,
-        AccountsFileProvider::AppendVec,
+        accounts.accounts_file_provider,
     ));
     match accounts.shrink_ratio {
         AccountShrinkThreshold::TotalSpace { shrink_ratio } => {
@@ -5229,10 +5207,11 @@ define_accounts_db_test!(test_calculate_storage_count_and_alive_bytes, |accounts
 
     accounts.accounts_index.set_startup(Startup::Startup);
 
-    let storage = accounts.create_and_insert_store(slot0, 4_000);
+    let storage = accounts.create_store(slot0, 4_000);
     storage
         .accounts
         .write_accounts(&(slot0, &[(&shared_key, &account)][..]));
+    accounts.storage.insert(Arc::new(storage));
 
     let storage = accounts.storage.get_slot_storage_entry(slot0).unwrap();
     let mut reader = append_vec::new_scan_accounts_reader();
@@ -5253,7 +5232,7 @@ define_accounts_db_test!(
     test_calculate_storage_count_and_alive_bytes_0_accounts,
     |accounts| {
         // empty store
-        let storage = accounts.create_and_insert_store(0, 1);
+        let storage = accounts.create_store(0, 1);
         let mut reader = append_vec::new_scan_accounts_reader();
         let mut accum = IndexGenerationAccumulator::with_slots_capacity(1);
         accounts.generate_index_for_slot(&mut reader, &mut accum, 0, &storage);
@@ -5285,7 +5264,7 @@ define_accounts_db_test!(
         let account = AccountSharedData::new(1, 1, AccountSharedData::default().owner());
         let account_big = AccountSharedData::new(1, 1000, AccountSharedData::default().owner());
         let slot0 = 0;
-        let storage = accounts.create_and_insert_store(slot0, 4_000);
+        let storage = accounts.create_store(slot0, 4_000);
         storage
             .accounts
             .write_accounts(&(slot0, &[(&keys[0], &account), (&keys[1], &account_big)][..]));
@@ -5331,7 +5310,7 @@ fn test_calculate_storage_count_and_alive_bytes_obsolete_account(
         .collect();
 
     let slot0 = 0;
-    let storage = accounts.create_and_insert_store(slot0, 10_000);
+    let storage = accounts.create_store(slot0, 10_000);
     let offsets = storage.accounts.write_accounts(&(slot0, &account_list[..]));
 
     let offsets = offsets.unwrap().offsets;
@@ -5543,7 +5522,6 @@ define_accounts_db_test!(
 
 #[test]
 fn test_filter_zero_lamport_clean_for_incremental_snapshots() {
-    agave_logger::setup();
     let slot = 10;
 
     struct TestParameters {
@@ -5855,8 +5833,9 @@ fn test_mark_dirty_dead_stores_no_shrink_in_progress() {
         let slot = 0;
         let db = AccountsDb::new_single_for_tests();
         let size = 1;
-        let existing_store = db.create_and_insert_store(slot, size);
+        let existing_store = db.create_store(slot, size);
         let old_id = existing_store.id();
+        db.storage.insert(Arc::new(existing_store));
         let dead_storages = db.mark_dirty_dead_stores(slot, add_dirty_stores, None, false);
         assert!(db.storage.get_slot_storage_entry(slot).is_none());
         assert_eq!(dead_storages.len(), 1);
@@ -5880,8 +5859,9 @@ fn test_mark_dirty_dead_stores() {
     for add_dirty_stores in [false, true] {
         let db = AccountsDb::new_single_for_tests();
         let size = 1;
-        let old_store = db.create_and_insert_store(slot, size);
+        let old_store = Arc::new(db.create_store(slot, size));
         let old_id = old_store.id();
+        db.storage.insert(Arc::clone(&old_store));
         let shrink_in_progress = db.get_store_for_shrink(slot, old_store, 100);
         let dead_storages =
             db.mark_dirty_dead_stores(slot, add_dirty_stores, Some(shrink_in_progress), false);
@@ -6045,10 +6025,12 @@ define_accounts_db_test!(test_get_sorted_potential_ancient_slots, |db| {
     );
     let root1 = DEFAULT_MAX_ANCIENT_STORAGES as u64 + ancient_append_vec_offset as u64 + 1;
     db.add_root(root1);
-    db.create_and_insert_store(root1, 4096);
+    let store1 = db.create_store(root1, 4096);
+    db.storage.insert(Arc::new(store1));
     let root2 = root1 + 1;
     db.add_root(root2);
-    db.create_and_insert_store(root2, 4096);
+    let store2 = db.create_store(root2, 4096);
+    db.storage.insert(Arc::new(store2));
     let oldest_non_ancient_slot = db.get_oldest_non_ancient_slot(&epoch_schedule);
     assert!(
         db.get_sorted_potential_ancient_slots(oldest_non_ancient_slot)
@@ -6096,7 +6078,6 @@ define_accounts_db_test!(test_get_sorted_potential_ancient_slots, |db| {
 
 #[test]
 fn test_shrink_collect_simple() {
-    agave_logger::setup();
     let account_counts = [
         1,
         SHRINK_COLLECT_CHUNK_SIZE,
@@ -6329,7 +6310,6 @@ fn test_shrink_collect_simple() {
 
 #[test]
 fn test_shrink_collect_with_obsolete_accounts() {
-    agave_logger::setup();
     let account_count = 100;
     let pubkeys: Vec<_> = iter::repeat_with(Pubkey::new_unique)
         .take(account_count)
@@ -6599,7 +6579,7 @@ pub(crate) fn create_storages_and_update_index(
         let slot = starting_slot + i as Slot;
         let storage =
             sample_storage_with_entries_id(tf, slot, &pubkey1, id, alive, account_data_size);
-        insert_store(db, Arc::clone(&storage));
+        db.storage.insert(Arc::clone(&storage));
     }
 
     let storage = db.get_storage_for_slot(starting_slot).unwrap();
@@ -6616,8 +6596,6 @@ pub(crate) fn create_db_with_storages_and_index(
     num_slots: usize,
     account_data_size: Option<u64>,
 ) -> (AccountsDb, Slot) {
-    agave_logger::setup();
-
     let db = AccountsDb::new_single_for_tests();
 
     // create a single append vec with a single account in a slot
@@ -6665,10 +6643,6 @@ fn get_one_ancient_append_vec_and_others_with_account_size(
 
 fn get_one_ancient_append_vec_and_others(num_normal_slots: usize) -> (AccountsDb, Slot) {
     get_one_ancient_append_vec_and_others_with_account_size(num_normal_slots, None)
-}
-
-fn insert_store(db: &AccountsDb, append_vec: Arc<AccountStorageEntry>) {
-    db.storage.insert(append_vec);
 }
 
 /// Ensure the calculating capitalization produces the correct value
@@ -6824,7 +6798,7 @@ fn test_mark_obsolete_accounts_at_startup_multiple_bins() {
 #[test]
 fn test_batch_insert_zero_lamport_single_ref_account_offsets() {
     let accounts = AccountsDb::new_single_for_tests();
-    let storage = accounts.create_and_insert_store(1, 100);
+    let storage = accounts.create_store(1, 100);
 
     // Test inserting new offsets
     let offsets1 = vec![10, 20, 30];
