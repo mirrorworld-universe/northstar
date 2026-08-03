@@ -5,7 +5,7 @@ use {
         state::{account_size, BridgeBuffer, ErTokenAccount, TokenDepositReceipt, TokenVault},
     },
     borsh::{BorshDeserialize, BorshSerialize},
-    northstar_portal::{Checkpoint, Session},
+    northstar_portal::{Checkpoint, DelegationRecord, Session, SessionBridge},
     pinocchio::{
         account_info::AccountInfo,
         entrypoint::deserialize,
@@ -22,33 +22,6 @@ use {
     solana_program_pack::Pack,
     spl_token_interface::state::Account as SplTokenAccount,
 };
-
-#[derive(BorshDeserialize)]
-struct SessionBridge {
-    discriminator: u8,
-    session: [u8; 32],
-    mint: [u8; 32],
-    bridge_program: [u8; 32],
-    vault: [u8; 32],
-    token_program: [u8; 32],
-    _bump: u8,
-}
-
-impl SessionBridge {
-    const DISCRIMINATOR: u8 = 8;
-
-    fn is_valid(&self) -> bool {
-        self.discriminator == Self::DISCRIMINATOR
-    }
-}
-
-#[derive(BorshDeserialize)]
-struct DelegationRecord {
-    discriminator: u8,
-    owner_program: [u8; 32],
-    _grid_id: u64,
-    _bump: u8,
-}
 
 pinocchio_pubkey::declare_id!("HeVLVaSa9WnFai9aTRJ3UR2c4jwbMe5nbjagmDP1GbXR");
 
@@ -853,7 +826,7 @@ fn require_bridge_delegation(
     }
     let record = DelegationRecord::try_from_slice(&delegation_record.try_borrow_data()?)
         .map_err(|_| ProgramError::InvalidAccountData)?;
-    if record.discriminator != 3 || record.owner_program != key_bytes(program_id) {
+    if !record.is_valid() || record.owner_program != key_bytes(program_id) {
         return Err(ProgramError::InvalidAccountData);
     }
     Ok(())
