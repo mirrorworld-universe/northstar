@@ -137,28 +137,22 @@ impl StandardBroadcastRun {
         blockstore: &Blockstore,
         bank: &Bank,
         process_stats: &mut ProcessShredsStats,
-    ) {
+    ) -> Result<()> {
         debug_assert_ne!(bank.slot(), self.slot);
 
-        // Sonic: local validators can expose a frozen parent before DCou assigns its block id.
-        // Calculate it here for broadcast chaining. Resumed roots may no longer retain a parent;
-        // match Votor's default in that case.
-        let parent_block_id = bank
-            .parent()
-            .map(|parent| {
-                if parent.block_id().is_none() {
-                    Bank::calculate_and_set_block_id_for_dcou(&parent);
-                }
-                parent.block_id().expect("DCou must assign a block id")
-            })
-            .unwrap_or_else(|| {
-                warn!(
-                    "Bank {} parent {} is unavailable; using default block id",
-                    bank.slot(),
-                    bank.parent_slot()
-                );
-                Hash::default()
-            });
+        let Some(parent_bank) = bank.parent() else {
+            // If our broadcast is quite backed up, the parent bank could have already been
+            // pruned from BankForks by a newer window getting rooted
+            return Err(Error::WindowSkipped(bank.slot()));
+        };
+        debug_assert!(parent_bank.is_frozen());
+        // Sonic: Local validators can expose a frozen parent before DCou assigns its block id.
+        if parent_bank.block_id().is_none() {
+            Bank::calculate_and_set_block_id_for_dcou(&parent_bank);
+        }
+        let parent_block_id = parent_bank
+            .block_id()
+            .expect("DCou must assign a block id to every frozen parent");
 
         let chained_merkle_root = if self.slot == bank.parent_slot() {
             self.chained_merkle_root
@@ -195,6 +189,8 @@ impl StandardBroadcastRun {
 
         process_stats.receive_elapsed = 0;
         process_stats.coalesce_elapsed = 0;
+
+        Ok(())
     }
 
     // If the current slot has changed, generates an empty shred indicating
@@ -404,7 +400,7 @@ impl StandardBroadcastRun {
             }
 
             // Reinitialize state for this slot.
-            self.reinitialize_state(blockstore, &bank, process_stats);
+            self.reinitialize_state(blockstore, &bank, process_stats)?;
             true
         } else {
             false
