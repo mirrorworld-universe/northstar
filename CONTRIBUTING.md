@@ -69,9 +69,9 @@ All changes should be stress-tested with relevant test cases, if relevant test c
 are not present, then write them.
 
 All changes should be benchmarked and evidence posted to the PR.
-Microbenchmark results along with relevant integration benchmarks (e.g.
-bench-tps, validator timings or profiles). Any code that adds complexity should
-be justified by a commensurate improvement in speed.
+Microbenchmark results along with mainnet/testnet validator timings or profiles,
+and relevant integration benchmarks. Any code that adds complexity
+should be justified by a comisurate improvement in speed.
 
 All changes should be reviewed by subject matter experts.
 
