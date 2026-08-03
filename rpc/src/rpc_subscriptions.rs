@@ -337,10 +337,10 @@ fn filter_confirmed_block_result_txs(
             .collect(),
     };
 
-    if block.transactions.is_empty() {
-        if let BlockSubscriptionKind::MentionsAccountOrProgram(_) = params.kind {
-            return Ok(None);
-        }
+    if block.transactions.is_empty()
+        && let BlockSubscriptionKind::MentionsAccountOrProgram(_) = params.kind
+    {
+        return Ok(None);
     }
 
     let block = block
