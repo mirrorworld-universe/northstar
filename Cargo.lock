@@ -8312,6 +8312,7 @@ dependencies = [
  "clap 2.33.3",
  "rpassword",
  "solana-bls-signatures",
+ "solana-cli-config",
  "solana-clock",
  "solana-cluster-type",
  "solana-commitment-config",
@@ -8344,6 +8345,7 @@ dependencies = [
  "five8",
  "rpassword",
  "solana-clap-v3-utils",
+ "solana-cli-config",
  "solana-clock",
  "solana-cluster-type",
  "solana-commitment-config",
@@ -8464,7 +8466,6 @@ dependencies = [
  "dirs-next",
  "serde",
  "serde_yaml",
- "solana-clap-utils",
  "solana-commitment-config",
  "url 2.5.8",
 ]
