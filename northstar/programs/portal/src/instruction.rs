@@ -1,7 +1,7 @@
 use {
     crate::Hash32,
     borsh::{BorshDeserialize, BorshSerialize},
-    pinocchio::pubkey::Pubkey,
+    pinocchio::Address as Pubkey,
 };
 
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]

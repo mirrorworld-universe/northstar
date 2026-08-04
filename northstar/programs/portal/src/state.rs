@@ -1,6 +1,6 @@
 use {
     borsh::{BorshDeserialize, BorshSerialize},
-    pinocchio::pubkey::Pubkey,
+    pinocchio::Address as Pubkey,
     pinocchio_idl_macros::p_state,
 };
 
@@ -11,10 +11,10 @@ pub fn account_size<T: BorshSerialize + ?Sized>(account: &T) -> usize {
 pub type Hash32 = [u8; 32];
 
 /// Fixed ER account that holds withdrawn SOL until L1 settlement.
-pub const WITHDRAWAL_SINK: Pubkey = [
+pub const WITHDRAWAL_SINK: Pubkey = Pubkey::new_from_array([
     0x05, 0x7d, 0x77, 0xa2, 0x13, 0x37, 0xb6, 0x2d, 0xb7, 0x7d, 0xba, 0x7e, 0x26, 0xf8, 0xe1, 0x47,
     0x06, 0x35, 0xbd, 0x36, 0x53, 0x76, 0xa6, 0x7d, 0x7f, 0xf5, 0xa1, 0x82, 0x3e, 0xe0, 0x8f, 0xb8,
-];
+]);
 
 #[p_state]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -351,8 +351,8 @@ mod tests {
             fee_cap: 5000,
             nonce: 999,
             created_at: 100,
-            authority: [1; 32],
-            validator: [2; 32],
+            authority: [1; 32].into(),
+            validator: [2; 32].into(),
             settlement_interval_slots: 42,
             last_settled_l1_slot: 100,
             last_settled_er_slot: 0,
@@ -382,8 +382,8 @@ mod tests {
     fn test_deposit_receipt_len() {
         let receipt = DepositReceipt {
             discriminator: DepositReceipt::DISCRIMINATOR,
-            session: [0x11; 32],
-            recipient: [0x22; 32],
+            session: [0x11; 32].into(),
+            recipient: [0x22; 32].into(),
             balance: 1_000_000_000,
             withdrawn: 0,
             bump: 77,
@@ -396,7 +396,7 @@ mod tests {
     fn test_delegation_record_len() {
         let record = DelegationRecord {
             discriminator: DelegationRecord::DISCRIMINATOR,
-            owner_program: [0xDE; 32],
+            owner_program: [0xDE; 32].into(),
             grid_id: 456,
             bump: 77,
         };
@@ -408,7 +408,7 @@ mod tests {
     fn test_checkpoint_len() {
         let checkpoint = Checkpoint {
             discriminator: Checkpoint::DISCRIMINATOR,
-            session: [0x10; 32],
+            session: [0x10; 32].into(),
             er_slot: 10,
             step_count: 4,
             previous_state_root: [0x11; 32],
@@ -418,13 +418,13 @@ mod tests {
             readonly_l1_root: [0x15; 32],
             da_commitment: [0x16; 32],
             effect_commitment: [0x17; 32],
-            proposer: [0x18; 32],
+            proposer: [0x18; 32].into(),
             proposed_at_l1_slot: 100,
             challenge_deadline_l1_slot: 110,
             status: CheckpointStatus::Pending,
             bond_lamports: 1_000_000,
             bond_status: CheckpointBondStatus::Locked,
-            challenger: [0x19; 32],
+            challenger: [0x19; 32].into(),
             challenged_at_l1_slot: 105,
             challenge_resolved: true,
             bump: 99,
@@ -437,11 +437,11 @@ mod tests {
     fn test_checkpoint_cursor_len() {
         let cursor = CheckpointCursor {
             discriminator: CheckpointCursor::DISCRIMINATOR,
-            session: [0x10; 32],
-            latest_finalized_checkpoint: [0x11; 32],
+            session: [0x10; 32].into(),
+            latest_finalized_checkpoint: [0x11; 32].into(),
             latest_finalized_er_slot: 10,
             latest_finalized_state_root: [0x12; 32],
-            active_checkpoint: [0x13; 32],
+            active_checkpoint: [0x13; 32].into(),
             active_er_slot: 11,
             bump: 99,
         };
@@ -453,9 +453,9 @@ mod tests {
     fn test_challenge_and_da_proof_len() {
         let challenge = Challenge {
             discriminator: Challenge::DISCRIMINATOR,
-            checkpoint: [1; 32],
-            challenger: [2; 32],
-            respondent: [3; 32],
+            checkpoint: [1; 32].into(),
+            challenger: [2; 32].into(),
+            respondent: [3; 32].into(),
             opened_at_l1_slot: 1,
             hard_deadline_l1_slot: 10,
             turn_deadline_l1_slot: 5,
@@ -474,8 +474,8 @@ mod tests {
 
         let da_proof = DataAvailabilityProof {
             discriminator: DataAvailabilityProof::DISCRIMINATOR,
-            challenge: [1; 32],
-            checkpoint: [2; 32],
+            challenge: [1; 32].into(),
+            checkpoint: [2; 32].into(),
             commitment: [3; 32],
             payload_root: [4; 32],
             inclusion_proof_hash: [5; 32],
@@ -490,9 +490,9 @@ mod tests {
     fn test_step_proof_account_len() {
         let proof = StepProofAccount {
             discriminator: StepProofAccount::DISCRIMINATOR,
-            checkpoint: [0x31; 32],
-            challenge: [0x32; 32],
-            authority: [0x33; 32],
+            checkpoint: [0x31; 32].into(),
+            challenge: [0x32; 32].into(),
+            authority: [0x33; 32].into(),
             proof_kind: 1,
             proof_version: 1,
             step_index: 3,
@@ -514,11 +514,11 @@ mod tests {
     fn test_session_bridge_len() {
         let bridge = SessionBridge {
             discriminator: SessionBridge::DISCRIMINATOR,
-            session: [0x11; 32],
-            mint: [0x22; 32],
-            bridge_program: [0x33; 32],
-            vault: [0x44; 32],
-            token_program: [0x55; 32],
+            session: [0x11; 32].into(),
+            mint: [0x22; 32].into(),
+            bridge_program: [0x33; 32].into(),
+            vault: [0x44; 32].into(),
+            token_program: [0x55; 32].into(),
             bump: 88,
         };
         let serialized = borsh::to_vec(&bridge).unwrap();
@@ -578,8 +578,8 @@ mod tests {
             fee_cap: 1000,
             nonce: 0,
             created_at: 50,
-            authority: [1; 32],
-            validator: [2; 32],
+            authority: [1; 32].into(),
+            validator: [2; 32].into(),
             settlement_interval_slots: 10,
             last_settled_l1_slot: 50,
             last_settled_er_slot: 0,

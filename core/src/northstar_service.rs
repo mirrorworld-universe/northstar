@@ -1122,8 +1122,8 @@ mod tests {
             fee_cap: 1_000,
             created_at: 0,
             nonce: 0,
-            authority: [1; 32],
-            validator: [2; 32],
+            authority: [1; 32].into(),
+            validator: [2; 32].into(),
             settlement_interval_slots: 10,
             last_settled_l1_slot: 0,
             last_settled_er_slot: 0,
@@ -1236,7 +1236,7 @@ mod tests {
             grid_id,
             ttl_slots,
             fee_cap,
-            validator: owner.to_bytes(),
+            validator: owner,
             settlement_interval_slots: 10,
         });
         let data = borsh::to_vec(&ix).unwrap();

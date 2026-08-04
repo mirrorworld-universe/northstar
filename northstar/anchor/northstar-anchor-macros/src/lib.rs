@@ -1,7 +1,9 @@
-use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
-use quote::{ToTokens, quote};
-use syn::{Attribute, Fields, ItemStruct, Meta, parse_macro_input};
+use {
+    proc_macro::TokenStream,
+    proc_macro2::TokenStream as TokenStream2,
+    quote::{quote, ToTokens},
+    syn::{parse_macro_input, Attribute, Fields, ItemStruct, Meta},
+};
 
 #[proc_macro_attribute]
 pub fn delegate(_attr: TokenStream, item: TokenStream) -> TokenStream {

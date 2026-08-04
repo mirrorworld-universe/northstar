@@ -1,5 +1,7 @@
-use anchor_lang::prelude::*;
-use northstar_anchor::{cpi::DelegateConfig, delegate};
+use {
+    anchor_lang::prelude::*,
+    northstar_anchor::{cpi::DelegateConfig, delegate},
+};
 
 declare_id!("11111111111111111111111111111111");
 

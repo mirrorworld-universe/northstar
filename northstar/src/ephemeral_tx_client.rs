@@ -963,11 +963,10 @@ impl EphemeralTransactionClient {
             return 0;
         };
         let (receipt_pda, _) = northstar_portal::find_deposit_receipt_pda(
-            &self.portal_program_id.to_bytes(),
-            &session_pda.to_bytes(),
-            &er_source.to_bytes(),
+            &self.portal_program_id,
+            &session_pda,
+            er_source,
         );
-        let receipt_pda = Pubkey::new_from_array(receipt_pda);
         let Some(account) = bank.get_account(&receipt_pda) else {
             return 0;
         };

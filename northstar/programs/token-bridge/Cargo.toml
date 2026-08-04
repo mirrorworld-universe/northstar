@@ -13,10 +13,9 @@ no-entrypoint = []
 [dependencies]
 borsh = { version = "1", default-features = false, features = ["derive"] }
 northstar-portal = { path = "../portal", features = ["no-entrypoint"] }
-pinocchio = "0.9"
-pinocchio-pubkey = { version = "0.3", features = ["const"] }
-pinocchio-system = "0.4"
-pinocchio-token = "0.4"
+pinocchio = "0.11.2"
+pinocchio-system = "0.6.1"
+pinocchio-token = "0.7.0"
 solana-account-info = { workspace = true }
 solana-instruction = { workspace = true }
 solana-msg = { workspace = true }

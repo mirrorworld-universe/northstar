@@ -150,8 +150,8 @@ impl StagedScenario {
             fee_cap: 0,
             created_at: 0,
             nonce: 0,
-            authority: self.inner.payer.pubkey().to_bytes(),
-            validator: self.inner.payer.pubkey().to_bytes(),
+            authority: self.inner.payer.pubkey(),
+            validator: self.inner.payer.pubkey(),
             settlement_interval_slots: 10,
             last_settled_l1_slot: 0,
             last_settled_er_slot: 0,
@@ -336,7 +336,7 @@ async fn delegate_keypair_wallet_succeeds() {
 
     let record = DelegationRecord::try_from_slice(&acct.data).unwrap();
     assert_eq!(record.discriminator, DelegationRecord::DISCRIMINATOR);
-    assert_eq!(record.owner_program, running.inner.owner_program.to_bytes());
+    assert_eq!(record.owner_program, running.inner.owner_program);
     assert_eq!(record.grid_id, running.inner.grid_id);
 }
 
@@ -388,8 +388,8 @@ async fn delegate_creates_multiple_records_and_restores_data() {
         fee_cap: 0,
         created_at: 0,
         nonce: 0,
-        authority: payer.pubkey().to_bytes(),
-        validator: payer.pubkey().to_bytes(),
+        authority: payer.pubkey(),
+        validator: payer.pubkey(),
         settlement_interval_slots: 10,
         last_settled_l1_slot: 0,
         last_settled_er_slot: 0,
@@ -499,9 +499,9 @@ async fn delegate_creates_multiple_records_and_restores_data() {
         .expect("record B should exist");
     let parsed_a = DelegationRecord::try_from_slice(&record_a_account.data).unwrap();
     let parsed_b = DelegationRecord::try_from_slice(&record_b_account.data).unwrap();
-    assert_eq!(parsed_a.owner_program, owner_a.to_bytes());
+    assert_eq!(parsed_a.owner_program, owner_a);
     assert_eq!(parsed_a.grid_id, grid_id);
-    assert_eq!(parsed_b.owner_program, owner_b.to_bytes());
+    assert_eq!(parsed_b.owner_program, owner_b);
     assert_eq!(parsed_b.grid_id, grid_id);
 
     let delegated_a_account = context

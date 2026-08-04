@@ -213,11 +213,9 @@ impl EphemeralRuntime {
         portal_program_id: &Pubkey,
         delegated_account: &Pubkey,
     ) -> (Pubkey, u8) {
-        let (pda, bump) = northstar_portal::find_delegation_record_pda(
-            &portal_program_id.to_bytes(),
-            &delegated_account.to_bytes(),
-        );
-        (Pubkey::new_from_array(pda), bump)
+        let (pda, bump) =
+            northstar_portal::find_delegation_record_pda(portal_program_id, delegated_account);
+        (pda, bump)
     }
 
     fn effective_delegated_account(
@@ -259,7 +257,7 @@ impl EphemeralRuntime {
             return None;
         }
 
-        let owner_program: Pubkey = record.owner_program.into();
+        let owner_program = record.owner_program;
         let mut effective_account = account.clone();
         effective_account.set_owner(owner_program);
         Some(effective_account)
@@ -1110,7 +1108,7 @@ impl EphemeralRuntime {
                         return None;
                     }
 
-                    let owner_program = Pubkey::from(record.owner_program);
+                    let owner_program = record.owner_program;
                     let mut effective_account = account.clone();
                     effective_account.set_owner(owner_program);
 
@@ -1567,11 +1565,10 @@ impl EphemeralRuntime {
             })
             .filter_map(|(er_source, account)| {
                 let (receipt_pda, _) = northstar_portal::find_deposit_receipt_pda(
-                    &self.portal_program_id.to_bytes(),
-                    &session_pda.to_bytes(),
-                    &er_source.to_bytes(),
+                    &self.portal_program_id,
+                    &session_pda,
+                    er_source,
                 );
-                let receipt_pda = Pubkey::new_from_array(receipt_pda);
                 let receipt_account = self.l1_anchor_bank.get_account(&receipt_pda)?;
                 let Some(crate::portal_state::PortalAccount::DepositReceipt(receipt)) =
                     crate::portal_state::try_parse_raw_portal_account(receipt_account.data())
@@ -1712,10 +1709,10 @@ impl EphemeralRuntime {
             else {
                 continue;
             };
-            if Pubkey::new_from_array(bridge.bridge_program) != event.bridge_program {
+            if bridge.bridge_program != event.bridge_program {
                 continue;
             }
-            let vault = Pubkey::new_from_array(bridge.vault);
+            let vault = bridge.vault;
             let Some(vault_account) = self.l1_anchor_bank.get_account(&vault) else {
                 continue;
             };
@@ -1757,8 +1754,8 @@ impl EphemeralRuntime {
                 vault,
                 vault_token_account: Pubkey::new_from_array(vault_state.vault_token_account),
                 l1_destination_token_account: event.l1_destination_token_account,
-                mint: Pubkey::new_from_array(bridge.mint),
-                token_program: Pubkey::new_from_array(bridge.token_program),
+                mint: bridge.mint,
+                token_program: bridge.token_program,
                 amount: payout,
                 withdrawn: next_cumulative,
                 decimals: event.decimals,
@@ -1836,7 +1833,7 @@ impl EphemeralRuntime {
                     Some(crate::portal_state::PortalAccount::DelegationRecord(record))
                         if record.grid_id == self.settings.grid_id =>
                     {
-                        Some(Pubkey::from(record.owner_program))
+                        Some(record.owner_program)
                     }
                     Some(crate::portal_state::PortalAccount::DelegationRecord(_)) => None,
                     _ => {
@@ -2073,16 +2070,15 @@ impl EphemeralRuntime {
     ) {
         let payer = Keypair::new();
         let (from, _) = northstar_portal::find_deposit_receipt_pda(
-            &self.portal_program_id.to_bytes(),
-            &self.settings.session_pda.to_bytes(),
-            &depositor.to_bytes(),
+            &self.portal_program_id,
+            &self.settings.session_pda,
+            depositor,
         );
-        let from = Pubkey::new_from_array(from);
         let event = northstar_portal::NorthstarTransferEvent {
             version: northstar_portal::NorthstarTransferEvent::VERSION,
             kind: northstar_portal::TransferEventKind::Deposit,
-            from: from.to_bytes(),
-            to: depositor.to_bytes(),
+            from,
+            to: *depositor,
             lamports,
             pre_balance: base_balance,
             post_balance: new_balance,
@@ -2449,8 +2445,8 @@ mod tests {
         );
         let receipt = DepositReceipt {
             discriminator: DepositReceipt::DISCRIMINATOR,
-            session: session_pda.to_bytes(),
-            recipient: recipient.to_bytes(),
+            session: *session_pda,
+            recipient: *recipient,
             balance,
             withdrawn,
             bump,
@@ -2499,7 +2495,7 @@ mod tests {
             EphemeralRuntime::delegation_record_pda(portal_program_id, delegated_account);
         let record = DelegationRecord {
             discriminator: DelegationRecord::DISCRIMINATOR,
-            owner_program: owner_program.to_bytes(),
+            owner_program: *owner_program,
             grid_id,
             bump,
         };
@@ -2808,11 +2804,11 @@ mod tests {
 
         let bridge_state = northstar_portal::SessionBridge {
             discriminator: northstar_portal::SessionBridge::DISCRIMINATOR,
-            session: session.to_bytes(),
-            mint: mint.to_bytes(),
-            bridge_program: bridge_program.to_bytes(),
-            vault: vault.to_bytes(),
-            token_program: token_program.to_bytes(),
+            session,
+            mint,
+            bridge_program,
+            vault,
+            token_program,
             bump: 255,
         };
         let bridge_data = borsh::to_vec(&bridge_state).unwrap();
@@ -2955,14 +2951,14 @@ mod tests {
         let event_data = BASE64_STANDARD.decode(transfer_data).unwrap();
         let event: NorthstarTransferEvent = borsh::from_slice(&event_data).unwrap();
         let (expected_from, _) = northstar_portal::find_deposit_receipt_pda(
-            &runtime.portal_program_id.to_bytes(),
-            &active_session_pda.to_bytes(),
-            &depositor.to_bytes(),
+            &runtime.portal_program_id,
+            &active_session_pda,
+            &depositor,
         );
         assert_eq!(event.version, NorthstarTransferEvent::VERSION);
         assert_eq!(event.kind, northstar_portal::TransferEventKind::Deposit);
         assert_eq!(event.from, expected_from);
-        assert_eq!(event.to, depositor.to_bytes());
+        assert_eq!(event.to, depositor);
         assert_eq!(event.lamports, 7);
         assert_eq!(event.pre_balance, 0);
         assert_eq!(event.post_balance, 7);

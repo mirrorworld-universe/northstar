@@ -34,29 +34,25 @@ fn live_validator_challenge_bisection_and_da_reveal() {
     let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
     rpc.get_health().expect("validator healthy");
 
-    let session = portal_pubkey(northstar_portal::find_session_pda(
-        &PORTAL_PROGRAM_ID.to_bytes(),
-    ));
-    let fee_vault = portal_pubkey(northstar_portal::find_fee_vault_pda(
-        &PORTAL_PROGRAM_ID.to_bytes(),
-    ));
+    let session = portal_pubkey(northstar_portal::find_session_pda(&PORTAL_PROGRAM_ID));
+    let fee_vault = portal_pubkey(northstar_portal::find_fee_vault_pda(&PORTAL_PROGRAM_ID));
     let er_slot = rpc.get_slot().unwrap().saturating_add(1);
     let checkpoint = portal_pubkey(northstar_portal::find_checkpoint_pda(
-        &PORTAL_PROGRAM_ID.to_bytes(),
-        &session.to_bytes(),
+        &PORTAL_PROGRAM_ID,
+        &session,
         er_slot,
     ));
     let cursor = portal_pubkey(northstar_portal::find_checkpoint_cursor_pda(
-        &PORTAL_PROGRAM_ID.to_bytes(),
-        &session.to_bytes(),
+        &PORTAL_PROGRAM_ID,
+        &session,
     ));
     let challenge = portal_pubkey(northstar_portal::find_challenge_pda(
-        &PORTAL_PROGRAM_ID.to_bytes(),
-        &checkpoint.to_bytes(),
+        &PORTAL_PROGRAM_ID,
+        &checkpoint,
     ));
     let da_proof = portal_pubkey(northstar_portal::find_da_proof_pda(
-        &PORTAL_PROGRAM_ID.to_bytes(),
-        &challenge.to_bytes(),
+        &PORTAL_PROGRAM_ID,
+        &challenge,
     ));
 
     send(
@@ -75,7 +71,7 @@ fn live_validator_challenge_bisection_and_da_reveal() {
                     grid_id: 1,
                     ttl_slots: 20_000,
                     fee_cap: 1_000_000_000,
-                    validator: payer.pubkey().to_bytes(),
+                    validator: payer.pubkey(),
                     settlement_interval_slots: 10,
                 }),
             ),
@@ -226,8 +222,8 @@ fn portal_ix(accounts: Vec<AccountMeta>, ix: PortalInstruction) -> Instruction {
     }
 }
 
-fn portal_pubkey((pubkey, _bump): ([u8; 32], u8)) -> Pubkey {
-    Pubkey::new_from_array(pubkey)
+fn portal_pubkey((pubkey, _bump): (Pubkey, u8)) -> Pubkey {
+    pubkey
 }
 
 fn send(rpc: &RpcClient, payer: &Keypair, signers: &[&Keypair], instructions: &[Instruction]) {

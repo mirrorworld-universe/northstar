@@ -64,7 +64,7 @@ fn deposit_receipt_escrow_lamports(lamports: u64, data_len: usize) -> u64 {
 }
 
 /// Fixed ER account that receives all bridged SOL withdrawals.
-pub const WITHDRAWAL_SINK: Pubkey = Pubkey::new_from_array(northstar_portal::WITHDRAWAL_SINK);
+pub const WITHDRAWAL_SINK: Pubkey = northstar_portal::WITHDRAWAL_SINK;
 
 /// Build the ER Portal instruction for a bridged SOL withdrawal request.
 pub fn er_withdrawal_instruction(
@@ -629,7 +629,7 @@ impl Manager {
         session_pda: Pubkey,
         checkpoint: &Checkpoint,
     ) -> Option<SettlementPlan> {
-        let proposer = Pubkey::new_from_array(checkpoint.proposer);
+        let proposer = checkpoint.proposer;
         let path = self.checkpoint_plan_path(session_pda, proposer, checkpoint.er_slot);
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
@@ -683,7 +683,7 @@ impl Manager {
             .write()
             .unwrap()
             .remove(&(session_pda, checkpoint.er_slot));
-        let proposer = Pubkey::new_from_array(checkpoint.proposer);
+        let proposer = checkpoint.proposer;
         let path = self.checkpoint_plan_path(session_pda, proposer, checkpoint.er_slot);
         if let Err(err) = std::fs::remove_file(&path) {
             if err.kind() != std::io::ErrorKind::NotFound {
@@ -707,12 +707,8 @@ impl Manager {
             .collect::<Vec<_>>();
 
         for er_slot in er_slots {
-            let (checkpoint_pda, _) = find_checkpoint_pda(
-                &self.config.portal_program_id.to_bytes(),
-                &session_pda.to_bytes(),
-                er_slot,
-            );
-            let checkpoint_pda = Pubkey::new_from_array(checkpoint_pda);
+            let (checkpoint_pda, _) =
+                find_checkpoint_pda(&self.config.portal_program_id, &session_pda, er_slot);
             let Some(account) = l1_bank.get_account(&checkpoint_pda) else {
                 continue;
             };
@@ -721,7 +717,7 @@ impl Manager {
             else {
                 continue;
             };
-            if checkpoint.session == session_pda.to_bytes()
+            if checkpoint.session == session_pda
                 && matches!(
                     checkpoint.status,
                     CheckpointStatus::Settled
@@ -789,12 +785,8 @@ impl Manager {
             );
         }
 
-        let (checkpoint_pda, _) = find_checkpoint_pda(
-            &self.config.portal_program_id.to_bytes(),
-            &session_pda.to_bytes(),
-            plan.er_slot,
-        );
-        let checkpoint_pda = Pubkey::new_from_array(checkpoint_pda);
+        let (checkpoint_pda, _) =
+            find_checkpoint_pda(&self.config.portal_program_id, &session_pda, plan.er_slot);
         let Some(checkpoint_account) = l1_bank.get_account(&checkpoint_pda) else {
             info!(
                 "Portal checkpoint propose: er_slot={} checksum={:?} challenge_window_slots={}",
@@ -857,11 +849,8 @@ impl Manager {
         l1_bank: &Bank,
         session_pda: Pubkey,
     ) -> [u8; 32] {
-        let (cursor_pda, _) = find_checkpoint_cursor_pda(
-            &self.config.portal_program_id.to_bytes(),
-            &session_pda.to_bytes(),
-        );
-        let cursor_pda = Pubkey::new_from_array(cursor_pda);
+        let (cursor_pda, _) =
+            find_checkpoint_cursor_pda(&self.config.portal_program_id, &session_pda);
         let Some(cursor_account) = l1_bank.get_account(&cursor_pda) else {
             return [0; 32];
         };
@@ -871,7 +860,7 @@ impl Manager {
             warn!("Portal checkpoint cursor {cursor_pda} has invalid account data");
             return [0; 32];
         };
-        if cursor.session != session_pda.to_bytes() {
+        if cursor.session != session_pda {
             warn!("Portal checkpoint cursor {cursor_pda} session mismatch");
             return [0; 32];
         }
@@ -885,11 +874,8 @@ impl Manager {
     ) -> Option<(Pubkey, Checkpoint)> {
         // The cursor is the on-chain index for the one active checkpoint. Never rediscover it by
         // scanning every Portal-owned account on the settlement hot path.
-        let (cursor_pda, _) = find_checkpoint_cursor_pda(
-            &self.config.portal_program_id.to_bytes(),
-            &session_pda.to_bytes(),
-        );
-        let cursor_pda = Pubkey::new_from_array(cursor_pda);
+        let (cursor_pda, _) =
+            find_checkpoint_cursor_pda(&self.config.portal_program_id, &session_pda);
         let cursor_account = l1_bank.get_account(&cursor_pda)?;
         let PortalAccount::CheckpointCursor(cursor) =
             try_parse_raw_portal_account(cursor_account.data())?
@@ -897,13 +883,13 @@ impl Manager {
             return None;
         };
         if !cursor.is_valid()
-            || cursor.session != session_pda.to_bytes()
-            || cursor.active_checkpoint == [0; 32]
+            || cursor.session != session_pda
+            || cursor.active_checkpoint == Pubkey::default()
         {
             return None;
         }
 
-        let checkpoint_pda = Pubkey::new_from_array(cursor.active_checkpoint);
+        let checkpoint_pda = cursor.active_checkpoint;
         let checkpoint_account = l1_bank.get_account(&checkpoint_pda)?;
         if checkpoint_account.owner() != &self.config.portal_program_id {
             return None;
@@ -914,7 +900,7 @@ impl Manager {
             return None;
         };
         (checkpoint.is_valid()
-            && checkpoint.session == session_pda.to_bytes()
+            && checkpoint.session == session_pda
             && matches!(
                 checkpoint.status,
                 CheckpointStatus::Pending
@@ -961,7 +947,7 @@ impl Manager {
         recent_blockhash: Hash,
     ) -> Option<Vec<Transaction>> {
         if !checkpoint.is_valid()
-            || checkpoint.session != session_pda.to_bytes()
+            || checkpoint.session != session_pda
             || checkpoint.er_slot != plan.er_slot
         {
             warn!(
@@ -1089,7 +1075,7 @@ impl Manager {
                 .map(|delegated| L1Event::AccountDelegated {
                     delegation_record_pda: pubkey,
                     delegated_account: delegated,
-                    owner_program: record.owner_program.into(),
+                    owner_program: record.owner_program,
                     grid_id: record.grid_id,
                 }),
             Some(PortalAccount::FeeVault(_vault)) => {
@@ -1112,10 +1098,10 @@ impl Manager {
                     deposit_receipt_escrow_lamports(account.lamports(), account.data().len());
 
                 (escrow > prev_escrow).then(|| L1Event::FeeDeposited {
-                    session_pda: receipt.session.into(),
+                    session_pda: receipt.session,
                     amount: escrow,
                     delta: escrow - prev_escrow,
-                    depositor: receipt.recipient.into(),
+                    depositor: receipt.recipient,
                 })
             }
             Some(PortalAccount::Checkpoint(_))
@@ -1155,7 +1141,7 @@ impl Manager {
         else {
             return None;
         };
-        let bridge_program = Pubkey::new_from_array(session_bridge.bridge_program);
+        let bridge_program = session_bridge.bridge_program;
         if account.owner() != &bridge_program {
             return None;
         }
@@ -1188,7 +1174,7 @@ impl Manager {
             .map(|previous| previous.balance)
             .unwrap_or(0);
         (receipt.balance > previous_balance).then_some(L1Event::TokenDeposited {
-            session_pda: Pubkey::new_from_array(session_bridge.session),
+            session_pda: session_bridge.session,
             session_bridge: session_bridge_key,
             bridge_program,
             er_token_account,
@@ -1259,11 +1245,8 @@ impl Manager {
         bank: &Bank,
         delegated_account: &Pubkey,
     ) -> Option<northstar_portal::DelegationRecord> {
-        let (record_pubkey, _) = find_portal_delegation_record_pda(
-            &self.config.portal_program_id.to_bytes(),
-            &delegated_account.to_bytes(),
-        );
-        let record_pubkey = Pubkey::new_from_array(record_pubkey);
+        let (record_pubkey, _) =
+            find_portal_delegation_record_pda(&self.config.portal_program_id, delegated_account);
         let record_account = bank.get_account(&record_pubkey)?;
         let PortalAccount::DelegationRecord(record) =
             try_parse_raw_portal_account(record_account.data())?
@@ -1502,9 +1485,7 @@ impl Manager {
     }
 
     fn active_l1_session(&self, bank: &Bank) -> Option<(Pubkey, northstar_portal::Session)> {
-        let (session_pda, _) =
-            northstar_portal::find_session_pda(&self.config.portal_program_id.to_bytes());
-        let session_pda = Pubkey::new_from_array(session_pda);
+        let (session_pda, _) = northstar_portal::find_session_pda(&self.config.portal_program_id);
         let account = bank.get_account(&session_pda)?;
         if account.owner() != &self.config.portal_program_id {
             return None;
@@ -1514,7 +1495,7 @@ impl Manager {
         };
         if !session.is_valid()
             || session.is_expired(bank.slot())
-            || session.validator != self.config.manager_account.pubkey().to_bytes()
+            || session.validator != self.config.manager_account.pubkey()
         {
             return None;
         }
@@ -1553,16 +1534,12 @@ impl Manager {
             })
             .collect::<Vec<_>>();
 
-        let program_id = self.config.portal_program_id.to_bytes();
+        let program_id = self.config.portal_program_id;
         let delegated_by_record = program_accounts
             .iter()
             .map(|(candidate, account)| {
-                let (record_pubkey, _) =
-                    find_portal_delegation_record_pda(&program_id, &candidate.to_bytes());
-                (
-                    Pubkey::new_from_array(record_pubkey),
-                    (*candidate, account.clone()),
-                )
+                let (record_pubkey, _) = find_portal_delegation_record_pda(&program_id, candidate);
+                (record_pubkey, (*candidate, account.clone()))
             })
             .collect::<HashMap<_, _>>();
 
@@ -1571,13 +1548,7 @@ impl Manager {
             .filter_map(|(record_pubkey, record)| {
                 delegated_by_record
                     .get(&record_pubkey)
-                    .map(|(delegated, account)| {
-                        (
-                            *delegated,
-                            account.clone(),
-                            Pubkey::new_from_array(record.owner_program),
-                        )
-                    })
+                    .map(|(delegated, account)| (*delegated, account.clone(), record.owner_program))
             })
             .collect()
     }
@@ -1737,7 +1708,7 @@ impl Manager {
     pub fn handle_delegation(&self, bank: &Bank, delegated_account: &Pubkey) {
         let owner_program = self
             .delegation_record(bank, delegated_account)
-            .map(|record| record.owner_program.into());
+            .map(|record| record.owner_program);
         self.handle_delegation_with_owner_program(bank, delegated_account, owner_program);
     }
 
@@ -1868,28 +1839,18 @@ mod portal_e2e_tests {
     }
 
     fn find_delegation_record_pda(program_id: &Pubkey, delegated_account: &Pubkey) -> (Pubkey, u8) {
-        let (pda, bump) = find_portal_delegation_record_pda(
-            &program_id.to_bytes(),
-            &delegated_account.to_bytes(),
-        );
-        (Pubkey::new_from_array(pda), bump)
+        let (pda, bump) = find_portal_delegation_record_pda(program_id, delegated_account);
+        (pda, bump)
     }
 
     fn find_checkpoint_pda(program_id: &Pubkey, session: &Pubkey, er_slot: u64) -> (Pubkey, u8) {
-        let (pda, bump) = northstar_portal::find_checkpoint_pda(
-            &program_id.to_bytes(),
-            &session.to_bytes(),
-            er_slot,
-        );
-        (Pubkey::new_from_array(pda), bump)
+        let (pda, bump) = northstar_portal::find_checkpoint_pda(program_id, session, er_slot);
+        (pda, bump)
     }
 
     fn find_checkpoint_cursor_pda(program_id: &Pubkey, session: &Pubkey) -> (Pubkey, u8) {
-        let (pda, bump) = northstar_portal::find_checkpoint_cursor_pda(
-            &program_id.to_bytes(),
-            &session.to_bytes(),
-        );
-        (Pubkey::new_from_array(pda), bump)
+        let (pda, bump) = northstar_portal::find_checkpoint_cursor_pda(program_id, session);
+        (pda, bump)
     }
 
     fn store_delegation_record(
@@ -1902,7 +1863,7 @@ mod portal_e2e_tests {
         let (record_pubkey, bump) = find_delegation_record_pda(program_id, delegated_account);
         let record = DelegationRecord {
             discriminator: DelegationRecord::DISCRIMINATOR,
-            owner_program: owner_program.to_bytes(),
+            owner_program: *owner_program,
             grid_id,
             bump,
         };
@@ -1936,7 +1897,7 @@ mod portal_e2e_tests {
             grid_id,
             ttl_slots,
             fee_cap,
-            validator: owner.to_bytes(),
+            validator: owner,
             settlement_interval_slots: 10,
         });
         let data = borsh::to_vec(&ix).unwrap();
@@ -1968,8 +1929,8 @@ mod portal_e2e_tests {
             fee_cap: 123_456,
             created_at: bank.slot(),
             nonce: 1,
-            authority: Pubkey::new_unique().to_bytes(),
-            validator: validator.to_bytes(),
+            authority: Pubkey::new_unique(),
+            validator: *validator,
             settlement_interval_slots,
             last_settled_l1_slot: bank.slot(),
             last_settled_er_slot: 0,
@@ -1997,7 +1958,7 @@ mod portal_e2e_tests {
         let (checkpoint_pda, bump) = find_checkpoint_pda(program_id, session, er_slot);
         let checkpoint = Checkpoint {
             discriminator: Checkpoint::DISCRIMINATOR,
-            session: session.to_bytes(),
+            session: *session,
             er_slot,
             step_count: 1,
             previous_state_root: [0; 32],
@@ -2007,13 +1968,13 @@ mod portal_e2e_tests {
             readonly_l1_root: [0; 32],
             da_commitment: effect_commitment,
             effect_commitment,
-            proposer: proposer.to_bytes(),
+            proposer: *proposer,
             proposed_at_l1_slot: bank.slot(),
             challenge_deadline_l1_slot: bank.slot(),
             status: CheckpointStatus::Committed,
             bond_lamports: 0,
             bond_status: northstar_portal::CheckpointBondStatus::Released,
-            challenger: [0; 32],
+            challenger: Pubkey::default(),
             challenged_at_l1_slot: 0,
             challenge_resolved: false,
             bump,
@@ -2026,11 +1987,11 @@ mod portal_e2e_tests {
         let (cursor_pda, cursor_bump) = find_checkpoint_cursor_pda(program_id, session);
         let cursor = CheckpointCursor {
             discriminator: CheckpointCursor::DISCRIMINATOR,
-            session: session.to_bytes(),
-            latest_finalized_checkpoint: checkpoint_pda.to_bytes(),
+            session: *session,
+            latest_finalized_checkpoint: checkpoint_pda,
             latest_finalized_er_slot: er_slot,
             latest_finalized_state_root: checkpoint.new_state_root,
-            active_checkpoint: checkpoint_pda.to_bytes(),
+            active_checkpoint: checkpoint_pda,
             active_er_slot: er_slot,
             bump: cursor_bump,
         };
@@ -2107,11 +2068,8 @@ mod portal_e2e_tests {
         er_slot: u64,
     ) -> Instruction {
         let (checkpoint_pda, _) = find_checkpoint_pda(&program_id, &session_pda, er_slot);
-        let (challenge, _) = northstar_portal::find_challenge_pda(
-            &program_id.to_bytes(),
-            &checkpoint_pda.to_bytes(),
-        );
-        let (da_proof, _) = northstar_portal::find_da_proof_pda(&program_id.to_bytes(), &challenge);
+        let (challenge, _) = northstar_portal::find_challenge_pda(&program_id, &checkpoint_pda);
+        let (da_proof, _) = northstar_portal::find_da_proof_pda(&program_id, &challenge);
         let ix = PortalInstruction::OpenChallenge(OpenChallenge { er_slot });
         Instruction {
             program_id,
@@ -2119,8 +2077,8 @@ mod portal_e2e_tests {
                 AccountMeta::new(challenger, true),
                 AccountMeta::new_readonly(session_pda, false),
                 AccountMeta::new(checkpoint_pda, false),
-                AccountMeta::new(Pubkey::new_from_array(challenge), false),
-                AccountMeta::new(Pubkey::new_from_array(da_proof), false),
+                AccountMeta::new(challenge, false),
+                AccountMeta::new(da_proof, false),
                 AccountMeta::new_readonly(system_program::id(), false),
             ],
             data: borsh::to_vec(&ix).unwrap(),
@@ -2737,8 +2695,8 @@ mod portal_e2e_tests {
             fee_cap,
             created_at: bank.slot(),
             nonce: 1,
-            authority: Pubkey::new_unique().to_bytes(),
-            validator: manager_account.pubkey().to_bytes(),
+            authority: Pubkey::new_unique(),
+            validator: manager_account.pubkey(),
             settlement_interval_slots: 10,
             last_settled_l1_slot: bank.slot(),
             last_settled_er_slot: 55,
@@ -2825,8 +2783,8 @@ mod portal_e2e_tests {
             fee_cap: 123_456,
             created_at: bank.slot(),
             nonce: 1,
-            authority: Pubkey::new_unique().to_bytes(),
-            validator: manager_account.pubkey().to_bytes(),
+            authority: Pubkey::new_unique(),
+            validator: manager_account.pubkey(),
             settlement_interval_slots: 10,
             last_settled_l1_slot: bank.slot(),
             last_settled_er_slot: 0,
@@ -2969,11 +2927,11 @@ mod portal_e2e_tests {
         let mint = Pubkey::new_unique();
         let bridge_state = northstar_portal::SessionBridge {
             discriminator: northstar_portal::SessionBridge::DISCRIMINATOR,
-            session: session.to_bytes(),
-            mint: mint.to_bytes(),
-            bridge_program: bridge_program.to_bytes(),
-            vault: Pubkey::new_unique().to_bytes(),
-            token_program: Pubkey::new_unique().to_bytes(),
+            session,
+            mint,
+            bridge_program,
+            vault: Pubkey::new_unique(),
+            token_program: Pubkey::new_unique(),
             bump: 255,
         };
         let bridge_data = borsh::to_vec(&bridge_state).unwrap();
@@ -3390,7 +3348,7 @@ mod portal_e2e_tests {
         else {
             panic!("delegation record should deserialize");
         };
-        assert_eq!(record.owner_program, new_owner.to_bytes());
+        assert_eq!(record.owner_program, new_owner);
     }
 
     type CheckpointFlowFixture = (
