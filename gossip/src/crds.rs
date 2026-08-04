@@ -55,7 +55,7 @@ use {
     },
 };
 
-const CRDS_SHARDS_BITS: u32 = 12;
+pub(crate) const CRDS_SHARDS_BITS: u32 = 12;
 // Number of vote slots to track in an lru-cache for metrics.
 const VOTE_SLOTS_METRICS_CAP: usize = 100;
 // Required number of leading zero bits for crds signature to get reported to influx
@@ -513,6 +513,10 @@ impl Crds {
             .find(mask, mask_bits)
             .map(move |i| self.table.index(i))
             .filter(move |VersionedCrdsValue { value, .. }| !value.data().is_deprecated())
+    }
+
+    pub(crate) fn filter_bitmask_scan_count(&self, mask: u64, mask_bits: u32) -> usize {
+        self.shards.find_count(mask, mask_bits)
     }
 
     /// Update the timestamp's of all the labels that are associated with Pubkey

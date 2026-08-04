@@ -100,23 +100,22 @@ fn submit_settlement_transactions(
         return Ok(());
     }
 
-    let mut packet_batches = to_packet_batches(transactions, NUM_PACKETS);
-    for packet_batch in packet_batches.iter_mut() {
+    for mut packet_batch in to_packet_batches(transactions, NUM_PACKETS) {
         for mut packet in packet_batch.iter_mut() {
             packet.meta_mut().flags |= PacketFlags::FROM_STAKED_NODE;
         }
-    }
-    let batch = BankingPacketBatch::new(packet_batches);
-    sender
-        .send(batch.clone())
-        .map_err(SettlementSubmitError::Local)?;
+        let batch = BankingPacketBatch::new(packet_batch);
+        sender
+            .send(batch.clone())
+            .map_err(SettlementSubmitError::Local)?;
 
-    if let Some(forward_sender) = forward_sender {
-        match forward_sender.try_send((batch, false)) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => return Err(SettlementSubmitError::ForwardFull),
-            Err(TrySendError::Disconnected(_)) => {
-                return Err(SettlementSubmitError::ForwardDisconnected);
+        if let Some(forward_sender) = forward_sender {
+            match forward_sender.try_send((batch, false)) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => return Err(SettlementSubmitError::ForwardFull),
+                Err(TrySendError::Disconnected(_)) => {
+                    return Err(SettlementSubmitError::ForwardDisconnected);
+                }
             }
         }
     }
@@ -869,7 +868,7 @@ mod tests {
             .unwrap();
         sender
             .send((
-                BankNotification::OptimisticallyConfirmed(bank2.slot()),
+                BankNotification::OptimisticallyConfirmed(bank2.slot(), bank2.hash()),
                 None,
             ))
             .unwrap();
@@ -887,15 +886,13 @@ mod tests {
     }
 
     fn packet_count(batch: &BankingPacketBatch) -> usize {
-        batch.iter().map(|packets| packets.len()).sum()
+        batch.len()
     }
 
     fn all_packets_marked_from_staked_node(batch: &BankingPacketBatch) -> bool {
-        batch.iter().all(|packets| {
-            packets
-                .iter()
-                .all(|packet| packet.meta().flags.contains(PacketFlags::FROM_STAKED_NODE))
-        })
+        batch
+            .iter()
+            .all(|packet| packet.meta().flags.contains(PacketFlags::FROM_STAKED_NODE))
     }
 
     #[test]
@@ -1724,10 +1721,11 @@ mod tests {
         let delegated_account_keypair = Keypair::new();
         let delegated_account = delegated_account_keypair.pubkey();
         let delegate_buffer = Pubkey::new_unique();
-        let delegated_portal_account = AccountSharedData::new(1_000_000, 0, &program_id);
+        let delegated_owner_account =
+            AccountSharedData::new(1_000_000, 0, &delegated_owner_program);
         let delegate_buffer_account =
             AccountSharedData::new(1_000_000, 0, &delegated_owner_program);
-        root_bank.store_account(&delegated_account, &delegated_portal_account);
+        root_bank.store_account(&delegated_account, &delegated_owner_account);
         root_bank.store_account(&delegate_buffer, &delegate_buffer_account);
 
         let grid_id = 7u64;
@@ -1814,6 +1812,11 @@ mod tests {
             bank_for_open.clone(),
             SlotLeader::new_unique(),
             bank_for_open.slot() + 1,
+        );
+        // Owner programs transfer ownership immediately before the Portal CPI.
+        delegate_bank.store_account(
+            &delegated_account,
+            &AccountSharedData::new(1_000_000, 0, &program_id),
         );
         let delegate_ix = build_delegate_ix(
             program_id,

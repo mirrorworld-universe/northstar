@@ -69,9 +69,9 @@ All changes should be stress-tested with relevant test cases, if relevant test c
 are not present, then write them.
 
 All changes should be benchmarked and evidence posted to the PR.
-Microbenchmark results along with relevant integration benchmarks (e.g.
-bench-tps, validator timings or profiles). Any code that adds complexity should
-be justified by a commensurate improvement in speed.
+Microbenchmark results along with mainnet/testnet validator timings or profiles,
+and relevant integration benchmarks. Any code that adds complexity
+should be justified by a comisurate improvement in speed.
 
 All changes should be reviewed by subject matter experts.
 
@@ -351,3 +351,12 @@ place, it adds up over time. Thus, if your code can be expected to run often:
 Inventing new terms is allowed, but should only be done when the term is widely
 used and understood. Avoid introducing new 3-letter terms, which can be
 confused with 3-letter acronyms.
+
+[Terms currently in use](https://solana.com/docs/terminology)
+
+
+## Design Proposals
+
+Design proposals are now tracked as Solana Improvement Documents (SIMDs) in the
+[solana-foundation/solana-improvement-documents](https://github.com/solana-foundation/solana-improvement-documents)
+repository.

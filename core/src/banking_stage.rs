@@ -19,12 +19,11 @@ use {
         validator::BlockProductionMethod,
     },
     agave_banking_stage_ingress_types::{BankingPacketReceiver, SchedulerPriorityFloor},
-    crossbeam_channel::{Receiver, Sender, unbounded},
+    crossbeam_channel::{Receiver, Sender, bounded},
     futures::{StreamExt, stream::FuturesUnordered},
     histogram::Histogram,
     solana_gossip::{cluster_info::ClusterInfo, contact_info::ContactInfoQuery},
-    solana_ledger::blockstore_processor::TransactionStatusSender,
-    solana_perf::packet::PACKETS_PER_BATCH,
+    solana_perf::packet::{PACKETS_PER_BATCH, PacketRef, bytes::Bytes},
     solana_poh::{
         poh_controller::PohController, poh_recorder::PohRecorder,
         transaction_recorder::TransactionRecorder,
@@ -32,7 +31,7 @@ use {
     solana_pubkey::Pubkey,
     solana_runtime::{
         bank::Bank, bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
-        vote_sender_types::ReplayVoteSender,
+        transaction_execution::TransactionStatusSender, vote_sender_types::ReplayVoteSender,
     },
     solana_time_utils::AtomicInterval,
     solana_unified_scheduler_logic::SchedulingMode,
@@ -65,7 +64,6 @@ mod decision_maker;
 mod latest_validator_vote_packet;
 mod leader_slot_metrics;
 mod leader_slot_timing_metrics;
-mod qos_service;
 mod scheduler_messages;
 mod vote_packet_receiver;
 mod vote_storage;
@@ -84,6 +82,13 @@ const DEFAULT_NUM_WORKERS: NonZeroUsize = NonZeroUsize::new(4).unwrap();
 
 const TOTAL_BUFFERED_PACKETS: usize = 100_000;
 const SLOT_BOUNDARY_CHECK_PERIOD: Duration = Duration::from_millis(10);
+
+fn packet_bytes(packet: PacketRef<'_>, packet_data: &[u8]) -> Bytes {
+    match packet {
+        PacketRef::Bytes(packet) => packet.buffer().clone(),
+        PacketRef::Packet(_) => Bytes::copy_from_slice(packet_data),
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct BankingStageStats {
@@ -518,9 +523,12 @@ impl BankingStage {
         threads.push(self.spawn_vote_worker());
 
         // Create channels for communication between scheduler and workers
+        const CHANNEL_CAPACITY: usize = 10_000; // unlikely we'll ever hit this given default configuration.
+
         let (work_senders, work_receivers): (Vec<Sender<_>>, Vec<Receiver<_>>) =
-            (0..num_workers).map(|_| unbounded()).unzip();
-        let (finished_work_sender, finished_work_receiver) = unbounded();
+            (0..num_workers).map(|_| bounded(CHANNEL_CAPACITY)).unzip();
+        let (finished_work_sender, finished_work_receiver) =
+            bounded(num_workers.saturating_mul(CHANNEL_CAPACITY));
 
         // Spawn the worker threads
         let decision_maker = DecisionMaker::from(self.poh_recorder.read().unwrap().deref());
@@ -829,8 +837,10 @@ mod tests {
             banking_trace::{BankingTracer, Channels},
             validator::SchedulerPacing,
         },
-        agave_banking_stage_ingress_types::BankingPacketBatch,
-        crossbeam_channel::unbounded,
+        agave_banking_stage_ingress_types::{
+            to_banking_packet_batch, to_single_banking_packet_batch,
+        },
+        crossbeam_channel::bounded,
         itertools::Itertools,
         solana_entry::{
             entry::{self, EntrySlice},
@@ -845,7 +855,6 @@ mod tests {
             },
             get_tmp_ledger_path_auto_delete,
         },
-        solana_perf::packet::to_packet_batches,
         solana_poh::{
             poh_recorder::{PohRecorderError, create_test_recorder},
             record_channels::record_channels,
@@ -896,7 +905,7 @@ mod tests {
             poh_service,
             _entry_receiever,
         ) = create_test_recorder(bank, blockstore, None, None);
-        let (replay_vote_sender, _replay_vote_receiver) = unbounded();
+        let (replay_vote_sender, _replay_vote_receiver) = bounded(1024);
 
         let banking_stage = BankingStage::new_num_threads(
             BlockProductionMethod::CentralSchedulerGreedy,
@@ -958,7 +967,7 @@ mod tests {
             poh_service,
             entry_receiver,
         ) = create_test_recorder(bank, blockstore, None, None);
-        let (replay_vote_sender, _replay_vote_receiver) = unbounded();
+        let (replay_vote_sender, _replay_vote_receiver) = bounded(1024);
 
         let banking_stage = BankingStage::new_num_threads(
             BlockProductionMethod::CentralSchedulerGreedy,
@@ -995,18 +1004,18 @@ mod tests {
         let tx_anf = system_transaction::transfer(&keypair, &to3, 1, start_hash);
 
         // send 'em over
-        let mut packet_batches = to_packet_batches(&[tx_no_ver, tx_anf, tx], 3);
-        packet_batches[0]
+        let mut packet_batch = to_banking_packet_batch(&[tx_no_ver, tx_anf, tx]);
+        Arc::make_mut(&mut packet_batch)
             .first_mut()
             .unwrap()
             .meta_mut()
             .set_discard(true); // set discard on `tx_no_ver`
 
         // glad they all fit
-        assert_eq!(packet_batches.len(), 1);
+        assert_eq!(packet_batch.len(), 3);
 
         non_vote_sender // no_ver, anf, tx
-            .send(BankingPacketBatch::new(packet_batches))
+            .send(packet_batch)
             .unwrap();
 
         // capture the entry receiver until we've received all our entries.
@@ -1085,18 +1094,14 @@ mod tests {
         let tx =
             system_transaction::transfer(&mint_keypair, &alice.pubkey(), 2, genesis_config.hash());
 
-        let packet_batches = to_packet_batches(&[tx], 1);
-        non_vote_sender
-            .send(BankingPacketBatch::new(packet_batches))
-            .unwrap();
+        let packet_batches = to_single_banking_packet_batch(&tx);
+        non_vote_sender.send(packet_batches).unwrap();
 
         // Process a second batch that uses the same from account, so conflicts with above TX
         let tx =
             system_transaction::transfer(&mint_keypair, &alice.pubkey(), 1, genesis_config.hash());
-        let packet_batches = to_packet_batches(&[tx], 1);
-        non_vote_sender
-            .send(BankingPacketBatch::new(packet_batches))
-            .unwrap();
+        let packet_batches = to_single_banking_packet_batch(&tx);
+        non_vote_sender.send(packet_batches).unwrap();
 
         let ledger_path = get_tmp_ledger_path_auto_delete!();
         let blockstore = Arc::new(
@@ -1104,7 +1109,7 @@ mod tests {
                 .expect("Expected to be able to open database ledger"),
         );
 
-        let (replay_vote_sender, _replay_vote_receiver) = unbounded();
+        let (replay_vote_sender, _replay_vote_receiver) = bounded(1024);
         let entry_receiver = {
             // start a banking_stage to eat verified receiver
             let (bank, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
@@ -1202,8 +1207,8 @@ mod tests {
         let summary = recorder.record_transactions(bank.bank_id(), txs.clone());
         assert!(summary.result.is_ok());
         assert_eq!(
-            record_receiver.try_recv().unwrap().transaction_batches,
-            vec![txs.clone()]
+            record_receiver.try_recv().unwrap().transactions,
+            txs.clone()
         );
         assert!(record_receiver.try_recv().is_err());
 
@@ -1269,7 +1274,7 @@ mod tests {
             poh_service,
             _entry_receiver,
         ) = create_test_recorder(bank.clone(), blockstore, None, None);
-        let (replay_vote_sender, _replay_vote_receiver) = unbounded();
+        let (replay_vote_sender, _replay_vote_receiver) = bounded(1024);
 
         let banking_stage = BankingStage::new_num_threads(
             BlockProductionMethod::CentralSchedulerGreedy,
@@ -1340,9 +1345,9 @@ mod tests {
             })
             .collect_vec();
 
-        let non_vote_packet_batches = to_packet_batches(&txs, 10);
-        let tpu_packet_batches = to_packet_batches(&tpu_votes, 10);
-        let gossip_packet_batches = to_packet_batches(&gossip_votes, 10);
+        let non_vote_packet_batches = to_banking_packet_batch(&txs);
+        let tpu_packet_batches = to_banking_packet_batch(&tpu_votes);
+        let gossip_packet_batches = to_banking_packet_batch(&gossip_votes);
 
         // Send em all
         [
@@ -1353,11 +1358,7 @@ mod tests {
         .into_iter()
         .map(|(packet_batches, sender)| {
             Builder::new()
-                .spawn(move || {
-                    sender
-                        .send(BankingPacketBatch::new(packet_batches))
-                        .unwrap()
-                })
+                .spawn(move || sender.send(packet_batches).unwrap())
                 .unwrap()
         })
         .for_each(|handle| {

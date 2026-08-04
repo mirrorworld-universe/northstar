@@ -44,7 +44,6 @@ pub(crate) struct NewBankTimings {
     pub(crate) cache_preparation_time_us: u64,
     pub(crate) update_sysvars_time_us: u64,
     pub(crate) fill_sysvar_cache_time_us: u64,
-    pub(crate) populate_cache_for_accounts_lt_hash_us: u64,
 }
 
 pub(crate) struct PrepareBlockExecutionStats {
@@ -53,8 +52,6 @@ pub(crate) struct PrepareBlockExecutionStats {
     pub(crate) cache_preparation_time_us: u64,
     pub(crate) update_sysvars_time_us: u64,
     pub(crate) fill_sysvar_cache_time_us: u64,
-    pub(crate) num_accounts_modified_this_slot: usize,
-    pub(crate) populate_cache_for_accounts_lt_hash_us: u64,
 }
 
 pub(crate) fn report_new_epoch_metrics(
@@ -122,7 +119,6 @@ pub(crate) fn report_new_bank_metrics(
     slot: Slot,
     parent_slot: Slot,
     block_height: u64,
-    num_accounts_modified_this_slot: usize,
     timings: NewBankTimings,
 ) {
     datapoint_info!(
@@ -172,16 +168,6 @@ pub(crate) fn report_new_bank_metrics(
             timings.fill_sysvar_cache_time_us,
             i64
         ),
-        (
-            "num_accounts_modified_this_slot",
-            num_accounts_modified_this_slot,
-            i64
-        ),
-        (
-            "populate_cache_for_accounts_lt_hash_us",
-            timings.populate_cache_for_accounts_lt_hash_us,
-            i64
-        ),
     );
 }
 
@@ -195,6 +181,8 @@ pub(crate) struct RewardsStoreMetrics {
     pub(crate) total_stake_accounts_count: usize,
     pub(crate) distributed_rewards: u64,
     pub(crate) burned_rewards: u64,
+    pub(crate) distributed_block_rewards: u64,
+    pub(crate) burned_block_rewards: u64,
     pub(crate) pre_capitalization: u64,
     pub(crate) post_capitalization: u64,
 }
@@ -225,6 +213,12 @@ pub(crate) fn report_partitioned_reward_metrics(bank: &Bank, timings: RewardsSto
         ),
         ("distributed_rewards", timings.distributed_rewards, i64),
         ("burned_rewards", timings.burned_rewards, i64),
+        (
+            "distributed_block_rewards",
+            timings.distributed_block_rewards,
+            i64
+        ),
+        ("burned_block_rewards", timings.burned_block_rewards, i64),
         ("pre_capitalization", timings.pre_capitalization, i64),
         ("post_capitalization", timings.post_capitalization, i64),
     );

@@ -25,10 +25,7 @@ use {
         bank::Bank, bank_forks::BankForks, leader_schedule_utils::leader_slot_index,
         vote_sender_types::ReplayVoteSender,
     },
-    std::{
-        collections::BTreeSet,
-        sync::{Arc, RwLock},
-    },
+    std::sync::{Arc, RwLock},
 };
 
 /// Replay-start decision for a child bank discovered from blockstore metadata.
@@ -113,7 +110,7 @@ fn try_restart_slot_from_update_parent(
     migration_status: &MigrationStatus,
     source: &str,
 ) -> bool {
-    if !migration_status.should_allow_fast_leader_handover(slot) {
+    if !migration_status.should_allow_block_markers(slot) {
         return false;
     }
     if blockstore.is_dead(slot) {
@@ -135,10 +132,10 @@ fn try_restart_slot_from_update_parent(
     if bank.is_none() && !progress.contains_key(&slot) {
         return false;
     }
-    if bank
-        .as_ref()
-        .is_some_and(|bank| ReplayStage::leader_is_me(bank.leader_id(), my_pubkey))
-    {
+    if bank.as_ref().is_some_and(|bank| {
+        ReplayStage::leader_is_me(bank.leader_id(), my_pubkey)
+            || !bank.feature_set.snapshot().alpenglow_fast_leader_handover
+    }) {
         return false;
     }
     if progress.get(&slot).is_some_and(|progress| {
@@ -169,12 +166,7 @@ fn try_restart_slot_from_update_parent(
     if let Some(bank) = bank {
         send_invalid_bank(&bank, replay_vote_sender);
     }
-    ReplayStage::clear_banks(
-        &BTreeSet::from([slot]),
-        bank_forks,
-        progress,
-        async_verification_freelist,
-    );
+    ReplayStage::clear_slots([slot], bank_forks, progress, async_verification_freelist);
     true
 }
 
@@ -344,9 +336,7 @@ pub(super) fn handle_abandoned_bank(
                 .is_some()
             });
     if !update_parent_ready {
-        let root = bank_forks.read().unwrap().root();
         let mut dead_slot_context = process_active_banks_context.dead_slot_context(
-            root,
             duplicate_slots_to_repair,
             purge_repair_slot_counter,
             tbft_structs,
@@ -365,8 +355,8 @@ pub(super) fn handle_abandoned_bank(
 
     // Clear the bank from bank_forks. It will be recreated with the correct
     // parent by generate_new_bank_forks on the next iteration.
-    ReplayStage::clear_banks(
-        &BTreeSet::from([bank_slot]),
+    ReplayStage::clear_slots(
+        [bank_slot],
         bank_forks,
         progress,
         async_verification_freelist,

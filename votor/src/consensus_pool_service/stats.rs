@@ -17,7 +17,11 @@ pub(super) struct ConsensusPoolServiceStats {
     pub(super) new_finalized_slot: Saturating<usize>,
     pub(super) parent_ready_missed_window: Saturating<usize>,
     pub(super) parent_ready_produce_window: Saturating<usize>,
-    pub(super) received_votes: Saturating<usize>,
+    pub(super) received_vote_aggregates: Saturating<usize>,
+    pub(super) received_own_messages: Saturating<usize>,
+    pub(super) received_consensus_message_batches: Saturating<usize>,
+    pub(super) own_message_receive_limit_reached: Saturating<usize>,
+    pub(super) consensus_message_batch_receive_limit_reached: Saturating<usize>,
     pub(super) received_certificates: Saturating<usize>,
     pub(super) standstill: bool,
     pub(super) prune_old_state_called: Saturating<usize>,
@@ -36,7 +40,11 @@ impl ConsensusPoolServiceStats {
             new_finalized_slot: Saturating(0),
             parent_ready_missed_window: Saturating(0),
             parent_ready_produce_window: Saturating(0),
-            received_votes: Saturating(0),
+            received_vote_aggregates: Saturating(0),
+            received_own_messages: Saturating(0),
+            received_consensus_message_batches: Saturating(0),
+            own_message_receive_limit_reached: Saturating(0),
+            consensus_message_batch_receive_limit_reached: Saturating(0),
             received_certificates: Saturating(0),
             standstill: false,
             prune_old_state_called: Saturating(0),
@@ -46,7 +54,7 @@ impl ConsensusPoolServiceStats {
         }
     }
 
-    fn report(&self) {
+    pub(super) fn do_report(&self) {
         let &Self {
             add_message_failed: Saturating(add_message_failed),
             certificates_sent: Saturating(certificates_sent),
@@ -55,7 +63,12 @@ impl ConsensusPoolServiceStats {
             new_finalized_slot: Saturating(new_finalized_slot),
             parent_ready_missed_window: Saturating(parent_ready_missed_window),
             parent_ready_produce_window: Saturating(parent_ready_produce_window),
-            received_votes: Saturating(received_votes),
+            received_vote_aggregates: Saturating(received_vote_aggregates),
+            received_own_messages: Saturating(received_own_messages),
+            received_consensus_message_batches: Saturating(received_consensus_message_batches),
+            own_message_receive_limit_reached: Saturating(own_message_receive_limit_reached),
+            consensus_message_batch_receive_limit_reached:
+                Saturating(consensus_message_batch_receive_limit_reached),
             received_certificates: Saturating(received_certificates),
             standstill,
             prune_old_state_called: Saturating(prune_old_state_called),
@@ -84,7 +97,23 @@ impl ConsensusPoolServiceStats {
                 parent_ready_produce_window,
                 i64
             ),
-            ("received_votes", received_votes, i64),
+            ("received_vote_aggregates", received_vote_aggregates, i64),
+            ("received_own_messages", received_own_messages, i64),
+            (
+                "received_consensus_message_batches",
+                received_consensus_message_batches,
+                i64
+            ),
+            (
+                "own_message_receive_limit_reached",
+                own_message_receive_limit_reached,
+                i64
+            ),
+            (
+                "consensus_message_batch_receive_limit_reached",
+                consensus_message_batch_receive_limit_reached,
+                i64
+            ),
             ("received_certificates", received_certificates, i64),
             ("in_standstill_bool", standstill, bool),
             ("prune_old_state_called", prune_old_state_called, i64),
@@ -103,7 +132,7 @@ impl ConsensusPoolServiceStats {
 
     pub(super) fn maybe_report(&mut self) {
         if self.last_request_time.elapsed() >= STATS_REPORT_INTERVAL {
-            self.report();
+            self.do_report();
             *self = Self::new();
         }
     }

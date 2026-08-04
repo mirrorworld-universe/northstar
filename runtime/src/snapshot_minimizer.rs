@@ -10,7 +10,7 @@ use {
         iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator},
         prelude::ParallelSlice,
     },
-    solana_account::{ReadableAccount, state_traits::StateMut},
+    solana_account::ReadableAccount,
     solana_accounts_db::{
         account_storage_entry::AccountStorageEntry,
         accounts_db::{AccountsDb, GetUniqueAccountsResult, UpdateIndexThreadSelection},
@@ -176,7 +176,7 @@ impl<'a> SnapshotMinimizer<'a> {
             .filter_map(|account| {
                 if let Ok(UpgradeableLoaderState::Program {
                     programdata_address,
-                }) = account.state()
+                }) = bincode::deserialize(account.data())
                 {
                     Some(programdata_address)
                 } else {
@@ -579,6 +579,56 @@ mod tests {
             account_count,
             minimizer.minimized_account_set.len() + num_accounts_per_slot
         ); // snapshot slot is untouched, so still has all 300 accounts
+    }
+
+    /// Purging an account from a filtered storage must decrement its ref count when the
+    /// account is still alive in a later slot.
+    #[test]
+    fn test_minimize_accounts_db_unrefs_multi_ref_accounts() {
+        let (genesis_config, _) = create_genesis_config(1_000_000);
+        let bank = Arc::new(Bank::new_for_tests(&genesis_config));
+        let accounts = &bank.accounts().accounts_db;
+
+        let pubkey_keep = Pubkey::new_unique();
+        let pubkey_multi = Pubkey::new_unique();
+        let account = AccountSharedData::new(223, 0, &Pubkey::default());
+
+        // pubkey_multi is stored in both slot 1 and slot 2; pubkey_keep keeps slot 1's
+        // storage out of the dead slot set
+        accounts.store_for_tests((
+            1,
+            [(&pubkey_keep, &account), (&pubkey_multi, &account)].as_slice(),
+        ));
+        accounts.add_root(1);
+        accounts.store_for_tests((2, [(&pubkey_multi, &account)].as_slice()));
+        accounts.add_root(2);
+        // Flush without clean so pubkey_multi keeps both slot list entries
+        accounts.flush_rooted_accounts_cache_without_clean();
+
+        assert_eq!(
+            accounts
+                .accounts_index
+                .ref_count_from_storage(&pubkey_multi),
+            2
+        );
+
+        let minimized_account_set = DashSet::new();
+        minimized_account_set.insert(pubkey_keep);
+        let minimizer = SnapshotMinimizer {
+            bank: &bank,
+            starting_slot: 2,
+            minimized_account_set,
+        };
+        minimizer.minimize_accounts_db();
+
+        // filter_storage purged (pubkey_multi, slot 1) from the index, decrementing its
+        // ref count; the other entry keeps it alive
+        assert_eq!(
+            accounts
+                .accounts_index
+                .ref_count_from_storage(&pubkey_multi),
+            1
+        );
     }
 
     /// Ensure that minimized snapshots are loadable with and without

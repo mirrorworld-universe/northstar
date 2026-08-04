@@ -3,13 +3,12 @@
 /// Spawns a QUIC server using `solana-streamer`, receives PacketBatches,
 /// deserialises transactions, and feeds them into `EphemeralTransactionClient`.
 use {
-    crate::ephemeral_tx_client::EphemeralTransactionClient,
+    crate::ephemeral_tx_client::{EphemeralTransactionClient, TransactionClient},
     crossbeam_channel::{unbounded, Receiver},
     log::{debug, info, warn},
     solana_keypair::Keypair,
     solana_perf::packet::PacketBatch,
     solana_send_transaction_service::send_transaction_service_stats::SendTransactionServiceStats,
-    solana_send_transaction_service::transaction_client::TransactionClient,
     solana_streamer::{
         nonblocking::simple_qos::SimpleQosConfig,
         quic::{spawn_simple_qos_server, QuicStreamerConfig, SpawnServerResult},

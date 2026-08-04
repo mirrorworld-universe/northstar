@@ -8,7 +8,6 @@ use {
     solana_clock::Slot,
     solana_keypair::Keypair,
     solana_leader_schedule::SlotLeader,
-    solana_ledger::transaction_balances::compile_collected_balances,
     solana_message::{v0::LoadedAddresses, AddressLoader, VersionedMessage},
     solana_pubkey::Pubkey,
     solana_rpc::{er_history::ErHistoryStore, rpc_subscriptions::RpcSubscriptions},
@@ -16,12 +15,10 @@ use {
         bank::Bank,
         bank_forks::BankForks,
         commitment::{BlockCommitmentCache, CommitmentSlots},
+        transaction_balances::compile_collected_balances,
     },
     solana_sdk_ids::{bpf_loader, bpf_loader_upgradeable, system_program, sysvar},
-    solana_send_transaction_service::{
-        send_transaction_service_stats::SendTransactionServiceStats,
-        transaction_client::TransactionClient,
-    },
+    solana_send_transaction_service::send_transaction_service_stats::SendTransactionServiceStats,
     solana_svm::{
         transaction_balances::BalanceCollector, transaction_commit_result::TransactionCommitResult,
         transaction_processor::ExecutionRecordingConfig,
@@ -41,6 +38,15 @@ use {
         },
     },
 };
+
+/// Sonic: Local ER batch interface retained after upstream specialized its sender to TPU.
+pub(crate) trait TransactionClient {
+    fn send_transactions_in_batch(
+        &self,
+        wire_transactions: Vec<Vec<u8>>,
+        stats: &SendTransactionServiceStats,
+    );
+}
 
 pub struct EphemeralTransactionClient {
     bank_forks: Arc<RwLock<BankForks>>,
@@ -422,14 +428,15 @@ impl EphemeralTransactionClient {
         let static_keys = message.static_account_keys();
 
         for (i, key) in static_keys.iter().enumerate() {
-            if message.is_maybe_writable(i, None)
-                && !Self::is_allowed_writable_on_bank(
-                    bank,
-                    key,
-                    delegated_accounts,
-                    touched_accounts,
-                )
-            {
+            if message.is_maybe_writable_with_reserved_addresses(
+                i,
+                Some(bank.get_reserved_account_keys()),
+            ) && !Self::is_allowed_writable_on_bank(
+                bank,
+                key,
+                delegated_accounts,
+                touched_accounts,
+            ) {
                 return false;
             }
         }
@@ -1302,7 +1309,10 @@ impl EphemeralTransactionClient {
             let static_keys = message.static_account_keys();
 
             for (i, key) in static_keys.iter().enumerate() {
-                if !message.is_maybe_writable(i, None) {
+                if !message.is_maybe_writable_with_reserved_addresses(
+                    i,
+                    Some(bank.get_reserved_account_keys()),
+                ) {
                     continue;
                 }
 
@@ -1359,7 +1369,14 @@ impl EphemeralTransactionClient {
                     .static_account_keys()
                     .iter()
                     .enumerate()
-                    .filter_map(|(i, key)| tx.message.is_maybe_writable(i, None).then_some(*key))
+                    .filter_map(|(i, key)| {
+                        tx.message
+                            .is_maybe_writable_with_reserved_addresses(
+                                i,
+                                Some(bank.get_reserved_account_keys()),
+                            )
+                            .then_some(*key)
+                    })
                     .chain(
                         Self::load_transaction_addresses(bank, tx)
                             .map(|loaded_addresses| loaded_addresses.writable)
@@ -1382,7 +1399,10 @@ impl EphemeralTransactionClient {
             let static_keys = message.static_account_keys();
 
             for (i, key) in static_keys.iter().enumerate() {
-                if message.is_maybe_writable(i, None) {
+                if message.is_maybe_writable_with_reserved_addresses(
+                    i,
+                    Some(bank.get_reserved_account_keys()),
+                ) {
                     touched_write.insert(*key);
                 }
             }

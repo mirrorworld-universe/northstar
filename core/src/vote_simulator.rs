@@ -17,7 +17,7 @@ use {
         replay_stage::{HeaviestForkFailures, ReplayStage, TowerBFTStructures},
         unfrozen_gossip_verified_vote_hashes::UnfrozenGossipVerifiedVoteHashes,
     },
-    crossbeam_channel::unbounded,
+    crossbeam_channel::bounded,
     solana_clock::Slot,
     solana_epoch_schedule::EpochSchedule,
     solana_hash::Hash,
@@ -240,15 +240,16 @@ impl VoteSimulator {
 
         let new_root = tower.record_bank_vote(&vote_bank);
         if let Some(new_root) = new_root {
-            self.set_root(new_root);
+            self.set_root(my_pubkey, new_root);
         }
 
         vec![]
     }
 
-    pub fn set_root(&mut self, new_root: Slot) {
-        let (drop_bank_sender, _drop_bank_receiver) = unbounded();
+    pub fn set_root(&mut self, my_pubkey: &Pubkey, new_root: Slot) {
+        let (drop_bank_sender, _drop_bank_receiver) = bounded(1024);
         ReplayStage::handle_new_root(
+            my_pubkey,
             new_root,
             &self.bank_forks,
             &mut self.progress,

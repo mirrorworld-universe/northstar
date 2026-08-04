@@ -14,7 +14,9 @@ use {
         spend_utils::{SpendAmount, resolve_spend_tx_and_check_account_balances},
         stake::check_current_authority,
     },
-    agave_feature_set::{bls_pubkey_management_in_vote_account, vote_account_initialize_v2},
+    agave_feature_set::{
+        alpenglow, bls_pubkey_management_in_vote_account, vote_account_initialize_v2,
+    },
     agave_votor_messages::consensus_message::BLS_KEYPAIR_DERIVE_SEED,
     clap::{App, Arg, ArgMatches, SubCommand, value_t_or_exit},
     solana_account::Account,
@@ -1112,17 +1114,14 @@ pub async fn process_create_vote_account(
         if let Ok(response) = rpc_client
             .get_account_with_commitment(&vote_account_address, config.commitment)
             .await
+            && let Some(vote_account) = response.value
         {
-            if let Some(vote_account) = response.value {
-                let err_msg = if vote_account.owner == solana_vote_program::id() {
-                    format!("Vote account {vote_account_address} already exists")
-                } else {
-                    format!(
-                        "Account {vote_account_address} already exists and is not a vote account"
-                    )
-                };
-                return Err(CliError::BadParameter(err_msg).into());
-            }
+            let err_msg = if vote_account.owner == solana_vote_program::id() {
+                format!("Vote account {vote_account_address} already exists")
+            } else {
+                format!("Account {vote_account_address} already exists and is not a vote account")
+            };
+            return Err(CliError::BadParameter(err_msg).into());
         }
 
         if let Some(nonce_account) = &nonce_account {
@@ -1239,14 +1238,14 @@ pub async fn process_vote_authorize(
                     &[current_authorized_voter, vote_state.authorized_withdrawer],
                     &authorized.pubkey(),
                 )?;
-                if let Some(signer) = new_authorized_signer {
-                    if signer.is_interactive() {
-                        return Err(CliError::BadParameter(format!(
-                            "invalid new authorized vote signer {new_authorized_pubkey:?}. \
-                             Interactive vote signers not supported"
-                        ))
-                        .into());
-                    }
+                if let Some(signer) = new_authorized_signer
+                    && signer.is_interactive()
+                {
+                    return Err(CliError::BadParameter(format!(
+                        "invalid new authorized vote signer {new_authorized_pubkey:?}. \
+                         Interactive vote signers not supported"
+                    ))
+                    .into());
                 }
             }
         }
@@ -1616,7 +1615,14 @@ pub async fn process_show_vote_account(
         .and_then(|feature| feature.activated_at);
     let tvc_activation_epoch = tvc_activation_slot.map(|s| epoch_schedule.get_epoch(s));
 
-    let ag_genesis_cert = rpc_client.get_ag_genesis_cert().await?;
+    let ag_is_active = get_feature_is_active(rpc_client, &alpenglow::id())
+        .await
+        .unwrap_or(false);
+    let ag_genesis_cert = if ag_is_active {
+        rpc_client.get_ag_genesis_cert().await?
+    } else {
+        None
+    };
     let votes_observed = VotesObserved::new(&vote_state, &ag_genesis_cert);
     let epoch_voting_history = get_epoch_history(
         &epoch_schedule,
@@ -1822,13 +1828,12 @@ pub async fn process_close_vote_account(
         .into_iter()
         .chain(vote_account_status.delinquent)
         .next()
+        && vote_account.activated_stake != 0
     {
-        if vote_account.activated_stake != 0 {
-            return Err(format!(
-                "Cannot close a vote account with active stake: {vote_account_pubkey}"
-            )
-            .into());
-        }
+        return Err(format!(
+            "Cannot close a vote account with active stake: {vote_account_pubkey}"
+        )
+        .into());
     }
 
     let latest_blockhash = rpc_client.get_latest_blockhash().await?;

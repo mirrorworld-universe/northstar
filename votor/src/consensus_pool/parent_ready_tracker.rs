@@ -111,7 +111,9 @@ impl ParentReadyTracker {
         }
     }
 
-    /// Adds a new notarize fallback certificate, we can use Notarize/NotarizeFallback/FastFinalize
+    /// Adds a new notarize fallback certificate from observing a  Notarize/NotarizeFallback/FastFinalize cert
+    ///
+    /// Ignore certificates <= our current root
     pub(super) fn add_new_notar_fallback_or_stronger(
         &mut self,
         block: Block,
@@ -121,6 +123,17 @@ impl ParentReadyTracker {
             return;
         }
 
+        self.add_notar_fallback_or_stronger(block, events);
+    }
+
+    /// Adds a notarize fallback certificate for the genesis block.
+    ///
+    /// The genesis block can be the current root.
+    pub(super) fn add_genesis(&mut self, block: Block, events: &mut Vec<VotorEvent>) {
+        self.add_notar_fallback_or_stronger(block, events);
+    }
+
+    fn add_notar_fallback_or_stronger(&mut self, block: Block, events: &mut Vec<VotorEvent>) {
         let status = self.slot_statuses.entry(block.slot).or_default();
         if status.notar_fallbacks.contains(&block) {
             return;
@@ -247,7 +260,6 @@ impl ParentReadyTracker {
             .and_then(|ss| ss.parents_ready.iter().min().copied())
         {
             Some(parent) => BlockProductionParent::Parent(parent),
-            // TODO: this will be plugged in for optimistic block production
             None => BlockProductionParent::ParentNotReady,
         }
     }
@@ -301,6 +313,26 @@ mod tests {
             tracker.add_new_notar_fallback_or_stronger(block, &mut events);
             assert_eq!(tracker.highest_parent_ready(), i + 1);
             assert!(tracker.parent_ready(i + 1, block));
+        }
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "assertion failed: status.notar_fallbacks.len() <= MAX_NOTAR_FALLBACK_BLOCKS"
+    )]
+    fn test_too_many_notar_fallback_blocks() {
+        let cluster_info = get_cluster_info(Keypair::new());
+        let mut tracker = new_tracker(cluster_info, Block::default());
+        let mut events = vec![];
+
+        for _ in 0..=MAX_NOTAR_FALLBACK_BLOCKS {
+            tracker.add_new_notar_fallback_or_stronger(
+                Block {
+                    slot: 1,
+                    block_id: Hash::new_unique(),
+                },
+                &mut events,
+            );
         }
     }
 
@@ -381,6 +413,40 @@ mod tests {
         assert!(tracker.parent_ready(root_slot + 3, root_block));
         assert!(tracker.parent_ready(root_slot + 5, block));
         assert_eq!(tracker.highest_parent_ready(), root_slot + 5);
+    }
+
+    #[test]
+    fn root_notar_fallback_seeds_parent_ready() {
+        let cluster_info = get_cluster_info(Keypair::new());
+        let startup_root = Block::default();
+        let root_slot = 63;
+        let migration_genesis = Block {
+            slot: root_slot,
+            block_id: Hash::new_unique(),
+        };
+        let mut tracker = new_tracker(cluster_info, startup_root);
+        let mut events = vec![];
+
+        tracker.set_root(root_slot);
+        assert_eq!(
+            tracker.block_production_parent(root_slot + 1),
+            BlockProductionParent::ParentNotReady
+        );
+
+        tracker.add_new_notar_fallback_or_stronger(migration_genesis, &mut events);
+        assert!(events.is_empty());
+        assert_eq!(
+            tracker.block_production_parent(root_slot + 1),
+            BlockProductionParent::ParentNotReady
+        );
+
+        tracker.add_genesis(migration_genesis, &mut vec![]);
+        assert!(tracker.parent_ready(root_slot + 1, migration_genesis));
+        assert_eq!(tracker.highest_parent_ready(), root_slot + 1);
+        assert_eq!(
+            tracker.block_production_parent(root_slot + 1),
+            BlockProductionParent::Parent(migration_genesis)
+        );
     }
 
     #[test]

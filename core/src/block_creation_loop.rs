@@ -8,12 +8,12 @@ use {
     crate::{
         banking_trace::{BankingPacketSender, BankingTracer},
         block_creation_loop::rewards::{
-            certs_requestor::CertsRequestor,
-            msg_types::{AddVoteMessage, RewardRespSucc},
+            certs_requestor::CertsRequestor, msg_types::RewardRespSucc,
             reward_certs_service::RewardCertsService,
         },
         replay_stage::{Finalizer, ReplayStage},
     },
+    agave_bls_sigverify::rewards::RewardInput,
     agave_votor::event::LeaderWindowInfo,
     agave_votor_messages::{
         consensus_message::Block,
@@ -61,6 +61,17 @@ use {
 pub(crate) mod rewards;
 mod stats;
 
+// Empirically derived value estimating the time to
+// - drain and record the final batch of transactions,
+// - produce the block footer,
+// - produce the 'alpentick',
+// - freeze the bank,
+// - shred the final batches of the block,
+// - broadcast.
+// Recording stops this much before the slot timeout so block completion has time to finish before
+// the leader window deadline.
+const TIME_TO_COMPLETE_BLOCK_BROADCAST: Duration = Duration::from_millis(6);
+
 /// Source of a leader-window notification consumed by BCL.
 enum ParentSource {
     /// Parent from ParentReady event for this leader window is already known.
@@ -75,13 +86,13 @@ pub struct BlockCreationLoop {
 }
 
 impl BlockCreationLoop {
-    pub fn new(config: BlockCreationLoopConfig) -> (Self, Sender<AddVoteMessage>) {
-        let (reward_certs_service, certs_requestor, votes_sender) = RewardCertsService::new(
-            config.cluster_info.clone(),
-            config.leader_schedule_cache.clone(),
-            config.sharable_banks.clone(),
-            config.exit.clone(),
-        );
+    pub(crate) fn new(config: BlockCreationLoopConfig) -> (Self, Sender<RewardInput>) {
+        let (reward_certs_service, certs_requestor, reward_aggregates_sender) =
+            RewardCertsService::new(
+                config.cluster_info.clone(),
+                config.sharable_banks.clone(),
+                config.exit.clone(),
+            );
         let t_block_creation_loop = Builder::new()
             .name("solBlkCreatLoop".to_string())
             .spawn(move || {
@@ -96,7 +107,7 @@ impl BlockCreationLoop {
                 t_block_creation_loop,
                 reward_certs_service,
             },
-            votes_sender,
+            reward_aggregates_sender,
         )
     }
 
@@ -423,6 +434,7 @@ fn reset_poh_recorder(bank: &Arc<Bank>, ctx: &LeaderContext) {
 fn block_timeout(bank: &Bank, slot: Slot) -> Duration {
     Duration::from_nanos_u128(bank.ns_per_slot_at_slot(slot))
         .saturating_mul((leader_slot_index(slot) as u32).saturating_add(1))
+        .saturating_sub(TIME_TO_COMPLETE_BLOCK_BROADCAST)
 }
 
 /// Select the freshest leader-window notification within one source.
@@ -517,7 +529,7 @@ fn produce_block_footer(
 
     if let Some(parent_bank) = bank.parent() {
         // Get parent time from alpenglow clock (nanoseconds) or fall back to clock sysvar (seconds -> nanoseconds)
-        let parent_time_nanos = bank
+        let parent_time_nanos = parent_bank
             .get_nanosecond_clock()
             .unwrap_or_else(|| bank.clock().unix_timestamp.saturating_mul(1_000_000_000));
         let parent_slot = parent_bank.slot();
@@ -693,19 +705,16 @@ fn record_and_complete_block(
             },
             recv(ctx.record_receiver.inner()) -> msg => {
                 let record = msg.map_err(|_| PohRecorderError::ChannelDisconnected)?;
-                ctx.record_receiver
-                    .on_received_record(record.transaction_batches.len() as u64);
+                ctx.record_receiver.on_received_record();
 
                 if optimistic_parent.is_some() {
-                    record.transaction_batches.iter().for_each(|batch| {
-                        accumulated_txs.extend(batch.iter().cloned());
-                    });
+                    accumulated_txs.extend(record.transactions.iter().cloned());
                 }
 
                 ctx.poh_recorder.write().unwrap().record(
                     record.bank_id,
-                    record.mixins,
-                    record.transaction_batches,
+                    record.mixin,
+                    record.transactions,
                 )?;
             },
             default(select_timeout) => {},
@@ -762,9 +771,10 @@ fn record_and_complete_block(
         let RewardRespSucc {
             skip,
             notar,
-            validators: _,
+            validators,
         } = reward_certs;
-        let reward_cert = ValidatedRewardCert::try_new(&bank, &skip, &notar)?;
+        let reward_cert =
+            ValidatedRewardCert::try_new_for_leader(bank.slot(), &skip, &notar, validators)?;
         let guard = ctx.highest_finalized.read().unwrap();
         let footer = produce_block_footer(&bank, skip, notar, guard.as_ref());
         let final_cert_input = guard.as_ref().map(|c| c.vote_rewards_input());
@@ -811,8 +821,8 @@ fn process_parent_ready(
     }
 
     if info.start_slot == bank_slot {
-        if let Some(optimistic_parent_block) = optimistic_parent.take() {
-            if handle_parent_ready(
+        if let Some(optimistic_parent_block) = optimistic_parent.take()
+            && handle_parent_ready(
                 ctx,
                 info,
                 optimistic_parent_block,
@@ -820,9 +830,8 @@ fn process_parent_ready(
                 block_timer,
             )?
             .is_some()
-            {
-                *records_shutdown = false;
-            }
+        {
+            *records_shutdown = false;
         }
         return Ok(false);
     }
@@ -979,7 +988,7 @@ fn handle_parent_ready(
             packets.len(),
         );
         let batch: PacketBatch = packets.into();
-        let banking_packet_batch = Arc::new(vec![batch]);
+        let banking_packet_batch = Arc::new(batch);
         ctx.banking_stage_sender
             // technically this send can evict to make room (which may drop a few packets)
             // but this should (hopefully) not be significant amounts since we are evicting
@@ -991,7 +1000,7 @@ fn handle_parent_ready(
     Ok(Some(new_bank))
 }
 
-/// Shut down record intake and synchronously record all already-reserved batches.
+/// Shut down record intake and synchronously process all already-reserved records.
 ///
 /// When `accumulated_txs` is provided, the drained transactions are retained so
 /// sad handover can reschedule them against the recreated bank.
@@ -1004,16 +1013,13 @@ fn shutdown_and_drain_record_receiver(
 
     for record in record_receiver.drain_after_shutdown() {
         if let Some(accumulated_txs) = accumulated_txs.as_deref_mut() {
-            record.transaction_batches.iter().for_each(|batch| {
-                accumulated_txs.extend(batch.iter().cloned());
-            });
+            accumulated_txs.extend(record.transactions.iter().cloned());
         }
 
-        poh_recorder.write().unwrap().record(
-            record.bank_id,
-            record.mixins,
-            record.transaction_batches,
-        )?;
+        poh_recorder
+            .write()
+            .unwrap()
+            .record(record.bank_id, record.mixin, record.transactions)?;
     }
 
     Ok(())
@@ -1318,9 +1324,9 @@ fn maybe_include_genesis_certificate(
 
     // Process the genesis certificate
     let bank = poh_recorder.bank().expect("Bank cannot have been cleared");
-    let processor = bank.block_component_processor.read().unwrap();
+    let mut processor = bank.block_component_processor.write().unwrap();
     processor
-        .on_genesis_cert_block_marker(
+        .on_genesis_cert_block_marker_leader(
             bank.clone(),
             ctx.genesis_cert_block_marker.clone(),
             &ctx.bank_forks.read().unwrap().migration_status(),
@@ -1342,7 +1348,7 @@ mod tests {
         super::*,
         crate::banking_trace::BankingTracer,
         agave_banking_stage_ingress_types::BankingPacketReceiver,
-        crossbeam_channel::unbounded,
+        crossbeam_channel::bounded,
         solana_bls_signatures::{BLS_SIGNATURE_AFFINE_SIZE, Signature as BLSSignature},
         solana_entry::{block_component::VersionedUpdateParent, entry_or_marker::EntryOrMarker},
         solana_keypair::Keypair,
@@ -1402,17 +1408,13 @@ mod tests {
             Ok(self.bank_forks.write().unwrap().insert(bank))
         }
 
-        fn enqueue_set_root(
-            &self,
-            _parent_slot: Slot,
-            new_root: Slot,
-            highest_super_majority_root: Option<Slot>,
-        ) {
+        fn enqueue_set_root(&self, new_root: Block) {
+            let new_root = new_root.slot;
             // Test code only so we allow writing bank forks directly.
             self.bank_forks
                 .write()
                 .unwrap()
-                .set_root(new_root, None, highest_super_majority_root);
+                .set_root(new_root, None, Some(new_root));
         }
 
         fn clear_bank(&self, slot: Slot) -> Result<(), BankForksControllerError> {
@@ -1494,10 +1496,9 @@ mod tests {
     fn recv_rescheduled_transactions(
         receiver: &BankingPacketReceiver,
     ) -> Vec<VersionedTransaction> {
-        let packet_batches = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
-        packet_batches
+        let packet_batch = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        packet_batch
             .iter()
-            .flat_map(|batch| batch.iter())
             .map(|packet| {
                 wincode::deserialize::<VersionedTransaction>(
                     packet.data(..packet.meta().size).unwrap(),
@@ -1536,7 +1537,7 @@ mod tests {
         let poh_recorder = Arc::new(RwLock::new(poh_recorder));
 
         let (_record_sender, record_receiver) = record_channels(false);
-        let (_leader_window_info_sender, leader_window_info_receiver) = unbounded();
+        let (_leader_window_info_sender, leader_window_info_receiver) = bounded(1024);
         let (banking_stage_sender, _banking_stage_receiver) = BankingTracer::channel_for_test();
         let bank_forks_controller = test_bank_forks_controller(bank_forks.clone());
         let (reward_certs_requestor, _receiver) = CertsRequestor::new();
@@ -1579,8 +1580,8 @@ mod tests {
         let in_flight_commit = bank.freeze_lock();
         ctx.record_receiver.shutdown();
         for _ in ctx.record_receiver.drain_after_shutdown() {}
-        let (abort_started_sender, abort_started_receiver) = unbounded();
-        let (abort_done_sender, abort_done_receiver) = unbounded();
+        let (abort_started_sender, abort_started_receiver) = bounded(1024);
+        let (abort_done_sender, abort_done_receiver) = bounded(1024);
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 abort_started_sender.send(()).unwrap();
@@ -1652,7 +1653,7 @@ mod tests {
         let poh_recorder = Arc::new(RwLock::new(poh_recorder));
 
         let (_record_sender, record_receiver) = record_channels(false);
-        let (_leader_window_info_sender, leader_window_info_receiver) = unbounded();
+        let (_leader_window_info_sender, leader_window_info_receiver) = bounded(1024);
         let (banking_stage_sender, _banking_stage_receiver) = BankingTracer::channel_for_test();
         let mut genesis_cert_block_marker = test_genesis_cert_block_marker();
         genesis_cert_block_marker.slot = parent_bank.slot();
@@ -1729,7 +1730,7 @@ mod tests {
         let poh_recorder = Arc::new(RwLock::new(poh_recorder));
 
         let (record_sender, record_receiver) = record_channels(false);
-        let (_leader_window_info_sender, leader_window_info_receiver) = unbounded();
+        let (_leader_window_info_sender, leader_window_info_receiver) = bounded(1024);
         let (banking_stage_sender, _banking_stage_receiver) = BankingTracer::channel_for_test();
         let bank_forks_controller = test_bank_forks_controller(bank_forks.clone());
         let (reward_certs_requestor, _reward_request_receiver) = CertsRequestor::new();
@@ -1768,8 +1769,8 @@ mod tests {
         let bank_id = ctx.poh_recorder.read().unwrap().bank().unwrap().bank_id();
         record_sender
             .try_send(Record::new(
-                vec![Hash::new_unique()],
-                vec![vec![versioned_transfer(1)]],
+                Hash::new_unique(),
+                vec![versioned_transfer(1)],
                 bank_id,
             ))
             .unwrap();
@@ -1838,7 +1839,7 @@ mod tests {
         let poh_recorder = Arc::new(RwLock::new(poh_recorder));
 
         let (record_sender, record_receiver) = record_channels(false);
-        let (leader_window_info_sender, leader_window_info_receiver) = unbounded();
+        let (leader_window_info_sender, leader_window_info_receiver) = bounded(1024);
         let (banking_stage_sender, banking_stage_receiver) = BankingTracer::channel_for_test();
         let bank_forks_controller = test_bank_forks_controller(bank_forks.clone());
         let (reward_certs_requestor, _receiver) = CertsRequestor::new();
@@ -1881,8 +1882,8 @@ mod tests {
         let drained_tx = versioned_transfer(2);
         record_sender
             .try_send(Record::new(
-                vec![Hash::new_unique()],
-                vec![vec![drained_tx.clone()]],
+                Hash::new_unique(),
+                vec![drained_tx.clone()],
                 optimistic_bank_id,
             ))
             .unwrap();

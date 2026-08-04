@@ -1,9 +1,10 @@
 use {
     super::*, crate::translate_mut,
     solana_program_runtime::execution_budget::SVMTransactionExecutionCost, solana_sbpf::ebpf,
+    solana_sysvar_id::SysvarId,
 };
 
-fn get_sysvar<T: std::fmt::Debug + SysvarSerialize + Clone>(
+fn get_sysvar<T: SysvarId + Clone>(
     sysvar: Result<Arc<T>, InstructionError>,
     var_addr: u64,
     invoke_context: &mut InvokeContext,
@@ -217,11 +218,14 @@ declare_builtin_function!(
 
         let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
         // Abort: "Not all bytes in VM memory range `[var_addr, var_addr + length)` are writable."
-        translate_mut!(
-            memory_mapping,
-            check_aligned,
-            let var: (&mut [MaybeUninit<u8>]) = map(var_addr, length)?;
-        );
+        {
+            // Just a check that this maps correctly for error compatibility with old code.
+            translate_mut!(
+                memory_mapping,
+                check_aligned,
+                let _var: (&mut [MaybeUninit<u8>]) = map(var_addr, length)?;
+            );
+        }
 
         // Abort: "Not all bytes in VM memory range `[sysvar_id, sysvar_id + 32)` are readable."
         let sysvar_id = translate_type::<Pubkey>(memory_mapping, sysvar_id_addr, check_aligned)?;
@@ -245,6 +249,11 @@ declare_builtin_function!(
 
         // "`1` if `offset + length` is greater than the length of the sysvar data."
         if let Some(sysvar_slice) = sysvar_buf.get(offset as usize..offset_length as usize) {
+            translate_mut!(
+                memory_mapping,
+                check_aligned,
+                let var: (&mut [MaybeUninit<u8>]) = map(var_addr, length)?;
+            );
             var.write_copy_of_slice(sysvar_slice);
         } else {
             return Ok(OFFSET_LENGTH_EXCEEDS_SYSVAR);

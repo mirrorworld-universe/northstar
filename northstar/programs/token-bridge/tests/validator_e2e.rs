@@ -481,15 +481,6 @@ fn fund_and_delegate_er_fee_payer(
         &payer.pubkey(),
         &[payer],
     );
-    send_tx(
-        rpc,
-        &[system_instruction::assign(
-            &er_fee_payer.pubkey(),
-            &PORTAL_PROGRAM_ID,
-        )],
-        &payer.pubkey(),
-        &[payer, er_fee_payer],
-    );
 
     let delegation_record = portal_pubkey(northstar_portal::find_delegation_record_pda(
         &PORTAL_PROGRAM_ID.to_bytes(),
@@ -508,7 +499,15 @@ fn fund_and_delegate_er_fee_payer(
         ],
         data: borsh::to_vec(&PortalInstruction::Delegate { grid_id: GRID_ID }).unwrap(),
     };
-    send_tx(rpc, &[ix], &payer.pubkey(), &[payer, er_fee_payer]);
+    send_tx(
+        rpc,
+        &[
+            system_instruction::assign(&er_fee_payer.pubkey(), &PORTAL_PROGRAM_ID),
+            ix,
+        ],
+        &payer.pubkey(),
+        &[payer, er_fee_payer],
+    );
 }
 
 fn create_l1_mint_and_token_accounts(

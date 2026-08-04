@@ -5,6 +5,7 @@ use {
     agave_snapshots::{
         SnapshotInterval, paths::BANK_SNAPSHOTS_DIR, snapshot_config::SnapshotConfig,
     },
+    agave_votor_messages::consensus_message::BLS_KEYPAIR_DERIVE_SEED,
     arc_swap::ArcSwap,
     base64::{Engine, prelude::BASE64_STANDARD},
     crossbeam_channel::Receiver,
@@ -15,6 +16,7 @@ use {
         accounts_index::{AccountsIndexConfig, ScanFilter},
         utils::create_accounts_run_and_snapshot_dirs,
     },
+    solana_bls_signatures::keypair::Keypair as BLSKeypair,
     solana_cli_output::CliAccount,
     solana_clock::{DEFAULT_MS_PER_SLOT, Slot},
     solana_commitment_config::CommitmentConfig,
@@ -39,7 +41,8 @@ use {
     solana_instruction::Instruction,
     solana_keypair::{Keypair, read_keypair_file, write_keypair_file},
     solana_ledger::{
-        blockstore::create_new_ledger, blockstore_options::LedgerColumnOptions,
+        blockstore::create_new_ledger,
+        blockstore_options::{BlockstoreCleanupStrategy, LedgerColumnOptions},
         create_new_tmp_ledger,
     },
     solana_loader_v3_interface::state::UpgradeableLoaderState,
@@ -58,7 +61,8 @@ use {
         client_error::Error as RpcClientError, request::MAX_MULTIPLE_ACCOUNTS,
     },
     solana_runtime::{
-        bank_forks::BankForks, genesis_utils::create_genesis_config_with_leader_ex,
+        bank_forks::BankForks,
+        genesis_utils::{activate_alpenglow_at_genesis, create_genesis_config_with_leader_ex},
         runtime_config::RuntimeConfig,
     },
     solana_sbpf::{elf::Executable, verifier::RequisiteVerifier},
@@ -68,6 +72,7 @@ use {
     solana_syscalls::create_program_runtime_environment,
     solana_transaction::{Transaction, TransactionError},
     solana_validator_exit::Exit,
+    solana_vote_interface::state::BLS_PUBLIC_KEY_COMPRESSED_SIZE,
     std::{
         collections::{HashMap, HashSet},
         ffi::OsStr,
@@ -169,7 +174,7 @@ pub struct TestValidatorGenesis {
     pub start_progress: Arc<RwLock<ValidatorStartProgress>>,
     pub authorized_voter_keypairs: Arc<RwLock<Vec<Arc<Keypair>>>>,
     pub staked_nodes_overrides: Arc<RwLock<HashMap<Pubkey, u64>>>,
-    pub max_ledger_shreds: Option<u64>,
+    pub blockstore_cleanup_strategy: BlockstoreCleanupStrategy,
     pub max_genesis_archive_unpacked_size: Option<u64>,
     pub geyser_plugin_config_files: Option<Vec<PathBuf>>,
     pub enable_scheduler_bindings: bool,
@@ -178,7 +183,7 @@ pub struct TestValidatorGenesis {
     pub log_messages_bytes_limit: Option<usize>,
     pub transaction_account_lock_limit: Option<usize>,
     pub geyser_plugin_manager: Arc<ArcSwap<GeyserPluginManager>>,
-    admin_rpc_service_post_init: Arc<RwLock<Option<AdminRpcRequestMetadataPostInit>>>,
+    pub admin_rpc_service_post_init: Arc<RwLock<Option<AdminRpcRequestMetadataPostInit>>>,
     /// Sonic: Portal program ID for ephemeral rollup service
     portal: Option<Pubkey>,
     /// Sonic: Ephemeral RPC port for the rollup server
@@ -214,7 +219,7 @@ impl Default for TestValidatorGenesis {
             start_progress: Arc::<RwLock<ValidatorStartProgress>>::default(),
             authorized_voter_keypairs: Arc::<RwLock<Vec<Arc<Keypair>>>>::default(),
             staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
-            max_ledger_shreds: Option::<u64>::default(),
+            blockstore_cleanup_strategy: BlockstoreCleanupStrategy::None,
             max_genesis_archive_unpacked_size: Option::<u64>::default(),
             geyser_plugin_config_files: Option::<Vec<PathBuf>>::default(),
             enable_scheduler_bindings: false,
@@ -232,6 +237,15 @@ impl Default for TestValidatorGenesis {
             er_history_max_retained_slots: solana_rpc::er_history::DEFAULT_MAX_RETAINED_SLOTS,
         }
     }
+}
+
+fn derive_bls_pubkey_from_authorized_voter_keypair(
+    authorized_voter_keypair: &Keypair,
+) -> [u8; BLS_PUBLIC_KEY_COMPRESSED_SIZE] {
+    BLSKeypair::derive_from_signer(authorized_voter_keypair, BLS_KEYPAIR_DERIVE_SEED)
+        .unwrap()
+        .public
+        .to_bytes_compressed()
 }
 
 #[cfg(feature = "dev-context-only-utils")]
@@ -334,6 +348,12 @@ impl TestValidatorGenesis {
         self.deactivate_feature_set.extend(deactivate_list);
         self
     }
+
+    pub fn activate_alpenglow(&mut self) -> &mut Self {
+        self.deactivate_feature_set.remove(&alpenglow::id());
+        self
+    }
+
     pub fn ledger_path<P: Into<PathBuf>>(&mut self, ledger_path: P) -> &mut Self {
         self.ledger_path = Some(ledger_path.into());
         self
@@ -552,11 +572,11 @@ impl TestValidatorGenesis {
                             return Err(format!("Invalid alt account data length for {address}"));
                         }
 
-                        for address_slice in
-                            raw_addresses_data.chunks_exact(std::mem::size_of::<Pubkey>())
+                        for address_array in raw_addresses_data
+                            .as_chunks::<{ std::mem::size_of::<Pubkey>() }>()
+                            .0
                         {
-                            // safe because size was checked earlier
-                            let address = Pubkey::try_from(address_slice).unwrap();
+                            let address = Pubkey::from(*address_array);
                             alt_entries.push(address);
                         }
                         self.add_account(*address, AccountSharedData::from(account));
@@ -645,6 +665,8 @@ impl TestValidatorGenesis {
                         .is_none()
                     {
                         self.deactivate_feature_set.insert(*feature_id);
+                    } else {
+                        self.deactivate_feature_set.remove(feature_id);
                     }
                 });
         }
@@ -698,7 +720,7 @@ impl TestValidatorGenesis {
         for dir in dirs {
             let matched_files = match fs::read_dir(&dir) {
                 Ok(dir) => dir,
-                Err(e) => return Err(format!("Cannot read directory {}: {}", &dir, e)),
+                Err(e) => return Err(format!("Cannot read directory {dir}: {e}")),
             }
             .flatten()
             .map(|entry| entry.path())
@@ -1001,6 +1023,7 @@ impl TestValidator {
                 warn!("Feature {feature:?} set for deactivation is not a known Feature public key",)
             }
         }
+        let is_alpenglow_active = feature_set.is_active(&alpenglow::id());
 
         let runtime_features = feature_set.runtime_features();
         let program_runtime_environment = create_program_runtime_environment(
@@ -1071,7 +1094,7 @@ impl TestValidator {
             );
         }
 
-        // Sonic: Load Portal and its SPL token bridge into genesis if Portal is configured.
+        // Northstar: Load Portal and its SPL token bridge into genesis when configured.
         if let Some(portal_program_id) = config.portal {
             insert_upgradeable_program_accounts(
                 &mut accounts,
@@ -1085,15 +1108,18 @@ impl TestValidator {
             );
         }
 
-        // Sonic: keep test-validator genesis feature activation enabled so bundled
-        // BPF programs (for example SPL Token) run with the expected SBPF feature set.
+        // Northstar: Keep genesis features active for bundled SBF programs such as SPL Token.
+        // Test validator genesis uses the vote account pubkey as the authorized voter,
+        // so the Alpenglow BLS pubkey is derived from the vote account keypair.
         let mut genesis_config = create_genesis_config_with_leader_ex(
             mint_lamports,
             &mint_address,
             &validator_identity.pubkey(),
             &validator_vote_account.pubkey(),
             &validator_stake_account.pubkey(),
-            None,
+            Some(derive_bls_pubkey_from_authorized_voter_keypair(
+                &validator_vote_account,
+            )),
             validator_stake_lamports,
             validator_identity_lamports,
             config.fee_rate_governor.clone(),
@@ -1102,6 +1128,9 @@ impl TestValidator {
             &feature_set,
             accounts.into_iter().collect(),
         );
+        if is_alpenglow_active {
+            activate_alpenglow_at_genesis(&mut genesis_config);
+        }
         genesis_config.epoch_schedule = config
             .epoch_schedule
             .as_ref()
@@ -1230,7 +1259,8 @@ impl TestValidator {
                 .iter()
                 .any(|x| x.pubkey() == vote_account_address)
             {
-                authorized_voter_keypairs.push(Arc::new(validator_vote_account))
+                // Test validator genesis uses the vote account pubkey as the authorized voter.
+                authorized_voter_keypairs.push(Arc::new(validator_vote_account));
             }
         }
 
@@ -1254,6 +1284,7 @@ impl TestValidator {
                 }),
             log_messages_bytes_limit: config.log_messages_bytes_limit,
             transaction_account_lock_limit: config.transaction_account_lock_limit,
+            ..RuntimeConfig::default()
         };
 
         let mut validator_config = ValidatorConfig {
@@ -1306,7 +1337,7 @@ impl TestValidator {
             },
             warp_slot: config.warp_slot,
             validator_exit: config.validator_exit.clone(),
-            max_ledger_shreds: config.max_ledger_shreds,
+            blockstore_cleanup_strategy: config.blockstore_cleanup_strategy,
             no_wait_for_vote_to_start_leader: true,
             staked_nodes_overrides: config.staked_nodes_overrides.clone(),
             accounts_db_config,
@@ -1538,6 +1569,59 @@ impl Drop for TestValidator {
 mod test {
     use {super::*, solana_feature_gate_interface::Feature};
 
+    async fn assert_feature_accounts(
+        rpc_client: &nonblocking::rpc_client::RpcClient,
+        active_features: &[Pubkey],
+        inactive_features: &[Pubkey],
+    ) {
+        for chunk in active_features.chunks(100) {
+            let active_feature_accounts = rpc_client.get_multiple_accounts(chunk).await.unwrap();
+            for feature_account in active_feature_accounts {
+                let account = feature_account.unwrap();
+                let feature_state: Feature = bincode::deserialize(account.data()).unwrap();
+                assert!(feature_state.activated_at.is_some());
+            }
+        }
+
+        if !inactive_features.is_empty() {
+            let inactive_feature_accounts = rpc_client
+                .get_multiple_accounts(inactive_features)
+                .await
+                .unwrap();
+            for feature_account in inactive_feature_accounts {
+                assert!(feature_account.is_none());
+            }
+        }
+    }
+
+    async fn wait_for_alpenglow_enabled(test_validator: &TestValidator) {
+        for _ in 0..240 {
+            let migration_status = test_validator
+                .bank_forks()
+                .read()
+                .unwrap()
+                .migration_status();
+            if migration_status.is_alpenglow_enabled() {
+                return;
+            }
+            sleep(Duration::from_millis(250)).await;
+        }
+        let bank_forks = test_validator.bank_forks();
+        let bank_forks = bank_forks.read().unwrap();
+        let root_bank = bank_forks.root_bank();
+        let migration_status = bank_forks.migration_status();
+        panic!(
+            "Timed out waiting for Alpenglow migration: migration_status={migration_status:?}, \
+             root_slot={}, working_slot={}, feature_activation_slot={:?}, \
+             eligible_genesis_block={:?}, genesis_certificate={:?}",
+            root_bank.slot(),
+            bank_forks.working_bank().slot(),
+            root_bank.feature_set.activated_slot(&alpenglow::id()),
+            migration_status.eligible_genesis_block(),
+            migration_status.genesis_certificate(),
+        );
+    }
+
     #[test]
     fn bundled_northstar_programs_are_elf_binaries() {
         assert!(PORTAL_PROGRAM_BINARY.starts_with(b"\x7fELF"));
@@ -1558,6 +1642,51 @@ mod test {
             .await;
         let rpc_client = test_validator.get_async_rpc_client();
         rpc_client.get_health().await.expect("health");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_all_features_active_except_alpenglow_by_default() {
+        let (test_validator, _payer) = TestValidatorGenesis::default_for_tests()
+            .start_async()
+            .await;
+        let rpc_client = test_validator.get_async_rpc_client();
+
+        let active_features = FEATURE_NAMES
+            .keys()
+            .copied()
+            .filter(|feature| *feature != alpenglow::id())
+            .collect::<Vec<_>>();
+        assert_feature_accounts(&rpc_client, &active_features, &[alpenglow::id()]).await;
+        assert!(
+            test_validator
+                .bank_forks()
+                .read()
+                .unwrap()
+                .migration_status()
+                .is_pre_feature_activation()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_all_features_active_with_alpenglow_at_genesis() {
+        let (test_validator, _payer) = TestValidatorGenesis::default_for_tests()
+            .activate_alpenglow()
+            .start_async()
+            .await;
+        let rpc_client = test_validator.get_async_rpc_client();
+
+        let active_features = FEATURE_NAMES.keys().copied().collect::<Vec<_>>();
+        assert_feature_accounts(&rpc_client, &active_features, &[]).await;
+        assert!(
+            test_validator
+                .bank_forks()
+                .read()
+                .unwrap()
+                .root_bank()
+                .get_alpenglow_genesis_certificate()
+                .is_some()
+        );
+        wait_for_alpenglow_enabled(&test_validator).await;
     }
 
     #[test]
@@ -1633,7 +1762,6 @@ mod test {
             alpenglow::id(),
             agave_feature_set::bls_pubkey_management_in_vote_account::id(),
             agave_feature_set::vote_account_initialize_v2::id(),
-            agave_feature_set::validator_admission_ticket::id(),
         ]
         .into_iter()
         .for_each(|feature| {

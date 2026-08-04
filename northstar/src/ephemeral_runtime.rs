@@ -1202,7 +1202,7 @@ impl EphemeralRuntime {
                     )
                     .collect::<Vec<_>>();
                 if !account_writes.is_empty() {
-                    er_bank.store_accounts((er_bank.slot(), account_writes.as_slice()));
+                    er_bank.store_accounts((er_bank.slot(), account_writes.as_slice()), None);
                 }
                 Self::remove_reloadable_programs_from_cache(
                     &er_bank,
@@ -1328,7 +1328,7 @@ impl EphemeralRuntime {
             .iter()
             .map(|(pubkey, account)| (pubkey, account))
             .collect::<Vec<_>>();
-        bank.store_accounts((bank.slot(), account_writes.as_slice()));
+        bank.store_accounts((bank.slot(), account_writes.as_slice()), None);
         overlay_snapshot.len()
     }
 
@@ -1914,7 +1914,7 @@ impl EphemeralRuntime {
                 ))
             })
             .collect::<Vec<_>>();
-        er_bank.store_accounts((er_bank.slot(), updated_accounts.as_slice()));
+        er_bank.store_accounts((er_bank.slot(), updated_accounts.as_slice()), None);
         Self::remove_reloadable_programs_from_cache(
             er_bank,
             cache_context,
@@ -2320,6 +2320,7 @@ impl Drop for EphemeralRuntime {
 mod tests {
     use {
         super::*,
+        crate::ephemeral_tx_client::TransactionClient,
         base64::{prelude::BASE64_STANDARD, Engine as _},
         northstar_portal::{DelegationRecord, DepositReceipt, NorthstarTransferEvent},
         solana_account::{
@@ -2338,10 +2339,7 @@ mod tests {
             CommitmentConfig, RpcSendTransactionConfig, RpcSimulateTransactionConfig,
         },
         solana_sdk_ids::{bpf_loader, bpf_loader_upgradeable, system_program},
-        solana_send_transaction_service::{
-            send_transaction_service_stats::SendTransactionServiceStats,
-            transaction_client::TransactionClient,
-        },
+        solana_send_transaction_service::send_transaction_service_stats::SendTransactionServiceStats,
         solana_svm::transaction_processor::ExecutionRecordingConfig,
         solana_system_interface::instruction::transfer,
         solana_transaction::{versioned::VersionedTransaction, Transaction},
@@ -4628,7 +4626,7 @@ mod tests {
                 .rc
                 .accounts
                 .accounts_db
-                .get_pubkeys_for_slot(*slot)
+                .get_pubkey_account_for_slot(*slot)
                 .is_empty()
         }));
 
@@ -4652,7 +4650,7 @@ mod tests {
                     .rc
                     .accounts
                     .accounts_db
-                    .get_pubkeys_for_slot(slot)
+                    .get_pubkey_account_for_slot(slot)
                     .is_empty(),
                 "old ER slot {slot} should be purged during async retirement"
             );
@@ -5224,7 +5222,7 @@ mod tests {
         )
         .unwrap();
 
-        solana_send_transaction_service::transaction_client::TransactionClient::send_transactions_in_batch(
+        TransactionClient::send_transactions_in_batch(
             &runtime._tx_client,
             vec![wire_tx],
             &solana_send_transaction_service::send_transaction_service_stats::SendTransactionServiceStats::default(),

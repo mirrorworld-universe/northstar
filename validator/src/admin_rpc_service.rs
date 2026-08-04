@@ -11,7 +11,7 @@ use {
     },
     log::*,
     serde::{Deserialize, Serialize, de::Deserializer},
-    solana_clock::Slot,
+    solana_clock::{Epoch, Slot},
     solana_core::{
         admin_rpc_post_init::AdminRpcRequestMetadataPostInit,
         banking_stage::{
@@ -30,7 +30,7 @@ use {
     solana_keypair::{Keypair, read_keypair_file},
     solana_metrics::{datapoint_info, datapoint_warn},
     solana_pubkey::Pubkey,
-    solana_runtime::snapshot_controller::SnapshotController,
+    solana_runtime::{bank::VATHealthError, snapshot_controller::SnapshotController},
     solana_signer::Signer,
     solana_validator_exit::Exit,
     std::{
@@ -98,6 +98,7 @@ pub struct AdminRpcContactInfo {
     pub tvu: SocketAddr,
     pub serve_repair_quic: SocketAddr,
     pub tpu: SocketAddr,
+    pub tpu_quic: Option<SocketAddr>,
     pub tpu_forwards: SocketAddr,
     pub tpu_vote: SocketAddr,
     pub rpc: SocketAddr,
@@ -110,6 +111,17 @@ pub struct AdminRpcContactInfo {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AdminRpcRepairWhitelist {
     pub whitelist: Vec<Pubkey>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AdminRpcValidatorAdmissionTicketStatus {
+    pub vote_account: Pubkey,
+    pub voting_enabled: bool,
+    pub current_epoch: Epoch,
+    pub in_current_epoch_vat: bool,
+    pub current_epoch_vote_account_stake: u64,
+    pub current_epoch_vote_accounts: usize,
+    pub next_epoch_vat_failure_reason: Option<VATHealthError>,
 }
 
 impl From<ContactInfo> for AdminRpcContactInfo {
@@ -129,6 +141,7 @@ impl From<ContactInfo> for AdminRpcContactInfo {
             tvu: unwrap_socket!(tvu, Protocol::UDP),
             serve_repair_quic: unwrap_socket!(serve_repair, Protocol::QUIC),
             tpu: unwrap_socket!(tpu, Protocol::UDP),
+            tpu_quic: node.tpu(Protocol::QUIC),
             tpu_forwards: unwrap_socket!(tpu_forwards, Protocol::UDP),
             tpu_vote: unwrap_socket!(tpu_vote, Protocol::UDP),
             rpc: unwrap_socket!(rpc),
@@ -145,6 +158,9 @@ impl Display for AdminRpcContactInfo {
         writeln!(f, "Gossip: {}", self.gossip)?;
         writeln!(f, "TVU: {}", self.tvu)?;
         writeln!(f, "TPU: {}", self.tpu)?;
+        if let Some(tpu_quic) = self.tpu_quic {
+            writeln!(f, "TPU QUIC: {tpu_quic}")?;
+        }
         writeln!(f, "TPU Forwards: {}", self.tpu_forwards)?;
         writeln!(f, "TPU Votes: {}", self.tpu_vote)?;
         writeln!(f, "RPC: {}", self.rpc)?;
@@ -159,7 +175,7 @@ impl solana_cli_output::QuietDisplay for AdminRpcContactInfo {}
 
 impl Display for AdminRpcRepairWhitelist {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        writeln!(f, "Repair whitelist: {:?}", &self.whitelist)
+        writeln!(f, "Repair whitelist: {:?}", self.whitelist)
     }
 }
 impl solana_cli_output::VerboseDisplay for AdminRpcRepairWhitelist {}
@@ -240,6 +256,9 @@ pub trait AdminRpc {
 
     #[rpc(meta, name = "contactInfo")]
     fn contact_info(&self, meta: Self::Metadata) -> Result<AdminRpcContactInfo>;
+
+    #[rpc(meta, name = "validatorAdmissionTicketStatus")]
+    fn vat_status(&self, meta: Self::Metadata) -> Result<AdminRpcValidatorAdmissionTicketStatus>;
 
     #[rpc(meta, name = "selectActiveInterface")]
     fn select_active_interface(&self, meta: Self::Metadata, interface: IpAddr) -> Result<()>;
@@ -609,10 +628,7 @@ impl AdminRpc for AdminRpcImpl {
     fn set_staked_nodes_overrides(&self, meta: Self::Metadata, path: String) -> Result<()> {
         let loaded_config = load_staked_nodes_overrides(&path)
             .map_err(|err| {
-                error!(
-                    "Failed to load staked nodes overrides from {}: {}",
-                    &path, err
-                );
+                error!("Failed to load staked nodes overrides from {path}: {err}");
                 jsonrpc_core::error::Error::internal_error()
             })?
             .staked_map_id;
@@ -626,6 +642,38 @@ impl AdminRpc for AdminRpcImpl {
 
     fn contact_info(&self, meta: Self::Metadata) -> Result<AdminRpcContactInfo> {
         meta.with_post_init(|post_init| Ok(post_init.cluster_info.my_contact_info().into()))
+    }
+
+    fn vat_status(&self, meta: Self::Metadata) -> Result<AdminRpcValidatorAdmissionTicketStatus> {
+        debug!("vat_status request received");
+        meta.with_post_init(|post_init| {
+            let bank = post_init.bank_forks.read().unwrap().root_bank();
+            let current_epoch = bank.epoch();
+            let epoch_vote_accounts = bank
+                .epoch_vote_accounts(current_epoch)
+                .ok_or_else(jsonrpc_core::Error::internal_error)?;
+            let current_epoch_vote_account_stake = epoch_vote_accounts
+                .get(&post_init.vote_account)
+                .map(|(stake, _vote_account)| *stake)
+                .unwrap_or_default();
+            let in_current_epoch_vote_accounts =
+                epoch_vote_accounts.contains_key(&post_init.vote_account);
+
+            let next_epoch_vat_failure_reason = bank
+                .get_vat_health_for_next_epoch(&post_init.vote_account)
+                .err();
+
+            let voting_enabled = !meta.authorized_voter_keypairs.read().unwrap().is_empty();
+            Ok(AdminRpcValidatorAdmissionTicketStatus {
+                vote_account: post_init.vote_account,
+                voting_enabled,
+                current_epoch,
+                in_current_epoch_vat: in_current_epoch_vote_accounts,
+                current_epoch_vote_account_stake,
+                current_epoch_vote_accounts: epoch_vote_accounts.len(),
+                next_epoch_vat_failure_reason,
+            })
+        })
     }
 
     fn select_active_interface(&self, meta: Self::Metadata, interface: IpAddr) -> Result<()> {
@@ -692,7 +740,7 @@ impl AdminRpc for AdminRpcImpl {
             *post_init.repair_whitelist.write().unwrap() = whitelist;
             warn!(
                 "Repair whitelist set to {:?}",
-                &post_init.repair_whitelist.read().unwrap()
+                post_init.repair_whitelist.read().unwrap()
             );
             Ok(())
         })
@@ -1103,7 +1151,7 @@ mod tests {
         agave_snapshots::snapshot_config::SnapshotConfig,
         agave_votor::event::VotorEventSender,
         assert_matches::assert_matches,
-        crossbeam_channel::unbounded,
+        crossbeam_channel::bounded,
         serde_json::Value,
         solana_accounts_db::{
             accounts_db::{ACCOUNTS_DB_CONFIG_FOR_TESTING, AccountsDbConfig},
@@ -1169,7 +1217,7 @@ mod tests {
                 },
             });
 
-            let (snapshot_request_sender, _) = unbounded();
+            let (snapshot_request_sender, _) = bounded(1024);
             let snapshot_controller = Arc::new(SnapshotController::new(
                 snapshot_request_sender.clone(),
                 SnapshotConfig::default(),
@@ -1183,7 +1231,7 @@ mod tests {
             let start_progress = Arc::new(RwLock::new(ValidatorStartProgress::default()));
             let repair_whitelist = Arc::new(RwLock::new(HashSet::new()));
             let votor_event_sender = config.votor_event_sender.unwrap_or_else(|| {
-                let (votor_event_sender, _) = unbounded();
+                let (votor_event_sender, _) = bounded(1024);
                 votor_event_sender
             });
             let meta = AdminRpcRequestMetadata {
@@ -1243,7 +1291,7 @@ mod tests {
     // Bank but without validator.
     #[test]
     fn test_set_identity() {
-        let (votor_event_sender, votor_event_receiver) = unbounded();
+        let (votor_event_sender, votor_event_receiver) = bounded(1024);
         let rpc = RpcHandler::start_with_config(TestConfig {
             account_indexes: AccountSecondaryIndexes::default(),
             votor_event_sender: Some(votor_event_sender),
@@ -1288,6 +1336,39 @@ mod tests {
             .recv()
             .expect("Failed to receive SetIdentity event");
         assert_matches!(event, VotorEvent::SetIdentity);
+    }
+
+    #[test]
+    fn test_vat_status() {
+        let rpc = RpcHandler::_start();
+        let RpcHandler { io, meta, .. } = rpc;
+        let post_init = meta.post_init.read().unwrap().clone().unwrap();
+        let bank = post_init.bank_forks.read().unwrap().root_bank();
+        let current_epoch = bank.epoch();
+        let epoch_vote_accounts = bank.epoch_vote_accounts(current_epoch).unwrap();
+        let expected_in_vat = epoch_vote_accounts.contains_key(&post_init.vote_account);
+        let expected_stake = epoch_vote_accounts
+            .get(&post_init.vote_account)
+            .map(|(stake, _vote_account)| *stake)
+            .unwrap_or_default();
+
+        let request =
+            r#"{"jsonrpc":"2.0","id":1,"method":"validatorAdmissionTicketStatus","params":[]}"#;
+        let response = io.handle_request_sync(request, meta.clone());
+        let result: Value = serde_json::from_str(&response.expect("actual response"))
+            .expect("actual response deserialization");
+        let status: AdminRpcValidatorAdmissionTicketStatus =
+            serde_json::from_value(result["result"].clone()).unwrap();
+
+        assert_eq!(status.vote_account, post_init.vote_account);
+        assert!(status.voting_enabled);
+        assert_eq!(status.current_epoch, current_epoch);
+        assert_eq!(status.in_current_epoch_vat, expected_in_vat);
+        assert_eq!(status.current_epoch_vote_account_stake, expected_stake);
+        assert_eq!(
+            status.current_epoch_vote_accounts,
+            epoch_vote_accounts.len()
+        );
     }
 
     struct TestValidatorWithAdminRpc {

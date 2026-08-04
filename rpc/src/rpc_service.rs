@@ -23,7 +23,6 @@ use {
     },
     regex::Regex,
     solana_cli_output::display::build_balance_message,
-    solana_client::connection_cache::Protocol,
     solana_genesis_config::DEFAULT_GENESIS_DOWNLOAD_PATH,
     solana_gossip::cluster_info::ClusterInfo,
     solana_hash::Hash,
@@ -34,6 +33,7 @@ use {
         leader_schedule_cache::LeaderScheduleCache,
     },
     solana_metrics::inc_new_counter_info,
+    solana_net_utils::Protocol,
     solana_perf::thread::renice_this_thread,
     solana_poh::poh_recorder::PohRecorder,
     solana_pubkey::Pubkey,
@@ -44,7 +44,7 @@ use {
     },
     solana_send_transaction_service::{
         send_transaction_service::{self, SendTransactionService},
-        transaction_client::{TpuClientNextClient, TransactionClient},
+        transaction_client::{TpuSender, create_client, create_leader_updater},
     },
     solana_storage_bigtable::CredentialType,
     solana_tls_utils::NotifyKeyUpdate,
@@ -353,48 +353,46 @@ impl RequestMiddleware for RpcRequestMiddleware {
     fn on_request(&self, request: hyper::Request<hyper::Body>) -> RequestMiddlewareAction {
         trace!("request uri: {}", request.uri());
 
-        if let Some(ref snapshot_config) = self.snapshot_config {
-            if request.uri().path() == FULL_SNAPSHOT_REQUEST_PATH
-                || request.uri().path() == INCREMENTAL_SNAPSHOT_REQUEST_PATH
-            {
-                // Convenience redirect to the latest snapshot
-                let full_snapshot_archive_info =
-                    snapshot_paths::get_highest_full_snapshot_archive_info(
-                        &snapshot_config.full_snapshot_archives_dir,
-                    );
-                let snapshot_archive_info =
-                    if let Some(full_snapshot_archive_info) = full_snapshot_archive_info {
-                        if request.uri().path() == FULL_SNAPSHOT_REQUEST_PATH {
-                            Some(full_snapshot_archive_info.snapshot_archive_info().clone())
-                        } else {
-                            snapshot_paths::get_highest_incremental_snapshot_archive_info(
-                                &snapshot_config.incremental_snapshot_archives_dir,
-                                full_snapshot_archive_info.slot(),
-                            )
-                            .map(|incremental_snapshot_archive_info| {
-                                incremental_snapshot_archive_info
-                                    .snapshot_archive_info()
-                                    .clone()
-                            })
-                        }
+        if let Some(ref snapshot_config) = self.snapshot_config
+            && (request.uri().path() == FULL_SNAPSHOT_REQUEST_PATH
+                || request.uri().path() == INCREMENTAL_SNAPSHOT_REQUEST_PATH)
+        {
+            // Convenience redirect to the latest snapshot
+            let full_snapshot_archive_info = snapshot_paths::get_highest_full_snapshot_archive_info(
+                &snapshot_config.full_snapshot_archives_dir,
+            );
+            let snapshot_archive_info =
+                if let Some(full_snapshot_archive_info) = full_snapshot_archive_info {
+                    if request.uri().path() == FULL_SNAPSHOT_REQUEST_PATH {
+                        Some(full_snapshot_archive_info.snapshot_archive_info().clone())
                     } else {
-                        None
-                    };
-                return if let Some(snapshot_archive_info) = snapshot_archive_info {
-                    RpcRequestMiddleware::redirect(&format!(
-                        "/{}",
-                        snapshot_archive_info
-                            .path
-                            .file_name()
-                            .unwrap_or_else(|| std::ffi::OsStr::new(""))
-                            .to_str()
-                            .unwrap_or("")
-                    ))
+                        snapshot_paths::get_highest_incremental_snapshot_archive_info(
+                            &snapshot_config.incremental_snapshot_archives_dir,
+                            full_snapshot_archive_info.slot(),
+                        )
+                        .map(|incremental_snapshot_archive_info| {
+                            incremental_snapshot_archive_info
+                                .snapshot_archive_info()
+                                .clone()
+                        })
+                    }
                 } else {
-                    RpcRequestMiddleware::not_found()
-                }
-                .into();
+                    None
+                };
+            return if let Some(snapshot_archive_info) = snapshot_archive_info {
+                RpcRequestMiddleware::redirect(&format!(
+                    "/{}",
+                    snapshot_archive_info
+                        .path
+                        .file_name()
+                        .unwrap_or_else(|| std::ffi::OsStr::new(""))
+                        .to_str()
+                        .unwrap_or("")
+                ))
+            } else {
+                RpcRequestMiddleware::not_found()
             }
+            .into();
         }
 
         if let Some(path) = match_supply_path(request.uri().path()) {
@@ -536,16 +534,19 @@ impl JsonRpcService {
                 "Invalid {:?} socket address for TPU",
                 Protocol::QUIC
             ))?;
-        let client = TpuClientNextClient::new(
-            client_runtime,
+        let leader_updater = create_leader_updater(
+            leader_info,
             my_tpu_address,
             config.send_transaction_service_config.tpu_peers.clone(),
-            leader_info,
+        );
+        let (tpu_sender, client) = create_client(
+            client_runtime,
+            leader_updater,
             config.send_transaction_service_config.leader_forward_count,
             Some(identity_keypair),
             tpu_client_socket,
             cancel,
-        );
+        )?;
 
         let json_rpc_service = Self::new(
             config.rpc_addr,
@@ -564,7 +565,8 @@ impl JsonRpcService {
             config.send_transaction_service_config,
             config.max_slots,
             config.leader_schedule_cache,
-            client,
+            Some(tpu_sender),
+            Arc::new(client),
             config.max_complete_transaction_status_slot,
             config.prioritization_fee_cache,
             runtime,
@@ -579,17 +581,9 @@ impl JsonRpcService {
         Ok(json_rpc_service)
     }
 
-    /// Sonic: Public constructor that accepts a custom TransactionClient,
-    /// used by ephemeral rollup RPC to bypass QUIC/TPU.
+    /// Sonic: ER constructor skips TPU forwarding because ErTxExecutor handles writes in-process.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_client<
-        Client: TransactionClient
-            + NotifyKeyUpdate
-            + Clone
-            + std::marker::Send
-            + std::marker::Sync
-            + 'static,
-    >(
+    pub fn new_with_client<Client: NotifyKeyUpdate + Send + Sync + 'static>(
         rpc_addr: SocketAddr,
         config: JsonRpcConfig,
         snapshot_config: Option<SnapshotConfig>,
@@ -641,7 +635,8 @@ impl JsonRpcService {
             send_transaction_service_config,
             max_slots,
             leader_schedule_cache,
-            client,
+            None,
+            Arc::new(client),
             max_complete_transaction_status_slot,
             prioritization_fee_cache,
             runtime,
@@ -655,14 +650,7 @@ impl JsonRpcService {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn new<
-        Client: TransactionClient
-            + NotifyKeyUpdate
-            + Clone
-            + std::marker::Send
-            + std::marker::Sync
-            + 'static,
-    >(
+    fn new(
         rpc_addr: SocketAddr,
         config: JsonRpcConfig,
         snapshot_config: Option<SnapshotConfig>,
@@ -679,7 +667,9 @@ impl JsonRpcService {
         send_transaction_service_config: send_transaction_service::Config,
         max_slots: Arc<MaxSlots>,
         leader_schedule_cache: Arc<LeaderScheduleCache>,
-        client: Client,
+        // Sonic: ER RPC has no TPU sender; writes use ErTxExecutor.
+        tpu_sender: Option<TpuSender>,
+        client_updater: Arc<dyn NotifyKeyUpdate + Send + Sync>,
         max_complete_transaction_status_slot: Arc<AtomicU64>,
         prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
         runtime: Arc<TokioRuntime>,
@@ -809,13 +799,15 @@ impl JsonRpcService {
             request_processor.set_er_tx_executor(er_tx_executor);
         }
 
-        let _send_transaction_service = Arc::new(SendTransactionService::new(
-            bank_forks.clone(),
-            receiver,
-            client.clone(),
-            send_transaction_service_config,
-            exit,
-        ));
+        let _send_transaction_service = tpu_sender.map(|tpu_sender| {
+            Arc::new(SendTransactionService::new(
+                bank_forks.clone(),
+                receiver,
+                tpu_sender,
+                send_transaction_service_config,
+                exit,
+            ))
+        });
 
         #[cfg(test)]
         let test_request_processor = request_processor.clone();
@@ -899,7 +891,7 @@ impl JsonRpcService {
             #[cfg(test)]
             request_processor: test_request_processor,
             close_handle: Some(close_handle),
-            client_updater: Arc::new(client) as Arc<dyn NotifyKeyUpdate + Send + Sync>,
+            client_updater,
         })
     }
 
@@ -1012,7 +1004,7 @@ mod tests {
             ..send_transaction_service::Config::default()
         };
 
-        let client = create_client_for_tests(
+        let (tpu_sender, client) = create_client_for_tests(
             runtime.handle().clone(),
             tpu_address,
             send_transaction_service_config.tpu_peers.clone(),
@@ -1035,7 +1027,8 @@ mod tests {
             send_transaction_service_config,
             Arc::new(MaxSlots::default()),
             Arc::new(LeaderScheduleCache::default()),
-            client,
+            Some(tpu_sender),
+            Arc::new(client),
             Arc::new(AtomicU64::default()),
             Some(Arc::new(PrioritizationFeeCache::default())),
             runtime,

@@ -105,8 +105,7 @@ impl BankForks {
             BankWithScheduler::new_without_scheduler(root_bank.clone()),
         );
 
-        let parents = root_bank.parents();
-        for parent in parents {
+        for parent in root_bank.parents_iter() {
             if banks
                 .insert(
                     parent.slot(),
@@ -233,20 +232,26 @@ impl BankForks {
     /// For use when we want to remove `slots` from `BankForks`. It's not safe to remove
     /// a bank if it's descendant(s) are still in BankForks.
     ///
-    /// Returns the supplied slots and any descendants that are still present in bank forks
-    pub fn slots_to_clear(&self, slots: impl IntoIterator<Item = Slot>) -> BTreeSet<Slot> {
+    /// Returns the supplied unrooted slots and all descendants that are still present in bank
+    /// forks as `slots_to_purge`, plus the subset that still has a bank as `banks_to_clear`.
+    pub fn slots_to_clear(
+        &self,
+        slots: impl IntoIterator<Item = Slot>,
+    ) -> (BTreeSet<Slot>, Vec<BankWithScheduler>) {
         let root = self.root();
-        let mut slots_to_clear = BTreeSet::new();
+        let mut slots_to_purge = BTreeSet::new();
+        let mut bank_slots_to_clear = BTreeSet::new();
 
-        for slot in slots.into_iter() {
+        for slot in slots {
             if slot <= root {
                 continue;
             }
+            slots_to_purge.insert(slot);
             if self.banks.contains_key(&slot) {
-                slots_to_clear.insert(slot);
+                bank_slots_to_clear.insert(slot);
             }
             if let Some(slot_descendants) = self.descendants.get(&slot) {
-                slots_to_clear.extend(
+                bank_slots_to_clear.extend(
                     slot_descendants
                         .iter()
                         .copied()
@@ -255,7 +260,15 @@ impl BankForks {
             }
         }
 
-        slots_to_clear
+        slots_to_purge.extend(&bank_slots_to_clear);
+        let banks_to_clear = bank_slots_to_clear
+            .into_iter()
+            .map(|slot| {
+                self.get_with_scheduler(slot)
+                    .expect("bank slot was present while collecting slots to clear")
+            })
+            .collect();
+        (slots_to_purge, banks_to_clear)
     }
 
     pub fn frozen_banks(&self) -> impl Iterator<Item = (Slot, Arc<Bank>)> + '_ {
@@ -577,7 +590,7 @@ impl BankForks {
             }
         }
         let root_tx_count = root_bank
-            .parents()
+            .parents_iter()
             .last()
             .map(|bank| bank.transaction_count())
             .unwrap_or(0);
@@ -643,6 +656,7 @@ impl BankForks {
         let set_root_start = Instant::now();
         let (removed_banks, set_root_metrics) =
             self.do_set_root_return_metrics(root, snapshot_controller, highest_super_majority_root);
+
         datapoint_info!(
             "bank-forks_set_root",
             (
@@ -668,14 +682,6 @@ impl BankForks {
                     .timings
                     .total_squash_time
                     .squash_accounts_ms,
-                i64
-            ),
-            (
-                "total_squash_accounts_index_ms",
-                set_root_metrics
-                    .timings
-                    .total_squash_time
-                    .squash_accounts_index_ms,
                 i64
             ),
             (
@@ -889,6 +895,7 @@ mod tests {
         super::*,
         crate::{
             bank::test_utils::update_vote_account_timestamp,
+            block_component_processor::vote_reward::epoch_inflation_account_state::EpochInflationAccountState,
             genesis_utils::{
                 GenesisConfigInfo, create_genesis_config, create_genesis_config_with_leader,
             },
@@ -899,9 +906,10 @@ mod tests {
         },
         agave_feature_set::FeatureSet,
         agave_votor_messages::{
-            certificate::{Certificate, CertificateType},
+            certificate::{CertSignature, GenesisCert},
             consensus_message::Block,
             migration::{GENESIS_CERTIFICATE_ACCOUNT, MIGRATION_SLOT_OFFSET},
+            wire::{WireBlockCertMessage, WireCertSignature},
         },
         assert_matches::assert_matches,
         crossbeam_channel::{Receiver, Sender, bounded},
@@ -1098,21 +1106,29 @@ mod tests {
     fn make_root_bank_for_migration_status_test(
         root_slot: Slot,
         ff_activation_slot: Option<Slot>,
-        genesis_cert: Option<Certificate>,
+        genesis_cert: Option<GenesisCert>,
     ) -> Bank {
         let GenesisConfigInfo {
             mut genesis_config, ..
         } = create_genesis_config(10_000);
         genesis_config.epoch_schedule = EpochSchedule::new(32);
 
-        if let Some(genesis_cert) = genesis_cert.as_ref() {
-            let cert_data = wincode::serialize(genesis_cert).unwrap();
+        if let Some(genesis_cert) = genesis_cert {
+            let cert = WireBlockCertMessage {
+                block: genesis_cert.block,
+                signature: WireCertSignature {
+                    signature: genesis_cert.signature.signature,
+                    bitmap: genesis_cert.signature.bitmap,
+                },
+            };
+            let cert_data = wincode::serialize(&cert).unwrap();
             let lamports = Rent::default().minimum_balance(cert_data.len());
             let mut cert_account = Account::new(lamports, cert_data.len(), &system_program::ID);
             cert_account.data = cert_data;
             genesis_config
                 .accounts
                 .insert(*GENESIS_CERTIFICATE_ACCOUNT, cert_account);
+            EpochInflationAccountState::insert_into_genesis_config(&mut genesis_config);
         }
 
         let mut feature_set = FeatureSet::default();
@@ -1141,13 +1157,15 @@ mod tests {
     #[test]
     fn test_initialize_migration_status() {
         let ff_activation_slot = 5;
-        let genesis_cert = Certificate {
-            cert_type: CertificateType::Genesis(Block {
+        let genesis_cert = GenesisCert {
+            block: Block {
                 slot: 1,
                 block_id: Hash::default(),
-            }),
-            signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
-            bitmap: vec![],
+            },
+            signature: CertSignature {
+                signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
+                bitmap: vec![],
+            },
         };
 
         let root_bank = make_root_bank_for_migration_status_test(0, None, None);
@@ -1168,8 +1186,17 @@ mod tests {
             Some(genesis_cert.clone()),
         );
         assert_eq!(
-            root_bank.get_alpenglow_genesis_certificate(),
-            Some(genesis_cert.clone())
+            root_bank.get_alpenglow_genesis_certificate().unwrap(),
+            genesis_cert.clone()
+        );
+        let migration_status = BankForks::initialize_migration_status(&root_bank);
+        assert!(migration_status.is_alpenglow_enabled());
+        assert!(!migration_status.is_full_alpenglow_epoch());
+
+        let root_bank = make_root_bank_for_migration_status_test(
+            ff_activation_slot + MIGRATION_SLOT_OFFSET,
+            Some(ff_activation_slot),
+            Some(genesis_cert.clone()),
         );
         let migration_status = BankForks::initialize_migration_status(&root_bank);
         assert!(migration_status.is_alpenglow_enabled());
@@ -1224,10 +1251,15 @@ mod tests {
 
         // Migration can still succeed
         let mut bank = Bank::new_from_parent(root_bank, SlotLeader::default(), 10);
-        let genesis_cert = Certificate {
-            cert_type: CertificateType::Finalize(1),
-            signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
-            bitmap: vec![],
+        let genesis_cert = GenesisCert {
+            block: Block {
+                slot: 1,
+                block_id: Hash::new_unique(),
+            },
+            signature: CertSignature {
+                signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
+                bitmap: vec![],
+            },
         };
         bank.activate_feature(&agave_feature_set::alpenglow::id());
         bank.set_alpenglow_genesis_certificate(&genesis_cert);
@@ -1265,17 +1297,43 @@ mod tests {
             &[(0, 1), (1, 2), (1, 3), (2, 4), (0, 5)],
         );
 
+        let slots = |slots: &[Slot]| {
+            let (slots_to_purge, banks_to_clear) = bank_forks
+                .read()
+                .unwrap()
+                .slots_to_clear(slots.iter().copied());
+            let bank_slots_to_clear = banks_to_clear
+                .iter()
+                .map(|bank| bank.slot())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(banks_to_clear.len(), bank_slots_to_clear.len());
+            (slots_to_purge, bank_slots_to_clear)
+        };
         assert_eq!(
-            bank_forks.read().unwrap().slots_to_clear([2]),
-            [2, 4].into_iter().collect()
+            slots(&[2]),
+            ([2, 4].into_iter().collect(), [2, 4].into_iter().collect())
         );
         assert_eq!(
-            bank_forks.read().unwrap().slots_to_clear([1]),
-            [1, 2, 3, 4].into_iter().collect(),
+            slots(&[1]),
+            (
+                [1, 2, 3, 4].into_iter().collect(),
+                [1, 2, 3, 4].into_iter().collect(),
+            )
         );
         assert_eq!(
-            bank_forks.read().unwrap().slots_to_clear([0]),
-            BTreeSet::<Slot>::new()
+            slots(&[0]),
+            (BTreeSet::<Slot>::new(), BTreeSet::<Slot>::new())
+        );
+        assert_eq!(
+            slots(&[6]),
+            ([6].into_iter().collect(), BTreeSet::<Slot>::new())
+        );
+        assert_eq!(
+            slots(&[1, 2, 2, 3]),
+            (
+                [1, 2, 3, 4].into_iter().collect(),
+                [1, 2, 3, 4].into_iter().collect(),
+            )
         );
     }
 

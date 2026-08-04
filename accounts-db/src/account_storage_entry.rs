@@ -1,10 +1,12 @@
 use {
     crate::{
         account_info::Offset,
+        account_storage::stored_account_info::{StoredAccountInfo, StoredAccountInfoWithoutData},
         accounts_db::AccountsFileId,
         accounts_file::{AccountsFile, AccountsFileError, AccountsFileProvider},
         obsolete_accounts::ObsoleteAccounts,
     },
+    agave_fs::buffered_reader::RequiredLenBufFileRead,
     solana_clock::Slot,
     solana_nohash_hasher::IntSet,
     std::{
@@ -43,6 +45,13 @@ pub struct AccountStorageEntry {
     /// shrink more likely to visit this storage.
     zero_lamport_single_ref_offsets: RwLock<IntSet<Offset>>,
 
+    /// offsets to zero-lamport accounts that have been removed from the accounts index entirely
+    /// (a tombstone — carried forward to this storage by shrink). The index has no slot_list entry
+    /// pointing at them; their bytes are retained only so an incremental snapshot taken after the
+    /// latest full snapshot still observes the zero-lamport account and propagates the deletion.
+    /// Shrink uses this list to recognize tombstone entries without needing to scan the index.
+    tombstone_offsets: RwLock<IntSet<Offset>>,
+
     /// Obsolete Accounts. These are accounts that are still present in the storage
     /// but should be ignored during rebuild. They have been removed
     /// from the accounts index, so they will not be picked up by scan.
@@ -73,6 +82,7 @@ impl AccountStorageEntry {
             num_alive_accounts: AtomicUsize::new(0),
             num_alive_bytes: AtomicUsize::new(0),
             zero_lamport_single_ref_offsets: RwLock::default(),
+            tombstone_offsets: RwLock::default(),
             obsolete_accounts: RwLock::default(),
         }
     }
@@ -88,6 +98,7 @@ impl AccountStorageEntry {
             zero_lamport_single_ref_offsets: RwLock::new(
                 self.zero_lamport_single_ref_offsets.read().unwrap().clone(),
             ),
+            tombstone_offsets: RwLock::new(self.tombstone_offsets.read().unwrap().clone()),
             obsolete_accounts: RwLock::new(self.obsolete_accounts.read().unwrap().clone()),
         })
     }
@@ -105,6 +116,7 @@ impl AccountStorageEntry {
             num_alive_accounts: AtomicUsize::new(0),
             num_alive_bytes: AtomicUsize::new(0),
             zero_lamport_single_ref_offsets: RwLock::default(),
+            tombstone_offsets: RwLock::default(),
             obsolete_accounts: RwLock::new(obsolete_accounts),
         }
     }
@@ -172,9 +184,44 @@ impl AccountStorageEntry {
         count
     }
 
-    /// Return the number of zero_lamport_single_ref accounts in the storage.
+    /// Number of dead zero-lamport accounts in the storage, counting both in-index single-ref
+    /// entries (`zero_lamport_single_ref_offsets`) and tombstones removed from the index
+    /// (`tombstone_offsets`). Used for shrink-productivity accounting.
     pub(crate) fn num_zero_lamport_single_ref_accounts(&self) -> usize {
-        self.zero_lamport_single_ref_offsets.read().unwrap().len()
+        self.zero_lamport_single_ref_offsets.read().unwrap().len() + self.num_tombstones()
+    }
+
+    /// Batch-insert tombstone offsets, taking the offsets lock once.
+    /// Returns the number of offsets inserted.
+    pub(crate) fn batch_insert_tombstone_offsets(
+        &self,
+        offsets: impl IntoIterator<Item = Offset>,
+    ) -> usize {
+        let mut tombstone_offsets = self.tombstone_offsets.write().unwrap();
+        let mut num_inserted = 0;
+        for offset in offsets {
+            if tombstone_offsets.insert(offset) {
+                num_inserted += 1;
+            }
+        }
+        num_inserted
+    }
+
+    /// Locks the tombstone offset set with a read lock and returns it with the guard.
+    pub(crate) fn tombstone_offsets_read_lock(&self) -> RwLockReadGuard<'_, IntSet<Offset>> {
+        self.tombstone_offsets.read().unwrap()
+    }
+
+    /// Number of tombstone offsets in the storage.
+    pub(crate) fn num_tombstones(&self) -> usize {
+        self.tombstone_offsets.read().unwrap().len()
+    }
+
+    /// True if every alive account in this storage is a tombstone. Such a storage holds no live
+    /// index entries (tombstones were removed from the index when created), so it is fully dead.
+    pub(crate) fn has_only_tombstones(&self) -> bool {
+        let num_tombstones = self.num_tombstones();
+        num_tombstones > 0 && self.count() == num_tombstones
     }
 
     /// Return the "alive_bytes" minus "zero_lamport_single_ref_accounts bytes".
@@ -188,11 +235,6 @@ impl AccountStorageEntry {
     /// Returns the number of bytes used in this storage
     pub fn written_bytes(&self) -> u64 {
         self.accounts.len() as u64
-    }
-
-    /// Returns the number of bytes, not accounts, this storage can hold
-    pub fn capacity(&self) -> u64 {
-        self.accounts.capacity()
     }
 
     pub fn has_accounts(&self) -> bool {
@@ -246,6 +288,55 @@ impl AccountStorageEntry {
         prev_num_alive_accounts - num_accounts
     }
 
+    /// Collect the offsets that should be excluded from scans
+    fn excluded_offsets(&self) -> IntSet<Offset> {
+        let mut offsets: IntSet<_> = self
+            .obsolete_accounts_read_lock()
+            .filter_obsolete_accounts(None)
+            .map(|(offset, _)| offset)
+            .collect();
+        offsets.extend(self.tombstone_offsets_read_lock().iter().copied());
+        offsets
+    }
+
+    /// Iterate over the alive accounts in this storage, excluding obsolete accounts and tombstones.
+    /// The return value is the number of values excluded from the scan.
+    pub(crate) fn scan_accounts<'a>(
+        &'a self,
+        reader: &mut impl RequiredLenBufFileRead<'a>,
+        mut callback: impl for<'local> FnMut(Offset, StoredAccountInfo<'local>),
+    ) -> Result<u64, AccountsFileError> {
+        let excluded_offsets = self.excluded_offsets();
+        let mut num_excluded = 0;
+        self.accounts.scan_accounts(reader, |offset, account| {
+            if excluded_offsets.contains(&offset) {
+                num_excluded += 1;
+                return;
+            }
+            callback(offset, account);
+        })?;
+        Ok(num_excluded)
+    }
+
+    /// Iterate over the alive accounts in this storage without reading data, excluding obsolete
+    /// accounts and tombstones. The return value is the number of values excluded from the scan.
+    pub(crate) fn scan_accounts_without_data(
+        &self,
+        mut callback: impl for<'local> FnMut(Offset, StoredAccountInfoWithoutData<'local>),
+    ) -> Result<u64, AccountsFileError> {
+        let excluded_offsets = self.excluded_offsets();
+        let mut num_excluded = 0;
+        self.accounts
+            .scan_accounts_without_data(|offset, account| {
+                if excluded_offsets.contains(&offset) {
+                    num_excluded += 1;
+                    return;
+                }
+                callback(offset, account);
+            })?;
+        Ok(num_excluded)
+    }
+
     /// Returns the path to the underlying accounts storage file
     pub fn path(&self) -> &Path {
         self.accounts.path()
@@ -261,5 +352,81 @@ impl AccountStorageEntry {
 
     pub(crate) fn zero_lamport_single_ref_offsets(&self) -> &RwLock<IntSet<Offset>> {
         &self.zero_lamport_single_ref_offsets
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::*, crate::append_vec::new_scan_accounts_reader, solana_account::AccountSharedData,
+        solana_pubkey::Pubkey, std::iter, tempfile::TempDir,
+    };
+
+    /// scan_accounts and scan_accounts_without_data each visit every account except those marked
+    /// obsolete or recorded as a tombstone, and return the number of accounts excluded.
+    #[test]
+    fn test_scan_accounts_excludes_obsolete_and_tombstones() {
+        let slot = 0;
+        let temp_dir = TempDir::new().unwrap();
+        let storage = AccountStorageEntry::new(
+            temp_dir.path(),
+            slot,
+            0,
+            1024 * 1024,
+            AccountsFileProvider::AppendVec,
+        );
+
+        // Write five accounts and capture their offsets.
+        let accounts: Vec<_> = iter::repeat_with(|| {
+            (
+                Pubkey::new_unique(),
+                AccountSharedData::new(1, 10, &Pubkey::default()),
+            )
+        })
+        .take(5)
+        .collect();
+        let offsets = storage
+            .accounts
+            .write_accounts(&(slot, &accounts[..]))
+            .unwrap()
+            .offsets;
+
+        // Mark account 1 obsolete and record account 3 as a tombstone.
+        let obsolete_offset = offsets[1];
+        let tombstone_offset = offsets[3];
+        let data_lens = storage.accounts.get_account_data_lens(&[obsolete_offset]);
+        storage
+            .obsolete_accounts()
+            .write()
+            .unwrap()
+            .mark_accounts_obsolete(iter::once((obsolete_offset, data_lens[0])), slot);
+        storage.batch_insert_tombstone_offsets([tombstone_offset]);
+
+        // Scan and collect the accounts that were visited, in offset order.
+        let mut reader = new_scan_accounts_reader();
+        let mut visited = Vec::new();
+        let num_excluded = storage
+            .scan_accounts(&mut reader, |offset, account| {
+                visited.push((offset, *account.pubkey()));
+            })
+            .unwrap();
+
+        // Accounts 0, 2, and 4 are alive; 1 (obsolete) and 3 (tombstone) are excluded.
+        assert_eq!(num_excluded, 2);
+        let expected: Vec<_> = [0, 2, 4]
+            .iter()
+            .map(|&i| (offsets[i], accounts[i].0))
+            .collect();
+        assert_eq!(visited, expected);
+
+        // scan_accounts_without_data excludes the same offsets from the same storage.
+        let mut visited = Vec::new();
+        let num_excluded = storage
+            .scan_accounts_without_data(|offset, account| {
+                visited.push((offset, *account.pubkey()));
+            })
+            .unwrap();
+        assert_eq!(num_excluded, 2);
+        assert_eq!(visited, expected);
     }
 }
