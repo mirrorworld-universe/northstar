@@ -1,12 +1,15 @@
-use northstar_portal::{Checkpoint, CheckpointStatus, Session};
+use {
+    northstar_portal::{Checkpoint, CheckpointStatus, Session},
+    pinocchio::Address,
+};
 
-pub(crate) fn is_valid_settlement_session(session: &Session, validator: &[u8; 32]) -> bool {
+pub(crate) fn is_valid_settlement_session(session: &Session, validator: &Address) -> bool {
     session.is_valid() && session.validator == *validator
 }
 
 pub(crate) fn is_valid_settlement_checkpoint(
     checkpoint: &Checkpoint,
-    session: &[u8; 32],
+    session: &Address,
     er_slot: u64,
     checksum: &[u8; 32],
 ) -> bool {
@@ -29,7 +32,7 @@ mod tests {
 
     #[test]
     fn settlement_session_requires_portal_state_and_validator() {
-        let validator = [8; 32];
+        let validator = Address::from([8; 32]);
         let session = Session {
             discriminator: Session::DISCRIMINATOR,
             grid_id: 1,
@@ -37,7 +40,7 @@ mod tests {
             fee_cap: 1_000_000,
             created_at: 10,
             nonce: 11,
-            authority: [7; 32],
+            authority: [7; 32].into(),
             validator,
             settlement_interval_slots: 10,
             last_settled_l1_slot: 0,
@@ -51,12 +54,15 @@ mod tests {
         };
 
         assert!(is_valid_settlement_session(&session, &validator));
-        assert!(!is_valid_settlement_session(&session, &[9; 32]));
+        assert!(!is_valid_settlement_session(
+            &session,
+            &Address::from([9; 32])
+        ));
     }
 
     #[test]
     fn settlement_checkpoint_requires_matching_finalizable_state() {
-        let session = [7; 32];
+        let session = Address::from([7; 32]);
         let checksum = [8; 32];
         let er_slot = 9;
         let mut checkpoint = Checkpoint {
@@ -71,13 +77,13 @@ mod tests {
             readonly_l1_root: [5; 32],
             da_commitment: [6; 32],
             effect_commitment: checksum,
-            proposer: [9; 32],
+            proposer: [9; 32].into(),
             proposed_at_l1_slot: 10,
             challenge_deadline_l1_slot: 20,
             status: CheckpointStatus::Committed,
             bond_lamports: 1_000_000,
             bond_status: CheckpointBondStatus::Locked,
-            challenger: [0; 32],
+            challenger: [0; 32].into(),
             challenged_at_l1_slot: 0,
             challenge_resolved: false,
             bump: 255,

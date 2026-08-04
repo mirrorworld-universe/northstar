@@ -8,12 +8,10 @@ use {
     },
     borsh::{BorshDeserialize, BorshSerialize},
     pinocchio::{
-        account_info::AccountInfo,
-        instruction::{Seed, Signer},
-        program_error::ProgramError,
-        pubkey::Pubkey,
+        cpi::{Seed, Signer},
+        error::ProgramError,
         sysvars::{clock::Clock, rent::Rent, Sysvar},
-        ProgramResult,
+        AccountView as AccountInfo, Address as Pubkey, ProgramResult,
     },
     pinocchio_idl_macros::p_instruction,
     pinocchio_system::instructions::Transfer,
@@ -32,21 +30,15 @@ use {
 )]
 pub fn process_deposit_fee(
     program_id: &Pubkey,
-    accounts: &[AccountInfo],
+    accounts: &mut [AccountInfo],
     lamports: u64,
 ) -> ProgramResult {
     pinocchio_log::log!("Instruction: DepositFee, lamports={}", lamports);
 
-    if accounts.len() < 5 {
+    let [depositor, session, deposit_receipt, recipient, _system_program, ..] = accounts else {
         pinocchio_log::log!("ERROR: DepositFee failed: not enough account keys");
         return Err(ProgramError::NotEnoughAccountKeys);
-    }
-
-    let depositor = &accounts[0];
-    let session = &accounts[1];
-    let deposit_receipt = &accounts[2]; // lamport receiver account belong to this program
-    let recipient = &accounts[3]; // who will receive the lamports
-    let _system_program = &accounts[4];
+    };
 
     if !depositor.is_signer() {
         pinocchio_log::log!("ERROR: DepositFee failed: depositor is not signer");
@@ -54,12 +46,12 @@ pub fn process_deposit_fee(
     }
 
     // Validate session is owned by portal program
-    if session.owner() != program_id {
+    if !session.owned_by(program_id) {
         pinocchio_log::log!("ERROR: DepositFee failed: session owner mismatch");
         return Err(PortalError::SessionAccountOwnerMismatch.into());
     }
 
-    let session_state = Session::try_from_slice(&session.try_borrow_data()?).map_err(|_| {
+    let session_state = Session::try_from_slice(&session.try_borrow()?).map_err(|_| {
         pinocchio_log::log!("ERROR: DepositFee failed: session deserialize failed");
         PortalError::SessionDeserializeFailed
     })?;
@@ -82,12 +74,12 @@ pub fn process_deposit_fee(
     }
 
     // Validate deposit_receipt PDA
-    let session_key = session.key();
-    let recipient_key = recipient.key();
+    let session_key = session.address();
+    let recipient_key = recipient.address();
     let (expected_receipt_key, receipt_bump) =
         find_deposit_receipt_pda(program_id, session_key, recipient_key);
 
-    if deposit_receipt.key() != &expected_receipt_key {
+    if deposit_receipt.address() != &expected_receipt_key {
         pinocchio_log::log!("ERROR: DepositFee failed: deposit receipt PDA mismatch");
         return Err(PortalError::InvalidPdaSeeds.into());
     }
@@ -101,8 +93,8 @@ pub fn process_deposit_fee(
         bump: receipt_bump,
     };
     let receipt_size = crate::account_size(&new_receipt_state);
-    let receipt_rent_exempt = Rent::get()?.minimum_balance(receipt_size);
-    let pre_escrow = if deposit_receipt.data_is_empty() {
+    let receipt_rent_exempt = Rent::get()?.try_minimum_balance(receipt_size)?;
+    let pre_escrow = if deposit_receipt.is_data_empty() {
         0
     } else {
         deposit_receipt
@@ -116,7 +108,7 @@ pub fn process_deposit_fee(
     emit_transfer_event(&NorthstarTransferEvent {
         version: NorthstarTransferEvent::VERSION,
         kind: TransferEventKind::Deposit,
-        from: *depositor.key(),
+        from: *depositor.address(),
         to: *recipient_key,
         lamports,
         pre_balance: pre_escrow,
@@ -126,7 +118,7 @@ pub fn process_deposit_fee(
     });
 
     // Create or update DepositReceipt
-    if deposit_receipt.data_is_empty() {
+    if deposit_receipt.is_data_empty() {
         // First deposit — create the PDA
         let receipt_lamports = receipt_rent_exempt;
 
@@ -149,11 +141,11 @@ pub fn process_deposit_fee(
             receipt_signer,
         )?;
 
-        let mut receipt_data = deposit_receipt.try_borrow_mut_data()?;
+        let mut receipt_data = deposit_receipt.try_borrow_mut()?;
         BorshSerialize::serialize(&new_receipt_state, &mut &mut receipt_data[..]).unwrap();
     } else {
         // Subsequent deposit — update existing receipt
-        let receipt_state = DepositReceipt::try_from_slice(&deposit_receipt.try_borrow_data()?)
+        let receipt_state = DepositReceipt::try_from_slice(&deposit_receipt.try_borrow()?)
             .map_err(|_| {
                 pinocchio_log::log!("ERROR: DepositFee failed: receipt deserialize failed");
                 PortalError::DepositReceiptDeserializeFailed

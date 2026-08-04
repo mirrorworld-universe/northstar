@@ -1,7 +1,7 @@
 use {
     base64_no_std::{prelude::BASE64_STANDARD, Engine as _},
     borsh::{BorshDeserialize, BorshSerialize},
-    pinocchio::pubkey::Pubkey,
+    pinocchio::Address as Pubkey,
 };
 
 pub const TRANSFER_EVENT_LOG_PREFIX: &str = "Transfer Data: ";
@@ -97,7 +97,7 @@ fn log_transfer_event_data(event: &NorthstarTransferEvent) {
     output[141] = BASE64[((last & 0x03) << 4) as usize];
     output[142] = b'=';
     output[143] = b'=';
-    pinocchio::log::sol_log(core::str::from_utf8(&message).unwrap());
+    pinocchio_log::log!("{}", core::str::from_utf8(&message).unwrap());
 }
 
 #[cfg(target_os = "solana")]
@@ -113,8 +113,8 @@ fn transfer_event_byte(event: &NorthstarTransferEvent, index: usize) -> u8 {
     match index {
         0 => event.version,
         1 => event.kind as u8,
-        2..=33 => event.from[index - 2],
-        34..=65 => event.to[index - 34],
+        2..=33 => event.from.as_ref()[index - 2],
+        34..=65 => event.to.as_ref()[index - 34],
         66..=73 => event.lamports.to_le_bytes()[index - 66],
         74..=81 => event.pre_balance.to_le_bytes()[index - 74],
         82..=89 => event.post_balance.to_le_bytes()[index - 82],
@@ -137,8 +137,8 @@ pub fn emit_transfer_event(event: &NorthstarTransferEvent) {
         event.timestamp
     );
     pinocchio_log::log!("NorthstarTransferEvent from");
-    pinocchio::pubkey::log(&event.from);
+    event.from.log();
     pinocchio_log::log!("NorthstarTransferEvent to");
-    pinocchio::pubkey::log(&event.to);
+    event.to.log();
     log_transfer_event_data(event);
 }

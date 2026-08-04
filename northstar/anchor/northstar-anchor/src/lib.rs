@@ -3,16 +3,18 @@
 pub use northstar_anchor_macros::delegate;
 
 pub mod cpi {
-    use anchor_lang::solana_program::{
-        account_info::AccountInfo,
-        entrypoint::ProgramResult,
-        instruction::{AccountMeta, Instruction},
-        program::{invoke, invoke_signed},
-        program_error::ProgramError,
-        pubkey::Pubkey,
-        rent::Rent,
-        system_instruction, system_program,
-        sysvar::Sysvar,
+    use anchor_lang::{
+        prelude::SolanaSysvar,
+        solana_program::{
+            account_info::AccountInfo,
+            entrypoint::ProgramResult,
+            instruction::{AccountMeta, Instruction},
+            program::{invoke, invoke_signed},
+            program_error::ProgramError,
+            pubkey::Pubkey,
+            rent::Rent,
+            system_instruction, system_program,
+        },
     };
 
     /// Portal seed for `Session` PDA.
@@ -371,7 +373,7 @@ pub mod cpi {
         destination: &AccountInfo<'info>,
         system_program: &AccountInfo<'info>,
     ) -> ProgramResult {
-        target.realloc(0, false)?;
+        target.resize(0)?;
         target.assign(&system_program::id());
         let lamports = target.lamports();
         if lamports > 0 {
@@ -428,6 +430,6 @@ pub mod cpi {
 }
 
 pub use cpi::{
-    BUFFER_SEED, DELEGATION_RECORD_SEED, SESSION_SEED, buffer_pda, delegation_record_pda,
-    session_pda,
+    buffer_pda, delegation_record_pda, session_pda, BUFFER_SEED, DELEGATION_RECORD_SEED,
+    SESSION_SEED,
 };

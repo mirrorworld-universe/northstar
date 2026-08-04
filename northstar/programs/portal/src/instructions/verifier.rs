@@ -2,7 +2,7 @@ use {
     crate::{PortalError, VerifyErStepProofV1},
     groth16_solana::groth16::Groth16Verifier,
     northstar_zk_types::{ErStepPublicInputsV1, Groth16ProofRaw},
-    pinocchio::{account_info::AccountInfo, ProgramResult},
+    pinocchio::{AccountView as AccountInfo, ProgramResult},
     pinocchio_idl_macros::p_instruction,
 };
 
@@ -13,7 +13,7 @@ mod verifier_key;
     data = [proof: [u8; 256], public_inputs: [u8; 256]]
 )]
 pub fn process_verify_er_step_proof_v1(
-    accounts: &[AccountInfo],
+    accounts: &mut [AccountInfo],
     VerifyErStepProofV1 {
         proof,
         public_inputs,
@@ -77,7 +77,7 @@ mod tests {
 
     #[test]
     fn verifies_generated_transition_vector() {
-        process_verify_er_step_proof_v1(&[], test_instruction()).unwrap();
+        process_verify_er_step_proof_v1(&mut [], test_instruction()).unwrap();
     }
 
     #[test]
@@ -85,7 +85,7 @@ mod tests {
         let mut instruction = test_instruction();
         instruction.proof[63] ^= 1;
         assert_eq!(
-            process_verify_er_step_proof_v1(&[], instruction),
+            process_verify_er_step_proof_v1(&mut [], instruction),
             Err(PortalError::StepProofVerificationFailed.into())
         );
     }
@@ -95,7 +95,7 @@ mod tests {
         let mut instruction = test_instruction();
         instruction.public_inputs[255] ^= 1;
         assert_eq!(
-            process_verify_er_step_proof_v1(&[], instruction),
+            process_verify_er_step_proof_v1(&mut [], instruction),
             Err(PortalError::StepProofVerificationFailed.into())
         );
     }
@@ -105,7 +105,7 @@ mod tests {
         let mut instruction = test_instruction();
         instruction.public_inputs[..32].copy_from_slice(&BN254_FR_MODULUS_BE);
         assert_eq!(
-            process_verify_er_step_proof_v1(&[], instruction),
+            process_verify_er_step_proof_v1(&mut [], instruction),
             Err(PortalError::StepProofVerificationFailed.into())
         );
     }

@@ -89,9 +89,7 @@ fn prepare(config: &Config) -> Result<()> {
     let er_rpc =
         RpcClient::new_with_commitment(config.er_rpc.clone(), CommitmentConfig::processed());
     let payer = read_keypair(&config.deployer_keypair)?;
-    let session = portal_pubkey(northstar_portal::find_session_pda(
-        &config.portal_program.to_bytes(),
-    ));
+    let session = portal_pubkey(northstar_portal::find_session_pda(&config.portal_program));
     let session_account = rpc.get_account(&session)?;
     let session_state = Session::try_from_slice(&session_account.data)?;
     let mint = Keypair::new();
@@ -100,9 +98,9 @@ fn prepare(config: &Config) -> Result<()> {
     let vault_token = Keypair::new();
     let er_fee_payer = Keypair::new();
     let session_bridge = portal_pubkey(northstar_portal::find_session_bridge_pda(
-        &config.portal_program.to_bytes(),
-        &session.to_bytes(),
-        &mint.pubkey().to_bytes(),
+        &config.portal_program,
+        &session,
+        &mint.pubkey(),
     ));
     let (vault, _) = find_token_vault_pda(&config.bridge_program, &session_bridge);
     let (er_token_account, _) =
@@ -305,10 +303,10 @@ fn register_session_bridge_ix(
         ],
         data: borsh::to_vec(&PortalInstruction::RegisterSessionBridge(
             RegisterSessionBridge {
-                mint: mint.to_bytes(),
-                bridge_program: bridge_program.to_bytes(),
-                vault: vault.to_bytes(),
-                token_program: spl_token_interface::id().to_bytes(),
+                mint,
+                bridge_program,
+                vault,
+                token_program: spl_token_interface::id(),
             },
         ))
         .unwrap(),
@@ -380,8 +378,8 @@ fn deposit_ix(
         &er_account,
     );
     let delegation_record = portal_pubkey(northstar_portal::find_delegation_record_pda(
-        &portal_program.to_bytes(),
-        &er_account.to_bytes(),
+        &portal_program,
+        &er_account,
     ));
     Instruction {
         program_id: bridge_program,
@@ -444,8 +442,8 @@ fn delegate_er_ix(
     grid_id: u64,
 ) -> Instruction {
     let delegation_record = portal_pubkey(northstar_portal::find_delegation_record_pda(
-        &portal_program.to_bytes(),
-        &er_account.to_bytes(),
+        &portal_program,
+        &er_account,
     ));
     let (buffer, _) = find_buffer_pda(&bridge_program, &er_account);
     Instruction {
@@ -495,8 +493,8 @@ fn fund_and_delegate_er_fee_payer(
         false,
     )?;
     let delegation_record = portal_pubkey(northstar_portal::find_delegation_record_pda(
-        &portal_program.to_bytes(),
-        &er_fee_payer.pubkey().to_bytes(),
+        &portal_program,
+        &er_fee_payer.pubkey(),
     ));
     send_tx(
         rpc,
@@ -723,8 +721,8 @@ fn required_env(name: &str) -> Result<String> {
     env::var(name).map_err(|_| format!("missing environment variable {name}").into())
 }
 
-fn portal_pubkey((pubkey, _bump): ([u8; 32], u8)) -> Pubkey {
-    Pubkey::new_from_array(pubkey)
+fn portal_pubkey((pubkey, _bump): (Pubkey, u8)) -> Pubkey {
+    pubkey
 }
 
 #[allow(dead_code)]

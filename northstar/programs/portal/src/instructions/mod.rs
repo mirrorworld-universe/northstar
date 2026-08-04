@@ -1,6 +1,6 @@
 use {
     crate::PortalError,
-    pinocchio::{account_info::AccountInfo, instruction::Signer, pubkey::Pubkey, ProgramResult},
+    pinocchio::{cpi::Signer, AccountView as AccountInfo, Address as Pubkey, ProgramResult},
     pinocchio_system::instructions::{Allocate, Assign, Transfer},
 };
 
@@ -23,9 +23,9 @@ fn initialize_pda_account(
     lamports: u64,
     space: u64,
     owner: &Pubkey,
-    signer: Signer,
+    signer: Signer<'_, '_>,
 ) -> ProgramResult {
-    if !pda.data_is_empty() || pda.owner() != &pinocchio_system::ID {
+    if !pda.is_data_empty() || !pda.owned_by(&pinocchio_system::ID) {
         return Err(PortalError::InvalidAccountData.into());
     }
 

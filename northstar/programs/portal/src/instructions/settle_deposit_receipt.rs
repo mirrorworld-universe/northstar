@@ -9,11 +9,9 @@ use {
     },
     borsh::{BorshDeserialize, BorshSerialize},
     pinocchio::{
-        account_info::AccountInfo,
-        program_error::ProgramError,
-        pubkey::Pubkey,
+        error::ProgramError,
         sysvars::{clock::Clock, rent::Rent, Sysvar},
-        ProgramResult,
+        AccountView as AccountInfo, Address as Pubkey, ProgramResult,
     },
     pinocchio_idl_macros::p_instruction,
 };
@@ -38,7 +36,7 @@ use {
 )]
 pub fn process_settle_deposit_receipt(
     program_id: &Pubkey,
-    accounts: &[AccountInfo],
+    accounts: &mut [AccountInfo],
     settle: SettleDepositReceipt,
 ) -> ProgramResult {
     pinocchio_log::log!(
@@ -49,28 +47,22 @@ pub fn process_settle_deposit_receipt(
         settle.payout_lamports
     );
 
-    if accounts.len() < 5 {
+    let [validator, session, deposit_receipt, er_source, l1_recipient, ..] = accounts else {
         pinocchio_log::log!("ERROR: SettleDepositReceipt failed: not enough account keys");
         return Err(ProgramError::NotEnoughAccountKeys);
-    }
-
-    let validator = &accounts[0];
-    let session = &accounts[1];
-    let deposit_receipt = &accounts[2];
-    let er_source = &accounts[3];
-    let l1_recipient = &accounts[4];
+    };
 
     let (expected_session_key, _) = find_session_pda(program_id);
-    if session.key() != &expected_session_key {
+    if session.address() != &expected_session_key {
         pinocchio_log::log!("ERROR: SettleDepositReceipt failed: session PDA mismatch");
         return Err(PortalError::InvalidPdaSeeds.into());
     }
-    if session.owner() != program_id {
+    if !session.owned_by(program_id) {
         pinocchio_log::log!("ERROR: SettleDepositReceipt failed: session owner mismatch");
         return Err(PortalError::SessionAccountOwnerMismatch.into());
     }
 
-    let mut session_state = Session::try_from_slice(&session.try_borrow_data()?).map_err(|_| {
+    let mut session_state = Session::try_from_slice(&session.try_borrow()?).map_err(|_| {
         pinocchio_log::log!("ERROR: SettleDepositReceipt failed: session deserialize failed");
         PortalError::SessionDeserializeFailed
     })?;
@@ -78,7 +70,7 @@ pub fn process_settle_deposit_receipt(
         pinocchio_log::log!("ERROR: SettleDepositReceipt failed: session state invalid");
         return Err(PortalError::SessionStateInvalid.into());
     }
-    if !validator.is_signer() || validator.key() != &session_state.validator {
+    if !validator.is_signer() || validator.address() != &session_state.validator {
         pinocchio_log::log!("ERROR: SettleDepositReceipt failed: validator unauthorized");
         return Err(PortalError::Unauthorized.into());
     }
@@ -95,25 +87,25 @@ pub fn process_settle_deposit_receipt(
         return Err(PortalError::SettlementChecksumMismatch.into());
     }
 
-    let session_key = session.key();
-    let er_source_key = er_source.key();
-    let l1_recipient_key = l1_recipient.key();
-    if l1_recipient_key != &settle.l1_recipient {
+    let session_key = *session.address();
+    let er_source_key = *er_source.address();
+    let l1_recipient_key = *l1_recipient.address();
+    if l1_recipient_key != settle.l1_recipient {
         pinocchio_log::log!("ERROR: SettleDepositReceipt failed: l1 recipient mismatch");
         return Err(PortalError::InvalidAccountData.into());
     }
     let (expected_receipt_key, _) =
-        find_deposit_receipt_pda(program_id, session_key, er_source_key);
-    if deposit_receipt.key() != &expected_receipt_key {
+        find_deposit_receipt_pda(program_id, &session_key, &er_source_key);
+    if deposit_receipt.address() != &expected_receipt_key {
         pinocchio_log::log!("ERROR: SettleDepositReceipt failed: deposit receipt PDA mismatch");
         return Err(PortalError::InvalidPdaSeeds.into());
     }
-    if deposit_receipt.owner() != program_id {
+    if !deposit_receipt.owned_by(program_id) {
         pinocchio_log::log!("ERROR: SettleDepositReceipt failed: receipt owner mismatch");
         return Err(PortalError::InvalidAccountData.into());
     }
 
-    let mut receipt_state = DepositReceipt::try_from_slice(&deposit_receipt.try_borrow_data()?)
+    let mut receipt_state = DepositReceipt::try_from_slice(&deposit_receipt.try_borrow()?)
         .map_err(|_| {
             pinocchio_log::log!("ERROR: SettleDepositReceipt failed: receipt deserialize failed");
             PortalError::DepositReceiptDeserializeFailed
@@ -122,7 +114,7 @@ pub fn process_settle_deposit_receipt(
         pinocchio_log::log!("ERROR: SettleDepositReceipt failed: receipt state invalid");
         return Err(PortalError::DepositReceiptStateInvalid.into());
     }
-    if receipt_state.session != *session_key || receipt_state.recipient != *er_source_key {
+    if receipt_state.session != session_key || receipt_state.recipient != er_source_key {
         pinocchio_log::log!("ERROR: SettleDepositReceipt failed: receipt state seeds mismatch");
         return Err(PortalError::InvalidPdaSeeds.into());
     }
@@ -145,7 +137,7 @@ pub fn process_settle_deposit_receipt(
         return Err(PortalError::InvalidAccountData.into());
     }
 
-    let rent_exempt = Rent::get()?.minimum_balance(crate::account_size(&receipt_state));
+    let rent_exempt = Rent::get()?.try_minimum_balance(crate::account_size(&receipt_state))?;
     let escrow_lamports = deposit_receipt
         .lamports()
         .checked_sub(rent_exempt)
@@ -161,35 +153,33 @@ pub fn process_settle_deposit_receipt(
     let mut recipient_pre_balance = 0;
     let mut recipient_post_balance = 0;
     if settle.payout_lamports > 0 {
-        {
-            let mut recipient_lamports = l1_recipient.try_borrow_mut_lamports()?;
-            recipient_pre_balance = *recipient_lamports;
-            *recipient_lamports = recipient_lamports
-                .checked_add(settle.payout_lamports)
-                .ok_or(PortalError::ArithmeticOverflow)?;
-            recipient_post_balance = *recipient_lamports;
-        }
-        *deposit_receipt.try_borrow_mut_lamports()? = deposit_receipt
+        recipient_pre_balance = l1_recipient.lamports();
+        recipient_post_balance = recipient_pre_balance
+            .checked_add(settle.payout_lamports)
+            .ok_or(PortalError::ArithmeticOverflow)?;
+        l1_recipient.set_lamports(recipient_post_balance);
+        let receipt_lamports = deposit_receipt
             .lamports()
             .checked_sub(settle.payout_lamports)
             .ok_or(PortalError::ArithmeticOverflow)?;
+        deposit_receipt.set_lamports(receipt_lamports);
     }
 
     receipt_state.balance = settle.balance;
     receipt_state.withdrawn = settle.withdrawn;
-    let mut receipt_data = deposit_receipt.try_borrow_mut_data()?;
+    let mut receipt_data = deposit_receipt.try_borrow_mut()?;
     BorshSerialize::serialize(&receipt_state, &mut &mut receipt_data[..]).unwrap();
     drop(receipt_data);
 
     session_state.settlement_accumulator = accumulate_receipt_checksum(
         session_state.settlement_accumulator,
-        er_source.key(),
-        l1_recipient.key(),
+        er_source.address(),
+        l1_recipient.address(),
         settle.balance,
         settle.withdrawn,
         settle.payout_lamports,
     );
-    let mut session_data = session.try_borrow_mut_data()?;
+    let mut session_data = session.try_borrow_mut()?;
     BorshSerialize::serialize(&session_state, &mut &mut session_data[..]).unwrap();
 
     if settle.payout_lamports > 0 {
@@ -197,8 +187,8 @@ pub fn process_settle_deposit_receipt(
         emit_transfer_event(&NorthstarTransferEvent {
             version: NorthstarTransferEvent::VERSION,
             kind: TransferEventKind::Withdrawal,
-            from: *er_source_key,
-            to: *l1_recipient_key,
+            from: er_source_key,
+            to: l1_recipient_key,
             lamports: settle.payout_lamports,
             pre_balance: recipient_pre_balance,
             post_balance: recipient_post_balance,

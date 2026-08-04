@@ -5,8 +5,7 @@ use {
         WITHDRAWAL_SINK,
     },
     pinocchio::{
-        account_info::AccountInfo, program_error::ProgramError, sysvars::clock::Clock,
-        ProgramResult,
+        error::ProgramError, sysvars::clock::Clock, AccountView as AccountInfo, ProgramResult,
     },
     pinocchio_idl_macros::p_instruction,
     pinocchio_system::instructions::Transfer,
@@ -23,25 +22,21 @@ use {
     ],
     data = [lamports: u64]
 )]
-pub fn process_start_withdrawal(accounts: &[AccountInfo], lamports: u64) -> ProgramResult {
+pub fn process_start_withdrawal(accounts: &mut [AccountInfo], lamports: u64) -> ProgramResult {
     pinocchio_log::log!("Instruction: StartWithdrawal, lamports={}", lamports);
 
-    if accounts.len() < 5 {
+    let [source, l1_recipient, withdrawal_sink, _system_program, clock_account, ..] = accounts
+    else {
         pinocchio_log::log!("ERROR: StartWithdrawal failed: not enough account keys");
         return Err(ProgramError::NotEnoughAccountKeys);
-    }
-
-    let source = &accounts[0];
-    let l1_recipient = &accounts[1];
-    let withdrawal_sink = &accounts[2];
-    let _system_program = &accounts[3];
-    let clock = Clock::from_account_info(&accounts[4])?;
+    };
+    let clock = Clock::from_account_view(clock_account)?;
 
     if !source.is_signer() {
         pinocchio_log::log!("ERROR: StartWithdrawal failed: source is not signer");
         return Err(PortalError::Unauthorized.into());
     }
-    if withdrawal_sink.key() != &WITHDRAWAL_SINK {
+    if withdrawal_sink.address() != &WITHDRAWAL_SINK {
         pinocchio_log::log!("ERROR: StartWithdrawal failed: withdrawal sink mismatch");
         return Err(PortalError::WithdrawalSinkMismatch.into());
     }
@@ -58,8 +53,8 @@ pub fn process_start_withdrawal(accounts: &[AccountInfo], lamports: u64) -> Prog
     emit_transfer_event(&NorthstarTransferEvent {
         version: NorthstarTransferEvent::VERSION,
         kind: TransferEventKind::Withdrawal,
-        from: *source.key(),
-        to: *l1_recipient.key(),
+        from: *source.address(),
+        to: *l1_recipient.address(),
         lamports,
         pre_balance,
         post_balance,
