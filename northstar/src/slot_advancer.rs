@@ -1,6 +1,7 @@
 use {
     crate::EphemeralRollupSettings,
     log::{debug, info},
+    solana_account::{ReadableAccount, WritableAccount},
     solana_clock::Slot,
     solana_fee_structure::FeeStructure,
     solana_hash::Hash,
@@ -18,6 +19,7 @@ use {
         installed_scheduler_pool::SchedulerStatus,
     },
     std::{
+        collections::HashSet,
         sync::{
             atomic::{AtomicBool, Ordering},
             Arc, Mutex, RwLock,
@@ -110,6 +112,45 @@ impl SlotAdvancer {
         }
     }
 
+    fn carry_forward_modified_accounts(current_bank: &Bank, next_bank: &Bank) {
+        let next_bank_writes: HashSet<_> = next_bank
+            .get_accounts_modified_in_slot()
+            .into_iter()
+            .map(|(pubkey, _)| pubkey)
+            .collect();
+        let accounts_to_carry = current_bank
+            .get_accounts_modified_in_slot()
+            .into_iter()
+            .filter(|(pubkey, _)| !next_bank_writes.contains(pubkey))
+            .collect::<Vec<_>>();
+        let zero_lamport_placeholders = accounts_to_carry
+            .iter()
+            .filter(|(_, account)| account.lamports() == 0)
+            .map(|(pubkey, account)| {
+                let mut placeholder = account.clone();
+                placeholder.set_lamports(1);
+                (pubkey, placeholder)
+            })
+            .collect::<Vec<_>>();
+        let placeholder_writes = zero_lamport_placeholders
+            .iter()
+            .map(|(pubkey, account)| (*pubkey, account))
+            .collect::<Vec<_>>();
+        if !placeholder_writes.is_empty() {
+            // AccountsDb skips a zero-lamport write when its ancestor is already zero.
+            // Replace it within this slot so its deletion marker survives ancestor cleanup.
+            next_bank.store_accounts((next_bank.slot(), placeholder_writes.as_slice()), None);
+        }
+
+        let account_writes = accounts_to_carry
+            .iter()
+            .map(|(pubkey, account)| (pubkey, account))
+            .collect::<Vec<_>>();
+        if !account_writes.is_empty() {
+            next_bank.store_accounts((next_bank.slot(), account_writes.as_slice()), None);
+        }
+    }
+
     fn run(
         bank_forks: Arc<RwLock<BankForks>>,
         bank_operation_lock: Arc<Mutex<()>>,
@@ -130,7 +171,7 @@ impl SlotAdvancer {
         while !exit.load(Ordering::Relaxed) {
             thread::sleep(config.slot_duration);
 
-            let (current_bank_slot, next_bank_slot, frozen_bank, next_bank_arc) = {
+            let (current_bank_slot, next_bank_slot, frozen_bank, next_bank_arc, removed_banks) = {
                 let _bank_operation_guard = bank_operation_lock.lock().unwrap();
                 let current_bank = bank_forks.read().unwrap().working_bank();
 
@@ -182,7 +223,11 @@ impl SlotAdvancer {
                     crate::er_recent_blockhash_max_age_for_slot_duration(config.slot_duration),
                 );
 
-                let next_bank_arc = {
+                // ER slots cannot become AccountsDb roots because AccountsDb is shared with L1.
+                // Move slot-local state forward before old unrooted caches are purged.
+                Self::carry_forward_modified_accounts(&frozen_bank, &next_bank);
+
+                let (next_bank_arc, removed_banks) = {
                     let mut bank_forks_write = bank_forks.write().unwrap();
                     let inserted = bank_forks_write.insert_ephemeral(next_bank);
                     let next_bank_arc = inserted.clone_without_scheduler();
@@ -207,9 +252,9 @@ impl SlotAdvancer {
                         frozen_bank.disconnect_from_parent();
                     }
 
-                    drop(bank_forks_write.set_root_ephemeral(current_bank_slot));
+                    let removed_banks = bank_forks_write.set_root_ephemeral(current_bank_slot);
 
-                    next_bank_arc
+                    (next_bank_arc, removed_banks)
                 };
 
                 (
@@ -217,6 +262,7 @@ impl SlotAdvancer {
                     next_bank_slot,
                     frozen_bank,
                     next_bank_arc,
+                    removed_banks,
                 )
             };
 
@@ -240,8 +286,18 @@ impl SlotAdvancer {
             // Confirmed commitment should track latest frozen ER bank.
             // RPC preflight simulation requires a frozen bank, so do not point
             // this at the new working bank.
-            *optimistically_confirmed_bank.write().unwrap() =
-                OptimisticallyConfirmedBank { bank: frozen_bank };
+            *optimistically_confirmed_bank.write().unwrap() = OptimisticallyConfirmedBank {
+                bank: frozen_bank.clone(),
+            };
+
+            let removed_slots = removed_banks
+                .iter()
+                .map(|bank| (bank.slot(), bank.bank_id()))
+                .collect::<Vec<_>>();
+            if !removed_slots.is_empty() {
+                frozen_bank.remove_unrooted_slots(&removed_slots);
+            }
+            drop(removed_banks);
 
             debug!(
                 "SlotAdvancer: advanced to slot {}, new blockhash {}",
@@ -709,6 +765,112 @@ mod tests {
             "old ER ancestry should not accumulate in BankForks descendants; retained \
              {descendant_entries} entries",
         );
+    }
+
+    #[test]
+    fn test_ephemeral_slot_advancer_prunes_account_cache_without_losing_state() {
+        agave_logger::setup();
+
+        let parent_bank = create_test_bank();
+        let deleted_pubkey = Pubkey::new_unique();
+        parent_bank.store_account(
+            &deleted_pubkey,
+            &solana_account::AccountSharedData::new(99, 0, &Pubkey::new_unique()),
+        );
+        parent_bank.freeze();
+        let parent_bank = Arc::new(parent_bank);
+
+        let initial_slot = 1u64 << 40;
+        let initial_bank = Bank::new_from_parent_ephemeral_isolated(
+            parent_bank,
+            SlotLeader::default(),
+            initial_slot,
+        );
+        let retained_pubkey = Pubkey::new_unique();
+        let retained_account =
+            solana_account::AccountSharedData::new(42, 32, &Pubkey::new_unique());
+        initial_bank.store_account(&retained_pubkey, &retained_account);
+        initial_bank.store_account(
+            &deleted_pubkey,
+            &solana_account::AccountSharedData::default(),
+        );
+        let ticks_per_slot = initial_bank.ticks_per_slot();
+        initial_bank.set_tick_height(initial_bank.max_tick_height() - ticks_per_slot);
+
+        let bank_forks = BankForks::new_rw_arc_ephemeral(initial_bank);
+        let initial_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
+        let accounts_db = Arc::clone(&initial_bank.rc.accounts.accounts_db);
+        assert!(accounts_db.accounts_cache.contains(initial_slot));
+        assert!(initial_bank
+            .get_accounts_modified_in_slot()
+            .into_iter()
+            .any(|(pubkey, account)| pubkey == deleted_pubkey
+                && account == solana_account::AccountSharedData::default()));
+
+        let exit = Arc::new(AtomicBool::new(false));
+        let block_commitment_cache = create_block_commitment_cache(initial_bank.slot());
+        let optimistically_confirmed_bank =
+            create_optimistically_confirmed_bank(initial_bank.clone());
+        let advancer = SlotAdvancer::new(
+            bank_forks.clone(),
+            Arc::new(Mutex::new(())),
+            block_commitment_cache,
+            optimistically_confirmed_bank,
+            initial_bank,
+            Config {
+                slot_duration: Duration::from_millis(5),
+                manager_account: Pubkey::default(),
+                er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            },
+            exit.clone(),
+            None,
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if bank_forks.read().unwrap().working_bank().slot() > initial_slot + 8 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let working_bank = bank_forks.read().unwrap().working_bank();
+        let working_slot = working_bank.slot();
+        let initial_cache_retained = accounts_db.accounts_cache.contains(initial_slot);
+        let retained_er_cache_slots = accounts_db
+            .accounts_cache
+            .cached_frozen_slots()
+            .into_iter()
+            .filter(|slot| *slot >= initial_slot)
+            .collect::<Vec<_>>();
+        let loaded_account = working_bank.get_account(&retained_pubkey);
+        let deleted_account = working_bank.get_account(&deleted_pubkey);
+        let deletion_marker = working_bank
+            .get_accounts_modified_in_slot()
+            .into_iter()
+            .find(|(pubkey, _)| *pubkey == deleted_pubkey);
+
+        exit.store(true, Ordering::Relaxed);
+        advancer.join();
+
+        assert!(
+            working_slot > initial_slot + 8,
+            "slot advancer did not run enough slots"
+        );
+        assert!(
+            !initial_cache_retained,
+            "old ER slot {initial_slot} remained in AccountsCache at working slot {working_slot}"
+        );
+        assert!(
+            retained_er_cache_slots.len() <= 2,
+            "ER AccountsCache grew with slot count: {retained_er_cache_slots:?}"
+        );
+        assert_eq!(loaded_account, Some(retained_account));
+        assert_eq!(
+            deletion_marker,
+            Some((deleted_pubkey, solana_account::AccountSharedData::default()))
+        );
+        assert_eq!(deleted_account, None);
     }
 
     #[test]
