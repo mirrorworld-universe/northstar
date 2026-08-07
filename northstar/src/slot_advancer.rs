@@ -112,7 +112,7 @@ impl SlotAdvancer {
         }
     }
 
-    fn carry_forward_modified_accounts(current_bank: &Bank, next_bank: &Bank) {
+    pub(crate) fn carry_forward_modified_accounts(current_bank: &Bank, next_bank: &Bank) {
         let next_bank_writes: HashSet<_> = next_bank
             .get_accounts_modified_in_slot()
             .into_iter()

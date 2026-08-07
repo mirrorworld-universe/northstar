@@ -419,6 +419,9 @@ impl EphemeralRuntime {
                 next_bank_slot,
             );
             next_bank.configure_er(er_fee_structure, recent_blockhash_max_age);
+            // This frozen root is pruned after the child advances, so materialize its
+            // slot-local overlay in the child before handing it to SlotAdvancer.
+            SlotAdvancer::carry_forward_modified_accounts(&frozen_bank, &next_bank);
             let next_bank_arc = {
                 let mut bank_forks_write = bank_forks.write().unwrap();
                 let inserted = bank_forks_write.insert(next_bank);
