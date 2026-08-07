@@ -80,7 +80,7 @@ fn build_open_session_with_validator_ix(
         grid_id,
         ttl_slots,
         fee_cap,
-        validator: validator.to_bytes(),
+        validator: *validator,
         settlement_interval_slots: 10,
     });
     let data = borsh::to_vec(&ix).unwrap();
@@ -679,13 +679,13 @@ async fn prefunded_portal_pdas_can_be_initialized() {
         .unwrap();
     let receipt = DepositReceipt::try_from_slice(&receipt_data).unwrap();
     assert!(receipt.is_valid());
-    assert_eq!(receipt.session, session_pda.to_bytes());
+    assert_eq!(receipt.session, session_pda);
 
     let cursor_data = get_account_data(&mut context.banks_client, &checkpoint_cursor_pda)
         .await
         .unwrap();
     let cursor = CheckpointCursor::try_from_slice(&cursor_data).unwrap();
-    assert_eq!(cursor.active_checkpoint, checkpoint_pda.to_bytes());
+    assert_eq!(cursor.active_checkpoint, checkpoint_pda);
 
     let challenge_ix = build_challenge_checkpoint_ix(
         &PORTAL_PROGRAM_ID,
@@ -725,7 +725,7 @@ async fn prefunded_portal_pdas_can_be_initialized() {
         .await
         .unwrap();
     let proof = StepProofAccount::try_from_slice(&proof_data).unwrap();
-    assert_eq!(proof.checkpoint, checkpoint_pda.to_bytes());
+    assert_eq!(proof.checkpoint, checkpoint_pda);
 }
 
 #[tokio::test]
@@ -1369,17 +1369,17 @@ async fn checkpoint_bond_locks_and_releases() {
     let rent = context.banks_client.get_rent().await.unwrap();
     let cursor_rent = rent.minimum_balance(account_size(&CheckpointCursor {
         discriminator: CheckpointCursor::DISCRIMINATOR,
-        session: [0; 32],
-        latest_finalized_checkpoint: [0; 32],
+        session: [0; 32].into(),
+        latest_finalized_checkpoint: [0; 32].into(),
         latest_finalized_er_slot: 0,
         latest_finalized_state_root: [0; 32],
-        active_checkpoint: [0; 32],
+        active_checkpoint: [0; 32].into(),
         active_er_slot: 0,
         bump: 0,
     }));
     let checkpoint_rent = rent.minimum_balance(account_size(&Checkpoint {
         discriminator: Checkpoint::DISCRIMINATOR,
-        session: [0; 32],
+        session: [0; 32].into(),
         er_slot: 0,
         step_count: 0,
         previous_state_root: [0; 32],
@@ -1389,13 +1389,13 @@ async fn checkpoint_bond_locks_and_releases() {
         readonly_l1_root: [0; 32],
         da_commitment: [0; 32],
         effect_commitment: [0; 32],
-        proposer: [0; 32],
+        proposer: [0; 32].into(),
         proposed_at_l1_slot: 0,
         challenge_deadline_l1_slot: 0,
         status: CheckpointStatus::Pending,
         bond_lamports: 0,
         bond_status: CheckpointBondStatus::Locked,
-        challenger: [0; 32],
+        challenger: [0; 32].into(),
         challenged_at_l1_slot: 0,
         challenge_resolved: false,
         bump: 0,
@@ -3500,7 +3500,7 @@ async fn test_start_withdrawal_transfers_to_fixed_sink_and_emits_event() {
         .lamports;
     let sink_before = context
         .banks_client
-        .get_account(Pubkey::new_from_array(WITHDRAWAL_SINK))
+        .get_account(WITHDRAWAL_SINK)
         .await
         .unwrap()
         .map(|account| account.lamports)
@@ -3511,7 +3511,7 @@ async fn test_start_withdrawal_transfers_to_fixed_sink_and_emits_event() {
         accounts: vec![
             AccountMeta::new(source.pubkey(), true),
             AccountMeta::new_readonly(l1_recipient, false),
-            AccountMeta::new(Pubkey::new_from_array(WITHDRAWAL_SINK), false),
+            AccountMeta::new(WITHDRAWAL_SINK, false),
             AccountMeta::new_readonly(system_program::id(), false),
             AccountMeta::new_readonly(solana_sdk_ids::sysvar::clock::id(), false),
         ],
@@ -3540,7 +3540,7 @@ async fn test_start_withdrawal_transfers_to_fixed_sink_and_emits_event() {
         .lamports;
     let sink_after = context
         .banks_client
-        .get_account(Pubkey::new_from_array(WITHDRAWAL_SINK))
+        .get_account(WITHDRAWAL_SINK)
         .await
         .unwrap()
         .unwrap()
@@ -3558,11 +3558,14 @@ async fn test_start_withdrawal_transfers_to_fixed_sink_and_emits_event() {
                 .strip_prefix(northstar_portal::TRANSFER_EVENT_LOG_PREFIX)
         })
         .unwrap();
-    let event: NorthstarTransferEvent =
-        borsh::from_slice(&BASE64_STANDARD.decode(event_data).unwrap()).unwrap();
+    let mut event_bytes = [0; northstar_portal::TRANSFER_EVENT_SERIALIZED_LEN];
+    let event_len = BASE64_STANDARD
+        .decode_slice(event_data, &mut event_bytes)
+        .unwrap();
+    let event: NorthstarTransferEvent = borsh::from_slice(&event_bytes[..event_len]).unwrap();
     assert_eq!(event.kind, TransferEventKind::Withdrawal);
-    assert_eq!(event.from, source.pubkey().to_bytes());
-    assert_eq!(event.to, l1_recipient.to_bytes());
+    assert_eq!(event.from, source.pubkey());
+    assert_eq!(event.to, l1_recipient);
     assert_eq!(event.lamports, lamports);
     assert_eq!(event.pre_balance - event.post_balance, lamports);
 }

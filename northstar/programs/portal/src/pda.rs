@@ -3,19 +3,19 @@ use {
         Challenge, Checkpoint, CheckpointCursor, DataAvailabilityProof, DelegationRecord,
         DepositReceipt, FeeVault, Session, SessionBridge, StepProofAccount,
     },
-    pinocchio::pubkey::Pubkey,
+    pinocchio::Address as Pubkey,
 };
 
 #[cfg(target_os = "solana")]
 fn find_program_address(seeds: &[&[u8]], program_id: &Pubkey) -> (Pubkey, u8) {
-    pinocchio::pubkey::find_program_address(seeds, program_id)
+    Pubkey::find_program_address(seeds, program_id)
 }
 
 #[cfg(not(target_os = "solana"))]
 fn find_program_address(seeds: &[&[u8]], program_id: &Pubkey) -> (Pubkey, u8) {
-    let program_id = solana_pubkey::Pubkey::new_from_array(*program_id);
+    let program_id = solana_pubkey::Pubkey::new_from_array(program_id.to_bytes());
     let (pda, bump) = solana_pubkey::Pubkey::find_program_address(seeds, &program_id);
-    (pda.to_bytes(), bump)
+    (Pubkey::from(pda.to_bytes()), bump)
 }
 
 pub fn find_session_pda(program_id: &Pubkey) -> (Pubkey, u8) {

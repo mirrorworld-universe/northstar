@@ -213,11 +213,9 @@ impl EphemeralRuntime {
         portal_program_id: &Pubkey,
         delegated_account: &Pubkey,
     ) -> (Pubkey, u8) {
-        let (pda, bump) = northstar_portal::find_delegation_record_pda(
-            &portal_program_id.to_bytes(),
-            &delegated_account.to_bytes(),
-        );
-        (Pubkey::new_from_array(pda), bump)
+        let (pda, bump) =
+            northstar_portal::find_delegation_record_pda(portal_program_id, delegated_account);
+        (pda, bump)
     }
 
     fn effective_delegated_account(
@@ -259,7 +257,7 @@ impl EphemeralRuntime {
             return None;
         }
 
-        let owner_program: Pubkey = record.owner_program.into();
+        let owner_program = record.owner_program;
         let mut effective_account = account.clone();
         effective_account.set_owner(owner_program);
         Some(effective_account)
@@ -421,6 +419,9 @@ impl EphemeralRuntime {
                 next_bank_slot,
             );
             next_bank.configure_er(er_fee_structure, recent_blockhash_max_age);
+            // This frozen root is pruned after the child advances, so materialize its
+            // slot-local overlay in the child before handing it to SlotAdvancer.
+            SlotAdvancer::carry_forward_modified_accounts(&frozen_bank, &next_bank);
             let next_bank_arc = {
                 let mut bank_forks_write = bank_forks.write().unwrap();
                 let inserted = bank_forks_write.insert(next_bank);
@@ -1110,7 +1111,7 @@ impl EphemeralRuntime {
                         return None;
                     }
 
-                    let owner_program = Pubkey::from(record.owner_program);
+                    let owner_program = record.owner_program;
                     let mut effective_account = account.clone();
                     effective_account.set_owner(owner_program);
 
@@ -1202,7 +1203,7 @@ impl EphemeralRuntime {
                     )
                     .collect::<Vec<_>>();
                 if !account_writes.is_empty() {
-                    er_bank.store_accounts((er_bank.slot(), account_writes.as_slice()));
+                    er_bank.store_accounts((er_bank.slot(), account_writes.as_slice()), None);
                 }
                 Self::remove_reloadable_programs_from_cache(
                     &er_bank,
@@ -1328,7 +1329,7 @@ impl EphemeralRuntime {
             .iter()
             .map(|(pubkey, account)| (pubkey, account))
             .collect::<Vec<_>>();
-        bank.store_accounts((bank.slot(), account_writes.as_slice()));
+        bank.store_accounts((bank.slot(), account_writes.as_slice()), None);
         overlay_snapshot.len()
     }
 
@@ -1567,11 +1568,10 @@ impl EphemeralRuntime {
             })
             .filter_map(|(er_source, account)| {
                 let (receipt_pda, _) = northstar_portal::find_deposit_receipt_pda(
-                    &self.portal_program_id.to_bytes(),
-                    &session_pda.to_bytes(),
-                    &er_source.to_bytes(),
+                    &self.portal_program_id,
+                    &session_pda,
+                    er_source,
                 );
-                let receipt_pda = Pubkey::new_from_array(receipt_pda);
                 let receipt_account = self.l1_anchor_bank.get_account(&receipt_pda)?;
                 let Some(crate::portal_state::PortalAccount::DepositReceipt(receipt)) =
                     crate::portal_state::try_parse_raw_portal_account(receipt_account.data())
@@ -1712,10 +1712,10 @@ impl EphemeralRuntime {
             else {
                 continue;
             };
-            if Pubkey::new_from_array(bridge.bridge_program) != event.bridge_program {
+            if bridge.bridge_program != event.bridge_program {
                 continue;
             }
-            let vault = Pubkey::new_from_array(bridge.vault);
+            let vault = bridge.vault;
             let Some(vault_account) = self.l1_anchor_bank.get_account(&vault) else {
                 continue;
             };
@@ -1757,8 +1757,8 @@ impl EphemeralRuntime {
                 vault,
                 vault_token_account: Pubkey::new_from_array(vault_state.vault_token_account),
                 l1_destination_token_account: event.l1_destination_token_account,
-                mint: Pubkey::new_from_array(bridge.mint),
-                token_program: Pubkey::new_from_array(bridge.token_program),
+                mint: bridge.mint,
+                token_program: bridge.token_program,
                 amount: payout,
                 withdrawn: next_cumulative,
                 decimals: event.decimals,
@@ -1836,7 +1836,7 @@ impl EphemeralRuntime {
                     Some(crate::portal_state::PortalAccount::DelegationRecord(record))
                         if record.grid_id == self.settings.grid_id =>
                     {
-                        Some(Pubkey::from(record.owner_program))
+                        Some(record.owner_program)
                     }
                     Some(crate::portal_state::PortalAccount::DelegationRecord(_)) => None,
                     _ => {
@@ -1914,7 +1914,7 @@ impl EphemeralRuntime {
                 ))
             })
             .collect::<Vec<_>>();
-        er_bank.store_accounts((er_bank.slot(), updated_accounts.as_slice()));
+        er_bank.store_accounts((er_bank.slot(), updated_accounts.as_slice()), None);
         Self::remove_reloadable_programs_from_cache(
             er_bank,
             cache_context,
@@ -2073,16 +2073,15 @@ impl EphemeralRuntime {
     ) {
         let payer = Keypair::new();
         let (from, _) = northstar_portal::find_deposit_receipt_pda(
-            &self.portal_program_id.to_bytes(),
-            &self.settings.session_pda.to_bytes(),
-            &depositor.to_bytes(),
+            &self.portal_program_id,
+            &self.settings.session_pda,
+            depositor,
         );
-        let from = Pubkey::new_from_array(from);
         let event = northstar_portal::NorthstarTransferEvent {
             version: northstar_portal::NorthstarTransferEvent::VERSION,
             kind: northstar_portal::TransferEventKind::Deposit,
-            from: from.to_bytes(),
-            to: depositor.to_bytes(),
+            from,
+            to: *depositor,
             lamports,
             pre_balance: base_balance,
             post_balance: new_balance,
@@ -2320,6 +2319,7 @@ impl Drop for EphemeralRuntime {
 mod tests {
     use {
         super::*,
+        crate::ephemeral_tx_client::TransactionClient,
         base64::{prelude::BASE64_STANDARD, Engine as _},
         northstar_portal::{DelegationRecord, DepositReceipt, NorthstarTransferEvent},
         solana_account::{
@@ -2338,10 +2338,7 @@ mod tests {
             CommitmentConfig, RpcSendTransactionConfig, RpcSimulateTransactionConfig,
         },
         solana_sdk_ids::{bpf_loader, bpf_loader_upgradeable, system_program},
-        solana_send_transaction_service::{
-            send_transaction_service_stats::SendTransactionServiceStats,
-            transaction_client::TransactionClient,
-        },
+        solana_send_transaction_service::send_transaction_service_stats::SendTransactionServiceStats,
         solana_svm::transaction_processor::ExecutionRecordingConfig,
         solana_system_interface::instruction::transfer,
         solana_transaction::{versioned::VersionedTransaction, Transaction},
@@ -2451,8 +2448,8 @@ mod tests {
         );
         let receipt = DepositReceipt {
             discriminator: DepositReceipt::DISCRIMINATOR,
-            session: session_pda.to_bytes(),
-            recipient: recipient.to_bytes(),
+            session: *session_pda,
+            recipient: *recipient,
             balance,
             withdrawn,
             bump,
@@ -2501,7 +2498,7 @@ mod tests {
             EphemeralRuntime::delegation_record_pda(portal_program_id, delegated_account);
         let record = DelegationRecord {
             discriminator: DelegationRecord::DISCRIMINATOR,
-            owner_program: owner_program.to_bytes(),
+            owner_program: *owner_program,
             grid_id,
             bump,
         };
@@ -2810,11 +2807,11 @@ mod tests {
 
         let bridge_state = northstar_portal::SessionBridge {
             discriminator: northstar_portal::SessionBridge::DISCRIMINATOR,
-            session: session.to_bytes(),
-            mint: mint.to_bytes(),
-            bridge_program: bridge_program.to_bytes(),
-            vault: vault.to_bytes(),
-            token_program: token_program.to_bytes(),
+            session,
+            mint,
+            bridge_program,
+            vault,
+            token_program,
             bump: 255,
         };
         let bridge_data = borsh::to_vec(&bridge_state).unwrap();
@@ -2957,14 +2954,14 @@ mod tests {
         let event_data = BASE64_STANDARD.decode(transfer_data).unwrap();
         let event: NorthstarTransferEvent = borsh::from_slice(&event_data).unwrap();
         let (expected_from, _) = northstar_portal::find_deposit_receipt_pda(
-            &runtime.portal_program_id.to_bytes(),
-            &active_session_pda.to_bytes(),
-            &depositor.to_bytes(),
+            &runtime.portal_program_id,
+            &active_session_pda,
+            &depositor,
         );
         assert_eq!(event.version, NorthstarTransferEvent::VERSION);
         assert_eq!(event.kind, northstar_portal::TransferEventKind::Deposit);
         assert_eq!(event.from, expected_from);
-        assert_eq!(event.to, depositor.to_bytes());
+        assert_eq!(event.to, depositor);
         assert_eq!(event.lamports, 7);
         assert_eq!(event.pre_balance, 0);
         assert_eq!(event.post_balance, 7);
@@ -4628,7 +4625,7 @@ mod tests {
                 .rc
                 .accounts
                 .accounts_db
-                .get_pubkeys_for_slot(*slot)
+                .get_pubkey_account_for_slot(*slot)
                 .is_empty()
         }));
 
@@ -4652,7 +4649,7 @@ mod tests {
                     .rc
                     .accounts
                     .accounts_db
-                    .get_pubkeys_for_slot(slot)
+                    .get_pubkey_account_for_slot(slot)
                     .is_empty(),
                 "old ER slot {slot} should be purged during async retirement"
             );
@@ -5224,7 +5221,7 @@ mod tests {
         )
         .unwrap();
 
-        solana_send_transaction_service::transaction_client::TransactionClient::send_transactions_in_batch(
+        TransactionClient::send_transactions_in_batch(
             &runtime._tx_client,
             vec![wire_tx],
             &solana_send_transaction_service::send_transaction_service_stats::SendTransactionServiceStats::default(),

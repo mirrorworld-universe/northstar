@@ -81,8 +81,8 @@ impl TestWorld {
             fee_cap: 0,
             created_at: 0,
             nonce: 0,
-            authority: payer.pubkey().to_bytes(),
-            validator: payer.pubkey().to_bytes(),
+            authority: payer.pubkey(),
+            validator: payer.pubkey(),
             settlement_interval_slots: 10,
             last_settled_l1_slot: 0,
             last_settled_er_slot: 0,
@@ -109,11 +109,11 @@ impl TestWorld {
         program_test.add_account(vault_token, token_account(mint, vault, 0));
         let bridge = SessionBridge {
             discriminator: SessionBridge::DISCRIMINATOR,
-            session: session.to_bytes(),
-            mint: mint.to_bytes(),
-            bridge_program: northstar_token_bridge::id().to_bytes(),
-            vault: vault.to_bytes(),
-            token_program: spl_token_interface::id().to_bytes(),
+            session,
+            mint,
+            bridge_program: northstar_token_bridge::id(),
+            vault,
+            token_program: spl_token_interface::id(),
             bump: vault_bump,
         };
         program_test.add_account(

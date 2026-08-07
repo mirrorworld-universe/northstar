@@ -1,10 +1,12 @@
 #![allow(clippy::arithmetic_side_effects)]
 
 mod setup;
+mod shared;
 
 use {
     bincode::deserialize,
     setup::{setup_stake, setup_vote},
+    shared::from_account_info,
     solana_account_info::{AccountInfo, next_account_info},
     solana_banks_client::BanksClient,
     solana_clock::Clock,
@@ -14,13 +16,12 @@ use {
     solana_program_test::{ProgramTest, ProgramTestBanksClientExt, ProgramTestError, processor},
     solana_pubkey::Pubkey,
     solana_signer::Signer,
+    solana_stake_history::{StakeHistory, sysvar as stake_history},
     solana_stake_interface::{
         instruction as stake_instruction,
-        stake_history::StakeHistory,
         state::{StakeActivationStatus, StakeStateV2},
-        sysvar::stake_history,
     },
-    solana_sysvar::{SysvarSerialize, clock},
+    solana_sysvar::clock,
     solana_transaction::Transaction,
     solana_transaction_error::TransactionError,
     std::{convert::TryInto, slice},
@@ -36,7 +37,7 @@ fn process_instruction(
 ) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
     let clock_info = next_account_info(account_info_iter)?;
-    let clock = &Clock::from_account_info(clock_info)?;
+    let clock = from_account_info::<Clock>(clock_info)?;
     let expected_slot = u64::from_le_bytes(input.try_into().unwrap());
     if clock.slot == expected_slot {
         Ok(())
@@ -194,11 +195,10 @@ async fn stake_rewards_from_warp() {
     let stake_history: StakeHistory = deserialize(&stake_history_account.data).unwrap();
     let clock: Clock = deserialize(&clock_account.data).unwrap();
     let stake = stake_state.stake().unwrap();
-    #[allow(deprecated)]
     let stake_activation_status =
         stake
             .delegation
-            .stake_activating_and_deactivating(clock.epoch, &stake_history, None);
+            .stake_activating_and_deactivating_v2(clock.epoch, &stake_history, None);
     assert_eq!(
         stake_activation_status,
         StakeActivationStatus::with_effective(stake.delegation.stake),

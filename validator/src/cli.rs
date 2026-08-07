@@ -22,7 +22,6 @@ use {
         },
     },
     solana_clock::Slot,
-    solana_core::banking_trace::BANKING_TRACE_DIR_DEFAULT_BYTE_LIMIT,
     solana_epoch_schedule::MINIMUM_SLOTS_PER_EPOCH,
     solana_faucet::faucet::{self, FAUCET_PORT},
     solana_hash::Hash,
@@ -154,6 +153,28 @@ fn deprecated_arguments() -> Vec<DeprecatedArg> {
             .help("No-op; account storages are always accessed via file I/O"),
     );
     add_arg!(
+        // deprecated in v4.2.0
+        Arg::with_name("accounts_db_cache_limit_mb")
+            .long("accounts-db-cache-limit-mb")
+            .value_name("MEGABYTES")
+            .validator(is_parsable::<u64>)
+            .takes_value(true)
+            .help(
+                "How large the write cache for account data can become. If this is exceeded, the \
+                 cache is flushed more aggressively.",
+            )
+            .conflicts_with("accounts_db_write_cache_limit"),
+        replaced_by: "accounts-db-write-cache-limit",
+    );
+    add_arg!(
+        // deprecated in v4.3.0
+        Arg::with_name("disable_banking_trace")
+            .long("disable-banking-trace")
+            .conflicts_with("banking_trace_dir_byte_limit")
+            .takes_value(false)
+            .help("Disables the banking trace. No-op, banking trace is disabled by default."),
+    );
+    add_arg!(
         // deprecated in v4.0.0
         Arg::with_name("enable_accounts_disk_index")
             .long("enable-accounts-disk-index")
@@ -162,18 +183,28 @@ fn deprecated_arguments() -> Vec<DeprecatedArg> {
         replaced_by: "accounts-index-limit",
     );
     add_arg!(
+        // deprecated in v4.2.0
+        Arg::with_name("experimental_poh_pinned_cpu_core")
+            .long("experimental-poh-pinned-cpu-core")
+            .takes_value(true)
+            .value_name("CPU_ID")
+            .conflicts_with("poh_pinned_cpu_core")
+            .validator(is_parsable::<usize>)
+            .help("Specify which CPU core PoH is pinned to. Use --poh-pinned-cpu-core instead"),
+        replaced_by: "poh-pinned-cpu-core",
+    );
+    add_arg!(
         // deprecated in v4.1.0
         Arg::with_name("experimental_retransmit_xdp_cpu_cores")
             .long("experimental-retransmit-xdp-cpu-cores")
             .takes_value(true)
             .value_name("CPU_LIST")
             .conflicts_with("xdp_cpu_cores")
+            .conflicts_with("no_xdp")
             .validator(|value| {
                 validate_cpu_ranges(value, "--experimental-retransmit-xdp-cpu-cores")
             })
-            .help(
-                "Enable XDP retransmit on the specified CPU cores. Use --xdp-cpu-cores instead",
-            ),
+            .help("CPU cores to reserve for XDP. Use --xdp-cpu-cores instead"),
         replaced_by: "xdp-cpu-cores",
     );
     add_arg!(
@@ -183,8 +214,8 @@ fn deprecated_arguments() -> Vec<DeprecatedArg> {
             .takes_value(true)
             .value_name("INTERFACE")
             .conflicts_with("xdp_interface")
-            .requires("experimental_retransmit_xdp_cpu_cores")
-            .help("Network interface to use for XDP retransmit. Use --xdp-interface instead"),
+            .conflicts_with("no_xdp")
+            .help("Network interface to use for XDP. Use --xdp-interface instead"),
         replaced_by: "xdp-interface",
     );
     add_arg!(
@@ -193,9 +224,22 @@ fn deprecated_arguments() -> Vec<DeprecatedArg> {
             .long("experimental-retransmit-xdp-zero-copy")
             .takes_value(false)
             .conflicts_with("xdp_zero_copy")
-            .requires("experimental_retransmit_xdp_cpu_cores")
+            .conflicts_with("no_xdp")
             .help("Enable XDP zero copy. Use --xdp-zero-copy instead"),
         replaced_by: "xdp-zero-copy",
+    );
+    add_arg!(
+        // deprecated in v4.3.0
+        Arg::with_name("limit_ledger_size")
+            .long("limit-ledger-size")
+            .value_name("SHRED_COUNT")
+            .takes_value(true)
+            .min_values(0)
+            .max_values(1)
+            /* .default_value() intentionally not used here! */
+            .conflicts_with("limit_blockstore_size")
+            .help("Keep this amount of shreds in root slots."),
+        replaced_by: "limit-blockstore-size",
     );
     add_arg!(
         // deprecated in v4.0.0
@@ -335,7 +379,7 @@ impl DefaultArgs {
             tpu_max_fwd_unstaked_connections: 0.to_string(),
             tpu_max_streams_per_ms: DEFAULT_MAX_STREAMS_PER_MS.to_string(),
             num_quic_endpoints: DEFAULT_QUIC_ENDPOINTS.to_string(),
-            banking_trace_dir_byte_limit: BANKING_TRACE_DIR_DEFAULT_BYTE_LIMIT.to_string(),
+            banking_trace_dir_byte_limit: 0.to_string(),
             block_production_pacing_fill_time_millis: BankingStage::default_fill_time_millis()
                 .to_string(),
             thread_args: DefaultThreadArgs::default(),
@@ -776,12 +820,27 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
                 ),
         )
         .arg(
+            // deprecated in v4.3.0
             Arg::with_name("limit_ledger_size")
                 .long("limit-ledger-size")
                 .value_name("SHRED_COUNT")
                 .takes_value(true)
-                .default_value(default_args.limit_ledger_size.as_str())
+                .min_values(0)
+                .max_values(1)
+                .conflicts_with("limit_blockstore_size")
                 .help("Keep this amount of shreds in root slots."),
+        )
+        .arg(
+            Arg::with_name("limit_blockstore_size")
+                .long("limit-blockstore-size")
+                .value_name("SHRED_COUNT")
+                .takes_value(true)
+                .default_value(default_args.limit_blockstore_size.as_str())
+                .help(
+                    "Limit the number of total shreds that the Blockstore retains. Once the \
+                     Blockstore reaches this capacity, shreds will be purged in a FIFO (oldest \
+                     slots first) manner.",
+                ),
         )
         .arg(
             Arg::with_name("faucet_sol")
@@ -834,6 +893,12 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
                 .long("enable-scheduler-bindings")
                 .takes_value(false)
                 .help("Enables external processes to connect and manage block production"),
+        )
+        .arg(
+            Arg::with_name("alpenglow")
+                .long("alpenglow")
+                .takes_value(false)
+                .help("Activate Alpenglow at genesis"),
         )
         .arg(
             Arg::with_name("deactivate_feature")
@@ -943,7 +1008,7 @@ pub struct DefaultTestArgs {
     pub rpc_port: String,
     pub faucet_port: String,
     pub dynamic_port_range: String,
-    pub limit_ledger_size: String,
+    pub limit_blockstore_size: String,
     pub faucet_sol: String,
     pub faucet_time_slice_secs: String,
 }
@@ -954,11 +1019,9 @@ impl DefaultTestArgs {
             rpc_port: 8899.to_string(),
             faucet_port: FAUCET_PORT.to_string(),
             dynamic_port_range: format!("{}-{}", VALIDATOR_PORT_RANGE.0, VALIDATOR_PORT_RANGE.1),
-            /* 10,000 was derived empirically by watching the size
-             * of the rocksdb/ directory self-limit itself to the
-             * 40MB-150MB range when running `solana-test-validator`
-             */
-            limit_ledger_size: 10_000.to_string(),
+            // See comments in ledger/src/blockstore/cleanup_service.rs for more
+            // details, but 800k shreds is approximately 1 GB of space
+            limit_blockstore_size: 800_000.to_string(),
             faucet_sol: (1_000_000.).to_string(),
             faucet_time_slice_secs: (faucet::TIME_SLICE).to_string(),
         }

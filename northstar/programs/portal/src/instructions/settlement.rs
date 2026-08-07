@@ -9,12 +9,11 @@ use {
     },
     borsh::{BorshDeserialize, BorshSerialize},
     pinocchio::{
-        account_info::AccountInfo,
-        program_error::ProgramError,
-        pubkey::Pubkey,
+        error::ProgramError,
         sysvars::{clock::Clock, rent::Rent, Sysvar},
-        ProgramResult,
+        AccountView as AccountInfo, Address as Pubkey, ProgramResult,
     },
+    pinocchio_idl_macros::p_instruction,
     solana_sha256_hasher::hashv,
 };
 
@@ -34,7 +33,7 @@ pub(crate) fn accumulate_data_chunk_checksum(
     hashv(&[
         &accumulator,
         b"data",
-        account,
+        account.as_ref(),
         &account_data_offset.to_le_bytes(),
         &(data.len() as u32).to_le_bytes(),
         data,
@@ -47,7 +46,7 @@ pub(crate) fn accumulate_owner_checksum(
     account: &Pubkey,
     owner: &Pubkey,
 ) -> [u8; 32] {
-    hashv(&[&accumulator, b"owner", account, owner]).to_bytes()
+    hashv(&[&accumulator, b"owner", account.as_ref(), owner.as_ref()]).to_bytes()
 }
 
 pub(crate) fn accumulate_lamports_checksum(
@@ -55,7 +54,13 @@ pub(crate) fn accumulate_lamports_checksum(
     account: &Pubkey,
     lamports: u64,
 ) -> [u8; 32] {
-    hashv(&[&accumulator, b"lamports", account, &lamports.to_le_bytes()]).to_bytes()
+    hashv(&[
+        &accumulator,
+        b"lamports",
+        account.as_ref(),
+        &lamports.to_le_bytes(),
+    ])
+    .to_bytes()
 }
 
 pub(crate) fn accumulate_receipt_checksum(
@@ -69,8 +74,8 @@ pub(crate) fn accumulate_receipt_checksum(
     hashv(&[
         &accumulator,
         b"receipt",
-        er_source,
-        l1_recipient,
+        er_source.as_ref(),
+        l1_recipient.as_ref(),
         &balance.to_le_bytes(),
         &withdrawn.to_le_bytes(),
         &payout_lamports.to_le_bytes(),
@@ -80,13 +85,13 @@ pub(crate) fn accumulate_receipt_checksum(
 
 fn load_session(program_id: &Pubkey, session: &AccountInfo) -> Result<Session, ProgramError> {
     let (expected_session_key, _) = find_session_pda(program_id);
-    if session.key() != &expected_session_key {
+    if session.address() != &expected_session_key {
         return Err(PortalError::InvalidPdaSeeds.into());
     }
-    if session.owner() != program_id {
+    if !session.owned_by(program_id) {
         return Err(PortalError::SessionAccountOwnerMismatch.into());
     }
-    let session_state = Session::try_from_slice(&session.try_borrow_data()?)
+    let session_state = Session::try_from_slice(&session.try_borrow()?)
         .map_err(|_| PortalError::SessionDeserializeFailed)?;
     if !session_state.is_valid() {
         return Err(PortalError::SessionStateInvalid.into());
@@ -94,14 +99,14 @@ fn load_session(program_id: &Pubkey, session: &AccountInfo) -> Result<Session, P
     Ok(session_state)
 }
 
-fn store_session(session: &AccountInfo, session_state: &Session) -> ProgramResult {
-    let mut session_data = session.try_borrow_mut_data()?;
+fn store_session(session: &mut AccountInfo, session_state: &Session) -> ProgramResult {
+    let mut session_data = session.try_borrow_mut()?;
     BorshSerialize::serialize(session_state, &mut &mut session_data[..]).unwrap();
     Ok(())
 }
 
 fn require_validator(validator: &AccountInfo, session_state: &Session) -> ProgramResult {
-    if !validator.is_signer() || validator.key() != &session_state.validator {
+    if !validator.is_signer() || validator.address() != &session_state.validator {
         return Err(PortalError::Unauthorized.into());
     }
     Ok(())
@@ -132,14 +137,14 @@ fn load_checkpoint_for_settlement(
     checkpoint: &AccountInfo,
 ) -> Result<Checkpoint, ProgramError> {
     let (expected_checkpoint_key, _) = find_checkpoint_pda(program_id, session_key, er_slot);
-    if checkpoint.key() != &expected_checkpoint_key {
+    if checkpoint.address() != &expected_checkpoint_key {
         return Err(PortalError::InvalidPdaSeeds.into());
     }
-    if checkpoint.owner() != program_id {
+    if !checkpoint.owned_by(program_id) {
         return Err(PortalError::CheckpointStateInvalid.into());
     }
 
-    let checkpoint_state = Checkpoint::try_from_slice(&checkpoint.try_borrow_data()?)
+    let checkpoint_state = Checkpoint::try_from_slice(&checkpoint.try_borrow()?)
         .map_err(|_| PortalError::CheckpointDeserializeFailed)?;
     if !checkpoint_state.is_valid()
         || checkpoint_state.session != *session_key
@@ -163,8 +168,8 @@ fn load_checkpoint_for_settlement(
     Ok(checkpoint_state)
 }
 
-fn store_checkpoint(checkpoint: &AccountInfo, checkpoint_state: &Checkpoint) -> ProgramResult {
-    let mut checkpoint_data = checkpoint.try_borrow_mut_data()?;
+fn store_checkpoint(checkpoint: &mut AccountInfo, checkpoint_state: &Checkpoint) -> ProgramResult {
+    let mut checkpoint_data = checkpoint.try_borrow_mut()?;
     BorshSerialize::serialize(checkpoint_state, &mut &mut checkpoint_data[..]).unwrap();
     Ok(())
 }
@@ -175,13 +180,13 @@ fn load_cursor(
     cursor: &AccountInfo,
 ) -> Result<CheckpointCursor, ProgramError> {
     let (expected_cursor_key, _) = find_checkpoint_cursor_pda(program_id, session_key);
-    if cursor.key() != &expected_cursor_key {
+    if cursor.address() != &expected_cursor_key {
         return Err(PortalError::InvalidPdaSeeds.into());
     }
-    if cursor.owner() != program_id {
+    if !cursor.owned_by(program_id) {
         return Err(PortalError::CheckpointCursorStateInvalid.into());
     }
-    let cursor_state = CheckpointCursor::try_from_slice(&cursor.try_borrow_data()?)
+    let cursor_state = CheckpointCursor::try_from_slice(&cursor.try_borrow()?)
         .map_err(|_| PortalError::CheckpointCursorDeserializeFailed)?;
     if !cursor_state.is_valid() || cursor_state.session != *session_key {
         return Err(PortalError::CheckpointCursorStateInvalid.into());
@@ -189,8 +194,8 @@ fn load_cursor(
     Ok(cursor_state)
 }
 
-fn store_cursor(cursor: &AccountInfo, cursor_state: &CheckpointCursor) -> ProgramResult {
-    let mut cursor_data = cursor.try_borrow_mut_data()?;
+fn store_cursor(cursor: &mut AccountInfo, cursor_state: &CheckpointCursor) -> ProgramResult {
+    let mut cursor_data = cursor.try_borrow_mut()?;
     BorshSerialize::serialize(cursor_state, &mut &mut cursor_data[..]).unwrap();
     Ok(())
 }
@@ -207,7 +212,7 @@ fn require_active_checkpoint(
 }
 
 fn clear_active_checkpoint(cursor_state: &mut CheckpointCursor) {
-    cursor_state.active_checkpoint = [0; 32];
+    cursor_state.active_checkpoint = [0; 32].into();
     cursor_state.active_er_slot = 0;
 }
 
@@ -217,20 +222,20 @@ fn load_delegation_record(
     delegated_account: &AccountInfo,
     delegation_record: &AccountInfo,
 ) -> Result<DelegationRecord, ProgramError> {
-    if delegated_account.owner() != program_id {
+    if !delegated_account.owned_by(program_id) {
         return Err(PortalError::DelegatedAccountOwnerMismatch.into());
     }
 
-    let delegated_key = *delegated_account.key();
+    let delegated_key = *delegated_account.address();
     let (expected_record, _) = find_delegation_record_pda(program_id, &delegated_key);
-    if delegation_record.key() != &expected_record {
+    if delegation_record.address() != &expected_record {
         return Err(PortalError::DelegationRecordAccountMismatch.into());
     }
-    if delegation_record.owner() != program_id {
+    if !delegation_record.owned_by(program_id) {
         return Err(PortalError::DelegationRecordStateInvalid.into());
     }
 
-    let delegation_state = DelegationRecord::try_from_slice(&delegation_record.try_borrow_data()?)
+    let delegation_state = DelegationRecord::try_from_slice(&delegation_record.try_borrow()?)
         .map_err(|_| PortalError::DelegationRecordDeserializeFailed)?;
     if !delegation_state.is_valid() || delegation_state.grid_id != session_state.grid_id {
         return Err(PortalError::DelegationRecordStateInvalid.into());
@@ -239,20 +244,21 @@ fn load_delegation_record(
     Ok(delegation_state)
 }
 
+#[p_instruction(
+    id = 5,
+    accounts = [validator(signer), session(mut, state = Session), checkpoint(state = Checkpoint)],
+    data = [er_slot: u64, checksum: Hash32]
+)]
 pub fn process_begin_settlement(
     program_id: &Pubkey,
-    accounts: &[AccountInfo],
+    accounts: &mut [AccountInfo],
     BeginSettlement { er_slot, checksum }: BeginSettlement,
 ) -> ProgramResult {
     pinocchio_log::log!("Instruction: BeginSettlement, er_slot={}", er_slot);
 
-    if accounts.len() < 3 {
+    let [validator, session, checkpoint, ..] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
-    }
-
-    let validator = &accounts[0];
-    let session = &accounts[1];
-    let checkpoint = &accounts[2];
+    };
     let mut session_state = load_session(program_id, session)?;
     require_validator(validator, &session_state)?;
 
@@ -272,7 +278,7 @@ pub fn process_begin_settlement(
         return Err(PortalError::SettlementErSlotNotAdvanced.into());
     }
 
-    load_checkpoint_for_settlement(program_id, session.key(), er_slot, checksum, checkpoint)?;
+    load_checkpoint_for_settlement(program_id, session.address(), er_slot, checksum, checkpoint)?;
 
     session_state.settlement_status = SettlementStatus::InProgress;
     session_state.settlement_er_slot = er_slot;
@@ -284,9 +290,25 @@ pub fn process_begin_settlement(
     Ok(())
 }
 
+#[p_instruction(
+    id = 6,
+    accounts = [
+        validator(signer),
+        session(mut, state = Session),
+        delegated_account(mut),
+        delegation_record(state = DelegationRecord)
+    ],
+    data = [
+        er_slot: u64,
+        checksum: Hash32,
+        account_data_offset: u32,
+        chunk_len: u16,
+        chunk: [u8; 700]
+    ]
+)]
 pub fn process_write_settlement_chunk(
     program_id: &Pubkey,
-    accounts: &[AccountInfo],
+    accounts: &mut [AccountInfo],
     WriteSettlementChunk {
         er_slot,
         checksum,
@@ -295,14 +317,9 @@ pub fn process_write_settlement_chunk(
         chunk,
     }: WriteSettlementChunk,
 ) -> ProgramResult {
-    if accounts.len() < 4 {
+    let [validator, session, delegated_account, delegation_record, ..] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
-    }
-
-    let validator = &accounts[0];
-    let session = &accounts[1];
-    let delegated_account = &accounts[2];
-    let delegation_record = &accounts[3];
+    };
 
     let mut session_state = load_session(program_id, session)?;
     require_validator(validator, &session_state)?;
@@ -328,7 +345,7 @@ pub fn process_write_settlement_chunk(
     }
 
     let chunk_data = &chunk[..chunk_len];
-    let mut delegated_data = delegated_account.try_borrow_mut_data()?;
+    let mut delegated_data = delegated_account.try_borrow_mut()?;
     if delegated_data[start..end] == *chunk_data {
         return Ok(());
     }
@@ -337,7 +354,7 @@ pub fn process_write_settlement_chunk(
 
     session_state.settlement_accumulator = accumulate_data_chunk_checksum(
         session_state.settlement_accumulator,
-        delegated_account.key(),
+        delegated_account.address(),
         account_data_offset,
         chunk_data,
     );
@@ -346,23 +363,28 @@ pub fn process_write_settlement_chunk(
     Ok(())
 }
 
+#[p_instruction(
+    id = 11,
+    accounts = [
+        validator(signer),
+        session(mut, state = Session),
+        delegated_account(mut),
+        delegation_record(mut, state = DelegationRecord)
+    ],
+    data = [er_slot: u64, checksum: Hash32, owner: Pubkey]
+)]
 pub fn process_settle_account_owner(
     program_id: &Pubkey,
-    accounts: &[AccountInfo],
+    accounts: &mut [AccountInfo],
     SettleAccountOwner {
         er_slot,
         checksum,
         owner,
     }: SettleAccountOwner,
 ) -> ProgramResult {
-    if accounts.len() < 4 {
+    let [validator, session, delegated_account, delegation_record, ..] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
-    }
-
-    let validator = &accounts[0];
-    let session = &accounts[1];
-    let delegated_account = &accounts[2];
-    let delegation_record = &accounts[3];
+    };
 
     let mut session_state = load_session(program_id, session)?;
     require_validator(validator, &session_state)?;
@@ -379,13 +401,13 @@ pub fn process_settle_account_owner(
     }
 
     delegation_state.owner_program = owner;
-    let mut delegation_data = delegation_record.try_borrow_mut_data()?;
+    let mut delegation_data = delegation_record.try_borrow_mut()?;
     BorshSerialize::serialize(&delegation_state, &mut &mut delegation_data[..]).unwrap();
     drop(delegation_data);
 
     session_state.settlement_accumulator = accumulate_owner_checksum(
         session_state.settlement_accumulator,
-        delegated_account.key(),
+        delegated_account.address(),
         &owner,
     );
     store_session(session, &session_state)?;
@@ -393,9 +415,19 @@ pub fn process_settle_account_owner(
     Ok(())
 }
 
+#[p_instruction(
+    id = 12,
+    accounts = [validator(signer), session(mut, state = Session)],
+    data = [
+        er_slot: u64,
+        checksum: Hash32,
+        account_count: u8,
+        lamports: [u64; 7]
+    ]
+)]
 pub fn process_settle_account_lamports(
     program_id: &Pubkey,
-    accounts: &[AccountInfo],
+    accounts: &mut [AccountInfo],
     SettleAccountLamports {
         er_slot,
         checksum,
@@ -411,14 +443,15 @@ pub fn process_settle_account_lamports(
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
-    let validator = &accounts[0];
-    let session = &accounts[1];
+    let (prefix, settlement_accounts) = accounts.split_at_mut(2);
+    let [validator, session] = prefix else {
+        unreachable!();
+    };
+    let settlement_accounts = &mut settlement_accounts[..account_count * 2];
 
     let mut session_state = load_session(program_id, session)?;
     require_validator(validator, &session_state)?;
     require_active_settlement(&session_state, er_slot, checksum)?;
-
-    let settlement_accounts = &accounts[2..2 + account_count * 2];
     for index in 0..account_count {
         let account = &settlement_accounts[index * 2];
         let record = &settlement_accounts[index * 2 + 1];
@@ -426,7 +459,7 @@ pub fn process_settle_account_lamports(
 
         for other_index in 0..index {
             let other = &settlement_accounts[other_index * 2];
-            if account.key() == other.key() {
+            if account.address() == other.address() {
                 return Err(ProgramError::InvalidInstructionData);
             }
         }
@@ -445,7 +478,9 @@ pub fn process_settle_account_lamports(
         target_total = target_total
             .checked_add(target_lamports as u128)
             .ok_or(PortalError::ArithmeticOverflow)?;
-        if account.data_len() > 0 && target_lamports < rent.minimum_balance(account.data_len()) {
+        if account.data_len() > 0
+            && target_lamports < rent.try_minimum_balance(account.data_len())?
+        {
             return Err(PortalError::SettlementLamportsBelowRentExempt.into());
         }
         already_settled &= account.lamports() == target_lamports;
@@ -459,12 +494,12 @@ pub fn process_settle_account_lamports(
     }
 
     for index in 0..account_count {
-        let account = &settlement_accounts[index * 2];
+        let account = &mut settlement_accounts[index * 2];
         let target_lamports = lamports[index];
-        *account.try_borrow_mut_lamports()? = target_lamports;
+        account.set_lamports(target_lamports);
         session_state.settlement_accumulator = accumulate_lamports_checksum(
             session_state.settlement_accumulator,
-            account.key(),
+            account.address(),
             target_lamports,
         );
     }
@@ -473,21 +508,26 @@ pub fn process_settle_account_lamports(
     Ok(())
 }
 
+#[p_instruction(
+    id = 7,
+    accounts = [
+        validator(signer),
+        session(mut, state = Session),
+        checkpoint(mut, state = Checkpoint),
+        checkpoint_cursor(mut, state = CheckpointCursor)
+    ],
+    data = [er_slot: u64, checksum: Hash32]
+)]
 pub fn process_finish_settlement(
     program_id: &Pubkey,
-    accounts: &[AccountInfo],
+    accounts: &mut [AccountInfo],
     FinishSettlement { er_slot, checksum }: FinishSettlement,
 ) -> ProgramResult {
     pinocchio_log::log!("Instruction: FinishSettlement, er_slot={}", er_slot);
 
-    if accounts.len() < 4 {
+    let [validator, session, checkpoint, cursor, ..] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
-    }
-
-    let validator = &accounts[0];
-    let session = &accounts[1];
-    let checkpoint = &accounts[2];
-    let cursor = &accounts[3];
+    };
     let mut session_state = load_session(program_id, session)?;
     require_validator(validator, &session_state)?;
 
@@ -503,11 +543,11 @@ pub fn process_finish_settlement(
         return Err(PortalError::SettlementChecksumMismatch.into());
     }
 
-    let session_key = session.key();
+    let session_key = session.address();
     let mut checkpoint_state =
         load_checkpoint_for_settlement(program_id, session_key, er_slot, checksum, checkpoint)?;
     let mut cursor_state = load_cursor(program_id, session_key, cursor)?;
-    require_active_checkpoint(&cursor_state, checkpoint.key(), er_slot)?;
+    require_active_checkpoint(&cursor_state, checkpoint.address(), er_slot)?;
 
     checkpoint_state.status = CheckpointStatus::Settled;
     store_checkpoint(checkpoint, &checkpoint_state)?;
@@ -526,15 +566,19 @@ pub fn process_finish_settlement(
     Ok(())
 }
 
-pub fn process_abort_settlement(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+#[p_instruction(
+    id = 8,
+    accounts = [authority_or_validator(signer), session(mut, state = Session)]
+)]
+pub fn process_abort_settlement(
+    program_id: &Pubkey,
+    accounts: &mut [AccountInfo],
+) -> ProgramResult {
     pinocchio_log::log!("Instruction: AbortSettlement");
 
-    if accounts.len() < 2 {
+    let [authority_or_validator, session, ..] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
-    }
-
-    let authority_or_validator = &accounts[0];
-    let session = &accounts[1];
+    };
     let mut session_state = load_session(program_id, session)?;
 
     if !authority_or_validator.is_signer() {
@@ -544,8 +588,8 @@ pub fn process_abort_settlement(program_id: &Pubkey, accounts: &[AccountInfo]) -
         return Err(PortalError::SettlementNotInProgress.into());
     }
 
-    let is_validator = authority_or_validator.key() == &session_state.validator;
-    let is_timed_out_authority = authority_or_validator.key() == &session_state.authority
+    let is_validator = authority_or_validator.address() == &session_state.validator;
+    let is_timed_out_authority = authority_or_validator.address() == &session_state.authority
         && Clock::get()?.slot
             > session_state
                 .settlement_started_l1_slot

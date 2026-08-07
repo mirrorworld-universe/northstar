@@ -1,15 +1,13 @@
 use {
-    super::{ComputeBudgetInstructionDetails, RuntimeTransaction},
+    super::RuntimeTransaction,
     crate::{
         instruction_meta::InstructionMeta,
         transaction_meta::{
-            CachedTransactionMeta, TransactionConfiguration, TransactionMeta,
-            VersionedTransactionConfiguration,
+            CachedTransactionMeta, TransactionMeta, VersionedTransactionConfiguration,
         },
         transaction_with_meta::TransactionWithMeta,
     },
-    solana_message::{AddressLoader, TransactionSignatureDetails, VersionedMessage},
-    solana_program_entrypoint::HEAP_LENGTH,
+    solana_message::{AddressLoader, TransactionSignatureDetails},
     solana_pubkey::Pubkey,
     solana_svm_transaction::instruction::SVMInstruction,
     solana_transaction::{
@@ -56,27 +54,10 @@ impl RuntimeTransaction<SanitizedVersionedTransaction> {
             precompile_signature_details.num_secp256r1_instruction_signatures,
         );
 
-        let versioned_transaction_config = match &sanitized_versioned_tx.get_message().message {
-            VersionedMessage::V1(msg) => {
-                VersionedTransactionConfiguration::V1(TransactionConfiguration {
-                    priority_fee_lamports: msg.config.priority_fee.unwrap_or(0),
-                    compute_unit_limit: msg.config.compute_unit_limit.unwrap_or(0),
-                    loaded_accounts_data_size_limit: msg
-                        .config
-                        .loaded_accounts_data_size_limit
-                        .unwrap_or(0),
-                    updated_heap_bytes: msg.config.heap_size.unwrap_or(HEAP_LENGTH as u32),
-                })
-            }
-            _ => VersionedTransactionConfiguration::LegacyAndV0(
-                ComputeBudgetInstructionDetails::try_from(
-                    sanitized_versioned_tx
-                        .get_message()
-                        .program_instructions_iter()
-                        .map(|(program_id, ix)| (program_id, SVMInstruction::from(ix))),
-                )?,
-            ),
-        };
+        let versioned_transaction_config =
+            VersionedTransactionConfiguration::try_from_sanitized_versioned_message(
+                sanitized_versioned_tx.get_message(),
+            )?;
 
         Ok(Self {
             transaction: sanitized_versioned_tx,
@@ -100,7 +81,6 @@ impl RuntimeTransaction<SanitizedTransaction> {
         is_simple_vote_tx: Option<bool>,
         address_loader: impl AddressLoader,
         reserved_account_keys: &HashSet<Pubkey>,
-        enable_instruction_accounts_limit: bool,
     ) -> Result<Self> {
         if tx.message.instructions().len()
             > solana_transaction_context::MAX_INSTRUCTION_TRACE_LENGTH
@@ -108,11 +88,9 @@ impl RuntimeTransaction<SanitizedTransaction> {
             return Err(solana_transaction_error::TransactionError::SanitizeFailure);
         }
 
-        if enable_instruction_accounts_limit {
-            for instr in tx.message.instructions() {
-                if instr.accounts.len() > solana_transaction_context::MAX_ACCOUNTS_PER_INSTRUCTION {
-                    return Err(solana_transaction_error::TransactionError::SanitizeFailure);
-                }
+        for instr in tx.message.instructions() {
+            if instr.accounts.len() > solana_transaction_context::MAX_ACCOUNTS_PER_INSTRUCTION {
+                return Err(solana_transaction_error::TransactionError::SanitizeFailure);
             }
         }
 
@@ -177,14 +155,12 @@ impl TransactionWithMeta for RuntimeTransaction<SanitizedTransaction> {
 impl RuntimeTransaction<SanitizedTransaction> {
     pub fn from_transaction_for_tests(transaction: solana_transaction::Transaction) -> Self {
         let versioned_transaction = VersionedTransaction::from(transaction);
-        let enable_instruction_accounts_limit = true;
         Self::try_create(
             versioned_transaction,
             MessageHash::Compute,
             None,
             solana_message::SimpleAddressLoader::Disabled,
             &HashSet::new(),
-            enable_instruction_accounts_limit,
         )
         .expect("failed to create RuntimeTransaction from Transaction")
     }
@@ -445,7 +421,6 @@ mod tests {
             None,
             solana_message::SimpleAddressLoader::Disabled,
             &HashSet::new(),
-            true,
         );
         assert!(result.is_ok());
 
@@ -467,7 +442,6 @@ mod tests {
             None,
             solana_message::SimpleAddressLoader::Disabled,
             &HashSet::new(),
-            true,
         );
         assert_eq!(
             result.err(),

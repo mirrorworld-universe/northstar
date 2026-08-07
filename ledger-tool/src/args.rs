@@ -5,6 +5,7 @@ use {
     solana_account_decoder::{UiAccountEncoding, UiDataSliceConfig},
     solana_accounts_db::{
         accounts_db::{AccountShrinkThreshold, AccountsDbConfig},
+        accounts_file::AccountsFileProvider,
         accounts_index::{
             AccountsIndexConfig, DEFAULT_NUM_ENTRIES_OVERHEAD, DEFAULT_NUM_ENTRIES_TO_EVICT,
             IndexLimit, IndexLimitThreshold, ScanFilter,
@@ -251,6 +252,7 @@ pub fn parse_process_options(ledger_path: &Path, arg_matches: &ArgMatches<'_>) -
     let allow_dead_slots = arg_matches.is_present("allow_dead_slots");
     let abort_on_invalid_block = arg_matches.is_present("abort_on_invalid_block");
     let no_block_cost_limits = arg_matches.is_present("no_block_cost_limits");
+    let skip_inter_slot_verification = arg_matches.is_present("skip_inter_slot_verification");
 
     ProcessOptions {
         new_hard_forks,
@@ -267,6 +269,7 @@ pub fn parse_process_options(ledger_path: &Path, arg_matches: &ArgMatches<'_>) -
         use_snapshot_archives_at_startup,
         abort_on_invalid_block,
         no_block_cost_limits,
+        skip_inter_slot_verification,
         ..ProcessOptions::default()
     }
 }
@@ -382,6 +385,7 @@ pub fn get_accounts_db_config(
         scan_filter_for_shrinking,
         num_background_threads: None,
         num_foreground_threads: None,
+        accounts_file_provider: AccountsFileProvider::AppendVec,
     }
 }
 

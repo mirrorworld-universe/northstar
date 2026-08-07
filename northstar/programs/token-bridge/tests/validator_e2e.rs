@@ -58,12 +58,8 @@ fn live_validator_spl_token_bridge_round_trip() {
     assert!(token_bridge_program.executable);
 
     let validator_identity = rpc.get_identity().expect("validator identity");
-    let session = portal_pubkey(northstar_portal::find_session_pda(
-        &PORTAL_PROGRAM_ID.to_bytes(),
-    ));
-    let fee_vault = portal_pubkey(northstar_portal::find_fee_vault_pda(
-        &PORTAL_PROGRAM_ID.to_bytes(),
-    ));
+    let session = portal_pubkey(northstar_portal::find_session_pda(&PORTAL_PROGRAM_ID));
+    let fee_vault = portal_pubkey(northstar_portal::find_fee_vault_pda(&PORTAL_PROGRAM_ID));
 
     send_tx(
         &rpc,
@@ -93,9 +89,9 @@ fn live_validator_spl_token_bridge_round_trip() {
     let bob_token = Keypair::new();
     let vault_token = Keypair::new();
     let session_bridge = portal_pubkey(northstar_portal::find_session_bridge_pda(
-        &PORTAL_PROGRAM_ID.to_bytes(),
-        &session.to_bytes(),
-        &mint.pubkey().to_bytes(),
+        &PORTAL_PROGRAM_ID,
+        &session,
+        &mint.pubkey(),
     ));
     let (vault, _) = find_token_vault_pda(&northstar_token_bridge::id(), &session_bridge);
     let (alice_er, _) = find_er_token_account_pda(
@@ -253,7 +249,7 @@ fn open_session_ix(
             grid_id: GRID_ID,
             ttl_slots: 2_000,
             fee_cap: 1_000_000,
-            validator: validator.to_bytes(),
+            validator,
             settlement_interval_slots: 10,
         }))
         .unwrap(),
@@ -277,10 +273,10 @@ fn register_session_bridge_ix(
         ],
         data: borsh::to_vec(&PortalInstruction::RegisterSessionBridge(
             RegisterSessionBridge {
-                mint: mint.to_bytes(),
-                bridge_program: northstar_token_bridge::id().to_bytes(),
-                vault: vault.to_bytes(),
-                token_program: spl_token_interface::id().to_bytes(),
+                mint,
+                bridge_program: northstar_token_bridge::id(),
+                vault,
+                token_program: spl_token_interface::id(),
             },
         ))
         .unwrap(),
@@ -345,8 +341,8 @@ fn deposit_ix(
         &er_account,
     );
     let delegation_record = portal_pubkey(northstar_portal::find_delegation_record_pda(
-        &PORTAL_PROGRAM_ID.to_bytes(),
-        &er_account.to_bytes(),
+        &PORTAL_PROGRAM_ID,
+        &er_account,
     ));
     Instruction {
         program_id: northstar_token_bridge::id(),
@@ -421,8 +417,8 @@ fn delegate_er_ix(
     er_account: Pubkey,
 ) -> Instruction {
     let delegation_record = portal_pubkey(northstar_portal::find_delegation_record_pda(
-        &PORTAL_PROGRAM_ID.to_bytes(),
-        &er_account.to_bytes(),
+        &PORTAL_PROGRAM_ID,
+        &er_account,
     ));
     let (buffer, _) = find_buffer_pda(&northstar_token_bridge::id(), &er_account);
     Instruction {
@@ -445,8 +441,8 @@ fn delegate_er_ix(
 
 fn undelegate_er_ix(authority: &Pubkey, session: Pubkey, er_account: Pubkey) -> Instruction {
     let delegation_record = portal_pubkey(northstar_portal::find_delegation_record_pda(
-        &PORTAL_PROGRAM_ID.to_bytes(),
-        &er_account.to_bytes(),
+        &PORTAL_PROGRAM_ID,
+        &er_account,
     ));
     let (buffer, _) = find_buffer_pda(&northstar_token_bridge::id(), &er_account);
     Instruction {
@@ -481,19 +477,10 @@ fn fund_and_delegate_er_fee_payer(
         &payer.pubkey(),
         &[payer],
     );
-    send_tx(
-        rpc,
-        &[system_instruction::assign(
-            &er_fee_payer.pubkey(),
-            &PORTAL_PROGRAM_ID,
-        )],
-        &payer.pubkey(),
-        &[payer, er_fee_payer],
-    );
 
     let delegation_record = portal_pubkey(northstar_portal::find_delegation_record_pda(
-        &PORTAL_PROGRAM_ID.to_bytes(),
-        &er_fee_payer.pubkey().to_bytes(),
+        &PORTAL_PROGRAM_ID,
+        &er_fee_payer.pubkey(),
     ));
     let ix = Instruction {
         program_id: PORTAL_PROGRAM_ID,
@@ -508,7 +495,15 @@ fn fund_and_delegate_er_fee_payer(
         ],
         data: borsh::to_vec(&PortalInstruction::Delegate { grid_id: GRID_ID }).unwrap(),
     };
-    send_tx(rpc, &[ix], &payer.pubkey(), &[payer, er_fee_payer]);
+    send_tx(
+        rpc,
+        &[
+            system_instruction::assign(&er_fee_payer.pubkey(), &PORTAL_PROGRAM_ID),
+            ix,
+        ],
+        &payer.pubkey(),
+        &[payer, er_fee_payer],
+    );
 }
 
 fn create_l1_mint_and_token_accounts(
@@ -731,8 +726,8 @@ fn wait_for_health(rpc: &RpcClient) {
     panic!("RPC did not become healthy");
 }
 
-fn portal_pubkey((pubkey, _bump): ([u8; 32], u8)) -> Pubkey {
-    Pubkey::new_from_array(pubkey)
+fn portal_pubkey((pubkey, _bump): (Pubkey, u8)) -> Pubkey {
+    pubkey
 }
 
 struct TestPorts {

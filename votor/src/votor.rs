@@ -46,16 +46,13 @@
 use {
     crate::{
         commitment::CommitmentAggregationData,
-        consensus_metrics::{
-            ConsensusMetrics, ConsensusMetricsEventReceiver, ConsensusMetricsEventSender,
-        },
+        consensus_metrics::ConsensusMetrics,
         consensus_pool_service::{ConsensusPoolContext, ConsensusPoolService},
         event::{
             LatestSwitchRequest, LeaderWindowInfo, RepairEventSender, VotorEventReceiver,
             VotorEventSender,
         },
         event_handler::{EventHandler, EventHandlerContext},
-        generated_cert_types::GeneratedCertTypes,
         root_utils::RootContext,
         timer_manager::TimerManager,
         vote_history::VoteHistory,
@@ -63,7 +60,13 @@ use {
         voting_service::BLSOp,
         voting_utils::VotingContext,
     },
-    agave_votor_messages::consensus_message::{Block, SigVerifiedBatch},
+    agave_bls_sigverify::{generated_cert_types::GeneratedCertTypes, rewards::RewardInput},
+    agave_votor_messages::{
+        consensus_message::Block,
+        metric_types::{ConsensusMetricsEventReceiver, ConsensusMetricsEventSender},
+        own_message::OwnMessage,
+        sig_verified_messages::SigVerifiedBatch,
+    },
     crossbeam_channel::{Receiver, Sender},
     parking_lot::RwLock as PlRwLock,
     solana_clock::Slot,
@@ -111,13 +114,15 @@ pub struct VotorConfig {
     pub leader_window_info_sender: Sender<LeaderWindowInfo>,
     pub highest_parent_ready: Arc<RwLock<(Slot, Block)>>,
     pub event_sender: VotorEventSender,
-    pub own_vote_sender: Sender<SigVerifiedBatch>,
+    pub own_vote_sender: Sender<OwnMessage>,
+    pub own_reward_aggregates_sender: Sender<RewardInput>,
     pub repair_event_sender: RepairEventSender,
     pub latest_switch_request: LatestSwitchRequest,
 
     // Receivers
     pub event_receiver: VotorEventReceiver,
     pub consensus_message_receiver: Receiver<SigVerifiedBatch>,
+    pub own_message_receiver: Receiver<OwnMessage>,
     pub consensus_metrics_receiver: ConsensusMetricsEventReceiver,
 }
 
@@ -160,10 +165,12 @@ impl Votor {
             highest_parent_ready,
             event_sender,
             own_vote_sender,
+            own_reward_aggregates_sender: own_reward_aggregate_sender,
             repair_event_sender,
             latest_switch_request,
             event_receiver,
             consensus_message_receiver,
+            own_message_receiver,
             consensus_metrics_sender,
             consensus_metrics_receiver,
             generated_cert_types,
@@ -184,18 +191,22 @@ impl Votor {
             cluster_info: cluster_info.clone(),
             highest_parent_ready,
             leader_window_info_sender,
-            vote_history_storage,
+            vote_history_storage: vote_history_storage.clone(),
             repair_event_sender: repair_event_sender.clone(),
             latest_switch_request,
         };
 
         let voting_context = VotingContext {
+            cluster_info: cluster_info.clone(),
+            leader_schedule: leader_schedule_cache.clone(),
             vote_history,
             vote_account_pubkey: vote_account,
             identity_keypair,
             authorized_voter_keypairs,
+            vote_history_storage,
             derived_bls_keypairs: HashMap::new(),
             own_vote_sender,
+            own_reward_sender: own_reward_aggregate_sender,
             bls_sender: bls_sender.clone(),
             commitment_sender: commitment_sender.clone(),
             wait_to_vote_slot,
@@ -209,6 +220,7 @@ impl Votor {
         };
 
         let timer_manager = Arc::new(PlRwLock::new(TimerManager::new(
+            cluster_info.clone(),
             event_sender.clone(),
             exit.clone(),
             migration_status.clone(),
@@ -231,12 +243,12 @@ impl Votor {
             migration_status,
             generated_cert_types,
             cluster_info: cluster_info.clone(),
-            my_vote_pubkey: vote_account,
             blockstore,
             sharable_banks: sharable_banks.clone(),
             leader_schedule_cache: leader_schedule_cache.clone(),
             vote_history_highest_parent_ready,
             consensus_message_receiver,
+            own_message_receiver,
             bls_sender,
             event_sender,
             repair_event_sender,

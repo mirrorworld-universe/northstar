@@ -3,8 +3,8 @@
 use {
     crate::rpc_sender::*,
     agave_votor_messages::{
-        certificate::{Certificate, CertificateType},
         consensus_message::Block,
+        wire::{WireBlockCertMessage, WireCertSignature},
     },
     async_trait::async_trait,
     base64::{Engine, prelude::BASE64_STANDARD},
@@ -34,7 +34,7 @@ use {
         },
     },
     solana_signature::Signature,
-    solana_transaction::{Transaction, versioned::TransactionVersion},
+    solana_transaction::versioned::{TransactionVersion, VersionedTransaction},
     solana_transaction_error::{TransactionError, TransactionResult},
     solana_transaction_status_client_types::{
         EncodedConfirmedBlock, EncodedConfirmedTransactionWithStatusMeta, EncodedTransaction,
@@ -178,10 +178,12 @@ impl RpcSender for MockSender {
                 transaction_count: Some(123),
             })?,
             "getAgGenesisCert" => {
-                let cert = Certificate {
-                    cert_type: CertificateType::Genesis(Block { slot: 0, block_id: Hash::default() }),
-                    signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
-                    bitmap: Vec::default(),
+                let cert = WireBlockCertMessage {
+                    block: Block { slot: 0, block_id: Hash::default() },
+                    signature: WireCertSignature {
+                        signature:  BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
+                        bitmap: vec![],
+                     }
                 };
                 serde_json::to_value(Some(cert))?
             }
@@ -364,7 +366,7 @@ impl RpcSender for MockSender {
                 } else {
                     let tx_str = params.as_array().unwrap()[0].as_str().unwrap().to_string();
                     let data = BASE64_STANDARD.decode(tx_str).unwrap();
-                    let tx: Transaction = bincode::deserialize(&data).unwrap();
+                    let tx: VersionedTransaction = wincode::deserialize(&data).unwrap();
                     tx.signatures[0].to_string()
                 };
                 Value::String(signature)

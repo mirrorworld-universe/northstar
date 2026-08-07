@@ -642,7 +642,7 @@ fn delegation_record_owner_program(account: &Account) -> Result<Pubkey, CliError
             "Delegation record has invalid discriminator".to_owned(),
         ));
     }
-    Ok(Pubkey::new_from_array(record.owner_program))
+    Ok(record.owner_program)
 }
 
 fn default_owner_program_for_delegate(
@@ -837,7 +837,7 @@ pub async fn process_portal_subcommand(
                     grid_id: *grid_id,
                     ttl_slots: *ttl_slots,
                     fee_cap: *fee_cap,
-                    validator: validator.to_bytes(),
+                    validator: *validator,
                     settlement_interval_slots: *settlement_interval_slots,
                 }))
                 .unwrap(),
@@ -963,7 +963,7 @@ pub async fn process_portal_subcommand(
                 accounts: vec![
                     AccountMeta::new(recipient.pubkey(), true),
                     AccountMeta::new_readonly(recipient.pubkey(), false),
-                    AccountMeta::new(Pubkey::new_from_array(WITHDRAWAL_SINK), false),
+                    AccountMeta::new(WITHDRAWAL_SINK, false),
                     AccountMeta::new_readonly(system_program::id(), false),
                     AccountMeta::new_readonly(sysvar::clock::id(), false),
                 ],
@@ -1368,7 +1368,7 @@ mod tests {
         let owner_program = Pubkey::new_unique();
         let data = borsh::to_vec(&DelegationRecord {
             discriminator: DelegationRecord::DISCRIMINATOR,
-            owner_program: owner_program.to_bytes(),
+            owner_program,
             grid_id: 0,
             bump: 0,
         })

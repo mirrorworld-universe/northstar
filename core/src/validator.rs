@@ -24,7 +24,8 @@ use {
         snapshot_packager_service::SnapshotPackagerService,
         stats_reporter_service::StatsReporterService,
         system_monitor_service::{
-            SystemMonitorService, SystemMonitorStatsReportConfig, verify_net_stats_access,
+            SystemMonitorService, SystemMonitorStatsReportConfig, XdpNetworkConfigReport,
+            verify_net_stats_access,
         },
         tpu::{Tpu, TpuSockets},
         tvu::{AlpenglowInitializationState, Tvu, TvuConfig, TvuSockets},
@@ -53,7 +54,6 @@ use {
     },
     solana_client::connection_cache::{ConnectionCache, Protocol},
     solana_clock::Slot,
-    solana_cluster_type::ClusterType,
     solana_entry::poh::compute_hash_time,
     solana_epoch_schedule::MAX_LEADER_SCHEDULE_EPOCH_OFFSET,
     solana_genesis_config::GenesisConfig,
@@ -88,8 +88,10 @@ use {
             MAX_REPLAY_WAKE_UP_SIGNALS, MAX_UPDATE_PARENT_SIGNALS, PurgeType, UpdateParentReceiver,
         },
         blockstore_metric_report_service::BlockstoreMetricReportService,
-        blockstore_options::{BLOCKSTORE_DIRECTORY_ROCKS_LEVEL, BlockstoreOptions},
-        blockstore_processor::{self, TransactionStatusSender},
+        blockstore_options::{
+            BLOCKSTORE_DIRECTORY_ROCKS_LEVEL, BlockstoreCleanupStrategy, BlockstoreOptions,
+        },
+        blockstore_processor,
         entry_notifier_interface::EntryNotifierArc,
         entry_notifier_service::{EntryNotifierSender, EntryNotifierService},
         leader_schedule_cache::LeaderScheduleCache,
@@ -98,7 +100,7 @@ use {
     },
     solana_measure::measure::Measure,
     solana_metrics::{datapoint_info, metrics::metrics_config_sanity_check},
-    solana_net_utils::SocketAddrSpace,
+    solana_net_utils::{PinnedXdpSender, SocketAddrSpace},
     solana_poh::{
         poh_controller::PohController,
         poh_recorder::PohRecorder,
@@ -126,7 +128,7 @@ use {
             AbsRequestHandlers, AccountsBackgroundService, DroppedSlotsReceiver,
             PendingSnapshotPackages, PrunedBanksRequestHandler, SnapshotRequestHandler,
         },
-        bank::Bank,
+        bank::{Bank, MAX_ALPENGLOW_VOTE_ACCOUNTS},
         bank_forks::BankForks,
         bank_forks_controller::BankForksControllerHandle,
         commitment::BlockCommitmentCache,
@@ -136,6 +138,7 @@ use {
         snapshot_bank_utils,
         snapshot_controller::SnapshotController,
         snapshot_utils,
+        transaction_execution::TransactionStatusSender,
     },
     solana_send_transaction_service::send_transaction_service::Config as SendTransactionServiceConfig,
     solana_shred_version::compute_shred_version,
@@ -147,7 +150,7 @@ use {
     },
     solana_time_utils::timestamp,
     solana_tpu_client::tpu_client::{DEFAULT_TPU_CONNECTION_POOL_SIZE, DEFAULT_VOTE_USE_QUIC},
-    solana_turbine::{self, XdpSender as TurbineXdpSender, broadcast_stage::BroadcastStageType},
+    solana_turbine::{self, broadcast_stage::BroadcastStageType},
     solana_unified_scheduler_pool::DefaultSchedulerPool,
     solana_validator_exit::Exit,
     solana_vote_program::vote_state::{VoteStateV4, handler::VoteStateHandler},
@@ -155,7 +158,7 @@ use {
         borrow::Cow,
         cmp,
         collections::{HashMap, HashSet},
-        net::{SocketAddr, SocketAddrV4},
+        net::{Ipv4Addr, SocketAddr, SocketAddrV4},
         num::{NonZeroU64, NonZeroUsize},
         path::{Path, PathBuf},
         str::FromStr,
@@ -335,7 +338,7 @@ pub struct ValidatorConfig {
     pub rpc_addrs: Option<(SocketAddr, SocketAddr)>, // (JsonRpc, JsonRpcPubSub)
     pub pubsub_config: PubSubConfig,
     pub snapshot_config: SnapshotConfig,
-    pub max_ledger_shreds: Option<u64>,
+    pub blockstore_cleanup_strategy: BlockstoreCleanupStrategy,
     pub blockstore_options: BlockstoreOptions,
     pub broadcast_stage_type: BroadcastStageType,
     pub turbine_mode: TurbineMode,
@@ -363,10 +366,11 @@ pub struct ValidatorConfig {
     pub no_poh_speed_test: bool,
     pub no_os_memory_stats_reporting: bool,
     pub no_os_network_stats_reporting: bool,
+    pub xdp_network_config_report: Option<XdpNetworkConfigReport>,
     pub no_os_cpu_stats_reporting: bool,
     pub no_os_disk_stats_reporting: bool,
     pub enforce_ulimit_nofile: bool,
-    pub poh_pinned_cpu_core: usize,
+    pub poh_pinned_cpu_core: Option<usize>,
     pub poh_hashes_per_batch: u64,
     pub process_ledger_before_services: bool,
     pub accounts_db_config: AccountsDbConfig,
@@ -420,7 +424,7 @@ impl ValidatorConfig {
             expected_bank_hash: None,
             expected_shred_version: None,
             voting_disabled: false,
-            max_ledger_shreds: None,
+            blockstore_cleanup_strategy: BlockstoreCleanupStrategy::None,
             blockstore_options: BlockstoreOptions::default_for_tests(),
             account_paths: Vec::new(),
             account_snapshot_paths: Vec::new(),
@@ -454,6 +458,7 @@ impl ValidatorConfig {
             no_poh_speed_test: true,
             no_os_memory_stats_reporting: true,
             no_os_network_stats_reporting: true,
+            xdp_network_config_report: None,
             no_os_cpu_stats_reporting: true,
             no_os_disk_stats_reporting: true,
             // No need to enforce nofile limit in tests
@@ -490,7 +495,7 @@ impl ValidatorConfig {
             replay_transactions_threads: NonZeroUsize::new(2).expect("2 is non-zero"),
             tvu_shred_sigverify_threads: NonZeroUsize::new(2).expect("2 is non-zero"),
             tvu_bls_sigverify_threads: NonZeroUsize::new(2).expect("2 is non-zero"),
-            delay_leader_block_for_pending_fork: false,
+            delay_leader_block_for_pending_fork: true,
             voting_service_test_override: None,
             repair_handler_type: RepairHandlerType::default(),
             snapshot_packager_niceness_adj: 0,
@@ -555,6 +560,11 @@ pub enum ValidatorStartProgress {
     Running,
 }
 
+pub struct XdpTransmitSetup {
+    pub transmitter_builder: TransmitterBuilder,
+    pub src_ip: Ipv4Addr,
+}
+
 struct BlockstoreRootScan {
     thread: Option<JoinHandle<Result<usize, BlockstoreError>>>,
 }
@@ -578,10 +588,10 @@ impl BlockstoreRootScan {
     }
 
     fn join(self) {
-        if let Some(blockstore_root_scan) = self.thread {
-            if let Err(err) = blockstore_root_scan.join() {
-                warn!("blockstore_root_scan failed to join {err:?}");
-            }
+        if let Some(blockstore_root_scan) = self.thread
+            && let Err(err) = blockstore_root_scan.join()
+        {
+            warn!("blockstore_root_scan failed to join {err:?}");
         }
     }
 }
@@ -715,7 +725,7 @@ impl Validator {
         socket_addr_space: SocketAddrSpace,
         tpu_config: ValidatorTpuConfig,
         admin_rpc_service_post_init: Arc<RwLock<Option<AdminRpcRequestMetadataPostInit>>>,
-        xdp_builder_with_src_addr: Option<(TransmitterBuilder, SocketAddrV4)>,
+        xdp_transmit_setup: Option<XdpTransmitSetup>,
     ) -> Result<Self> {
         let exit = Arc::new(AtomicBool::new(false));
         Self::new_with_exit(
@@ -731,7 +741,7 @@ impl Validator {
             socket_addr_space,
             tpu_config,
             admin_rpc_service_post_init,
-            xdp_builder_with_src_addr,
+            xdp_transmit_setup,
             exit,
         )
     }
@@ -750,7 +760,7 @@ impl Validator {
         socket_addr_space: SocketAddrSpace,
         tpu_config: ValidatorTpuConfig,
         admin_rpc_service_post_init: Arc<RwLock<Option<AdminRpcRequestMetadataPostInit>>>,
-        xdp_builder_with_src_addr: Option<(TransmitterBuilder, SocketAddrV4)>,
+        xdp_transmit_setup: Option<XdpTransmitSetup>,
         exit: Arc<AtomicBool>,
     ) -> Result<Self> {
         #[cfg(debug_assertions)]
@@ -912,6 +922,7 @@ impl Validator {
             SystemMonitorStatsReportConfig {
                 report_os_memory_stats: !config.no_os_memory_stats_reporting,
                 report_os_network_stats: !config.no_os_network_stats_reporting,
+                xdp_network_config_report: config.xdp_network_config_report.clone(),
                 report_os_cpu_stats: !config.no_os_cpu_stats_reporting,
                 report_os_disk_stats: !config.no_os_disk_stats_reporting,
             },
@@ -965,14 +976,14 @@ impl Validator {
         let shred_version = compute_shred_version(&genesis_config.hash(), Some(&hard_forks));
         info!("shred version: {shred_version}, hard forks: {hard_forks:?}");
 
-        if let Some(expected_shred_version) = config.expected_shred_version {
-            if expected_shred_version != shred_version {
-                return Err(ValidatorError::ShredVersionMismatch {
-                    actual: shred_version,
-                    expected: expected_shred_version,
-                }
-                .into());
+        if let Some(expected_shred_version) = config.expected_shred_version
+            && expected_shred_version != shred_version
+        {
+            return Err(ValidatorError::ShredVersionMismatch {
+                actual: shred_version,
+                expected: expected_shred_version,
             }
+            .into());
         }
 
         if let Some(start_slot) = should_cleanup_blockstore_incorrect_shred_versions(
@@ -1011,6 +1022,7 @@ impl Validator {
         cluster_info.restore_contact_info(ledger_path, config.contact_save_interval);
         cluster_info.set_bind_ip_addrs(node.bind_ip_addrs.clone());
         let cluster_info = Arc::new(cluster_info);
+        cluster_info.set_migration_status(migration_status.clone());
         let node_multihoming = Arc::new(NodeMultihoming::from(&node));
         migration_status.set_pubkey(cluster_info.id());
 
@@ -1151,6 +1163,7 @@ impl Validator {
             blockstore_root_scan,
             &snapshot_controller,
             config,
+            cluster_info.my_shred_version(),
         );
 
         maybe_warp_slot(
@@ -1213,11 +1226,13 @@ impl Validator {
             ))
         };
 
-        let bls_connection_cache = Arc::new(ConnectionCache::new_with_client_options(
+        let bls_connection_cache = Arc::new(ConnectionCache::new_with_max_connections(
             "connection_cache_bls_quic",
             // BLS consensus messaging is extremely low throughput (5 PPS). Even during standstill operations
             // we wouldn't expect more than a 100 PPS. 1 connection is enough.
             1, /* connection_pool_size */
+            // Overprovision to account for epoch boundary validator set rotations
+            MAX_ALPENGLOW_VOTE_ACCOUNTS * 2, /* max_connections */
             Some(node.sockets.quic_alpenglow_client),
             Some((
                 &identity_keypair,
@@ -1259,8 +1274,6 @@ impl Validator {
             json_rpc_service,
             rpc_subscriptions,
             pubsub_service,
-            completed_data_sets_sender,
-            completed_data_sets_service,
             rpc_completed_slots_service,
             sample_performance_service,
             optimistically_confirmed_bank_tracker,
@@ -1343,27 +1356,6 @@ impl Validator {
 
                 Some(pubsub_service)
             };
-
-            let (completed_data_sets_sender, completed_data_sets_service) =
-                if !config.rpc_config.full_api {
-                    (None, None)
-                } else {
-                    let (completed_data_sets_sender, completed_data_sets_receiver) =
-                        bounded(MAX_COMPLETED_DATA_SETS_IN_CHANNEL);
-                    let completed_data_sets_service = CompletedDataSetsService::new(
-                        completed_data_sets_receiver,
-                        blockstore.clone(),
-                        rpc_subscriptions.clone(),
-                        deshred_transaction_notifier.clone(),
-                        exit.clone(),
-                        max_slots.clone(),
-                        bank_forks.clone(),
-                    );
-                    (
-                        Some(completed_data_sets_sender),
-                        Some(completed_data_sets_service),
-                    )
-                };
 
             let rpc_completed_slots_service =
                 if config.rpc_config.full_api || geyser_plugin_service.is_some() {
@@ -1455,8 +1447,6 @@ impl Validator {
                 Some(json_rpc_service),
                 Some(rpc_subscriptions),
                 pubsub_service,
-                completed_data_sets_sender,
-                completed_data_sets_service,
                 rpc_completed_slots_service,
                 sample_performance_service,
                 optimistically_confirmed_bank_tracker,
@@ -1464,8 +1454,36 @@ impl Validator {
                 northstar_service_opt,
             )
         } else {
-            (None, None, None, None, None, None, None, None, None, None)
+            (None, None, None, None, None, None, None, None)
         };
+
+        // CompletedDataSetsService feeds two independent sinks: RPC signatureSubscribe
+        // notifications (which need rpc_subscriptions) and the geyser deshred-transaction notifier
+        // (which does not). Spawn it whenever either sink wants it, kept out of the rpc_addrs block
+        // above so a geyser node started without --rpc-port still gets deshred notifications.
+        // Gating on the notifier itself rather than on a plugin being loaded keeps the per-data-set
+        // blockstore reads off nodes whose plugins don't subscribe; --geyser-plugin-always-enabled
+        // is the exception, where the notifier is present with no subscribers.
+        let (completed_data_sets_sender, completed_data_sets_service) =
+            if config.rpc_config.full_api || deshred_transaction_notifier.is_some() {
+                let (completed_data_sets_sender, completed_data_sets_receiver) =
+                    bounded(MAX_COMPLETED_DATA_SETS_IN_CHANNEL);
+                let completed_data_sets_service = CompletedDataSetsService::new(
+                    completed_data_sets_receiver,
+                    blockstore.clone(),
+                    rpc_subscriptions.clone(),
+                    deshred_transaction_notifier.clone(),
+                    exit.clone(),
+                    max_slots.clone(),
+                    bank_forks.clone(),
+                );
+                (
+                    Some(completed_data_sets_sender),
+                    Some(completed_data_sets_service),
+                )
+            } else {
+                (None, None)
+            };
 
         let ip_echo_server = match node.sockets.ip_echo {
             None => None,
@@ -1484,10 +1502,60 @@ impl Validator {
         let epoch_specs: Box<dyn solana_gossip::epoch_specs::EpochSpecs> =
             Box::new(crate::epoch_specs::EpochSpecs::from(bank_forks.clone()));
 
+        let (
+            xdp_transmitter,
+            turbine_xdp_sender,
+            quic_xdp_sender,
+            repair_xdp_sender,
+            gossip_xdp_sender,
+        ) = if let Some(XdpTransmitSetup {
+            transmitter_builder,
+            src_ip,
+        }) = xdp_transmit_setup
+        {
+            let turbine_src_port = node.sockets.retransmit_sockets[0]
+                .local_addr()
+                .expect("retransmit socket should have local address")
+                .port();
+
+            let repair_src_port = node
+                .sockets
+                .repair
+                .local_addr()
+                .expect("repair socket should have local address")
+                .port();
+
+            let gossip_src_port = node.sockets.gossip[0]
+                .local_addr()
+                .expect("gossip socket should have local address")
+                .port();
+
+            let (transmitter, sender) = transmitter_builder.build();
+            (
+                Some(transmitter),
+                Some(PinnedXdpSender::new(
+                    sender.clone(),
+                    SocketAddrV4::new(src_ip, turbine_src_port),
+                )),
+                Some((sender.clone(), src_ip)),
+                Some(PinnedXdpSender::new(
+                    sender.clone(),
+                    SocketAddrV4::new(src_ip, repair_src_port),
+                )),
+                Some(PinnedXdpSender::new(
+                    sender,
+                    SocketAddrV4::new(src_ip, gossip_src_port),
+                )),
+            )
+        } else {
+            (None, None, None, None, None)
+        };
+
         let gossip_service = GossipService::new(
             &cluster_info,
             Some(epoch_specs),
             node.sockets.gossip.clone(),
+            gossip_xdp_sender,
             config.gossip_validators.clone(),
             config.should_check_duplicate_instance,
             Some(stats_reporter_sender.clone()),
@@ -1574,7 +1642,7 @@ impl Validator {
             banking_stage_sender: banking_stage_sender_for_bcl,
             sharable_banks: bank_forks.read().unwrap().sharable_banks(),
         };
-        let (block_creation_loop, reward_votes_sender) =
+        let (block_creation_loop, reward_aggregates_sender) =
             BlockCreationLoop::new(block_creation_loop_config);
 
         assert_eq!(
@@ -1624,27 +1692,6 @@ impl Validator {
         // This channel backing up indicates a serious problem in votor
         let (votor_event_sender, votor_event_receiver) = bounded(1000);
 
-        let (xdp_transmitter, turbine_xdp_sender, quic_xdp_sender) =
-            if let Some((xdp_transmit_builder, src_addr)) = xdp_builder_with_src_addr {
-                let (transmitter, sender) = xdp_transmit_builder.build();
-                (
-                    Some(transmitter),
-                    Some(TurbineXdpSender::new(sender.clone(), src_addr)),
-                    Some((sender, *src_addr.ip())),
-                )
-            } else {
-                (None, None, None)
-            };
-
-        // disable all2all tests if not allowed for a given cluster type
-        let alpenglow_socket = if genesis_config.cluster_type == ClusterType::Testnet
-            || genesis_config.cluster_type == ClusterType::Development
-        {
-            node.sockets.alpenglow
-        } else {
-            None
-        };
-
         let tvu = Tvu::new(
             vote_account,
             authorized_voter_keypairs,
@@ -1655,7 +1702,7 @@ impl Validator {
                 retransmit: node.sockets.retransmit_sockets,
                 fetch: node.sockets.tvu,
                 ancestor_hashes_requests: node.sockets.ancestor_hashes_requests,
-                alpenglow: alpenglow_socket,
+                alpenglow: node.sockets.alpenglow,
                 block_id_repair: node.sockets.block_id_repair,
             },
             blockstore.clone(),
@@ -1684,7 +1731,7 @@ impl Validator {
             bank_notification_sender.clone(),
             duplicate_confirmed_slots_receiver,
             TvuConfig {
-                max_ledger_shreds: config.max_ledger_shreds,
+                blockstore_cleanup_strategy: config.blockstore_cleanup_strategy,
                 shred_version: node.info.shred_version(),
                 repair_validators: config.repair_validators.clone(),
                 repair_whitelist: config.repair_whitelist.clone(),
@@ -1694,13 +1741,12 @@ impl Validator {
                 shred_sigverify_threads: config.tvu_shred_sigverify_threads,
                 bls_sigverify_threads: config.tvu_bls_sigverify_threads,
                 turbine_xdp_sender: turbine_xdp_sender.clone(),
+                repair_xdp_sender,
             },
             &max_slots,
             block_metadata_notifier,
             config.wait_to_vote_slot,
             Some(snapshot_controller.clone()),
-            config.runtime_config.log_messages_bytes_limit,
-            prioritization_fee_cache.clone(),
             banking_tracer,
             outstanding_repair_requests.clone(),
             cluster_slots.clone(),
@@ -1723,7 +1769,7 @@ impl Validator {
                 voting_service_test_override: config.voting_service_test_override.clone(),
                 highest_finalized,
             },
-            reward_votes_sender,
+            reward_aggregates_sender,
         )
         .map_err(ValidatorError::Other)?;
 
@@ -1900,15 +1946,14 @@ impl Validator {
                 logfile,
                 logrotate_flag,
             }) = self.log_config.as_ref()
+                && logrotate_flag.load(Ordering::Relaxed)
             {
-                if logrotate_flag.load(Ordering::Relaxed) {
-                    info!("Received SIGUSR1, reopening {}", logfile.display());
-                    agave_logger::redirect_stderr(logfile);
-                    // Reset the flag to `false` to allow detection of the
-                    // signal again and to avoid hitting this case every
-                    // iteration
-                    logrotate_flag.store(false, Ordering::Relaxed);
-                }
+                info!("Received SIGUSR1, reopening {}", logfile.display());
+                agave_logger::redirect_stderr(logfile);
+                // Reset the flag to `false` to allow detection of the
+                // signal again and to avoid hitting this case every
+                // iteration
+                logrotate_flag.store(false, Ordering::Relaxed);
             }
 
             // One second is a reasonable response time for these signals to
@@ -1955,6 +2000,10 @@ impl Validator {
         info!(
             "local retransmit address: {}",
             node.sockets.retransmit_sockets[0].local_addr().unwrap()
+        );
+        info!(
+            "local alpenglow address: {}",
+            node.sockets.alpenglow.local_addr().unwrap()
         );
     }
 
@@ -2056,10 +2105,10 @@ impl Validator {
 }
 
 fn active_vote_account_exists_in_bank(bank: &Bank, vote_account: &Pubkey) -> bool {
-    if let Some(account) = &bank.get_account(vote_account) {
-        if let Ok(vote_state) = VoteStateV4::deserialize(account.data(), vote_account) {
-            return !vote_state.votes.is_empty();
-        }
+    if let Some(account) = &bank.get_account(vote_account)
+        && let Ok(vote_state) = VoteStateV4::deserialize(account.data(), vote_account)
+    {
+        return !vote_state.votes.is_empty();
     }
     false
 }
@@ -2098,7 +2147,7 @@ pub fn should_require_vote_history_file(
         // New vote account
         return false;
     };
-    let genesis_slot = genesis_certificate.cert_type.slot();
+    let genesis_slot = genesis_certificate.block.slot;
 
     // We've voted past the alpenglow genesis
     last_voted_slot > genesis_slot
@@ -2171,10 +2220,10 @@ fn check_poh_speed(bank: &Bank, maybe_hash_samples: Option<u64>) -> Result<(), V
 
 fn maybe_cluster_restart_with_hard_fork(config: &ValidatorConfig, root_slot: Slot) -> Option<Slot> {
     // detect cluster restart (hard fork) indirectly via wait_for_supermajority...
-    if let Some(wait_slot_for_supermajority) = config.wait_for_supermajority {
-        if wait_slot_for_supermajority == root_slot {
-            return Some(wait_slot_for_supermajority);
-        }
+    if let Some(wait_slot_for_supermajority) = config.wait_for_supermajority
+        && wait_slot_for_supermajority == root_slot
+    {
+        return Some(wait_slot_for_supermajority);
     }
 
     None
@@ -2350,13 +2399,13 @@ fn load_genesis(
     let genesis_hash = genesis_config.hash();
     info!("genesis hash: {genesis_hash}");
 
-    if let Some(expected_genesis_hash) = config.expected_genesis_hash {
-        if genesis_hash != expected_genesis_hash {
-            return Err(ValidatorError::GenesisHashMismatch(
-                genesis_hash,
-                expected_genesis_hash,
-            ));
-        }
+    if let Some(expected_genesis_hash) = config.expected_genesis_hash
+        && genesis_hash != expected_genesis_hash
+    {
+        return Err(ValidatorError::GenesisHashMismatch(
+            genesis_hash,
+            expected_genesis_hash,
+        ));
     }
 
     Ok(genesis_config)
@@ -2557,6 +2606,7 @@ pub struct ProcessBlockStore<'a> {
     config: &'a ValidatorConfig,
     tower: Option<Tower>,
     vote_history: Option<VoteHistory>,
+    my_shred_version: u16,
 }
 
 impl<'a> ProcessBlockStore<'a> {
@@ -2575,6 +2625,7 @@ impl<'a> ProcessBlockStore<'a> {
         blockstore_root_scan: BlockstoreRootScan,
         snapshot_controller: &'a SnapshotController,
         config: &'a ValidatorConfig,
+        my_shred_version: u16,
     ) -> Self {
         Self {
             id,
@@ -2592,6 +2643,7 @@ impl<'a> ProcessBlockStore<'a> {
             config,
             tower: None,
             vote_history: None,
+            my_shred_version,
         }
     }
 
@@ -2627,6 +2679,7 @@ impl<'a> ProcessBlockStore<'a> {
         blockstore_processor::process_blockstore_from_root(
             self.blockstore,
             self.bank_forks,
+            self.my_shred_version,
             self.leader_schedule_cache,
             self.process_options,
             self.transaction_status_sender,
@@ -2851,16 +2904,23 @@ fn scan_blockstore_for_incorrect_shred_version(
     // Search for shreds with incompatible version in blockstore
     let slot_meta_iterator = blockstore.slot_meta_iterator(start_slot)?;
 
-    info!("Searching blockstore for shred with incorrect version from slot {start_slot}");
+    info!(
+        "Blockstore search for shreds with incorrect version starting from slot {start_slot}; \
+         searching for 60s"
+    );
     for (slot, _meta) in slot_meta_iterator {
         let shreds = blockstore.get_data_shreds_for_slot(slot, 0)?;
         for shred in &shreds {
             if shred.version() != expected_shred_version {
+                info!(
+                    "Blockstore search found shred with incorrect version {} in slot {slot}",
+                    shred.version()
+                );
                 return Ok(Some(shred.version()));
             }
         }
         if timer.elapsed() > TIMEOUT {
-            info!("Didn't find incorrect shreds after 60 seconds, aborting");
+            info!("Blockstore search did not find any shreds with incorrect version");
             break;
         }
     }
@@ -2908,7 +2968,7 @@ fn cleanup_blockstore_incorrect_shred_versions(
             for (slot, _meta) in slot_meta_iterator {
                 let shreds = blockstore.get_data_shreds_for_slot(slot, 0)?;
                 let shreds = shreds.into_iter().map(Cow::Owned);
-                let _ = backup_blockstore.insert_cow_shreds(shreds, None, true);
+                let _ = backup_blockstore.insert_cow_shreds(shreds, true);
                 num_slots_copied += 1;
 
                 if print_timer.elapsed() > PRINT_INTERVAL {
@@ -2927,8 +2987,7 @@ fn cleanup_blockstore_incorrect_shred_versions(
 
     info!("Purging slots {start_slot} to {end_slot} from blockstore");
     let mut timer = Measure::start("blockstore purge");
-    blockstore.purge_from_next_slots(start_slot, end_slot);
-    blockstore.purge_slots(start_slot, end_slot, PurgeType::Exact)?;
+    blockstore.purge_slots_cleanup_chaining(start_slot, end_slot, PurgeType::Exact)?;
     timer.stop();
     info!("Purging slots done. {timer}");
 
@@ -3040,13 +3099,13 @@ fn wait_for_supermajority(
                 _ => {}
             }
 
-            if let Some(expected_bank_hash) = config.expected_bank_hash {
-                if bank.hash() != expected_bank_hash {
-                    return Err(ValidatorError::BankHashMismatch(
-                        bank.hash(),
-                        expected_bank_hash,
-                    ));
-                }
+            if let Some(expected_bank_hash) = config.expected_bank_hash
+                && bank.hash() != expected_bank_hash
+            {
+                return Err(ValidatorError::BankHashMismatch(
+                    bank.hash(),
+                    expected_bank_hash,
+                ));
             }
 
             for i in 1.. {
@@ -3201,6 +3260,7 @@ pub fn is_snapshot_config_valid(snapshot_config: &SnapshotConfig) -> bool {
 mod tests {
     use {
         super::*,
+        agave_votor_messages::certificate::{CertSignature, GenesisCert},
         crossbeam_channel::{RecvTimeoutError, bounded},
         solana_entry::entry,
         solana_genesis_config::create_genesis_config,
@@ -3238,10 +3298,7 @@ mod tests {
     #[test]
     fn test_should_require_vote_history_file() {
         use {
-            agave_votor_messages::{
-                certificate::{Certificate, CertificateType},
-                consensus_message::Block,
-            },
+            agave_votor_messages::consensus_message::Block,
             solana_account::{AccountSharedData, state_traits::StateMut},
             solana_bls_signatures::{BLS_SIGNATURE_AFFINE_SIZE, Signature as BLSSignature},
         };
@@ -3299,14 +3356,17 @@ mod tests {
             &identity,
         ));
 
-        bank.set_alpenglow_genesis_certificate(&Certificate {
-            cert_type: CertificateType::Genesis(Block {
+        let cert = GenesisCert {
+            block: Block {
                 slot: 40,
                 block_id: Hash::new_unique(),
-            }),
-            signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
-            bitmap: vec![],
-        });
+            },
+            signature: CertSignature {
+                signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
+                bitmap: vec![],
+            },
+        };
+        bank.set_alpenglow_genesis_certificate(&cert);
         assert!(!should_require_vote_history_file(
             &bank,
             &vote_account_pubkey,
@@ -3445,7 +3505,7 @@ mod tests {
                 true,  // is_full_slot
                 1,     // version
             );
-            blockstore.insert_shreds(shreds, None, true).unwrap();
+            blockstore.insert_shreds(shreds, true).unwrap();
         }
 
         // No check as all blockstore data is newer than latest hard fork
@@ -3536,7 +3596,7 @@ mod tests {
                 true,  // is_full_slot
                 1,     // version
             );
-            blockstore.insert_shreds(shreds, None, true).unwrap();
+            blockstore.insert_shreds(shreds, true).unwrap();
         }
 
         // this purges and compacts all slots greater than or equal to 5

@@ -1,0 +1,34 @@
+[package]
+name = "northstar-zk-verifier-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+groth16-solana = { git = "https://github.com/Lightprotocol/groth16-solana", rev = "43fee1a67e91c0df7bb4edad5ba87ae4602aa208" }
+solana-account-info = { workspace = true }
+solana-program-entrypoint = { workspace = true }
+solana-program-error = { workspace = true }
+solana-pubkey = { workspace = true }
+
+[dev-dependencies]
+bincode = { workspace = true }
+solana-account = { workspace = true }
+hex = "0.4"
+serde_json = "1"
+solana-instruction = { workspace = true }
+solana-program-test = { workspace = true }
+solana-sdk-ids = { workspace = true }
+solana-signer = { workspace = true }
+solana-transaction = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+
+[lints]
+workspace = true

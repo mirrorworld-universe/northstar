@@ -1,6 +1,6 @@
 use {
     crate::PortalError,
-    pinocchio::{account_info::AccountInfo, instruction::Signer, pubkey::Pubkey, ProgramResult},
+    pinocchio::{cpi::Signer, AccountView as AccountInfo, Address as Pubkey, ProgramResult},
     pinocchio_system::instructions::{Allocate, Assign, Transfer},
 };
 
@@ -14,6 +14,8 @@ pub mod settle_deposit_receipt;
 pub mod settlement;
 pub mod start_withdrawal;
 pub mod undelegate;
+#[cfg(feature = "zk-verifier-prototype")]
+pub mod verifier;
 
 fn initialize_pda_account(
     payer: &AccountInfo,
@@ -21,9 +23,9 @@ fn initialize_pda_account(
     lamports: u64,
     space: u64,
     owner: &Pubkey,
-    signer: Signer,
+    signer: Signer<'_, '_>,
 ) -> ProgramResult {
-    if !pda.data_is_empty() || pda.owner() != &pinocchio_system::ID {
+    if !pda.is_data_empty() || !pda.owned_by(&pinocchio_system::ID) {
         return Err(PortalError::InvalidAccountData.into());
     }
 
@@ -52,6 +54,8 @@ fn initialize_pda_account(
     Ok(())
 }
 
+#[cfg(feature = "zk-verifier-prototype")]
+pub use verifier::process_verify_er_step_proof_v1;
 pub use {
     checkpoint::{
         process_bisect_challenge, process_cancel_checkpoint, process_commit_checkpoint,

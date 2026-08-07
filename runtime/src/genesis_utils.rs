@@ -2,16 +2,16 @@
 use solana_stake_interface::config::Config as StakeConfig;
 use {
     crate::{
-        bank::VAT_TO_BURN_PER_EPOCH,
+        bank::DEFAULT_VAT_TO_BURN_PER_EPOCH,
         block_component_processor::vote_reward::epoch_inflation_account_state::EpochInflationAccountState,
         stake_utils,
     },
     agave_feature_set::{FEATURE_NAMES, FeatureSet},
     agave_votor_messages::{
         self,
-        certificate::{Certificate, CertificateType},
         consensus_message::{BLS_KEYPAIR_DERIVE_SEED, Block},
         migration::GENESIS_CERTIFICATE_ACCOUNT,
+        wire::{WireBlockCertMessage, WireCertSignature},
     },
     bincode::serialize,
     bitvec::vec::BitVec,
@@ -38,10 +38,7 @@ use {
     solana_signer_store::encode_base2,
     solana_stake_interface::state::{Authorized, Lockup, Meta, StakeStateV2},
     solana_system_interface::program as system_program,
-    solana_sysvar::{
-        SysvarSerialize,
-        epoch_rewards::{self, EpochRewards},
-    },
+    solana_sysvar::epoch_rewards,
     solana_vote_interface::state::{BLS_PUBLIC_KEY_COMPRESSED_SIZE, VoteStateV4},
     solana_vote_program::vote_state,
     std::{borrow::Borrow, sync::Arc},
@@ -49,11 +46,20 @@ use {
 
 // Default amount received by the validator
 const VALIDATOR_LAMPORTS: u64 = 890_880;
+const MINT_KEYPAIR_SEED: [u8; 32] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+    26, 27, 28, 29, 30, 31,
+];
+const VALIDATOR_STAKE_KEYPAIR_SEED: [u8; 32] = [
+    64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87,
+    88, 89, 90, 91, 92, 93, 94, 95,
+];
 
-// Minimum vote account balance required for VAT (SIMD-0357).
-// Vote accounts need this minimum to pass VAT filtering.
+// Default minimum vote account balance used by tests/genesis helpers. This is
+// conservative once shorter slot-time regimes lower the live bank VAT burn.
 pub fn minimum_vote_account_balance_for_vat(num_epochs: Epoch) -> u64 {
-    VAT_TO_BURN_PER_EPOCH * num_epochs + Rent::default().minimum_balance(VoteStateV4::size_of())
+    DEFAULT_VAT_TO_BURN_PER_EPOCH * num_epochs
+        + Rent::default().minimum_balance(VoteStateV4::size_of())
 }
 
 // Minimum stake lamports required for a valid stake account with non-zero stake.
@@ -176,7 +182,8 @@ pub fn create_genesis_config_with_vote_accounts_and_cluster_type(
     assert!(!voting_keypairs.is_empty());
     assert_eq!(voting_keypairs.len(), stakes.len());
 
-    let mint_keypair = Keypair::new();
+    // Use deterministic keypair so we don't get confused by randomness in tests
+    let mint_keypair = Keypair::from_seed(&MINT_KEYPAIR_SEED).unwrap();
     let voting_keypair = voting_keypairs[0].borrow().vote_keypair.insecure_clone();
 
     let validator_pubkey = voting_keypairs[0].borrow().node_keypair.pubkey();
@@ -264,11 +271,7 @@ pub fn create_genesis_config_with_leader(
     validator_stake_lamports: u64,
 ) -> GenesisConfigInfo {
     // Use deterministic keypair so we don't get confused by randomness in tests
-    let mint_keypair = Keypair::from_seed(&[
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
-        25, 26, 27, 28, 29, 30, 31,
-    ])
-    .unwrap();
+    let mint_keypair = Keypair::from_seed(&MINT_KEYPAIR_SEED).unwrap();
 
     create_genesis_config_with_leader_with_mint_keypair(
         mint_keypair,
@@ -294,13 +297,16 @@ pub fn create_genesis_config_with_leader_with_mint_keypair(
     let bls_keypair =
         BLSKeypair::derive_from_signer(&voting_keypair, BLS_KEYPAIR_DERIVE_SEED).unwrap();
     let validator_bls_pubkey = Some(bls_keypair.public.to_bytes_compressed());
+    let stake_pubkey = Keypair::from_seed(&VALIDATOR_STAKE_KEYPAIR_SEED)
+        .unwrap()
+        .pubkey();
 
     let genesis_config = create_genesis_config_with_leader_ex(
         mint_lamports,
         &mint_keypair.pubkey(),
         validator_pubkey,
         &voting_keypair.pubkey(),
-        &Pubkey::new_unique(),
+        &stake_pubkey,
         validator_bls_pubkey,
         validator_stake_lamports,
         VALIDATOR_LAMPORTS,
@@ -321,19 +327,29 @@ pub fn create_genesis_config_with_leader_with_mint_keypair(
 
 pub fn activate_all_features_alpenglow(genesis_config: &mut GenesisConfig) {
     do_activate_all_features::<true>(genesis_config);
+    configure_alpenglow_at_genesis(genesis_config);
+}
 
+pub fn activate_alpenglow_at_genesis(genesis_config: &mut GenesisConfig) {
+    activate_feature(genesis_config, agave_feature_set::alpenglow::id());
+    configure_alpenglow_at_genesis(genesis_config);
+}
+
+fn configure_alpenglow_at_genesis(genesis_config: &mut GenesisConfig) {
     // PoH is in low power mode
     genesis_config.poh_config.hashes_per_tick = None;
 
     // This is a dev cluster with alpenglow enabled at genesis. We don't want to test the migration pathway
     // so we add a fake genesis certificate.
-    let cert = Certificate {
-        cert_type: CertificateType::Genesis(Block {
+    let cert = WireBlockCertMessage {
+        block: Block {
             slot: 0,
             block_id: Hash::default(),
-        }),
-        signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
-        bitmap: encode_base2(&BitVec::new()).unwrap(),
+        },
+        signature: WireCertSignature {
+            signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
+            bitmap: encode_base2(&BitVec::new()).unwrap(),
+        },
     };
     let cert_size = bincode::serialized_size(&cert).unwrap();
     let lamports = Rent::default().minimum_balance(cert_size as usize);
@@ -449,7 +465,9 @@ pub fn create_genesis_config_with_leader_ex_no_features(
     mut initial_accounts: Vec<(Pubkey, AccountSharedData)>,
 ) -> GenesisConfig {
     // Ensure minimum lamports for VAT filtering, but only when stake > 0.
-    // VAT requires: non-zero stake, BLS pubkey, and lamports >= VAT_TO_BURN_PER_EPOCH + rent_exempt_minimum.
+    // VAT requires non-zero stake, a BLS pubkey, and lamports >= the bank's
+    // current VAT burn plus rent-exempt minimum. This helper funds with the
+    // conservative default burn amount.
     let (vote_account_lamports, stake_lamports) = if validator_stake_lamports > 0 {
         (
             validator_stake_lamports.max(minimum_vote_account_balance_for_vat(100)),
@@ -569,7 +587,7 @@ pub fn add_genesis_stake_config_account(genesis_config: &mut GenesisConfig) -> u
 }
 
 pub fn add_genesis_epoch_rewards_account(genesis_config: &mut GenesisConfig) -> u64 {
-    let data = vec![0; EpochRewards::size_of()];
+    let data = vec![0; epoch_rewards::SIZE];
     let lamports = std::cmp::max(genesis_config.rent.minimum_balance(data.len()), 1);
 
     let account = AccountSharedData::create_from_existing_shared_data(

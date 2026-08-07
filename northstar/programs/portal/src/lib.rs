@@ -13,10 +13,7 @@ mod state;
 use pinocchio::no_allocator;
 use {
     borsh::BorshDeserialize,
-    pinocchio::{
-        account_info::AccountInfo, entrypoint::deserialize, program_error::ProgramError,
-        ProgramResult, SUCCESS,
-    },
+    pinocchio::{error::ProgramError, AccountView as AccountInfo, ProgramResult},
 };
 pub use {error::*, events::*, instruction::*, pda::*, state::*};
 
@@ -65,8 +62,8 @@ fn split_instruction(data: &[u8]) -> Result<(u8, &[u8]), ProgramError> {
 
 #[inline(never)]
 fn process_instruction(
-    program_id: &pinocchio::pubkey::Pubkey,
-    accounts: &[AccountInfo],
+    program_id: &pinocchio::Address,
+    accounts: &mut [AccountInfo],
     instruction_data: &[u8],
 ) -> ProgramResult {
     // Sonic: Do not Borsh-deserialize the whole `PortalInstruction` enum here.
@@ -137,6 +134,9 @@ fn process_instruction(
         Ok((25, payload)) => deserialize_args(payload).and_then(|timeout| {
             instructions::process_timeout_challenge(program_id, accounts, timeout)
         }),
+        #[cfg(feature = "zk-verifier-prototype")]
+        Ok((26, payload)) => deserialize_args(payload)
+            .and_then(|proof| instructions::process_verify_er_step_proof_v1(accounts, proof)),
         Ok((_, _)) | Err(_) => Err(ProgramError::InvalidInstructionData),
     }
 }
@@ -150,18 +150,5 @@ fn process_instruction(
 /// # Safety
 /// `input` must be a valid pointer to a serialized Solana program input buffer.
 pub unsafe extern "C" fn entrypoint(input: *mut u8) -> u64 {
-    const MAX_PORTAL_ACCOUNTS: usize = 16;
-    const UNINIT: core::mem::MaybeUninit<AccountInfo> = core::mem::MaybeUninit::uninit();
-    let mut accounts_arr = [UNINIT; MAX_PORTAL_ACCOUNTS];
-
-    let (program_id, count, instruction_data) =
-        deserialize::<MAX_PORTAL_ACCOUNTS>(input, &mut accounts_arr);
-
-    let accounts: &[AccountInfo] =
-        core::slice::from_raw_parts(accounts_arr.as_ptr() as *const AccountInfo, count);
-
-    match process_instruction(program_id, accounts, instruction_data) {
-        Ok(()) => SUCCESS,
-        Err(e) => e.into(),
-    }
+    pinocchio::entrypoint::process_entrypoint::<16>(input, process_instruction)
 }

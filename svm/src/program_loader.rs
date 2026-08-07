@@ -1,7 +1,7 @@
 #[cfg(feature = "metrics")]
 use solana_program_runtime::program_metrics::LoadProgramMetrics;
 use {
-    solana_account::{AccountSharedData, ReadableAccount, state_traits::StateMut},
+    solana_account::{AccountSharedData, ReadableAccount},
     solana_clock::Slot,
     solana_instruction::error::InstructionError,
     solana_loader_v3_interface::state::UpgradeableLoaderState,
@@ -11,16 +11,12 @@ use {
             ProgramCacheForTxBatch, ProgramCacheMatchCriteria, ProgramRuntimeEnvironment,
             ProgramToLoad,
         },
-        program_cache_entry::{
-            DELAY_VISIBILITY_SLOT_OFFSET, ProgramCacheEntry, ProgramCacheEntryOwner,
-            ProgramCacheEntryType,
-        },
+        program_cache_entry::{ProgramCacheEntry, ProgramCacheEntryOwner, ProgramCacheEntryType},
     },
     solana_pubkey::Pubkey,
     solana_sdk_ids::{bpf_loader, bpf_loader_deprecated, bpf_loader_upgradeable, loader_v4},
     solana_svm_callback::TransactionProcessingCallback,
     solana_svm_timings::ExecuteTimings,
-    solana_svm_transaction::svm_message::SVMMessage,
     solana_svm_type_overrides::sync::Arc,
     solana_transaction_error::{TransactionError, TransactionResult},
     std::sync::atomic::Ordering,
@@ -54,7 +50,7 @@ pub(crate) fn load_program_accounts<CB: TransactionProcessingCallback>(
     } else if bpf_loader_upgradeable::check_id(program_account.owner()) {
         if let Ok(UpgradeableLoaderState::Program {
             programdata_address,
-        }) = program_account.state()
+        }) = bincode::deserialize(program_account.data())
         {
             if let Some((programdata_account, _slot)) =
                 callbacks.get_account_shared_data(&programdata_address)
@@ -63,7 +59,7 @@ pub(crate) fn load_program_accounts<CB: TransactionProcessingCallback>(
                     if let Ok(UpgradeableLoaderState::ProgramData {
                         slot,
                         upgrade_authority_address: _,
-                    }) = programdata_account.state()
+                    }) = bincode::deserialize(programdata_account.data())
                     {
                         ProgramAccountLoadResult::ProgramOfLoaderV3(
                             program_account,
@@ -125,9 +121,7 @@ pub fn load_program_with_pubkey<CB: TransactionProcessingCallback>(
             program_account.owner(),
             ProgramRuntimeEnvironment::clone(program_runtime_environment),
             0,
-            DELAY_VISIBILITY_SLOT_OFFSET,
             program_account.data(),
-            program_account.data().len(),
             #[cfg(feature = "metrics")]
             &mut load_program_metrics,
         )
@@ -137,9 +131,7 @@ pub fn load_program_with_pubkey<CB: TransactionProcessingCallback>(
             program_account.owner(),
             ProgramRuntimeEnvironment::clone(program_runtime_environment),
             0,
-            DELAY_VISIBILITY_SLOT_OFFSET,
             program_account.data(),
-            program_account.data().len(),
             #[cfg(feature = "metrics")]
             &mut load_program_metrics,
         )
@@ -158,12 +150,7 @@ pub fn load_program_with_pubkey<CB: TransactionProcessingCallback>(
                     program_account.owner(),
                     ProgramRuntimeEnvironment::clone(program_runtime_environment),
                     deployment_slot,
-                    deployment_slot.saturating_add(DELAY_VISIBILITY_SLOT_OFFSET),
                     programdata,
-                    program_account
-                        .data()
-                        .len()
-                        .saturating_add(programdata_account.data().len()),
                     #[cfg(feature = "metrics")]
                     &mut load_program_metrics,
                 )
@@ -181,9 +168,7 @@ pub fn load_program_with_pubkey<CB: TransactionProcessingCallback>(
                         &loader_v4::id(),
                         ProgramRuntimeEnvironment::clone(program_runtime_environment),
                         deployment_slot,
-                        deployment_slot.saturating_add(DELAY_VISIBILITY_SLOT_OFFSET),
                         elf_bytes,
-                        program_account.data().len(),
                         #[cfg(feature = "metrics")]
                         &mut load_program_metrics,
                     )
@@ -221,7 +206,7 @@ pub(crate) fn get_program_deployment_slot<CB: TransactionProcessingCallback>(
         ProgramCacheEntryOwner::LoaderV3 => {
             if let Ok(UpgradeableLoaderState::Program {
                 programdata_address,
-            }) = program.state()
+            }) = bincode::deserialize(program.data())
             {
                 let (programdata, _slot) = callbacks
                     .get_account_shared_data(&programdata_address)
@@ -229,7 +214,7 @@ pub(crate) fn get_program_deployment_slot<CB: TransactionProcessingCallback>(
                 if let Ok(UpgradeableLoaderState::ProgramData {
                     slot,
                     upgrade_authority_address: _,
-                }) = programdata.state()
+                }) = bincode::deserialize(programdata.data())
                 {
                     return Ok(slot);
                 }
@@ -250,11 +235,11 @@ pub(crate) fn get_program_deployment_slot<CB: TransactionProcessingCallback>(
 pub fn filter_executable_program_accounts<'a, CB: TransactionProcessingCallback>(
     callbacks: &CB,
     program_cache_for_tx_batch: &ProgramCacheForTxBatch,
-    tx: &'a impl SVMMessage,
+    keys: impl Iterator<Item = &'a Pubkey>,
     check_program_deployment_slot: bool,
 ) -> Vec<ProgramToLoad<'a>> {
     let mut result = Vec::new();
-    for account_key in tx.account_keys().iter() {
+    for account_key in keys {
         if let Some(cache_entry) = program_cache_for_tx_batch.find(account_key) {
             cache_entry.stats.uses.fetch_add(1, Ordering::Relaxed);
         } else if let Some((account, last_modification_slot)) =
@@ -322,7 +307,7 @@ mod tests {
             solana_sbpf::program::BuiltinProgram,
         },
         solana_sdk_ids::{bpf_loader, bpf_loader_upgradeable, native_loader},
-        solana_svm_callback::InvokeContextCallback,
+        solana_svm_transaction::svm_message::SVMMessage,
         solana_svm_type_overrides::sync::atomic::AtomicU64,
         solana_transaction::{Transaction, sanitized::SanitizedTransaction},
         std::{
@@ -346,8 +331,6 @@ mod tests {
     pub(crate) struct MockBankCallback {
         pub(crate) account_shared_data: RefCell<HashMap<Pubkey, (AccountSharedData, Slot)>>,
     }
-
-    impl InvokeContextCallback for MockBankCallback {}
 
     impl TransactionProcessingCallback for MockBankCallback {
         fn get_account_shared_data(&self, pubkey: &Pubkey) -> Option<(AccountSharedData, Slot)> {
@@ -483,7 +466,6 @@ mod tests {
         #[cfg(feature = "metrics")]
         let mut metrics = LoadProgramMetrics::default();
         let loader = bpf_loader_upgradeable::id();
-        let size = buffer.len();
         let slot: Slot = 2;
         let environment = ProgramRuntimeEnvironment::from(BuiltinProgram::new_mock());
 
@@ -491,9 +473,7 @@ mod tests {
             &loader,
             ProgramRuntimeEnvironment::clone(&environment),
             slot,
-            slot.saturating_add(DELAY_VISIBILITY_SLOT_OFFSET),
             &buffer,
-            size,
             #[cfg(feature = "metrics")]
             &mut metrics,
         );
@@ -597,9 +577,7 @@ mod tests {
             account_data.owner(),
             ProgramRuntimeEnvironment::clone(&program_runtime_environment),
             0,
-            DELAY_VISIBILITY_SLOT_OFFSET,
             account_data.data(),
-            account_data.data().len(),
             #[cfg(feature = "metrics")]
             &mut LoadProgramMetrics::default(),
         );
@@ -689,9 +667,7 @@ mod tests {
             account_data.owner(),
             ProgramRuntimeEnvironment::clone(&program_runtime_environment),
             0,
-            DELAY_VISIBILITY_SLOT_OFFSET,
             account_data.data(),
-            account_data.data().len(),
             #[cfg(feature = "metrics")]
             &mut LoadProgramMetrics::default(),
         );
@@ -846,9 +822,7 @@ mod tests {
                 Arc::new(ProgramCacheEntry {
                     program: ProgramCacheEntryType::Builtin(BuiltinProgram::new_mock()),
                     account_owner: ProgramCacheEntryOwner::NativeLoader,
-                    account_size: 0,
                     deployment_slot: 0,
-                    effective_slot: 0,
                     stats: Arc::default(),
                     latest_access_slot: AtomicU64::default(),
                 }),
@@ -888,7 +862,7 @@ mod tests {
         let missing_programs = filter_executable_program_accounts(
             &mock_bank,
             &loaded_programs_for_tx_batch,
-            &sanitized_tx,
+            sanitized_tx.account_keys().iter(),
             false,
         );
         assert_eq!(
@@ -912,7 +886,7 @@ mod tests {
         let missing_programs = filter_executable_program_accounts(
             &mock_bank,
             &loaded_programs_for_tx_batch,
-            &sanitized_tx,
+            sanitized_tx.account_keys().iter(),
             true,
         );
         assert_eq!(

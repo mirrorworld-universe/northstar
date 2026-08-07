@@ -6,8 +6,9 @@ use {
     },
     borsh::BorshDeserialize,
     pinocchio::{
-        account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, ProgramResult,
+        error::ProgramError, AccountView as AccountInfo, Address as Pubkey, ProgramResult,
     },
+    pinocchio_idl_macros::p_instruction,
 };
 
 /// Undelegate an account, returning ownership to `owner_program`.
@@ -28,44 +29,64 @@ use {
 /// 3. `[writable]` delegation_record PDA (closed)
 /// 4. `[]` system_program
 /// 5. `[]` session
-pub fn process_undelegate(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+#[p_instruction(
+    id = 4,
+    accounts = [
+        authority(signer, mut),
+        delegated_account(mut),
+        owner_program,
+        delegation_record(mut, state = DelegationRecord),
+        system_program,
+        session(state = Session)
+    ]
+)]
+pub fn process_undelegate(program_id: &Pubkey, accounts: &mut [AccountInfo]) -> ProgramResult {
     pinocchio_log::log!("Instruction: Undelegate");
     process_undelegate_inner(program_id, accounts, false)
 }
 
-pub fn process_undelegate_handoff(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+#[p_instruction(
+    id = 10,
+    accounts = [
+        authority(signer, mut),
+        delegated_account(mut),
+        owner_program,
+        delegation_record(mut, state = DelegationRecord),
+        system_program,
+        session(state = Session)
+    ]
+)]
+pub fn process_undelegate_handoff(
+    program_id: &Pubkey,
+    accounts: &mut [AccountInfo],
+) -> ProgramResult {
     pinocchio_log::log!("Instruction: UndelegateHandoff");
     process_undelegate_inner(program_id, accounts, true)
 }
 
 fn process_undelegate_inner(
     program_id: &Pubkey,
-    accounts: &[AccountInfo],
+    accounts: &mut [AccountInfo],
     allow_non_empty_handoff: bool,
 ) -> ProgramResult {
-    if accounts.len() < 6 {
+    let [authority, delegated_account, owner_program, delegation_record, _system_program, session, ..] =
+        accounts
+    else {
         return Err(ProgramError::NotEnoughAccountKeys);
-    }
-
-    let authority = &accounts[0];
-    let delegated_account = &accounts[1];
-    let owner_program = &accounts[2];
-    let delegation_record = &accounts[3];
-    let _system_program = &accounts[4];
-    let session = &accounts[5];
+    };
 
     if !authority.is_signer() {
         return Err(PortalError::Unauthorized.into());
     }
 
     let (expected_session_key, _) = find_session_pda(program_id);
-    if session.key() != &expected_session_key {
+    if session.address() != &expected_session_key {
         return Err(PortalError::InvalidPdaSeeds.into());
     }
-    if session.owner() != program_id {
+    if !session.owned_by(program_id) {
         return Err(PortalError::SessionAccountOwnerMismatch.into());
     }
-    let session_state = Session::try_from_slice(&session.try_borrow_data()?)
+    let session_state = Session::try_from_slice(&session.try_borrow()?)
         .map_err(|_| PortalError::SessionDeserializeFailed)?;
     if !session_state.is_valid() {
         return Err(PortalError::SessionStateInvalid.into());
@@ -74,29 +95,29 @@ fn process_undelegate_inner(
         return Err(PortalError::SettlementInProgress.into());
     }
 
-    let delegated_key = *delegated_account.key();
+    let delegated_key = *delegated_account.address();
     let (expected_delegation_key, _) = find_delegation_record_pda(program_id, &delegated_key);
 
-    if delegation_record.key() != &expected_delegation_key {
+    if delegation_record.address() != &expected_delegation_key {
         return Err(PortalError::InvalidPdaSeeds.into());
     }
 
-    let delegation_state = DelegationRecord::try_from_slice(&delegation_record.try_borrow_data()?)
+    let delegation_state = DelegationRecord::try_from_slice(&delegation_record.try_borrow()?)
         .map_err(|_| PortalError::DelegationRecordDeserializeFailed)?;
 
     if !delegation_state.is_valid() {
         return Err(PortalError::DelegationRecordStateInvalid.into());
     }
 
-    if delegation_state.owner_program != *owner_program.key() {
+    if delegation_state.owner_program != *owner_program.address() {
         return Err(PortalError::Unauthorized.into());
     }
 
-    if delegated_account.owner() != program_id {
+    if !delegated_account.owned_by(program_id) {
         return Err(PortalError::DelegatedAccountOwnerMismatch.into());
     }
 
-    let mut delegated_data = delegated_account.try_borrow_mut_data()?;
+    let mut delegated_data = delegated_account.try_borrow_mut()?;
     let has_non_empty_data = delegated_data.iter().any(|byte| *byte != 0);
     if has_non_empty_data && !allow_non_empty_handoff {
         return Err(PortalError::DelegatedAccountDataNotEmpty.into());
@@ -106,19 +127,20 @@ fn process_undelegate_inner(
     }
     drop(delegated_data);
 
-    unsafe { delegated_account.assign(owner_program.key()) };
+    unsafe { delegated_account.assign(owner_program.address()) };
 
     let delegation_record_lamports = delegation_record.lamports();
 
     if delegation_record_lamports > 0 {
-        let mut authority_lamports = authority.try_borrow_mut_lamports()?;
-        *authority_lamports = authority_lamports
+        let authority_lamports = authority
+            .lamports()
             .checked_add(delegation_record_lamports)
             .ok_or(PortalError::ArithmeticOverflow)?;
-        *delegation_record.try_borrow_mut_lamports()? = 0;
+        authority.set_lamports(authority_lamports);
+        delegation_record.set_lamports(0);
     }
 
-    delegation_record.try_borrow_mut_data()?.fill(0);
+    delegation_record.try_borrow_mut()?.fill(0);
 
     pinocchio_log::log!("Undelegate success");
 

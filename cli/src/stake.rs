@@ -14,7 +14,7 @@ use {
         spend_utils::{SpendAmount, resolve_spend_tx_and_check_account_balances},
     },
     clap::{App, AppSettings, Arg, ArgGroup, ArgMatches, SubCommand, value_t},
-    solana_account::{Account, from_account, state_traits::StateMut},
+    solana_account::Account,
     solana_clap_utils::{
         ArgConstant,
         compute_budget::{COMPUTE_UNIT_PRICE_ARG, ComputeUnitLimit, compute_unit_price_arg},
@@ -30,7 +30,7 @@ use {
     solana_cli_output::{
         self, CliBalance, CliEpochReward, CliStakeHistory, CliStakeHistoryEntry, CliStakeState,
         CliStakeType, OutputFormat, ReturnSignersConfig, display::BuildBalanceMessageConfig,
-        return_signers_with_config,
+        return_signers_with_config, stdout::writeln_stdout,
     },
     solana_clock::{Clock, Epoch, SECONDS_PER_DAY, UnixTimestamp},
     solana_commitment_config::CommitmentConfig,
@@ -50,12 +50,15 @@ use {
         system_program,
         sysvar::{clock, stake_history},
     },
+    solana_stake_history::StakeHistory,
     solana_stake_interface::{
         self as stake,
         error::StakeError,
         instruction::{self as stake_instruction, LockupArgs},
-        stake_history::StakeHistory,
-        state::{Authorized, Lockup, Meta, StakeActivationStatus, StakeAuthorize, StakeStateV2},
+        state::{
+            Authorized, Delegation, Lockup, Meta, StakeActivationStatus, StakeAuthorize,
+            StakeStateV2,
+        },
         tools::{acceptable_reference_epoch_credits, eligible_for_deactivate_delinquent},
     },
     solana_system_interface::{error::SystemError, instruction as system_instruction},
@@ -1751,7 +1754,7 @@ pub async fn process_deactivate_stake_account(
             .into());
         }
 
-        let vote_account_address = match stake_account.state() {
+        let vote_account_address = match wincode::deserialize::<StakeStateV2>(&stake_account.data) {
             Ok(stake_state) => match stake_state {
                 StakeStateV2::Stake(_, stake, _) => stake.delegation.voter_pubkey,
                 _ => {
@@ -2235,13 +2238,13 @@ pub async fn process_merge_stake(
 
     if !sign_only {
         for stake_account_address in &[stake_account_pubkey, source_stake_account_pubkey] {
-            if let Ok(stake_account) = rpc_client.get_account(stake_account_address).await {
-                if stake_account.owner != stake::program::id() {
-                    return Err(CliError::BadParameter(format!(
-                        "Account {stake_account_address} is not a stake account"
-                    ))
-                    .into());
-                }
+            if let Ok(stake_account) = rpc_client.get_account(stake_account_address).await
+                && stake_account.owner != stake::program::id()
+            {
+                return Err(CliError::BadParameter(format!(
+                    "Account {stake_account_address} is not a stake account"
+                ))
+                .into());
             }
         }
     }
@@ -2434,6 +2437,29 @@ fn u64_some_if_not_zero(n: u64) -> Option<u64> {
     if n > 0 { Some(n) } else { None }
 }
 
+fn stake_activation_status(
+    delegation: &Delegation,
+    current_epoch: Epoch,
+    stake_history: &StakeHistory,
+    new_rate_activation_epoch: Option<Epoch>,
+    use_fixed_point_stake_math: bool,
+) -> StakeActivationStatus {
+    if use_fixed_point_stake_math {
+        delegation.stake_activating_and_deactivating_v2(
+            current_epoch,
+            stake_history,
+            new_rate_activation_epoch,
+        )
+    } else {
+        #[allow(deprecated)]
+        delegation.stake_activating_and_deactivating(
+            current_epoch,
+            stake_history,
+            new_rate_activation_epoch,
+        )
+    }
+}
+
 pub fn build_stake_state(
     account_balance: u64,
     stake_state: &StakeStateV2,
@@ -2443,6 +2469,7 @@ pub fn build_stake_state(
     new_rate_activation_epoch: Option<Epoch>,
     rent_exempt_reserve: u64,
     use_csv: bool,
+    use_fixed_point_stake_math: bool,
 ) -> CliStakeState {
     match stake_state {
         StakeStateV2::Stake(
@@ -2456,15 +2483,16 @@ pub fn build_stake_state(
             _,
         ) => {
             let current_epoch = clock.epoch;
-            #[allow(deprecated)]
             let StakeActivationStatus {
                 effective,
                 activating,
                 deactivating,
-            } = stake.delegation.stake_activating_and_deactivating(
+            } = stake_activation_status(
+                &stake.delegation,
                 current_epoch,
                 stake_history,
                 new_rate_activation_epoch,
+                use_fixed_point_stake_math,
             );
             let lockup = if lockup.is_in_force(clock, None) {
                 Some(lockup.into())
@@ -2557,7 +2585,7 @@ async fn get_stake_account_state(
         ))
         .into());
     }
-    stake_account.state().map_err(|err| {
+    wincode::deserialize(&stake_account.data).map_err(|err| {
         CliError::RpcRequestError(format!(
             "Account data could not be deserialized to stake state: {err}"
         ))
@@ -2717,15 +2745,15 @@ pub async fn get_account_stake_state(
             "{stake_account_address:?} is not a stake account",
         )));
     }
-    match stake_account.state() {
+    match wincode::deserialize::<StakeStateV2>(&stake_account.data) {
         Ok(stake_state) => {
             let stake_history_account = rpc_client.get_account(&stake_history::id()).await?;
-            let stake_history: StakeHistory = bincode::deserialize(&stake_history_account.data)
+            let stake_history: StakeHistory = wincode::deserialize(&stake_history_account.data)
                 .map_err(|_| {
                     CliError::RpcRequestError("Failed to deserialize stake history".to_string())
                 })?;
             let clock_account = rpc_client.get_account(&clock::id()).await?;
-            let clock: Clock = from_account(&clock_account).ok_or_else(|| {
+            let clock: Clock = wincode::deserialize(&clock_account.data).map_err(|_| {
                 CliError::RpcRequestError("Failed to deserialize clock sysvar".to_string())
             })?;
             let new_rate_activation_epoch = get_feature_activation_epoch(
@@ -2733,6 +2761,13 @@ pub async fn get_account_stake_state(
                 &agave_feature_set::reduce_stake_warmup_cooldown::id(),
             )
             .await?;
+            let fixed_point_activation_epoch = get_feature_activation_epoch(
+                rpc_client,
+                &agave_feature_set::upgrade_bpf_stake_program_to_v5_1::id(),
+            )
+            .await?;
+            let use_fixed_point_stake_math = fixed_point_activation_epoch
+                .is_some_and(|activation_epoch| clock.epoch >= activation_epoch);
             let rent_exempt_balance = rpc_client
                 .get_minimum_balance_for_rent_exemption(stake_account.data.len())
                 .await?;
@@ -2745,25 +2780,27 @@ pub async fn get_account_stake_state(
                 new_rate_activation_epoch,
                 rent_exempt_balance,
                 use_csv,
+                use_fixed_point_stake_math,
             );
 
-            if state.stake_type == CliStakeType::Stake && state.activation_epoch.is_some() {
-                if let Some(num_epochs) = with_rewards {
-                    state.epoch_rewards = match fetch_epoch_rewards(
-                        rpc_client,
-                        stake_account_address,
-                        num_epochs,
-                        starting_epoch,
-                    )
-                    .await
-                    {
-                        Ok(rewards) => Some(rewards),
-                        Err(error) => {
-                            eprintln!("Failed to fetch epoch rewards: {error:?}");
-                            None
-                        }
-                    };
-                }
+            if state.stake_type == CliStakeType::Stake
+                && state.activation_epoch.is_some()
+                && let Some(num_epochs) = with_rewards
+            {
+                state.epoch_rewards = match fetch_epoch_rewards(
+                    rpc_client,
+                    stake_account_address,
+                    num_epochs,
+                    starting_epoch,
+                )
+                .await
+                {
+                    Ok(rewards) => Some(rewards),
+                    Err(error) => {
+                        eprintln!("Failed to fetch epoch rewards: {error:?}");
+                        None
+                    }
+                };
             }
             Ok(state)
         }
@@ -2781,7 +2818,7 @@ pub async fn process_show_stake_history(
 ) -> ProcessResult {
     let stake_history_account = rpc_client.get_account(&stake_history::id()).await?;
     let stake_history =
-        bincode::deserialize::<StakeHistory>(&stake_history_account.data).map_err(|_| {
+        wincode::deserialize::<StakeHistory>(&stake_history_account.data).map_err(|_| {
             CliError::RpcRequestError("Failed to deserialize stake history".to_string())
         })?;
 
@@ -2876,7 +2913,7 @@ pub async fn process_delegate_stake(
             if !force {
                 sanity_check_result?;
             } else {
-                println!("--force supplied, ignoring: {err}");
+                writeln_stdout(format_args!("--force supplied, ignoring: {err}"))?;
             }
         }
 

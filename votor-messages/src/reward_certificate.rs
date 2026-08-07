@@ -121,7 +121,7 @@ pub enum BuildRewardCertsRespError {
     /// Building either the skip or the notar reward cert failed.
     #[error("try_new() on skip or notar cert failed with {0}")]
     RewardCertTryNew(#[from] RewardCertError),
-    /// Experienced failure with encoding.
-    #[error("encode error {0:?}")]
-    Encode(EncodeError),
+    /// Encoding failed
+    #[error("encoding failed with {0:?}")]
+    Encoding(EncodeError),
 }

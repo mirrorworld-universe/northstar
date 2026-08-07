@@ -285,20 +285,15 @@ impl SettlementPlan {
         challenge_window_slots: u64,
         previous_state_root: [u8; 32],
     ) -> Instruction {
-        let (checkpoint, _) = find_checkpoint_pda(
-            &portal_program_id.to_bytes(),
-            &session_pda.to_bytes(),
-            self.er_slot,
-        );
-        let (cursor, _) =
-            find_checkpoint_cursor_pda(&portal_program_id.to_bytes(), &session_pda.to_bytes());
+        let (checkpoint, _) = find_checkpoint_pda(&portal_program_id, &session_pda, self.er_slot);
+        let (cursor, _) = find_checkpoint_cursor_pda(&portal_program_id, &session_pda);
         Instruction {
             program_id: portal_program_id,
             accounts: vec![
                 AccountMeta::new(validator, true),
                 AccountMeta::new_readonly(session_pda, false),
-                AccountMeta::new(Pubkey::new_from_array(checkpoint), false),
-                AccountMeta::new(Pubkey::new_from_array(cursor), false),
+                AccountMeta::new(checkpoint, false),
+                AccountMeta::new(cursor, false),
                 AccountMeta::new_readonly(system_program::id(), false),
             ],
             data: borsh::to_vec(&PortalInstruction::ProposeCheckpoint(ProposeCheckpoint {
@@ -323,20 +318,15 @@ impl SettlementPlan {
         session_pda: Pubkey,
         validator: Pubkey,
     ) -> Instruction {
-        let (checkpoint, _) = find_checkpoint_pda(
-            &portal_program_id.to_bytes(),
-            &session_pda.to_bytes(),
-            self.er_slot,
-        );
-        let (cursor, _) =
-            find_checkpoint_cursor_pda(&portal_program_id.to_bytes(), &session_pda.to_bytes());
+        let (checkpoint, _) = find_checkpoint_pda(&portal_program_id, &session_pda, self.er_slot);
+        let (cursor, _) = find_checkpoint_cursor_pda(&portal_program_id, &session_pda);
         Instruction {
             program_id: portal_program_id,
             accounts: vec![
                 AccountMeta::new_readonly(validator, true),
                 AccountMeta::new_readonly(session_pda, false),
-                AccountMeta::new(Pubkey::new_from_array(checkpoint), false),
-                AccountMeta::new(Pubkey::new_from_array(cursor), false),
+                AccountMeta::new(checkpoint, false),
+                AccountMeta::new(cursor, false),
                 AccountMeta::new(validator, false),
             ],
             data: borsh::to_vec(&PortalInstruction::CommitCheckpoint(CommitCheckpoint {
@@ -363,15 +353,8 @@ impl SettlementPlan {
             return vec![];
         }
 
-        let (checkpoint, _) = find_checkpoint_pda(
-            &portal_program_id.to_bytes(),
-            &session_pda.to_bytes(),
-            self.er_slot,
-        );
-        let checkpoint = Pubkey::new_from_array(checkpoint);
-        let (checkpoint_cursor, _) =
-            find_checkpoint_cursor_pda(&portal_program_id.to_bytes(), &session_pda.to_bytes());
-        let checkpoint_cursor = Pubkey::new_from_array(checkpoint_cursor);
+        let (checkpoint, _) = find_checkpoint_pda(&portal_program_id, &session_pda, self.er_slot);
+        let (checkpoint_cursor, _) = find_checkpoint_cursor_pda(&portal_program_id, &session_pda);
         let mut instructions = Vec::with_capacity(
             self.chunks.len()
                 + self.owner_changes.len()
@@ -398,17 +381,15 @@ impl SettlementPlan {
         for chunk in &self.chunks {
             let mut chunk_data = [0; MAX_SETTLEMENT_CHUNK];
             chunk_data[..chunk.data.len()].copy_from_slice(&chunk.data);
-            let (delegation_record, _) = find_delegation_record_pda(
-                &portal_program_id.to_bytes(),
-                &chunk.account.to_bytes(),
-            );
+            let (delegation_record, _) =
+                find_delegation_record_pda(&portal_program_id, &chunk.account);
             instructions.push(Instruction {
                 program_id: portal_program_id,
                 accounts: vec![
                     AccountMeta::new_readonly(validator, true),
                     AccountMeta::new(session_pda, false),
                     AccountMeta::new(chunk.account, false),
-                    AccountMeta::new_readonly(Pubkey::new_from_array(delegation_record), false),
+                    AccountMeta::new_readonly(delegation_record, false),
                 ],
                 data: borsh::to_vec(&PortalInstruction::WriteSettlementChunk(
                     WriteSettlementChunk {
@@ -424,22 +405,20 @@ impl SettlementPlan {
         }
 
         for owner_change in &self.owner_changes {
-            let (delegation_record, _) = find_delegation_record_pda(
-                &portal_program_id.to_bytes(),
-                &owner_change.account.to_bytes(),
-            );
+            let (delegation_record, _) =
+                find_delegation_record_pda(&portal_program_id, &owner_change.account);
             instructions.push(Instruction {
                 program_id: portal_program_id,
                 accounts: vec![
                     AccountMeta::new_readonly(validator, true),
                     AccountMeta::new(session_pda, false),
                     AccountMeta::new(owner_change.account, false),
-                    AccountMeta::new(Pubkey::new_from_array(delegation_record), false),
+                    AccountMeta::new(delegation_record, false),
                 ],
                 data: borsh::to_vec(&PortalInstruction::SettleAccountOwner(SettleAccountOwner {
                     er_slot: self.er_slot,
                     checksum: self.checksum,
-                    owner: owner_change.owner.to_bytes(),
+                    owner: owner_change.owner,
                 }))
                 .unwrap(),
             });
@@ -453,15 +432,10 @@ impl SettlementPlan {
             ];
             for (index, lamport_change) in self.lamport_changes.iter().enumerate() {
                 lamports[index] = lamport_change.lamports;
-                let (delegation_record, _) = find_delegation_record_pda(
-                    &portal_program_id.to_bytes(),
-                    &lamport_change.account.to_bytes(),
-                );
+                let (delegation_record, _) =
+                    find_delegation_record_pda(&portal_program_id, &lamport_change.account);
                 accounts.push(AccountMeta::new(lamport_change.account, false));
-                accounts.push(AccountMeta::new_readonly(
-                    Pubkey::new_from_array(delegation_record),
-                    false,
-                ));
+                accounts.push(AccountMeta::new_readonly(delegation_record, false));
             }
             instructions.push(Instruction {
                 program_id: portal_program_id,
@@ -504,7 +478,7 @@ impl SettlementPlan {
                         balance: receipt.balance,
                         withdrawn: receipt.withdrawn,
                         payout_lamports: receipt.payout_lamports,
-                        l1_recipient: receipt.l1_recipient.to_bytes(),
+                        l1_recipient: receipt.l1_recipient,
                     },
                 ))
                 .unwrap(),
@@ -538,14 +512,7 @@ pub fn token_withdrawal_transactions(
     validator: &Keypair,
     recent_blockhash: Hash,
 ) -> Vec<Transaction> {
-    let checkpoint = Pubkey::new_from_array(
-        find_checkpoint_pda(
-            &portal_program_id.to_bytes(),
-            &session_pda.to_bytes(),
-            er_slot,
-        )
-        .0,
-    );
+    let checkpoint = find_checkpoint_pda(&portal_program_id, &session_pda, er_slot).0;
     withdrawals
         .iter()
         .map(|withdrawal| {

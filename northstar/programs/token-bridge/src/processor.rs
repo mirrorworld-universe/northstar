@@ -5,17 +5,14 @@ use {
         state::{account_size, BridgeBuffer, ErTokenAccount, TokenDepositReceipt, TokenVault},
     },
     borsh::{BorshDeserialize, BorshSerialize},
-    northstar_portal::{Checkpoint, Session},
+    northstar_portal::{Checkpoint, DelegationRecord, Session, SessionBridge},
     pinocchio::{
-        account_info::AccountInfo,
-        entrypoint::deserialize,
-        instruction::{AccountMeta, Instruction, Seed, Signer},
+        cpi::{invoke, invoke_signed, Seed, Signer},
+        error::ProgramError,
+        instruction::{InstructionAccount as AccountMeta, InstructionView as Instruction},
         no_allocator,
-        program::{invoke, invoke_signed},
-        program_error::ProgramError,
-        pubkey::{find_program_address, Pubkey},
         sysvars::{rent::Rent, Sysvar},
-        ProgramResult, SUCCESS,
+        AccountView as AccountInfo, Address as Pubkey, ProgramResult,
     },
     pinocchio_system::instructions::CreateAccount,
     pinocchio_token::instructions::TransferChecked,
@@ -23,34 +20,7 @@ use {
     spl_token_interface::state::Account as SplTokenAccount,
 };
 
-#[derive(BorshDeserialize)]
-struct SessionBridge {
-    discriminator: u8,
-    session: [u8; 32],
-    mint: [u8; 32],
-    bridge_program: [u8; 32],
-    vault: [u8; 32],
-    token_program: [u8; 32],
-    _bump: u8,
-}
-
-impl SessionBridge {
-    const DISCRIMINATOR: u8 = 8;
-
-    fn is_valid(&self) -> bool {
-        self.discriminator == Self::DISCRIMINATOR
-    }
-}
-
-#[derive(BorshDeserialize)]
-struct DelegationRecord {
-    discriminator: u8,
-    owner_program: [u8; 32],
-    _grid_id: u64,
-    _bump: u8,
-}
-
-pinocchio_pubkey::declare_id!("HeVLVaSa9WnFai9aTRJ3UR2c4jwbMe5nbjagmDP1GbXR");
+pinocchio::address::declare_id!("HeVLVaSa9WnFai9aTRJ3UR2c4jwbMe5nbjagmDP1GbXR");
 
 no_allocator!();
 
@@ -58,29 +28,17 @@ no_allocator!();
 /// # Safety
 /// `input` must point to a valid serialized Solana program input buffer.
 pub unsafe extern "C" fn entrypoint(input: *mut u8) -> u64 {
-    const MAX_TOKEN_BRIDGE_ACCOUNTS: usize = 16;
-    const UNINIT: core::mem::MaybeUninit<AccountInfo> = core::mem::MaybeUninit::uninit();
-    let mut account_storage = [UNINIT; MAX_TOKEN_BRIDGE_ACCOUNTS];
-    let (program_id, account_count, instruction_data) =
-        deserialize::<MAX_TOKEN_BRIDGE_ACCOUNTS>(input, &mut account_storage);
-    let accounts = core::slice::from_raw_parts(
-        account_storage.as_ptr() as *const AccountInfo,
-        account_count,
-    );
-    match process_instruction(program_id, accounts, instruction_data) {
-        Ok(()) => SUCCESS,
-        Err(error) => error.into(),
-    }
+    pinocchio::entrypoint::process_entrypoint::<16>(input, process_instruction)
 }
 
 fn next_account_info<'a>(
-    accounts: &mut core::slice::Iter<'a, AccountInfo>,
-) -> Result<&'a AccountInfo, ProgramError> {
+    accounts: &mut core::slice::IterMut<'a, AccountInfo>,
+) -> Result<&'a mut AccountInfo, ProgramError> {
     accounts.next().ok_or(ProgramError::NotEnoughAccountKeys)
 }
 
 fn find_token_vault_pda(program_id: &Pubkey, session_bridge: &Pubkey) -> (Pubkey, u8) {
-    find_program_address(
+    Pubkey::find_program_address(
         &[TokenVault::SEED_PREFIX, session_bridge.as_ref()],
         program_id,
     )
@@ -91,7 +49,7 @@ fn find_er_token_account_pda(
     session_bridge: &Pubkey,
     owner: &Pubkey,
 ) -> (Pubkey, u8) {
-    find_program_address(
+    Pubkey::find_program_address(
         &[
             ErTokenAccount::SEED_PREFIX,
             session_bridge.as_ref(),
@@ -106,7 +64,7 @@ fn find_token_deposit_receipt_pda(
     session_bridge: &Pubkey,
     er_token_account: &Pubkey,
 ) -> (Pubkey, u8) {
-    find_program_address(
+    Pubkey::find_program_address(
         &[
             TokenDepositReceipt::SEED_PREFIX,
             session_bridge.as_ref(),
@@ -117,7 +75,7 @@ fn find_token_deposit_receipt_pda(
 }
 
 fn find_buffer_pda(program_id: &Pubkey, er_token_account: &Pubkey) -> (Pubkey, u8) {
-    find_program_address(
+    Pubkey::find_program_address(
         &[BridgeBuffer::SEED_PREFIX, er_token_account.as_ref()],
         program_id,
     )
@@ -125,7 +83,7 @@ fn find_buffer_pda(program_id: &Pubkey, er_token_account: &Pubkey) -> (Pubkey, u
 
 pub fn process_instruction(
     program_id: &Pubkey,
-    accounts: &[AccountInfo],
+    accounts: &mut [AccountInfo],
     instruction_data: &[u8],
 ) -> ProgramResult {
     let instruction = TokenBridgeInstruction::try_from_slice(instruction_data)
@@ -165,8 +123,8 @@ pub fn process_instruction(
     }
 }
 
-fn process_initialize_vault(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
+fn process_initialize_vault(program_id: &Pubkey, accounts: &mut [AccountInfo]) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter_mut();
     let payer = next_account_info(account_info_iter)?;
     let vault = next_account_info(account_info_iter)?;
     let session_bridge = next_account_info(account_info_iter)?;
@@ -177,26 +135,28 @@ fn process_initialize_vault(program_id: &Pubkey, accounts: &[AccountInfo]) -> Pr
     require_signer(payer)?;
     require_system_program(system_program_info)?;
     let bridge = load_session_bridge(program_id, session_bridge, portal_program)?;
-    if bridge.vault != key_bytes(vault.key()) {
+    if bridge.vault != *vault.address() {
         return Err(ProgramError::InvalidSeeds);
     }
 
-    let (expected_vault, bump) = find_token_vault_pda(program_id, session_bridge.key());
-    if expected_vault != *vault.key() {
+    let (expected_vault, bump) = find_token_vault_pda(program_id, session_bridge.address());
+    if expected_vault != *vault.address() {
         return Err(ProgramError::InvalidSeeds);
     }
 
     let vault_token = unpack_token_account(vault_token_account)?;
-    if vault_token.owner.to_bytes() != *vault.key() || vault_token.mint.to_bytes() != bridge.mint {
+    if vault_token.owner.to_bytes() != vault.address().to_bytes()
+        || vault_token.mint.to_bytes() != bridge.mint.to_bytes()
+    {
         return Err(ProgramError::InvalidAccountData);
     }
 
     let state = TokenVault {
         discriminator: TokenVault::DISCRIMINATOR,
-        session_bridge: key_bytes(session_bridge.key()),
-        mint: bridge.mint,
-        vault_token_account: key_bytes(vault_token_account.key()),
-        token_program: bridge.token_program,
+        session_bridge: key_bytes(session_bridge.address()),
+        mint: bridge.mint.to_bytes(),
+        vault_token_account: key_bytes(vault_token_account.address()),
+        token_program: bridge.token_program.to_bytes(),
         deposited: 0,
         withdrawn: 0,
         bump,
@@ -210,12 +170,12 @@ fn process_initialize_vault(program_id: &Pubkey, accounts: &[AccountInfo]) -> Pr
             program_id,
             [
                 Seed::from(TokenVault::SEED_PREFIX),
-                Seed::from(session_bridge.key()),
+                Seed::from(session_bridge.address().as_ref()),
                 Seed::from(&bump_seed),
             ],
             system_program_info,
         )?;
-    } else if vault.owner() != program_id {
+    } else if !vault.owned_by(program_id) {
         return Err(ProgramError::InvalidAccountOwner);
     }
 
@@ -224,10 +184,10 @@ fn process_initialize_vault(program_id: &Pubkey, accounts: &[AccountInfo]) -> Pr
 
 fn process_initialize_er_token_account(
     program_id: &Pubkey,
-    accounts: &[AccountInfo],
+    accounts: &mut [AccountInfo],
     owner: [u8; 32],
 ) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
+    let account_info_iter = &mut accounts.iter_mut();
     let payer = next_account_info(account_info_iter)?;
     let er_token_account = next_account_info(account_info_iter)?;
     let session_bridge = next_account_info(account_info_iter)?;
@@ -238,16 +198,18 @@ fn process_initialize_er_token_account(
     require_system_program(system_program_info)?;
     let bridge = load_session_bridge(program_id, session_bridge, portal_program)?;
     let owner_key = owner;
-    let (expected, bump) = find_er_token_account_pda(program_id, session_bridge.key(), &owner_key);
-    if expected != *er_token_account.key() {
+    let owner_key = Pubkey::from(owner_key);
+    let (expected, bump) =
+        find_er_token_account_pda(program_id, session_bridge.address(), &owner_key);
+    if expected != *er_token_account.address() {
         return Err(ProgramError::InvalidSeeds);
     }
 
     let state = ErTokenAccount {
         discriminator: ErTokenAccount::DISCRIMINATOR,
-        session_bridge: key_bytes(session_bridge.key()),
+        session_bridge: key_bytes(session_bridge.address()),
         owner,
-        mint: bridge.mint,
+        mint: bridge.mint.to_bytes(),
         amount: 0,
         bump,
     };
@@ -260,13 +222,13 @@ fn process_initialize_er_token_account(
             program_id,
             [
                 Seed::from(ErTokenAccount::SEED_PREFIX),
-                Seed::from(session_bridge.key()),
+                Seed::from(session_bridge.address().as_ref()),
                 Seed::from(&owner),
                 Seed::from(&bump_seed),
             ],
             system_program_info,
         )?;
-    } else if er_token_account.owner() != program_id {
+    } else if !er_token_account.owned_by(program_id) {
         return Err(ProgramError::InvalidAccountOwner);
     }
 
@@ -275,11 +237,11 @@ fn process_initialize_er_token_account(
 
 fn process_deposit(
     program_id: &Pubkey,
-    accounts: &[AccountInfo],
+    accounts: &mut [AccountInfo],
     amount: u64,
     decimals: u8,
 ) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
+    let account_info_iter = &mut accounts.iter_mut();
     let owner = next_account_info(account_info_iter)?;
     let vault = next_account_info(account_info_iter)?;
     let er_token_account = next_account_info(account_info_iter)?;
@@ -296,7 +258,7 @@ fn process_deposit(
     require_signer(owner)?;
     require_system_program(system_program_info)?;
     let bridge = load_session_bridge(program_id, session_bridge, portal_program)?;
-    let mut vault_state = load_vault(program_id, vault, session_bridge.key())?;
+    let mut vault_state = load_vault(program_id, vault, session_bridge.address())?;
     require_bridge_token_accounts(
         &bridge,
         &vault_state,
@@ -306,9 +268,14 @@ fn process_deposit(
     )?;
 
     let mut er_state = load_er_token_account_data(er_token_account)?;
-    require_er_account(&er_state, session_bridge.key(), owner.key(), &bridge.mint)?;
-    let is_delegated = er_token_account.owner() == portal_program.key();
-    if !is_delegated && er_token_account.owner() != program_id {
+    require_er_account(
+        &er_state,
+        session_bridge.address(),
+        owner.address(),
+        &bridge.mint,
+    )?;
+    let is_delegated = er_token_account.owned_by(portal_program.address());
+    if !is_delegated && !er_token_account.owned_by(program_id) {
         return Err(ProgramError::InvalidAccountOwner);
     }
     if is_delegated {
@@ -320,29 +287,32 @@ fn process_deposit(
         )?;
     }
 
-    let (expected_receipt, receipt_bump) =
-        find_token_deposit_receipt_pda(program_id, session_bridge.key(), er_token_account.key());
-    if expected_receipt != *deposit_receipt.key() {
+    let (expected_receipt, receipt_bump) = find_token_deposit_receipt_pda(
+        program_id,
+        session_bridge.address(),
+        er_token_account.address(),
+    );
+    if expected_receipt != *deposit_receipt.address() {
         return Err(ProgramError::InvalidSeeds);
     }
 
-    if token_program.key() != &pinocchio_token::ID {
+    if token_program.address() != &pinocchio_token::ID {
         return Err(ProgramError::IncorrectProgramId);
     }
-    TransferChecked {
-        from: source_token_account,
+    TransferChecked::<_>::new(
+        source_token_account,
         mint,
-        to: vault_token_account,
-        authority: owner,
+        vault_token_account,
+        owner,
         amount,
         decimals,
-    }
+    )
     .invoke()?;
 
     let initial_receipt = TokenDepositReceipt {
         discriminator: TokenDepositReceipt::DISCRIMINATOR,
-        session_bridge: key_bytes(session_bridge.key()),
-        er_token_account: key_bytes(er_token_account.key()),
+        session_bridge: key_bytes(session_bridge.address()),
+        er_token_account: key_bytes(er_token_account.address()),
         balance: 0,
         withdrawn: 0,
         bump: receipt_bump,
@@ -356,25 +326,25 @@ fn process_deposit(
             program_id,
             [
                 Seed::from(TokenDepositReceipt::SEED_PREFIX),
-                Seed::from(session_bridge.key()),
-                Seed::from(er_token_account.key()),
+                Seed::from(session_bridge.address().as_ref()),
+                Seed::from(er_token_account.address().as_ref()),
                 Seed::from(&bump_seed),
             ],
             system_program_info,
         )?;
-    } else if deposit_receipt.owner() != program_id {
+    } else if !deposit_receipt.owned_by(program_id) {
         return Err(ProgramError::InvalidAccountOwner);
     }
 
-    let mut receipt = if deposit_receipt.try_borrow_data()?[0] == 0 {
+    let mut receipt = if deposit_receipt.try_borrow()?[0] == 0 {
         initial_receipt
     } else {
-        TokenDepositReceipt::try_from_slice(&deposit_receipt.try_borrow_data()?)
+        TokenDepositReceipt::try_from_slice(&deposit_receipt.try_borrow()?)
             .map_err(|_| ProgramError::InvalidAccountData)?
     };
     if !receipt.is_valid()
-        || receipt.session_bridge != key_bytes(session_bridge.key())
-        || receipt.er_token_account != key_bytes(er_token_account.key())
+        || receipt.session_bridge != key_bytes(session_bridge.address())
+        || receipt.er_token_account != key_bytes(er_token_account.address())
         || receipt.bump != receipt_bump
     {
         return Err(ProgramError::InvalidAccountData);
@@ -400,8 +370,12 @@ fn process_deposit(
     Ok(())
 }
 
-fn process_transfer(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
+fn process_transfer(
+    program_id: &Pubkey,
+    accounts: &mut [AccountInfo],
+    amount: u64,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter_mut();
     let authority = next_account_info(account_info_iter)?;
     let source = next_account_info(account_info_iter)?;
     let destination = next_account_info(account_info_iter)?;
@@ -409,7 +383,7 @@ fn process_transfer(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) 
     require_signer(authority)?;
     let mut source_state = load_er_token_account(program_id, source)?;
     let mut destination_state = load_er_token_account(program_id, destination)?;
-    if source_state.owner != key_bytes(authority.key())
+    if source_state.owner != key_bytes(authority.address())
         || source_state.session_bridge != destination_state.session_bridge
         || source_state.mint != destination_state.mint
     {
@@ -429,11 +403,11 @@ fn process_transfer(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) 
 
 fn process_withdraw(
     program_id: &Pubkey,
-    accounts: &[AccountInfo],
+    accounts: &mut [AccountInfo],
     amount: u64,
     decimals: u8,
 ) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
+    let account_info_iter = &mut accounts.iter_mut();
     let owner = next_account_info(account_info_iter)?;
     let vault = next_account_info(account_info_iter)?;
     let er_token_account = next_account_info(account_info_iter)?;
@@ -446,7 +420,7 @@ fn process_withdraw(
 
     require_signer(owner)?;
     let bridge = load_session_bridge(program_id, session_bridge, portal_program)?;
-    let mut vault_state = load_vault(program_id, vault, session_bridge.key())?;
+    let mut vault_state = load_vault(program_id, vault, session_bridge.address())?;
     require_bridge_token_accounts(
         &bridge,
         &vault_state,
@@ -456,7 +430,12 @@ fn process_withdraw(
     )?;
 
     let mut er_state = load_er_token_account(program_id, er_token_account)?;
-    require_er_account(&er_state, session_bridge.key(), owner.key(), &bridge.mint)?;
+    require_er_account(
+        &er_state,
+        session_bridge.address(),
+        owner.address(),
+        &bridge.mint,
+    )?;
     er_state.amount = er_state
         .amount
         .checked_sub(amount)
@@ -467,24 +446,24 @@ fn process_withdraw(
         .filter(|withdrawn| *withdrawn <= vault_state.deposited)
         .ok_or(ProgramError::InsufficientFunds)?;
 
-    if token_program.key() != &pinocchio_token::ID {
+    if token_program.address() != &pinocchio_token::ID {
         return Err(ProgramError::IncorrectProgramId);
     }
     let vault_bump = [vault_state.bump];
     let vault_seeds = [
         Seed::from(TokenVault::SEED_PREFIX),
-        Seed::from(session_bridge.key()),
+        Seed::from(session_bridge.address().as_ref()),
         Seed::from(&vault_bump),
     ];
     let vault_signer = Signer::from(&vault_seeds);
-    TransferChecked {
-        from: vault_token_account,
+    TransferChecked::<_>::new(
+        vault_token_account,
         mint,
-        to: destination_token_account,
-        authority: vault,
+        destination_token_account,
+        vault,
         amount,
         decimals,
-    }
+    )
     .invoke_signed(&[vault_signer])?;
 
     store(vault, &vault_state)?;
@@ -493,11 +472,11 @@ fn process_withdraw(
 
 fn process_start_withdrawal(
     program_id: &Pubkey,
-    accounts: &[AccountInfo],
+    accounts: &mut [AccountInfo],
     amount: u64,
     _decimals: u8,
 ) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
+    let account_info_iter = &mut accounts.iter_mut();
     let owner = next_account_info(account_info_iter)?;
     let er_token_account = next_account_info(account_info_iter)?;
     let session_bridge = next_account_info(account_info_iter)?;
@@ -507,16 +486,21 @@ fn process_start_withdrawal(
 
     require_signer(owner)?;
     let bridge = load_session_bridge(program_id, session_bridge, portal_program)?;
-    if bridge.token_program != key_bytes(token_program.key()) {
+    if bridge.token_program != *token_program.address() {
         return Err(ProgramError::InvalidAccountData);
     }
     let destination = unpack_token_account(destination_token_account)?;
-    if destination.mint.to_bytes() != bridge.mint {
+    if destination.mint.to_bytes() != bridge.mint.to_bytes() {
         return Err(ProgramError::InvalidAccountData);
     }
 
     let mut er_state = load_er_token_account(program_id, er_token_account)?;
-    require_er_account(&er_state, session_bridge.key(), owner.key(), &bridge.mint)?;
+    require_er_account(
+        &er_state,
+        session_bridge.address(),
+        owner.address(),
+        &bridge.mint,
+    )?;
     er_state.amount = er_state
         .amount
         .checked_sub(amount)
@@ -526,14 +510,14 @@ fn process_start_withdrawal(
 
 fn process_settle_withdrawal(
     program_id: &Pubkey,
-    accounts: &[AccountInfo],
+    accounts: &mut [AccountInfo],
     er_slot: u64,
     checksum: [u8; 32],
     amount: u64,
     withdrawn: u64,
     decimals: u8,
 ) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
+    let account_info_iter = &mut accounts.iter_mut();
     let validator = next_account_info(account_info_iter)?;
     let session = next_account_info(account_info_iter)?;
     let checkpoint = next_account_info(account_info_iter)?;
@@ -549,47 +533,47 @@ fn process_settle_withdrawal(
     if session.owner() != checkpoint.owner() || session_bridge.owner() != session.owner() {
         return Err(ProgramError::InvalidAccountOwner);
     }
-    let expected_checkpoint = find_program_address(
+    let expected_checkpoint = Pubkey::find_program_address(
         &[
             b"checkpoint",
-            session.key().as_ref(),
+            session.address().as_ref(),
             &er_slot.to_le_bytes(),
         ],
         session.owner(),
     )
     .0;
-    if expected_checkpoint != *checkpoint.key() {
+    if expected_checkpoint != *checkpoint.address() {
         return Err(ProgramError::InvalidSeeds);
     }
-    let session_state = Session::try_from_slice(&session.try_borrow_data()?)
+    let session_state = Session::try_from_slice(&session.try_borrow()?)
         .map_err(|_| ProgramError::InvalidAccountData)?;
-    let checkpoint_state = Checkpoint::try_from_slice(&checkpoint.try_borrow_data()?)
+    let checkpoint_state = Checkpoint::try_from_slice(&checkpoint.try_borrow()?)
         .map_err(|_| ProgramError::InvalidAccountData)?;
-    if !is_valid_settlement_session(&session_state, validator.key())
-        || !is_valid_settlement_checkpoint(&checkpoint_state, session.key(), er_slot, &checksum)
+    if !is_valid_settlement_session(&session_state, validator.address())
+        || !is_valid_settlement_checkpoint(&checkpoint_state, session.address(), er_slot, &checksum)
     {
         return Err(ProgramError::InvalidAccountData);
     }
 
-    let bridge = SessionBridge::try_from_slice(&session_bridge.try_borrow_data()?)
+    let bridge = SessionBridge::try_from_slice(&session_bridge.try_borrow()?)
         .map_err(|_| ProgramError::InvalidAccountData)?;
-    let expected_session_bridge = find_program_address(
+    let expected_session_bridge = Pubkey::find_program_address(
         &[
             b"session_bridge",
-            session.key().as_ref(),
+            session.address().as_ref(),
             bridge.mint.as_ref(),
         ],
         session.owner(),
     )
     .0;
     if !bridge.is_valid()
-        || bridge.bridge_program != key_bytes(program_id)
-        || bridge.session != key_bytes(session.key())
-        || expected_session_bridge != *session_bridge.key()
+        || bridge.bridge_program != *program_id
+        || bridge.session != *session.address()
+        || expected_session_bridge != *session_bridge.address()
     {
         return Err(ProgramError::InvalidAccountData);
     }
-    let mut vault_state = load_vault(program_id, vault, session_bridge.key())?;
+    let mut vault_state = load_vault(program_id, vault, session_bridge.address())?;
     require_bridge_token_accounts(
         &bridge,
         &vault_state,
@@ -598,7 +582,7 @@ fn process_settle_withdrawal(
         token_program,
     )?;
     let destination = unpack_token_account(destination_token_account)?;
-    if destination.mint.to_bytes() != bridge.mint {
+    if destination.mint.to_bytes() != bridge.mint.to_bytes() {
         return Err(ProgramError::InvalidAccountData);
     }
 
@@ -611,34 +595,34 @@ fn process_settle_withdrawal(
     }
     vault_state.withdrawn = withdrawn;
 
-    if token_program.key() != &pinocchio_token::ID {
+    if token_program.address() != &pinocchio_token::ID {
         return Err(ProgramError::IncorrectProgramId);
     }
     let vault_bump = [vault_state.bump];
     let vault_seeds = [
         Seed::from(TokenVault::SEED_PREFIX),
-        Seed::from(session_bridge.key()),
+        Seed::from(session_bridge.address().as_ref()),
         Seed::from(&vault_bump),
     ];
     let vault_signer = Signer::from(&vault_seeds);
-    TransferChecked {
-        from: vault_token_account,
+    TransferChecked::<_>::new(
+        vault_token_account,
         mint,
-        to: destination_token_account,
-        authority: vault,
+        destination_token_account,
+        vault,
         amount,
         decimals,
-    }
+    )
     .invoke_signed(&[vault_signer])?;
     store(vault, &vault_state)
 }
 
 fn process_delegate_er_token_account(
     program_id: &Pubkey,
-    accounts: &[AccountInfo],
+    accounts: &mut [AccountInfo],
     grid_id: u64,
 ) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
+    let account_info_iter = &mut accounts.iter_mut();
     let payer = next_account_info(account_info_iter)?;
     let er_token_account = next_account_info(account_info_iter)?;
     let bridge_program = next_account_info(account_info_iter)?;
@@ -654,15 +638,15 @@ fn process_delegate_er_token_account(
     require_system_program(system_program_info)?;
     load_session_bridge(program_id, session_bridge, portal_program)?;
     let er_state = load_er_token_account(program_id, er_token_account)?;
-    if er_state.session_bridge != key_bytes(session_bridge.key()) {
+    if er_state.session_bridge != key_bytes(session_bridge.address()) {
         return Err(ProgramError::InvalidAccountData);
     }
 
-    let (expected_record, _) = find_program_address(
-        &[b"delegation", er_token_account.key().as_ref()],
-        portal_program.key(),
+    let (expected_record, _) = Pubkey::find_program_address(
+        &[b"delegation", er_token_account.address().as_ref()],
+        portal_program.address(),
     );
-    if expected_record != *delegation_record.key() {
+    if expected_record != *delegation_record.address() {
         return Err(ProgramError::InvalidSeeds);
     }
 
@@ -680,7 +664,7 @@ fn process_delegate_er_token_account(
         payer,
         er_token_account,
         er_account_space,
-        portal_program.key(),
+        portal_program.address(),
         er_signer_seeds(&er_state),
         system_program_info,
     )?;
@@ -688,30 +672,30 @@ fn process_delegate_er_token_account(
     let er_signer = Signer::from(&er_seeds);
 
     let portal_accounts = [
-        AccountMeta::writable_signer(payer.key()),
+        AccountMeta::writable_signer(payer.address()),
         AccountMeta::readonly(&pinocchio_system::ID),
-        AccountMeta::readonly(session.key()),
-        AccountMeta::writable_signer(er_token_account.key()),
+        AccountMeta::readonly(session.address()),
+        AccountMeta::writable_signer(er_token_account.address()),
         AccountMeta::readonly(program_id),
-        AccountMeta::writable(delegation_record.key()),
-        AccountMeta::readonly(buffer.key()),
+        AccountMeta::writable(delegation_record.address()),
+        AccountMeta::readonly(buffer.address()),
     ];
     let portal_data = encode_portal_delegate(grid_id);
     let portal_instruction = Instruction {
-        program_id: portal_program.key(),
+        program_id: portal_program.address(),
         accounts: &portal_accounts,
         data: &portal_data,
     };
     invoke_signed(
         &portal_instruction,
         &[
-            payer,
-            system_program_info,
-            session,
-            er_token_account,
-            bridge_program,
-            delegation_record,
-            buffer,
+            &*payer,
+            &*system_program_info,
+            &*session,
+            &*er_token_account,
+            &*bridge_program,
+            &*delegation_record,
+            &*buffer,
         ],
         &[er_signer],
     )?;
@@ -721,9 +705,9 @@ fn process_delegate_er_token_account(
 
 fn process_undelegate_er_token_account(
     program_id: &Pubkey,
-    accounts: &[AccountInfo],
+    accounts: &mut [AccountInfo],
 ) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
+    let account_info_iter = &mut accounts.iter_mut();
     let authority = next_account_info(account_info_iter)?;
     let er_token_account = next_account_info(account_info_iter)?;
     let bridge_program = next_account_info(account_info_iter)?;
@@ -736,7 +720,7 @@ fn process_undelegate_er_token_account(
     require_signer(authority)?;
     require_self_program(program_id, bridge_program)?;
     require_system_program(system_program_info)?;
-    if er_token_account.owner() != portal_program.key() {
+    if !er_token_account.owned_by(portal_program.address()) {
         return Err(ProgramError::InvalidAccountOwner);
     }
 
@@ -750,32 +734,32 @@ fn process_undelegate_er_token_account(
     copy_data(er_token_account, buffer)?;
 
     let portal_accounts = [
-        AccountMeta::writable_signer(authority.key()),
-        AccountMeta::writable(er_token_account.key()),
+        AccountMeta::writable_signer(authority.address()),
+        AccountMeta::writable(er_token_account.address()),
         AccountMeta::readonly(program_id),
-        AccountMeta::writable(delegation_record.key()),
+        AccountMeta::writable(delegation_record.address()),
         AccountMeta::readonly(&pinocchio_system::ID),
-        AccountMeta::readonly(session.key()),
+        AccountMeta::readonly(session.address()),
     ];
     let portal_data = [10];
     let portal_instruction = Instruction {
-        program_id: portal_program.key(),
+        program_id: portal_program.address(),
         accounts: &portal_accounts,
         data: &portal_data,
     };
     invoke(
         &portal_instruction,
         &[
-            authority,
-            er_token_account,
-            bridge_program,
-            delegation_record,
-            system_program_info,
-            session,
+            &*authority,
+            &*er_token_account,
+            &*bridge_program,
+            &*delegation_record,
+            &*system_program_info,
+            &*session,
         ],
     )?;
 
-    if er_token_account.owner() != program_id {
+    if !er_token_account.owned_by(program_id) {
         return Err(ProgramError::InvalidAccountOwner);
     }
     copy_data(buffer, er_token_account)?;
@@ -787,12 +771,12 @@ fn load_session_bridge(
     session_bridge: &AccountInfo,
     portal_program: &AccountInfo,
 ) -> Result<SessionBridge, ProgramError> {
-    if session_bridge.owner() != portal_program.key() {
+    if !session_bridge.owned_by(portal_program.address()) {
         return Err(ProgramError::InvalidAccountOwner);
     }
-    let bridge = SessionBridge::try_from_slice(&session_bridge.try_borrow_data()?)
+    let bridge = SessionBridge::try_from_slice(&session_bridge.try_borrow()?)
         .map_err(|_| ProgramError::InvalidAccountData)?;
-    if !bridge.is_valid() || bridge.bridge_program != key_bytes(program_id) {
+    if !bridge.is_valid() || bridge.bridge_program != *program_id {
         return Err(ProgramError::InvalidAccountData);
     }
     Ok(bridge)
@@ -803,10 +787,10 @@ fn load_vault(
     vault: &AccountInfo,
     session_bridge: &Pubkey,
 ) -> Result<TokenVault, ProgramError> {
-    if vault.owner() != program_id {
+    if !vault.owned_by(program_id) {
         return Err(ProgramError::InvalidAccountOwner);
     }
-    let state = TokenVault::try_from_slice(&vault.try_borrow_data()?)
+    let state = TokenVault::try_from_slice(&vault.try_borrow()?)
         .map_err(|_| ProgramError::InvalidAccountData)?;
     if !state.is_valid() || state.session_bridge != key_bytes(session_bridge) {
         return Err(ProgramError::InvalidAccountData);
@@ -818,10 +802,10 @@ fn load_er_token_account(
     program_id: &Pubkey,
     account: &AccountInfo,
 ) -> Result<ErTokenAccount, ProgramError> {
-    if account.owner() != program_id {
+    if !account.owned_by(program_id) {
         return Err(ProgramError::InvalidAccountOwner);
     }
-    let state = ErTokenAccount::try_from_slice(&account.try_borrow_data()?)
+    let state = ErTokenAccount::try_from_slice(&account.try_borrow()?)
         .map_err(|_| ProgramError::InvalidAccountData)?;
     if !state.is_valid() {
         return Err(ProgramError::InvalidAccountData);
@@ -830,7 +814,7 @@ fn load_er_token_account(
 }
 
 fn load_er_token_account_data(account: &AccountInfo) -> Result<ErTokenAccount, ProgramError> {
-    let state = ErTokenAccount::try_from_slice(&account.try_borrow_data()?)
+    let state = ErTokenAccount::try_from_slice(&account.try_borrow()?)
         .map_err(|_| ProgramError::InvalidAccountData)?;
     if !state.is_valid() {
         return Err(ProgramError::InvalidAccountData);
@@ -844,16 +828,18 @@ fn require_bridge_delegation(
     delegation_record: &AccountInfo,
     portal_program: &AccountInfo,
 ) -> ProgramResult {
-    let (expected, _) = find_program_address(
-        &[b"delegation", er_token_account.key().as_ref()],
-        portal_program.key(),
+    let (expected, _) = Pubkey::find_program_address(
+        &[b"delegation", er_token_account.address().as_ref()],
+        portal_program.address(),
     );
-    if expected != *delegation_record.key() || delegation_record.owner() != portal_program.key() {
+    if expected != *delegation_record.address()
+        || !delegation_record.owned_by(portal_program.address())
+    {
         return Err(ProgramError::InvalidSeeds);
     }
-    let record = DelegationRecord::try_from_slice(&delegation_record.try_borrow_data()?)
+    let record = DelegationRecord::try_from_slice(&delegation_record.try_borrow()?)
         .map_err(|_| ProgramError::InvalidAccountData)?;
-    if record.discriminator != 3 || record.owner_program != key_bytes(program_id) {
+    if !record.is_valid() || record.owner_program != *program_id {
         return Err(ProgramError::InvalidAccountData);
     }
     Ok(())
@@ -863,11 +849,11 @@ fn require_er_account(
     state: &ErTokenAccount,
     session_bridge: &Pubkey,
     owner: &Pubkey,
-    mint: &[u8; 32],
+    mint: &Pubkey,
 ) -> ProgramResult {
     if state.session_bridge != key_bytes(session_bridge)
         || state.owner != key_bytes(owner)
-        || &state.mint != mint
+        || state.mint != mint.to_bytes()
     {
         return Err(ProgramError::InvalidAccountData);
     }
@@ -881,11 +867,11 @@ fn require_bridge_token_accounts(
     mint: &AccountInfo,
     token_program: &AccountInfo,
 ) -> ProgramResult {
-    if bridge.mint != key_bytes(mint.key())
-        || bridge.token_program != key_bytes(token_program.key())
-        || vault.mint != bridge.mint
-        || vault.token_program != bridge.token_program
-        || vault.vault_token_account != key_bytes(vault_token_account.key())
+    if bridge.mint != *mint.address()
+        || bridge.token_program != *token_program.address()
+        || vault.mint != bridge.mint.to_bytes()
+        || vault.token_program != bridge.token_program.to_bytes()
+        || vault.vault_token_account != key_bytes(vault_token_account.address())
     {
         return Err(ProgramError::InvalidAccountData);
     }
@@ -893,12 +879,11 @@ fn require_bridge_token_accounts(
 }
 
 fn unpack_token_account(account: &AccountInfo) -> Result<SplTokenAccount, ProgramError> {
-    SplTokenAccount::unpack(&account.try_borrow_data()?)
-        .map_err(|_| ProgramError::InvalidAccountData)
+    SplTokenAccount::unpack(&account.try_borrow()?).map_err(|_| ProgramError::InvalidAccountData)
 }
 
-fn store<T: BorshSerialize>(account: &AccountInfo, state: &T) -> ProgramResult {
-    let mut data = account.try_borrow_mut_data()?;
+fn store<T: BorshSerialize>(account: &mut AccountInfo, state: &T) -> ProgramResult {
+    let mut data = account.try_borrow_mut()?;
     let mut output = &mut data[..];
     BorshSerialize::serialize(state, &mut output).map_err(|_| ProgramError::InvalidAccountData)?;
     if !output.is_empty() {
@@ -909,14 +894,14 @@ fn store<T: BorshSerialize>(account: &AccountInfo, state: &T) -> ProgramResult {
 
 fn create_pda<const N: usize>(
     payer: &AccountInfo,
-    pda: &AccountInfo,
+    pda: &mut AccountInfo,
     space: usize,
     owner: &Pubkey,
-    seeds: [Seed; N],
+    seeds: [Seed<'_>; N],
     system_program_info: &AccountInfo,
 ) -> ProgramResult {
     require_system_program(system_program_info)?;
-    let lamports = Rent::get()?.minimum_balance(space);
+    let lamports = Rent::get()?.try_minimum_balance(space)?;
     let signer = Signer::from(&seeds);
     CreateAccount {
         from: payer,
@@ -931,12 +916,12 @@ fn create_pda<const N: usize>(
 fn create_buffer(
     program_id: &Pubkey,
     payer: &AccountInfo,
-    buffer: &AccountInfo,
+    buffer: &mut AccountInfo,
     er_token_account: &AccountInfo,
     system_program_info: &AccountInfo,
 ) -> ProgramResult {
-    let (expected, bump) = find_buffer_pda(program_id, er_token_account.key());
-    if expected != *buffer.key() {
+    let (expected, bump) = find_buffer_pda(program_id, er_token_account.address());
+    if expected != *buffer.address() {
         return Err(ProgramError::InvalidSeeds);
     }
     if buffer.lamports() == 0 {
@@ -948,21 +933,21 @@ fn create_buffer(
             program_id,
             [
                 Seed::from(BridgeBuffer::SEED_PREFIX),
-                Seed::from(er_token_account.key()),
+                Seed::from(er_token_account.address().as_ref()),
                 Seed::from(&bump_seed),
             ],
             system_program_info,
         )?;
     }
-    if buffer.owner() != program_id || buffer.data_len() != er_token_account.data_len() {
+    if !buffer.owned_by(program_id) || buffer.data_len() != er_token_account.data_len() {
         return Err(ProgramError::InvalidAccountData);
     }
     Ok(())
 }
 
-fn copy_data(from: &AccountInfo, to: &AccountInfo) -> ProgramResult {
-    let source = from.try_borrow_data()?;
-    let mut destination = to.try_borrow_mut_data()?;
+fn copy_data(from: &AccountInfo, to: &mut AccountInfo) -> ProgramResult {
+    let source = from.try_borrow()?;
+    let mut destination = to.try_borrow_mut()?;
     if source.len() != destination.len() {
         return Err(ProgramError::InvalidAccountData);
     }
@@ -970,13 +955,14 @@ fn copy_data(from: &AccountInfo, to: &AccountInfo) -> ProgramResult {
     Ok(())
 }
 
-fn close_buffer(buffer: &AccountInfo, recipient: &AccountInfo) -> ProgramResult {
+fn close_buffer(buffer: &mut AccountInfo, recipient: &mut AccountInfo) -> ProgramResult {
     let lamports = buffer.lamports();
-    *recipient.try_borrow_mut_lamports()? = recipient
+    let recipient_lamports = recipient
         .lamports()
         .checked_add(lamports)
         .ok_or(ProgramError::ArithmeticOverflow)?;
-    *buffer.try_borrow_mut_lamports()? = 0;
+    recipient.set_lamports(recipient_lamports);
+    buffer.set_lamports(0);
     buffer.close()
 }
 
@@ -997,21 +983,21 @@ fn require_signer(account: &AccountInfo) -> ProgramResult {
 }
 
 fn require_self_program(program_id: &Pubkey, account: &AccountInfo) -> ProgramResult {
-    if account.key() != program_id {
+    if account.address() != program_id {
         return Err(ProgramError::IncorrectProgramId);
     }
     Ok(())
 }
 
 fn require_system_program(account: &AccountInfo) -> ProgramResult {
-    if *account.key() != pinocchio_system::ID {
+    if *account.address() != pinocchio_system::ID {
         return Err(ProgramError::IncorrectProgramId);
     }
     Ok(())
 }
 
 fn key_bytes(key: &Pubkey) -> [u8; 32] {
-    *key
+    key.to_bytes()
 }
 
 fn encode_portal_delegate(grid_id: u64) -> [u8; 9] {

@@ -1,5 +1,5 @@
 use {
-    crossbeam_channel::unbounded,
+    crossbeam_channel::bounded,
     itertools::Itertools,
     log::*,
     solana_core::{
@@ -17,6 +17,7 @@ use {
     solana_hash::Hash,
     solana_leader_schedule::SlotLeader,
     solana_ledger::genesis_utils::create_genesis_config,
+    solana_pubkey::Pubkey,
     solana_runtime::{
         bank::Bank, bank_forks::BankForks, genesis_utils::GenesisConfigInfo,
         installed_scheduler_pool::SchedulingContext,
@@ -109,8 +110,8 @@ fn test_scheduler_waited_by_drop_bank_service() {
     drop(lock_to_stall);
 
     // Create 2 channels to check actual pruned banks
-    let (drop_bank_sender1, drop_bank_receiver1) = unbounded();
-    let (drop_bank_sender2, drop_bank_receiver2) = unbounded();
+    let (drop_bank_sender1, drop_bank_receiver1) = bounded(1024);
+    let (drop_bank_sender2, drop_bank_receiver2) = bounded(1024);
     let drop_bank_service = DropBankService::new(drop_bank_receiver2);
 
     info!("calling handle_new_root()...");
@@ -151,6 +152,7 @@ fn test_scheduler_waited_by_drop_bank_service() {
             epoch_slots_frozen_slots,
         };
         ReplayStage::handle_new_root(
+            &Pubkey::new_unique(),
             root,
             &bank_forks,
             &mut progress,

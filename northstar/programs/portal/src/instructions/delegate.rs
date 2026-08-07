@@ -6,13 +6,12 @@ use {
     },
     borsh::{BorshDeserialize, BorshSerialize},
     pinocchio::{
-        account_info::AccountInfo,
-        instruction::{Seed, Signer},
-        program_error::ProgramError,
-        pubkey::Pubkey,
+        cpi::{Seed, Signer},
+        error::ProgramError,
         sysvars::{rent::Rent, Sysvar},
-        ProgramResult,
+        AccountView as AccountInfo, Address as Pubkey, ProgramResult,
     },
+    pinocchio_idl_macros::p_instruction,
     pinocchio_system::instructions::CreateAccount,
 };
 
@@ -34,9 +33,22 @@ use {
 /// - `[]` owner_program (stored in `DelegationRecord.owner_program`)
 /// - `[writable]` delegation_record PDA (`["delegation", delegated_account]` under Portal)
 /// - `[]` buffer
+#[p_instruction(
+    id = 3,
+    accounts = [
+        payer(signer, mut),
+        system_program,
+        session(state = Session),
+        delegated_account(signer, mut),
+        owner_program,
+        delegation_record(mut, state = DelegationRecord),
+        buffer
+    ],
+    data = [grid_id: u64]
+)]
 pub fn process_delegate(
     program_id: &Pubkey,
-    accounts: &[AccountInfo],
+    accounts: &mut [AccountInfo],
     grid_id: u64,
 ) -> ProgramResult {
     pinocchio_log::log!("Instruction: Delegate, grid_id={}", grid_id);
@@ -48,10 +60,10 @@ pub fn process_delegate(
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
-    let payer = &accounts[0];
-    let system_program = &accounts[1];
-    let session = &accounts[2];
-    let delegation_accounts = &accounts[PREFIX_ACCOUNTS..];
+    let (prefix, delegation_accounts) = accounts.split_at_mut(PREFIX_ACCOUNTS);
+    let [payer, system_program, session] = prefix else {
+        unreachable!();
+    };
 
     if !delegation_accounts
         .len()
@@ -62,15 +74,18 @@ pub fn process_delegate(
 
     let session_state = validate_session(program_id, session, grid_id)?;
 
-    for group in delegation_accounts.chunks_exact(ACCOUNTS_PER_DELEGATION) {
+    for group in delegation_accounts.chunks_exact_mut(ACCOUNTS_PER_DELEGATION) {
+        let [delegated_account, owner_program, delegation_record, buffer] = group else {
+            unreachable!();
+        };
         process_delegate_account(
             program_id,
             payer,
-            &group[0],
-            &group[1],
-            &group[2],
+            delegated_account,
+            owner_program,
+            delegation_record,
             system_program,
-            &group[3],
+            buffer,
             &session_state,
         )?;
     }
@@ -86,13 +101,13 @@ fn validate_session(
     grid_id: u64,
 ) -> Result<Session, ProgramError> {
     let (expected_session_key, _) = find_session_pda(program_id);
-    if session.key() != &expected_session_key {
+    if session.address() != &expected_session_key {
         return Err(PortalError::InvalidPdaSeeds.into());
     }
-    if session.owner() != program_id {
+    if !session.owned_by(program_id) {
         return Err(PortalError::SessionAccountOwnerMismatch.into());
     }
-    let session_state = Session::try_from_slice(&session.try_borrow_data()?)
+    let session_state = Session::try_from_slice(&session.try_borrow()?)
         .map_err(|_| PortalError::SessionDeserializeFailed)?;
     if !session_state.is_valid() {
         return Err(PortalError::SessionStateInvalid.into());
@@ -109,9 +124,9 @@ fn validate_session(
 fn process_delegate_account(
     program_id: &Pubkey,
     payer: &AccountInfo,
-    delegated_account: &AccountInfo,
+    delegated_account: &mut AccountInfo,
     owner_program: &AccountInfo,
-    delegation_record: &AccountInfo,
+    delegation_record: &mut AccountInfo,
     _system_program: &AccountInfo,
     buffer: &AccountInfo,
     _session_state: &Session,
@@ -124,14 +139,14 @@ fn process_delegate_account(
         return Err(PortalError::Unauthorized.into());
     }
 
-    if delegated_account.owner() != program_id {
+    if !delegated_account.owned_by(program_id) {
         return Err(PortalError::DelegatedAccountOwnerMismatch.into());
     }
 
-    let delegated_key = *delegated_account.key();
+    let delegated_key = *delegated_account.address();
     let (expected_delegation_key, bump) = find_delegation_record_pda(program_id, &delegated_key);
 
-    if delegation_record.key() != &expected_delegation_key {
+    if delegation_record.address() != &expected_delegation_key {
         return Err(PortalError::InvalidPdaSeeds.into());
     }
 
@@ -139,7 +154,7 @@ fn process_delegate_account(
         return Err(PortalError::DelegationRecordAlreadyInitialized.into());
     }
 
-    if buffer.owner() != owner_program.key() {
+    if !buffer.owned_by(owner_program.address()) {
         return Err(PortalError::DelegateBufferOwnerMismatch.into());
     }
     if buffer.data_len() != delegated_account.data_len() {
@@ -148,13 +163,13 @@ fn process_delegate_account(
 
     let delegation_state = DelegationRecord {
         discriminator: DelegationRecord::DISCRIMINATOR,
-        owner_program: *owner_program.key(),
+        owner_program: *owner_program.address(),
         grid_id: _session_state.grid_id,
         bump,
     };
     let rent = Rent::get()?;
     let delegation_size = crate::account_size(&delegation_state);
-    let lamports = rent.minimum_balance(delegation_size);
+    let lamports = rent.try_minimum_balance(delegation_size)?;
 
     let bump_bytes = [bump];
     let seeds = &[
@@ -173,12 +188,12 @@ fn process_delegate_account(
     }
     .invoke_signed(&[signer])?;
 
-    let mut delegation_data = delegation_record.try_borrow_mut_data()?;
+    let mut delegation_data = delegation_record.try_borrow_mut()?;
     BorshSerialize::serialize(&delegation_state, &mut &mut delegation_data[..]).unwrap();
     drop(delegation_data);
 
-    let buffer_data = buffer.try_borrow_data()?;
-    let mut delegated_data = delegated_account.try_borrow_mut_data()?;
+    let buffer_data = buffer.try_borrow()?;
+    let mut delegated_data = delegated_account.try_borrow_mut()?;
     delegated_data.copy_from_slice(&buffer_data);
 
     Ok(())

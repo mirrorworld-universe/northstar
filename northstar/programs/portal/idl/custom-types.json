@@ -1,0 +1,87 @@
+[
+  {
+    "name": "Hash32",
+    "type": {
+      "kind": "type",
+      "alias": { "array": ["u8", 32] }
+    }
+  },
+  {
+    "name": "SettlementStatus",
+    "type": {
+      "kind": "enum",
+      "variants": [
+        { "name": "Idle" },
+        { "name": "InProgress" }
+      ]
+    }
+  },
+  {
+    "name": "CheckpointStatus",
+    "type": {
+      "kind": "enum",
+      "variants": [
+        { "name": "Pending" },
+        { "name": "Committed" },
+        { "name": "Cancelled" },
+        { "name": "Settled" },
+        { "name": "Challenged" },
+        { "name": "Invalid" }
+      ]
+    }
+  },
+  {
+    "name": "CheckpointBondStatus",
+    "type": {
+      "kind": "enum",
+      "variants": [
+        { "name": "Locked" },
+        { "name": "Released" },
+        { "name": "Slashed" }
+      ]
+    }
+  },
+  {
+    "name": "ChallengeStatus",
+    "type": {
+      "kind": "enum",
+      "variants": [
+        { "name": "Active" },
+        { "name": "ChallengerWon" },
+        { "name": "ValidatorWon" }
+      ]
+    }
+  },
+  {
+    "name": "ChallengeTurn",
+    "type": {
+      "kind": "enum",
+      "variants": [
+        { "name": "Respondent" },
+        { "name": "Challenger" },
+        { "name": "Prove" }
+      ]
+    }
+  },
+  {
+    "name": "DataAvailabilityStatus",
+    "type": {
+      "kind": "enum",
+      "variants": [
+        { "name": "Missing" },
+        { "name": "Revealed" },
+        { "name": "Defaulted" }
+      ]
+    }
+  },
+  {
+    "name": "StepProofVerifierMode",
+    "type": {
+      "kind": "enum",
+      "variants": [
+        { "name": "Production" },
+        { "name": "TestOnly" }
+      ]
+    }
+  }
+]

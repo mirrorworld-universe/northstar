@@ -478,7 +478,7 @@ pub(super) fn calc_vote_rewards_update_vote_states(
         )?,
     };
 
-    bank.store_accounts((bank.slot(), updated_accounts.as_slice()));
+    bank.store_accounts((bank.slot(), updated_accounts.as_slice()), None);
     Ok(())
 }
 
@@ -602,20 +602,19 @@ mod tests {
     use {
         super::*,
         crate::{
-            bank::VAT_TO_BURN_PER_EPOCH,
             bank_forks::BankForks,
             genesis_utils::{
                 ValidatorVoteKeypairs, activate_all_features_alpenglow,
                 create_genesis_config_with_alpenglow_vote_accounts,
                 create_genesis_config_with_leader_ex, create_validator,
             },
-            inflation_rewards::commission_split,
+            inflation_rewards::commission_split_preserve_lamports,
             stake_utils,
             validated_block_finalization::ValidatedBlockFinalizationCert,
         },
         agave_feature_set::FeatureSet,
         agave_votor_messages::{
-            certificate::{Certificate, CertificateType},
+            certificate::{CertSignature, FastFinalizeCert},
             consensus_message::Block,
             reward_certificate::NUM_SLOTS_FOR_REWARD,
         },
@@ -677,18 +676,18 @@ mod tests {
             slot: bank.slot(),
             block_id: Hash::new_unique(),
         };
-        let cert_type = CertificateType::FinalizeFast(block);
         let max_rank = signing_ranks.iter().copied().max().unwrap_or(0);
         let mut bitvec = BitVec::<u8, Lsb0>::repeat(false, max_rank.saturating_add(1));
         for &rank in signing_ranks {
             bitvec.set(rank, true);
         }
         let bitmap = encode_base2(&bitvec).unwrap();
-
-        let cert = Certificate {
-            cert_type,
-            signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
-            bitmap,
+        let cert = FastFinalizeCert {
+            block,
+            signature: CertSignature {
+                signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
+                bitmap,
+            },
         };
         ValidatedBlockFinalizationCert::from_validated_fast(cert, bank)
     }
@@ -908,11 +907,11 @@ mod tests {
         .unwrap();
 
         let handle = vote_state_from_bank(&bank, &target_vote_pubkey);
-        assert_eq!(handle.root_slot(), Some(final_cert.slot()));
+        assert_eq!(handle.root_slot(), Some(final_cert.slot().slot()));
         assert_eq!(handle.votes().len(), 1);
         assert_eq!(
             handle.votes().front().unwrap().lockout.slot(),
-            final_cert.slot().max(reward_slot)
+            final_cert.slot().slot().max(reward_slot)
         );
     }
 
@@ -1273,7 +1272,7 @@ mod tests {
                 let stake = initial_lamports - rent_exempt_reserve;
                 let stake_weighted_reward = validator_reward * stake / validator_stake;
                 let (voter_reward, staker_reward, is_split) =
-                    commission_split(self.commission_bps, stake_weighted_reward);
+                    commission_split_preserve_lamports(self.commission_bps, stake_weighted_reward);
                 assert!(is_split);
                 assert_eq!(
                     staker_reward,
@@ -1283,6 +1282,28 @@ mod tests {
                 expected_validator_reward += voter_reward;
             }
             expected_validator_reward
+        }
+
+        /// Asserts the vote account's lamport delta equals the voter's share
+        /// of `total_vote_reward`, accounting for VAT burn across the spanned
+        /// epochs.
+        fn validate_vote_account_payout(
+            &self,
+            reward_bank: &Bank,
+            payout_bank: &Bank,
+            vote_pubkey: &Pubkey,
+            total_vote_reward: u64,
+        ) {
+            let expected_voter_reward =
+                self.validate_stakers(reward_bank, payout_bank, vote_pubkey, total_vote_reward);
+            let (initial_vote_lamports, final_vote_lamports) =
+                self.get_initial_and_final_lamports(reward_bank, payout_bank, vote_pubkey);
+            let vat_burn =
+                payout_bank.vat_to_burn_per_epoch() * (payout_bank.epoch() - reward_bank.epoch());
+            assert_eq!(
+                expected_voter_reward,
+                final_vote_lamports + vat_burn - initial_vote_lamports
+            );
         }
 
         /// Returns leader_rewards
@@ -1299,16 +1320,11 @@ mod tests {
             let (validator_reward, leader_reward) =
                 self.get_rewards(reward_bank, num_reward_slots, voter_pubkey);
 
-            let expected_validator_reward =
-                self.validate_stakers(reward_bank, payout_bank, voter_pubkey, validator_reward);
-
-            let (initial_validator_lamports, final_validator_lamports) =
-                self.get_initial_and_final_lamports(reward_bank, payout_bank, voter_pubkey);
-            assert_eq!(
-                expected_validator_reward,
-                final_validator_lamports
-                    + VAT_TO_BURN_PER_EPOCH * (payout_bank.epoch() - reward_bank.epoch())
-                    - initial_validator_lamports
+            self.validate_vote_account_payout(
+                reward_bank,
+                payout_bank,
+                voter_pubkey,
+                validator_reward,
             );
             leader_reward
         }
@@ -1329,18 +1345,11 @@ mod tests {
 
             let (validator_reward, leader_reward) =
                 self.get_rewards(reward_bank, num_reward_slots, &leader);
-            let validator_reward = validator_reward + leader_reward + add_leader_reward;
-
-            let expected_validator_reward =
-                self.validate_stakers(reward_bank, payout_bank, &leader, validator_reward);
-
-            let (initial_validator_lamports, final_validator_lamports) =
-                self.get_initial_and_final_lamports(reward_bank, payout_bank, &leader);
-            assert_eq!(
-                expected_validator_reward,
-                final_validator_lamports
-                    + VAT_TO_BURN_PER_EPOCH * (payout_bank.epoch() - reward_bank.epoch())
-                    - initial_validator_lamports
+            self.validate_vote_account_payout(
+                reward_bank,
+                payout_bank,
+                &leader,
+                validator_reward + leader_reward + add_leader_reward,
             );
         }
 
@@ -1384,11 +1393,17 @@ mod tests {
             .collect::<Vec<_>>();
 
         let mut looping_bank = bank;
-        for _ in 0..num_reward_slots {
-            let reward_cert = ValidatedRewardCert::new_for_tests(
-                looping_bank.slot() - 100,
-                validators_to_reward.clone(),
+        let first_reward_slot = looping_bank.slot() - NUM_SLOTS_FOR_REWARD;
+        for reward_slot in first_reward_slot..first_reward_slot + num_reward_slots {
+            assert_eq!(
+                looping_bank.slot(),
+                reward_slot.saturating_add(NUM_SLOTS_FOR_REWARD),
+                "bank_slot={} must be exactly {NUM_SLOTS_FOR_REWARD} slots after \
+                 reward_slot={reward_slot}",
+                looping_bank.slot()
             );
+            let reward_cert =
+                ValidatedRewardCert::new_for_tests(reward_slot, validators_to_reward.clone());
             calc_vote_rewards_update_vote_states(
                 &looping_bank,
                 Some(reward_cert),
@@ -1448,5 +1463,166 @@ mod tests {
         let final_bank =
             test_vote_reward_payout_impl(&state.validators, initial_bank.clone(), num_reward_slots);
         state.validate_rewards(&initial_bank, &final_bank, num_reward_slots);
+    }
+
+    #[test]
+    fn test_per_pays_rewards_for_reward_slots_across_epoch_boundary() {
+        let num_validators = 2;
+        let num_add_stakers = 1;
+        let commission_bps = 1_000;
+        let (state, initial_bank) =
+            State::new(num_validators, num_add_stakers, true, commission_bps);
+
+        // Choose a consecutive reward-slot range that is long enough for both
+        // the reward slots and their delayed processing slots to cross the
+        // epoch boundary.
+        let credit_epoch = initial_bank.epoch();
+        let last_credit_slot = initial_bank
+            .epoch_schedule
+            .get_last_slot_in_epoch(credit_epoch);
+        let first_credit_slot_next_epoch = initial_bank
+            .epoch_schedule
+            .get_first_slot_in_epoch(credit_epoch + 1);
+        let first_crediting_slot = last_credit_slot - 1;
+        let first_reward_slot = first_crediting_slot - NUM_SLOTS_FOR_REWARD;
+        let num_reward_slots = NUM_SLOTS_FOR_REWARD + 4;
+        let reward_slots =
+            (first_reward_slot..first_reward_slot + num_reward_slots).collect::<Vec<_>>();
+
+        let reward_slot_epochs = reward_slots
+            .iter()
+            .map(|&slot| initial_bank.epoch_schedule.get_epoch(slot))
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            reward_slot_epochs,
+            HashSet::from([credit_epoch, credit_epoch + 1])
+        );
+
+        let crediting_slots = reward_slots
+            .iter()
+            .map(|slot| slot.saturating_add(NUM_SLOTS_FOR_REWARD))
+            .collect::<Vec<_>>();
+        assert_eq!(crediting_slots[0], first_crediting_slot);
+        assert_eq!(
+            *crediting_slots
+                .iter()
+                .find(|&&slot| slot == first_credit_slot_next_epoch)
+                .unwrap(),
+            first_credit_slot_next_epoch
+        );
+        let crediting_slot_epochs = crediting_slots
+            .iter()
+            .map(|&slot| initial_bank.epoch_schedule.get_epoch(slot))
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            crediting_slot_epochs,
+            HashSet::from([credit_epoch, credit_epoch + 1])
+        );
+
+        // Start at the exact bank slot that should process the first reward
+        // slot. The helper advances by one slot after each certificate, so
+        // every reward slot below is processed at `reward_slot + delay`.
+        let crediting_slot = reward_slots[0].saturating_add(NUM_SLOTS_FOR_REWARD);
+        let crediting_bank = new_bank_from_parent(initial_bank, crediting_slot);
+        let pre_credit_bank = crediting_bank.clone();
+
+        // Credit vote state through the reward-certificate path.  Crossing the
+        // boundary here lets PER pay the first credit bucket while later
+        // certificates continue writing the next bucket.
+        let rewarded_bank = reward_validators(crediting_bank, &state.validators, num_reward_slots);
+        assert_eq!(rewarded_bank.epoch(), credit_epoch + 1);
+
+        // Reward amounts come from the reward slot's epoch/stake view, while
+        // vote-state credits are bucketed by the delayed processing epoch. PER
+        // then redeems each bucket through the normal stake reward path.
+        let mut expected_vote_rewards = state
+            .validators
+            .iter()
+            .map(|validator| (validator.vote_keypair.pubkey(), HashMap::new()))
+            .collect::<HashMap<_, HashMap<Epoch, u64>>>();
+        let leader_vote_pubkey = rewarded_bank.leader().vote_address;
+        for &reward_slot in &reward_slots {
+            let reward_epoch = rewarded_bank.epoch_schedule.get_epoch(reward_slot);
+            let processing_epoch = rewarded_bank
+                .epoch_schedule
+                .get_epoch(reward_slot.saturating_add(NUM_SLOTS_FOR_REWARD));
+            let epoch_state = EpochInflationAccountState::new_from_bank(&rewarded_bank)
+                .unwrap()
+                .get_epoch_state(reward_epoch)
+                .unwrap();
+            let epoch_stakes = rewarded_bank.epoch_stakes_from_slot(reward_slot).unwrap();
+            let total_stake = epoch_stakes.total_stake();
+            let reward_slot_vote_accounts = epoch_stakes.stakes().vote_accounts().as_ref();
+
+            for validator in &state.validators {
+                let vote_pubkey = validator.vote_keypair.pubkey();
+                let (reward_slot_validator_stake, _) =
+                    reward_slot_vote_accounts.get(&vote_pubkey).unwrap();
+                let (validator_reward, leader_reward) =
+                    calculate_reward(&epoch_state, total_stake, *reward_slot_validator_stake);
+                *expected_vote_rewards
+                    .get_mut(&vote_pubkey)
+                    .unwrap()
+                    .entry(processing_epoch)
+                    .or_default() += validator_reward;
+                *expected_vote_rewards
+                    .get_mut(&leader_vote_pubkey)
+                    .unwrap()
+                    .entry(processing_epoch)
+                    .or_default() += leader_reward;
+            }
+        }
+        let expected_credit_epochs = expected_vote_rewards
+            .values()
+            .flat_map(|rewards| rewards.keys().copied())
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            expected_credit_epochs,
+            HashSet::from([credit_epoch, credit_epoch + 1])
+        );
+
+        for (vote_pubkey, expected_rewards) in &expected_vote_rewards {
+            let vote_state = vote_state_from_bank(&rewarded_bank, vote_pubkey);
+            let mut actual_rewards = HashMap::new();
+            for &(epoch, final_credits, initial_credits) in vote_state.epoch_credits() {
+                let credits = final_credits - initial_credits;
+                if credits != 0 {
+                    *actual_rewards.entry(epoch).or_default() += credits;
+                }
+            }
+            assert_eq!(&actual_rewards, expected_rewards);
+        }
+
+        // The first credit bucket was written before the boundary and is paid
+        // while the helper continues processing the post-boundary certificates.
+        for (vote_pubkey, rewards) in &expected_vote_rewards {
+            state.validate_vote_account_payout(
+                &pre_credit_bank,
+                &rewarded_bank,
+                vote_pubkey,
+                rewards.get(&credit_epoch).copied().unwrap_or_default(),
+            );
+        }
+
+        // Move to the next epoch so PER redeems the credited vote-state
+        // rewards, then verify the actual stake/vote account balances.
+        let payout_epoch_slot = rewarded_bank
+            .epoch_schedule
+            .get_first_slot_in_epoch(rewarded_bank.epoch() + 1);
+        let payout_bank = new_bank_from_parent(rewarded_bank.clone(), payout_epoch_slot);
+        let final_bank = progress_bank_for_payout(payout_bank);
+        assert_eq!(final_bank.epoch(), credit_epoch + 2);
+
+        for (vote_pubkey, rewards) in &expected_vote_rewards {
+            state.validate_vote_account_payout(
+                &rewarded_bank,
+                &final_bank,
+                vote_pubkey,
+                rewards
+                    .get(&(credit_epoch + 1))
+                    .copied()
+                    .unwrap_or_default(),
+            );
+        }
     }
 }
