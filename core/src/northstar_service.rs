@@ -645,7 +645,24 @@ impl NorthStarService {
                         // one-slot Portal transitions such as deposits or delegations.
                         let l1_events = manager.get_l1_events(&bank);
 
+                        let has_session_opened = l1_events
+                            .iter()
+                            .any(|event| matches!(event, L1Event::SessionOpened { .. }));
                         let mut reanchored_this_bank = false;
+                        // Sonic: Startup replay can pass the session-opening slot before this
+                        // service starts receiving notifications. Recover from inherited L1 state
+                        // before applying later deposits or delegations from the same bank.
+                        if !manager.has_active_runtime()
+                            && !has_session_opened
+                            && manager.resume_active_session_from_l1(bank.clone())
+                        {
+                            info!(
+                                "NorthStar resumed active Portal session from L1 at slot {}",
+                                bank.slot()
+                            );
+                            reanchored_this_bank = true;
+                        }
+
                         for event in l1_events {
                             match event {
                                 L1Event::SessionOpened {
@@ -1588,6 +1605,106 @@ mod tests {
 
         exit.store(true, Ordering::Relaxed);
         service.join().expect("service should join");
+    }
+
+    #[test]
+    fn test_service_resumes_active_session_when_open_notification_was_missed() {
+        agave_logger::setup();
+
+        let (root_bank, bank_forks, program_id, mint_keypair) = setup_bank_with_portal();
+        let owner = Keypair::new();
+        root_bank
+            .transfer(100_000_000_000, &mint_keypair, &owner.pubkey())
+            .unwrap();
+        root_bank.freeze();
+
+        let cluster_info = create_test_cluster_info();
+        let (sender, receiver) = unbounded();
+        let exit = Arc::new(AtomicBool::new(false));
+        let config = NorthStarServiceConfig {
+            listen_addr: find_free_addr(),
+            ws_addr: find_free_addr(),
+            tpu_addr: find_free_addr(),
+            slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
+            er_history_max_retained_slots: solana_rpc::er_history::DEFAULT_MAX_RETAINED_SLOTS,
+            settlement_sender: None,
+            settlement_forward_sender: None,
+        };
+
+        let service = NorthStarService::new(
+            bank_forks,
+            receiver,
+            northstar::ManagerConfig {
+                portal_program_id: program_id,
+                manager_account: Arc::new(owner.insecure_clone()),
+                checkpoint_plan_dir: None,
+            },
+            cluster_info,
+            config.clone(),
+            exit.clone(),
+        );
+
+        let grid_id = 1u64;
+        let (session_pda, _) = find_session_pda(&program_id);
+        let (fee_vault_pda, _) = find_fee_vault_pda(&program_id);
+        let open_slot = root_bank.slot() + 1;
+        let open_bank = Arc::new(Bank::new_from_parent(
+            root_bank,
+            SlotLeader::new_unique(),
+            open_slot,
+        ));
+        let open_tx = Transaction::new_signed_with_payer(
+            &[build_open_session_ix(
+                program_id,
+                owner.pubkey(),
+                session_pda,
+                fee_vault_pda,
+                grid_id,
+                100,
+                1_000_000,
+            )],
+            Some(&owner.pubkey()),
+            &[&owner],
+            open_bank.last_blockhash(),
+        );
+        open_bank.process_transaction(&open_tx).unwrap();
+        open_bank.freeze();
+
+        let later_bank = Arc::new(Bank::new_from_parent(
+            open_bank,
+            SlotLeader::new_unique(),
+            open_slot + 1,
+        ));
+        later_bank.freeze();
+        sender
+            .send((BankNotification::Frozen(later_bank), None))
+            .unwrap();
+
+        let rpc = RpcClient::new(format!("http://{}", config.listen_addr));
+        let mut session_from_rpc = None;
+        for _ in 0..20 {
+            std::thread::sleep(Duration::from_millis(200));
+            session_from_rpc = rpc
+                .send(
+                    RpcRequest::Custom {
+                        method: "getSessionPda",
+                    },
+                    serde_json::Value::Null,
+                )
+                .unwrap_or(None);
+            if session_from_rpc.is_some() {
+                break;
+            }
+        }
+
+        exit.store(true, Ordering::Relaxed);
+        service.join().expect("service should join");
+        assert_eq!(
+            session_from_rpc,
+            Some(session_pda.to_string()),
+            "service should recover an inherited active session even when its opening bank was \
+             missed"
+        );
     }
 
     #[test]
