@@ -1184,6 +1184,8 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             .map_err(|(index, err)| TransactionError::InstructionError(index, err));
         process_message_time.stop();
 
+        // Sonic: carry optional SBPF witness data into conformance output.
+        let vm_traces = invoke_context.take_vm_traces();
         drop(invoke_context);
 
         execute_timings.execute_accessories.process_message_us += process_message_time.as_us();
@@ -1294,6 +1296,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                 return_data,
                 executed_units,
                 accounts_deltas,
+                vm_traces,
             },
             loaded_transaction,
             programs_modified_by_tx: program_cache_for_tx_batch.drain_modified_entries(),

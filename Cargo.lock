@@ -10346,6 +10346,7 @@ dependencies = [
  "solana-sdk-ids",
  "solana-secp256k1-program",
  "solana-secp256r1-program",
+ "solana-sha256-hasher",
  "solana-signer",
  "solana-slot-hashes",
  "solana-stable-layout",
