@@ -12,6 +12,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # PR caches are merge-ref scoped; only reusable default-branch caches should consume quota.
+  SAVE_CI_CACHE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
 jobs:
   fmt:
@@ -37,6 +39,8 @@ jobs:
           rm -rf ~/.cargo/registry/src/**/.cargo-lock*
       - run: rustup component add clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ env.SAVE_CI_CACHE }}
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -56,6 +60,8 @@ jobs:
           rm -rf target
           rm -rf ~/.cargo/registry/src/**/.cargo-lock*
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ env.SAVE_CI_CACHE }}
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -70,8 +76,9 @@ jobs:
           cargo build-sbf --version
           version=$(cargo build-sbf --version | awk '/platform-tools/{print $2}')
           echo "platform_tools_version=$version" >> "$GITHUB_OUTPUT"
-      - name: Cache Solana platform tools
-        uses: actions/cache@v4
+      - name: Restore Solana platform tools
+        id: solana_platform_tools_cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cache/solana
@@ -83,6 +90,14 @@ jobs:
         run: cargo build-sbf --manifest-path northstar/programs/portal/Cargo.toml
       - name: Build Token Bridge SBF program
         run: cargo build-sbf --manifest-path northstar/programs/token-bridge/Cargo.toml
+      - name: Save Solana platform tools
+        if: env.SAVE_CI_CACHE == 'true' && steps.solana_platform_tools_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cache/solana
+            ~/.local/share/solana/install/active_release/bin/platform-tools-sdk/sbf/dependencies/platform-tools
+          key: ${{ runner.os }}-solana-platform-tools-v3-${{ steps.solana_tools.outputs.platform_tools_version }}-${{ hashFiles('Cargo.lock') }}
       - name: Build test validator
         run: cargo build --bin solana-test-validator
       - name: Test devnet SPL smoke state format
