@@ -94,6 +94,34 @@ pub enum BankTxnProcessingResult {
     },
 }
 
+// Sonic: opt-in real-Bank execution path for deterministic proof traces.
+#[allow(clippy::too_many_arguments)]
+#[cfg(feature = "conformance")]
+pub fn execute_txn_with_trace(
+    accounts: &[(Pubkey, AccountSharedData)],
+    feature_set: FeatureSet,
+    blockhash_queue: BlockhashQueue,
+    fee_rate_governor: FeeRateGovernor,
+    total_epoch_stake: u64,
+    transaction: VersionedTransaction,
+    verify_signatures: bool,
+) -> BankTxnProcessingResult {
+    execute_txn_inner(
+        accounts,
+        feature_set,
+        blockhash_queue,
+        fee_rate_governor,
+        total_epoch_stake,
+        transaction,
+        true,
+        if verify_signatures {
+            TransactionVerificationMode::FullVerification
+        } else {
+            TransactionVerificationMode::HashAndVerifyPrecompiles
+        },
+    )
+}
+
 /// Build a [`Bank`] from the supplied native inputs and execute `transaction`.
 ///
 /// The clock and epoch-schedule sysvars are read out of `accounts` to derive the
@@ -105,6 +133,29 @@ pub fn execute_txn(
     fee_rate_governor: FeeRateGovernor,
     total_epoch_stake: u64,
     transaction: VersionedTransaction,
+) -> BankTxnProcessingResult {
+    execute_txn_inner(
+        accounts,
+        feature_set,
+        blockhash_queue,
+        fee_rate_governor,
+        total_epoch_stake,
+        transaction,
+        false,
+        TransactionVerificationMode::HashAndVerifyPrecompiles,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_txn_inner(
+    accounts: &[(Pubkey, AccountSharedData)],
+    feature_set: FeatureSet,
+    blockhash_queue: BlockhashQueue,
+    fee_rate_governor: FeeRateGovernor,
+    total_epoch_stake: u64,
+    transaction: VersionedTransaction,
+    enable_trace: bool,
+    verification_mode: TransactionVerificationMode,
 ) -> BankTxnProcessingResult {
     const TICKS_PER_SLOT: u64 = 64;
 
@@ -162,18 +213,23 @@ pub fn execute_txn(
     // The bank must be wrapped in `BankForks` so the program cache has a fork graph;
     // `_bank_forks` is kept alive for the duration of execution.
     let bank = Bank::new_for_txn_tests(bank_rc, bank_fields, feature_set, epoch_stakes);
+    #[cfg(feature = "conformance")]
+    let mut bank = bank;
+    #[cfg(feature = "conformance")]
+    if enable_trace {
+        bank.enable_transaction_tracing();
+    }
+    #[cfg(not(feature = "conformance"))]
+    debug_assert!(!enable_trace);
     let (bank, _bank_forks) = bank.wrap_with_bank_forks_for_tests();
 
-    let runtime_transaction = match bank.verify_transaction(
-        transaction,
-        TransactionVerificationMode::HashAndVerifyPrecompiles,
-    ) {
+    let runtime_transaction = match bank.verify_transaction(transaction, verification_mode) {
         Ok(tx) => tx,
         Err(err) => return BankTxnProcessingResult::FailedVerification(err),
     };
 
     let recording_config = ExecutionRecordingConfig {
-        enable_cpi_recording: false,
+        enable_cpi_recording: enable_trace,
         enable_log_recording: true,
         enable_return_data_recording: true,
         enable_transaction_balance_recording: false,
@@ -585,6 +641,25 @@ pub unsafe extern "C" fn sol_compat_txn_execute_v1(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "conformance")]
+    use {
+        super::execute_txn_with_trace,
+        crate::conformance::trace::{build_transaction_trace_v1, fixture_trace_header_v1},
+        northstar_zk_types::trace::{
+            AccountPhaseV1, InstructionBoundaryV1, ProcessorStageV1, StageOutcomeV1, TraceEventV1,
+            TransactionOutcomeV1, TransactionTraceV1,
+        },
+        solana_instruction::error::InstructionError,
+        solana_program_option::COption,
+        solana_program_pack::Pack,
+        solana_system_interface::instruction::transfer,
+        solana_transaction_error::TransactionError,
+        spl_token_2022_interface::{
+            instruction::transfer_checked,
+            state::{Account as TokenAccount, AccountState, Mint},
+        },
+        std::collections::HashSet,
+    };
     use {
         super::{BankTxnProcessingResult, execute_txn},
         agave_feature_set::{FeatureSet, disable_sbpf_v0_execution, set_exempt_rent_epoch_max},
@@ -604,6 +679,7 @@ mod tests {
         },
         solana_pubkey::Pubkey,
         solana_sdk_ids::{bpf_loader_upgradeable, native_loader, sysvar},
+        solana_sha256_hasher::hash,
         solana_signature::Signature,
         solana_slot_hashes::SlotHashes,
         solana_svm::transaction_processing_result::{
@@ -612,8 +688,6 @@ mod tests {
         solana_transaction::versioned::VersionedTransaction,
         std::{borrow::Cow, env, fs, sync::Arc},
     };
-    #[cfg(feature = "conformance")]
-    use {solana_instruction::error::InstructionError, std::collections::HashSet};
 
     /// All features enabled except `disable_sbpf_v0_execution`, so the v0
     /// `complex-transfer` program loads. `set_exempt_rent_epoch_max` is forced on
@@ -642,8 +716,8 @@ mod tests {
     /// most-recent blockhash to use as the message's `recent_blockhash`.
     fn blockhash_queue() -> (BlockhashQueue, Hash) {
         let mut queue = BlockhashQueue::default();
-        queue.register_hash(&Hash::new_unique(), 5000);
-        let recent = Hash::new_unique();
+        queue.register_hash(&Hash::new_from_array([240; 32]), 5000);
+        let recent = Hash::new_from_array([241; 32]);
         queue.register_hash(&recent, 5000);
         (queue, recent)
     }
@@ -730,21 +804,41 @@ mod tests {
         fs::read(&dir).expect("program file not found")
     }
 
+    #[cfg(feature = "conformance")]
+    fn load_token_2022_program() -> Vec<u8> {
+        let mut path = env::current_dir().unwrap();
+        path.push("..");
+        path.push("program-binaries");
+        path.push("src");
+        path.push("programs");
+        path.push("spl_token_2022-10.0.0.so");
+        fs::read(path).expect("Token-2022 program file not found")
+    }
+
     /// Build the program + programdata accounts for an upgradeable BPF program.
     fn deploy_program(name: &str) -> [(Pubkey, AccountSharedData); 2] {
-        let program_account = Pubkey::new_unique();
-        let program_data_account = Pubkey::new_unique();
+        let mut program_seed = b"northstar-conformance-program:".to_vec();
+        program_seed.extend_from_slice(name.as_bytes());
+        let program_id = Pubkey::new_from_array(hash(&program_seed).to_bytes());
+        deploy_program_bytes(program_id, load_program(name))
+    }
 
-        let state = UpgradeableLoaderState::Program {
-            programdata_address: program_data_account,
-        };
+    fn deploy_program_bytes(
+        program_id: Pubkey,
+        mut buffer: Vec<u8>,
+    ) -> [(Pubkey, AccountSharedData); 2] {
+        let mut program_data_seed = b"northstar-conformance-programdata:".to_vec();
+        program_data_seed.extend_from_slice(program_id.as_ref());
+        let program_data_id = Pubkey::new_from_array(hash(&program_data_seed).to_bytes());
         let program = account(
             25,
-            bincode::serialize(&state).unwrap(),
+            bincode::serialize(&UpgradeableLoaderState::Program {
+                programdata_address: program_data_id,
+            })
+            .unwrap(),
             bpf_loader_upgradeable::id(),
             true,
         );
-
         let state = UpgradeableLoaderState::ProgramData {
             slot: 0,
             upgrade_authority_address: None,
@@ -755,15 +849,10 @@ mod tests {
             UpgradeableLoaderState::size_of_programdata_metadata()
                 .saturating_sub(header.len())
         ];
-        let mut buffer = load_program(name);
         header.append(&mut complement);
         header.append(&mut buffer);
         let program_data = account(25, header, bpf_loader_upgradeable::id(), false);
-
-        [
-            (program_account, program),
-            (program_data_account, program_data),
-        ]
+        [(program_id, program), (program_data_id, program_data)]
     }
 
     /// Lamports of the writable account `pubkey` after execution, if the
@@ -812,6 +901,28 @@ mod tests {
                 panic!("transaction failed verification: {err:?}")
             }
         }
+    }
+
+    #[cfg(feature = "conformance")]
+    fn traced_execution(
+        accounts: &[(Pubkey, AccountSharedData)],
+        blockhash_queue: BlockhashQueue,
+        transaction: VersionedTransaction,
+        verify_signatures: bool,
+    ) -> (BankTxnProcessingResult, TransactionTraceV1) {
+        let transaction_bytes = bincode::serialize(&transaction).unwrap();
+        let execution = execute_txn_with_trace(
+            accounts,
+            feature_set(),
+            blockhash_queue,
+            fee_rate_governor(),
+            0,
+            transaction,
+            verify_signatures,
+        );
+        let header = fixture_trace_header_v1(&transaction_bytes, b"all-features-v1");
+        let trace = build_transaction_trace_v1(header, accounts, &execution);
+        (execution, trace)
     }
 
     #[cfg(feature = "conformance")]
@@ -961,9 +1072,9 @@ mod tests {
     fn test_simple_transfer() {
         let [(program_id, program), (program_data_id, program_data)] =
             deploy_program("simple-transfer");
-        let fee_payer = Pubkey::new_unique();
-        let sender = Pubkey::new_unique();
-        let recipient = Pubkey::new_unique();
+        let fee_payer = Pubkey::new_from_array([21; 32]);
+        let sender = Pubkey::new_from_array([22; 32]);
+        let recipient = Pubkey::new_from_array([23; 32]);
         let (blockhash_queue, recent_blockhash) = blockhash_queue();
 
         let message = VersionedMessage::V0(v0::Message {
@@ -999,6 +1110,142 @@ mod tests {
             slot_hashes_sysvar_account(),
         ];
 
+        #[cfg(feature = "conformance")]
+        let execution = {
+            let transaction_bytes = bincode::serialize(&transaction).unwrap();
+            let first = execute_txn_with_trace(
+                &accounts,
+                feature_set(),
+                blockhash_queue.clone(),
+                fee_rate_governor(),
+                0,
+                transaction.clone(),
+                false,
+            );
+            let second = execute_txn_with_trace(
+                &accounts,
+                feature_set(),
+                blockhash_queue.clone(),
+                fee_rate_governor(),
+                0,
+                transaction.clone(),
+                false,
+            );
+            let header = fixture_trace_header_v1(&transaction_bytes, b"all-features-v1");
+            let first_trace = build_transaction_trace_v1(header.clone(), &accounts, &first);
+            let second_trace = build_transaction_trace_v1(header, &accounts, &second);
+            let first_bytes = first_trace.canonical_bytes().unwrap();
+            let second_bytes = second_trace.canonical_bytes().unwrap();
+            assert_eq!(first_bytes, second_bytes);
+            assert_eq!(hash(&first_bytes), hash(&second_bytes));
+            assert_eq!(first_bytes.len(), 180_302);
+            assert_eq!(
+                hash(&first_bytes).to_bytes(),
+                [
+                    206, 36, 189, 166, 16, 199, 162, 43, 196, 85, 71, 28, 114, 220, 183, 69, 133,
+                    151, 96, 153, 149, 8, 110, 164, 207, 133, 216, 138, 42, 13, 83, 44,
+                ]
+            );
+            assert!(first_trace.events.iter().any(|event| matches!(
+                event,
+                TraceEventV1::VmInvocation { rows, memory, .. }
+                    if !rows.is_empty() && memory.len() == 3
+            )));
+            assert!(
+                first_trace
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, TraceEventV1::Syscall { .. }))
+            );
+            assert!(first_trace.events.iter().any(|event| matches!(
+                event,
+                TraceEventV1::InstructionBoundary {
+                    boundary: InstructionBoundaryV1::Enter,
+                    parent_invocation_id: Some(_),
+                    ..
+                }
+            )));
+            assert!(first_trace.events.iter().any(|event| matches!(
+                event,
+                TraceEventV1::AccountState {
+                    phase: AccountPhaseV1::Post,
+                    ..
+                }
+            )));
+            assert!(first_trace.events.iter().any(|event| matches!(
+                event,
+                TraceEventV1::TransactionOutcome {
+                    outcome: TransactionOutcomeV1::ExecutedSuccess,
+                    transaction_fee: 10_000,
+                    ..
+                }
+            )));
+            let summary = first_trace.summary().unwrap();
+            let BankTxnProcessingResult::Processed {
+                result: Ok(ProcessedTransaction::Executed(first_transaction)),
+                ..
+            } = &first
+            else {
+                panic!("traced execution failed")
+            };
+            assert_eq!(
+                summary.executed_units,
+                first_transaction.execution_details.executed_units
+            );
+            assert_eq!(
+                summary.loaded_accounts_data_size,
+                u64::from(
+                    first_transaction
+                        .loaded_transaction
+                        .loaded_accounts_data_size
+                )
+            );
+            assert_eq!(
+                summary.transaction_fee,
+                first_transaction
+                    .loaded_transaction
+                    .fee_details
+                    .transaction_fee()
+            );
+            assert_eq!(
+                summary.prioritization_fee,
+                first_transaction
+                    .loaded_transaction
+                    .fee_details
+                    .prioritization_fee()
+            );
+            for effect in &summary.post_accounts {
+                let (expected_address, expected_account) = &first_transaction
+                    .loaded_transaction
+                    .accounts[effect.transaction_index as usize];
+                assert_eq!(effect.account.address, expected_address.to_bytes());
+                assert_eq!(effect.account.lamports, expected_account.lamports());
+                assert_eq!(effect.account.owner, expected_account.owner().to_bytes());
+                assert_eq!(effect.account.data, expected_account.data());
+            }
+            let untraced = execute_txn(
+                &accounts,
+                feature_set(),
+                blockhash_queue,
+                fee_rate_governor(),
+                0,
+                transaction,
+            );
+            let BankTxnProcessingResult::Processed {
+                result: Ok(ProcessedTransaction::Executed(untraced_transaction)),
+                ..
+            } = &untraced
+            else {
+                panic!("untraced execution failed")
+            };
+            assert!(untraced_transaction.execution_details.vm_traces.is_empty());
+            assert_eq!(
+                writable_account_lamports(&untraced, &sender),
+                writable_account_lamports(&first, &sender)
+            );
+            first
+        };
+        #[cfg(not(feature = "conformance"))]
         let execution = execute_txn(
             &accounts,
             feature_set(),
@@ -1013,6 +1260,417 @@ mod tests {
         assert_eq!(
             writable_account_lamports(&execution, &recipient),
             Some(900010)
+        );
+    }
+
+    #[cfg(feature = "conformance")]
+    #[test]
+    fn trace_rejects_bad_signature_before_execution() {
+        let payer = Pubkey::new_unique();
+        let (queue, recent_blockhash) = blockhash_queue();
+        let transaction = VersionedTransaction {
+            signatures: vec![Signature::default()],
+            message: VersionedMessage::Legacy(legacy::Message {
+                header: MessageHeader {
+                    num_required_signatures: 1,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 0,
+                },
+                account_keys: vec![payer],
+                recent_blockhash,
+                instructions: vec![],
+            }),
+        };
+        let accounts = vec![
+            (payer, empty_account(1_000_000)),
+            clock_sysvar_account(),
+            epoch_schedule_sysvar_account(),
+            rent_sysvar_account(),
+        ];
+        let (execution, trace) = traced_execution(&accounts, queue, transaction, true);
+        assert!(matches!(
+            execution,
+            BankTxnProcessingResult::FailedVerification(TransactionError::SignatureFailure)
+        ));
+        assert!(trace.events.iter().any(|event| matches!(
+            event,
+            TraceEventV1::ProcessorStage {
+                stage: ProcessorStageV1::SignatureVerification,
+                outcome: StageOutcomeV1::Failure,
+                ..
+            }
+        )));
+        assert!(
+            !trace
+                .events
+                .iter()
+                .any(|event| matches!(event, TraceEventV1::VmInvocation { .. }))
+        );
+    }
+
+    #[cfg(feature = "conformance")]
+    #[test]
+    fn trace_records_stale_blockhash_as_bank_check_failure() {
+        let payer = Pubkey::new_unique();
+        let (queue, _) = blockhash_queue();
+        let transaction = VersionedTransaction {
+            signatures: vec![Signature::default()],
+            message: VersionedMessage::Legacy(legacy::Message {
+                header: MessageHeader {
+                    num_required_signatures: 1,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 0,
+                },
+                account_keys: vec![payer],
+                recent_blockhash: Hash::new_unique(),
+                instructions: vec![],
+            }),
+        };
+        let accounts = vec![
+            (payer, empty_account(1_000_000)),
+            clock_sysvar_account(),
+            epoch_schedule_sysvar_account(),
+            rent_sysvar_account(),
+        ];
+        let (execution, trace) = traced_execution(&accounts, queue, transaction, false);
+        assert!(matches!(
+            execution,
+            BankTxnProcessingResult::Processed {
+                result: Err(TransactionError::BlockhashNotFound),
+                ..
+            }
+        ));
+        assert!(trace.events.iter().any(|event| matches!(
+            event,
+            TraceEventV1::ProcessorStage {
+                stage: ProcessorStageV1::BankChecks,
+                outcome: StageOutcomeV1::Failure,
+                ..
+            }
+        )));
+    }
+
+    #[cfg(feature = "conformance")]
+    #[test]
+    fn trace_records_failed_sbf_and_rollback() {
+        let [(program_id, program), (program_data_id, program_data)] =
+            deploy_program("simple-transfer");
+        let fee_payer = Pubkey::new_unique();
+        let sender = Pubkey::new_unique();
+        let recipient = Pubkey::new_unique();
+        let (queue, recent_blockhash) = blockhash_queue();
+        let transaction = VersionedTransaction {
+            signatures: vec![Signature::default(), Signature::default()],
+            message: VersionedMessage::V0(v0::Message {
+                header: MessageHeader {
+                    num_required_signatures: 2,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 1,
+                },
+                account_keys: vec![fee_payer, sender, recipient, program_id, Pubkey::default()],
+                recent_blockhash,
+                instructions: vec![CompiledInstruction {
+                    program_id_index: 3,
+                    accounts: vec![1, 2, 4],
+                    data: 1_000_000u64.to_be_bytes().to_vec(),
+                }],
+                address_table_lookups: vec![],
+            }),
+        };
+        let accounts = vec![
+            (fee_payer, empty_account(10_000_000)),
+            (recipient, empty_account(900_000)),
+            (sender, empty_account(900_000)),
+            (program_id, program),
+            (program_data_id, program_data),
+            system_program_account(),
+            clock_sysvar_account(),
+            epoch_schedule_sysvar_account(),
+            rent_sysvar_account(),
+            slot_hashes_sysvar_account(),
+        ];
+        let (execution, trace) = traced_execution(&accounts, queue, transaction, false);
+        assert!(matches!(
+            execution,
+            BankTxnProcessingResult::Processed {
+                result: Ok(ProcessedTransaction::Executed(ref transaction)),
+                ..
+            } if transaction.execution_details.status.is_err()
+        ));
+        assert!(trace.events.iter().any(
+            |event| matches!(event, TraceEventV1::VmInvocation { rows, .. } if !rows.is_empty())
+        ));
+        assert!(trace.events.iter().any(|event| matches!(
+            event,
+            TraceEventV1::AccountState {
+                phase: AccountPhaseV1::Rollback,
+                ..
+            }
+        )));
+        assert!(trace.events.iter().any(|event| matches!(
+            event,
+            TraceEventV1::TransactionOutcome {
+                outcome: TransactionOutcomeV1::ExecutedFailure,
+                ..
+            }
+        )));
+    }
+
+    #[cfg(feature = "conformance")]
+    #[test]
+    fn trace_records_native_system_execution_without_vm_rows() {
+        let payer = Pubkey::new_unique();
+        let recipient = Pubkey::new_unique();
+        let (queue, recent_blockhash) = blockhash_queue();
+        let message = legacy::Message::new_with_blockhash(
+            &[transfer(&payer, &recipient, 10)],
+            Some(&payer),
+            &recent_blockhash,
+        );
+        let transaction = VersionedTransaction {
+            signatures: vec![Signature::default()],
+            message: VersionedMessage::Legacy(message),
+        };
+        let accounts = vec![
+            (payer, empty_account(1_000_000)),
+            (recipient, empty_account(1)),
+            system_program_account(),
+            clock_sysvar_account(),
+            epoch_schedule_sysvar_account(),
+            rent_sysvar_account(),
+        ];
+        let (execution, trace) = traced_execution(&accounts, queue, transaction, false);
+        assert_executed_ok(&execution);
+        assert!(
+            !trace
+                .events
+                .iter()
+                .any(|event| matches!(event, TraceEventV1::VmInvocation { .. }))
+        );
+        assert!(trace.events.iter().any(|event| matches!(
+            event,
+            TraceEventV1::TransactionOutcome {
+                outcome: TransactionOutcomeV1::ExecutedSuccess,
+                ..
+            }
+        )));
+    }
+
+    #[cfg(feature = "conformance")]
+    #[test]
+    fn trace_records_noop_fee_payer_failure() {
+        let missing_payer = Pubkey::new_unique();
+        let (queue, recent_blockhash) = blockhash_queue();
+        let transaction = VersionedTransaction {
+            signatures: vec![Signature::default()],
+            message: VersionedMessage::Legacy(legacy::Message {
+                header: MessageHeader {
+                    num_required_signatures: 1,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 0,
+                },
+                account_keys: vec![missing_payer],
+                recent_blockhash,
+                instructions: vec![],
+            }),
+        };
+        let accounts = vec![
+            clock_sysvar_account(),
+            epoch_schedule_sysvar_account(),
+            rent_sysvar_account(),
+        ];
+        let (execution, trace) = traced_execution(&accounts, queue, transaction, false);
+        assert!(matches!(
+            execution,
+            BankTxnProcessingResult::Processed {
+                result: Ok(ProcessedTransaction::NoOp(_)),
+                ..
+            }
+        ));
+        assert!(trace.events.iter().any(|event| matches!(
+            event,
+            TraceEventV1::TransactionOutcome {
+                outcome: TransactionOutcomeV1::NoOp,
+                ..
+            }
+        )));
+    }
+
+    #[cfg(feature = "conformance")]
+    #[test]
+    fn trace_records_fees_only_program_load_failure() {
+        let payer = Pubkey::new_unique();
+        let missing_program = Pubkey::new_unique();
+        let (queue, recent_blockhash) = blockhash_queue();
+        let transaction = VersionedTransaction {
+            signatures: vec![Signature::default()],
+            message: VersionedMessage::Legacy(legacy::Message {
+                header: MessageHeader {
+                    num_required_signatures: 1,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 1,
+                },
+                account_keys: vec![payer, missing_program],
+                recent_blockhash,
+                instructions: vec![CompiledInstruction {
+                    program_id_index: 1,
+                    accounts: vec![],
+                    data: vec![],
+                }],
+            }),
+        };
+        let accounts = vec![
+            (payer, empty_account(1_000_000)),
+            clock_sysvar_account(),
+            epoch_schedule_sysvar_account(),
+            rent_sysvar_account(),
+        ];
+        let (execution, trace) = traced_execution(&accounts, queue, transaction, false);
+        assert!(matches!(
+            execution,
+            BankTxnProcessingResult::Processed {
+                result: Ok(ProcessedTransaction::FeesOnly(_)),
+                ..
+            }
+        ));
+        assert!(trace.events.iter().any(|event| matches!(
+            event,
+            TraceEventV1::TransactionOutcome {
+                outcome: TransactionOutcomeV1::FeesOnly,
+                transaction_fee: 5_000,
+                ..
+            }
+        )));
+        assert!(trace.events.iter().any(|event| matches!(
+            event,
+            TraceEventV1::AccountState {
+                phase: AccountPhaseV1::Rollback,
+                ..
+            }
+        )));
+    }
+
+    #[cfg(feature = "conformance")]
+    #[test]
+    fn trace_records_token_2022_transfer() {
+        let program_id = spl_token_2022_interface::id();
+        let [(program_id, program), (program_data_id, program_data)] =
+            deploy_program_bytes(program_id, load_token_2022_program());
+        let payer = Pubkey::new_from_array([31; 32]);
+        let mint_id = Pubkey::new_from_array([32; 32]);
+        let source_id = Pubkey::new_from_array([33; 32]);
+        let destination_id = Pubkey::new_from_array([34; 32]);
+        let mut mint_data = vec![0; Mint::LEN];
+        Mint::pack(
+            Mint {
+                mint_authority: COption::Some(payer),
+                supply: 100,
+                decimals: 0,
+                is_initialized: true,
+                freeze_authority: COption::None,
+            },
+            &mut mint_data,
+        )
+        .unwrap();
+        let mut source_data = vec![0; TokenAccount::LEN];
+        TokenAccount::pack(
+            TokenAccount {
+                mint: mint_id,
+                owner: payer,
+                amount: 100,
+                delegate: COption::None,
+                state: AccountState::Initialized,
+                is_native: COption::None,
+                delegated_amount: 0,
+                close_authority: COption::None,
+            },
+            &mut source_data,
+        )
+        .unwrap();
+        let mut destination_data = vec![0; TokenAccount::LEN];
+        TokenAccount::pack(
+            TokenAccount {
+                mint: mint_id,
+                owner: payer,
+                amount: 0,
+                delegate: COption::None,
+                state: AccountState::Initialized,
+                is_native: COption::None,
+                delegated_amount: 0,
+                close_authority: COption::None,
+            },
+            &mut destination_data,
+        )
+        .unwrap();
+        let (queue, recent_blockhash) = blockhash_queue();
+        let instruction = transfer_checked(
+            &program_id,
+            &source_id,
+            &mint_id,
+            &destination_id,
+            &payer,
+            &[],
+            10,
+            0,
+        )
+        .unwrap();
+        let transaction = VersionedTransaction {
+            signatures: vec![Signature::default()],
+            message: VersionedMessage::Legacy(legacy::Message::new_with_blockhash(
+                &[instruction],
+                Some(&payer),
+                &recent_blockhash,
+            )),
+        };
+        let accounts = vec![
+            (payer, empty_account(10_000_000)),
+            (mint_id, account(2_000_000, mint_data, program_id, false)),
+            (
+                source_id,
+                account(2_000_000, source_data, program_id, false),
+            ),
+            (
+                destination_id,
+                account(2_000_000, destination_data, program_id, false),
+            ),
+            (program_id, program),
+            (program_data_id, program_data),
+            clock_sysvar_account(),
+            epoch_schedule_sysvar_account(),
+            rent_sysvar_account(),
+            slot_hashes_sysvar_account(),
+        ];
+        let (execution, trace) = traced_execution(&accounts, queue, transaction, false);
+        assert_executed_ok(&execution);
+        let BankTxnProcessingResult::Processed {
+            result: Ok(ProcessedTransaction::Executed(transaction)),
+            ..
+        } = &execution
+        else {
+            unreachable!()
+        };
+        let unpack = |address| {
+            let (_, account) = transaction
+                .loaded_transaction
+                .accounts
+                .iter()
+                .find(|(key, _)| *key == address)
+                .unwrap();
+            TokenAccount::unpack(account.data()).unwrap()
+        };
+        assert_eq!(unpack(source_id).amount, 90);
+        assert_eq!(unpack(destination_id).amount, 10);
+        assert!(trace.events.iter().any(|event| matches!(
+            event,
+            TraceEventV1::VmInvocation {
+                program_id: traced_program_id,
+                rows,
+                ..
+            } if *traced_program_id == program_id.to_bytes() && !rows.is_empty()
+        )));
+        assert_eq!(
+            trace.summary().unwrap().outcome,
+            TransactionOutcomeV1::ExecutedSuccess
         );
     }
 
