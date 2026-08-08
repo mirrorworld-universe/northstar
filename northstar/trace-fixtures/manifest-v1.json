@@ -1,0 +1,57 @@
+{
+  "schema": "northstar-transaction-trace-v1",
+  "proof_kind": 2,
+  "proof_version": 1,
+  "fixtures": [
+    {
+      "name": "sbf-system-cpi-success",
+      "test": "solana_runtime::conformance::txn::tests::test_simple_transfer",
+      "coverage": [
+        "fees",
+        "account-loading",
+        "sbf-registers",
+        "syscall",
+        "cpi",
+        "memory-deltas",
+        "commit"
+      ],
+      "trace_bytes": 180302,
+      "trace_sha256": "ce24bda610c7a22bc455471c72dcb7458597609d95086ea4cf85d88a2a0d532c"
+    },
+    {
+      "name": "sbf-system-cpi-failure",
+      "test": "solana_runtime::conformance::txn::tests::trace_records_failed_sbf_and_rollback",
+      "coverage": ["sbf-error", "syscall", "cpi", "rollback"]
+    },
+    {
+      "name": "invalid-signature",
+      "test": "solana_runtime::conformance::txn::tests::trace_rejects_bad_signature_before_execution",
+      "coverage": ["full-signature-verification", "unprocessable"]
+    },
+    {
+      "name": "stale-blockhash",
+      "test": "solana_runtime::conformance::txn::tests::trace_records_stale_blockhash_as_bank_check_failure",
+      "coverage": ["bank-checks", "blockhash", "unprocessable"]
+    },
+    {
+      "name": "fee-payer-noop",
+      "test": "solana_runtime::conformance::txn::tests::trace_records_noop_fee_payer_failure",
+      "coverage": ["fee-payer", "noop"]
+    },
+    {
+      "name": "program-load-fees-only",
+      "test": "solana_runtime::conformance::txn::tests::trace_records_fees_only_program_load_failure",
+      "coverage": ["fees", "program-loading", "fees-only", "rollback"]
+    },
+    {
+      "name": "system-transfer",
+      "test": "solana_runtime::conformance::txn::tests::trace_records_native_system_execution_without_vm_rows",
+      "coverage": ["builtin", "system-program", "commit"]
+    },
+    {
+      "name": "token-2022-transfer",
+      "test": "solana_runtime::conformance::txn::tests::trace_records_token_2022_transfer",
+      "coverage": ["spl", "token-2022", "sbf-registers", "account-data", "commit"]
+    }
+  ]
+}

@@ -62,6 +62,32 @@ pub type BuiltinFunctionRegisterer =
 pub type Executable = GenericExecutable<InvokeContext<'static, 'static>>;
 pub type RegisterTrace<'a> = &'a [[u64; 12]];
 
+// Sonic: deterministic SBPF witness data captured only by trace-enabled runtime environments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VmTraceRow {
+    pub registers: [u64; 12],
+    pub instruction: [u8; 8],
+    pub syscall_key: Option<u32>,
+}
+
+// Sonic: boundary memory images avoid hooks in the external solana-sbpf crate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VmExecutionTrace {
+    pub instruction_trace_index: usize,
+    pub parent_instruction_trace_index: Option<usize>,
+    pub stack_height: usize,
+    pub program_id: Pubkey,
+    pub program_hash: [u8; 32],
+    pub sbpf_version: u8,
+    pub compute_units_before: u64,
+    pub compute_units_after: u64,
+    pub rows: Vec<VmTraceRow>,
+    pub program_input_before: Vec<u8>,
+    pub program_input_after: Vec<u8>,
+    pub stack_after: Vec<u8>,
+    pub heap_after: Vec<u8>,
+}
+
 /// Adapter so we can unify the interfaces of built-in programs and syscalls
 #[macro_export]
 macro_rules! declare_process_instruction {
@@ -237,8 +263,8 @@ pub struct InvokeContext<'a, 'ix_data> {
     pub total_nested_exec_time: Duration,
     pub timings: ExecuteDetailsTimings,
     pub memory_contexts: MemoryContexts,
-    /// Pairs of index in TX instruction trace and VM register trace
-    register_traces: Vec<(usize, Vec<[u64; 12]>)>,
+    // Sonic: populated only when SBPF register tracing is enabled.
+    vm_traces: Vec<VmExecutionTrace>,
     /// Debug port to use for this executing transaction.
     #[cfg(feature = "sbpf-debugger")]
     pub debug_port: Option<u16>,
@@ -264,7 +290,7 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
             total_nested_exec_time: Duration::ZERO,
             timings: ExecuteDetailsTimings::default(),
             memory_contexts: MemoryContexts::new(),
-            register_traces: Vec::new(),
+            vm_traces: Vec::new(),
             #[cfg(feature = "sbpf-debugger")]
             debug_port: None,
         }
@@ -802,42 +828,55 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
             .unwrap_or(true)
     }
 
-    /// Insert a VM register trace
-    pub(crate) fn insert_register_trace(&mut self, register_trace: Vec<[u64; 12]>) {
-        if register_trace.is_empty() {
+    /// Insert a completed trace-enabled SBPF invocation.
+    pub(crate) fn insert_vm_trace(&mut self, mut trace: VmExecutionTrace) {
+        if trace.rows.is_empty() {
             return;
         }
         let Ok(instruction_context) = self.transaction_context.get_current_instruction_context()
         else {
             return;
         };
-        self.register_traces
-            .push((instruction_context.get_index_in_trace(), register_trace));
+        trace.instruction_trace_index = instruction_context.get_index_in_trace();
+        let caller = instruction_context.get_index_of_caller();
+        trace.parent_instruction_trace_index = (caller != usize::from(u16::MAX)).then_some(caller);
+        trace.stack_height = instruction_context.get_stack_height();
+        self.vm_traces.push(trace);
     }
 
-    /// Iterates over all VM register traces (including CPI)
+    /// Iterates over all VM register traces (including CPI).
     pub fn iterate_vm_traces(
         &self,
         callback: &dyn Fn(InstructionContext, &Executable, RegisterTrace),
     ) {
-        for (index_in_trace, register_trace) in &self.register_traces {
+        for trace in &self.vm_traces {
             let Ok(instruction_context) = self
                 .transaction_context
-                .get_instruction_context_at_index_in_trace(*index_in_trace)
+                .get_instruction_context_at_index_in_trace(trace.instruction_trace_index)
             else {
                 continue;
             };
-            let Ok(program_id) = instruction_context.get_program_key() else {
-                continue;
-            };
-            let Some(entry) = self.program_cache_for_tx_batch.find(program_id) else {
+            let Some(entry) = self.program_cache_for_tx_batch.find(&trace.program_id) else {
                 continue;
             };
             let ProgramCacheEntryType::Loaded(ref executable) = entry.program else {
                 continue;
             };
-            callback(instruction_context, executable, register_trace.as_slice());
+            let registers = trace
+                .rows
+                .iter()
+                .map(|row| row.registers)
+                .collect::<Vec<_>>();
+            callback(instruction_context, executable, registers.as_slice());
         }
+    }
+
+    pub fn vm_traces(&self) -> &[VmExecutionTrace] {
+        &self.vm_traces
+    }
+
+    pub fn take_vm_traces(&mut self) -> Vec<VmExecutionTrace> {
+        std::mem::take(&mut self.vm_traces)
     }
 }
 

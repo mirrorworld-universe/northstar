@@ -1,5 +1,9 @@
 #![no_std]
 
+extern crate alloc;
+
+pub mod trace;
+
 use borsh::{
     io::{Error, ErrorKind, Read, Result as IoResult},
     BorshDeserialize, BorshSerialize,
@@ -7,6 +11,9 @@ use borsh::{
 
 pub const ER_STEP_PUBLIC_INPUTS_V1: usize = 8;
 pub const GROTH16_PROOF_RAW_LEN: usize = 256;
+pub const ER_STEP_PROOF_KIND_ONE_ACCOUNT: u8 = 1;
+pub const ER_STEP_PROOF_KIND_FULL_TRANSACTION: u8 = 2;
+pub const ER_STEP_PROOF_VERSION_V1: u8 = 1;
 
 /// BN254 scalar-field modulus, big-endian.
 pub const BN254_FR_MODULUS_BE: [u8; 32] = [
@@ -18,6 +25,8 @@ pub const BN254_FR_MODULUS_BE: [u8; 32] = [
 pub enum ZkTypeError {
     NonCanonicalFieldElement,
     InvalidProofLength,
+    InvalidProofDomain,
+    MissingPublicCommitment,
 }
 
 /// Canonical BN254 scalar-field element encoded as 32-byte big-endian bytes.
@@ -182,6 +191,43 @@ impl ErStepPublicInputsV1 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FullTransactionPublicInputsV1(ErStepPublicInputsV1);
+
+impl FullTransactionPublicInputsV1 {
+    pub const fn into_inner(self) -> ErStepPublicInputsV1 {
+        self.0
+    }
+}
+
+impl TryFrom<ErStepPublicInputsV1> for FullTransactionPublicInputsV1 {
+    type Error = ZkTypeError;
+
+    fn try_from(inputs: ErStepPublicInputsV1) -> Result<Self, Self::Error> {
+        if inputs.domain
+            != FrBytes::er_step_domain_v1(
+                ER_STEP_PROOF_KIND_FULL_TRANSACTION,
+                ER_STEP_PROOF_VERSION_V1,
+            )
+        {
+            return Err(ZkTypeError::InvalidProofDomain);
+        }
+        for commitment in [
+            inputs.session_context,
+            inputs.pre_state_root,
+            inputs.post_state_root,
+            inputs.tx_effect_root,
+            inputs.readonly_l1_root,
+            inputs.settlement_effect_root,
+        ] {
+            if commitment == FrBytes::ZERO {
+                return Err(ZkTypeError::MissingPublicCommitment);
+            }
+        }
+        Ok(Self(inputs))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,5 +302,38 @@ mod tests {
         }
         assert_eq!(borsh::to_vec(&public).unwrap().len(), 8 * 32);
         assert_eq!(ErStepPublicInputsV1::from_array(array), Ok(public));
+    }
+
+    #[test]
+    fn full_transaction_inputs_fail_closed() {
+        let mut public = ErStepPublicInputsV1 {
+            domain: FrBytes::er_step_domain_v1(
+                ER_STEP_PROOF_KIND_FULL_TRANSACTION,
+                ER_STEP_PROOF_VERSION_V1,
+            ),
+            session_context: FrBytes::from_u64(1),
+            slot_step: FrBytes::ZERO,
+            pre_state_root: FrBytes::from_u64(2),
+            post_state_root: FrBytes::from_u64(3),
+            tx_effect_root: FrBytes::from_u64(4),
+            readonly_l1_root: FrBytes::from_u64(5),
+            settlement_effect_root: FrBytes::from_u64(6),
+        };
+        assert!(FullTransactionPublicInputsV1::try_from(public).is_ok());
+        public.domain =
+            FrBytes::er_step_domain_v1(ER_STEP_PROOF_KIND_ONE_ACCOUNT, ER_STEP_PROOF_VERSION_V1);
+        assert_eq!(
+            FullTransactionPublicInputsV1::try_from(public),
+            Err(ZkTypeError::InvalidProofDomain)
+        );
+        public.domain = FrBytes::er_step_domain_v1(
+            ER_STEP_PROOF_KIND_FULL_TRANSACTION,
+            ER_STEP_PROOF_VERSION_V1,
+        );
+        public.tx_effect_root = FrBytes::ZERO;
+        assert_eq!(
+            FullTransactionPublicInputsV1::try_from(public),
+            Err(ZkTypeError::MissingPublicCommitment)
+        );
     }
 }

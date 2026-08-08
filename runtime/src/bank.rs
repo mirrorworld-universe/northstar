@@ -5187,6 +5187,26 @@ impl Bank {
         .unwrap()
     }
 
+    // Sonic: conformance-only environment; production execution remains untraced.
+    #[cfg(feature = "conformance")]
+    pub(crate) fn enable_transaction_tracing(&mut self) {
+        let simd_0268_active = self.feature_set.snapshot().raise_cpi_nesting_limit_to_8;
+        let compute_budget = self
+            .compute_budget()
+            .as_ref()
+            .unwrap_or(&ComputeBudget::new_with_defaults(simd_0268_active))
+            .to_budget();
+        let environment = create_program_runtime_environment(
+            &self.feature_set.runtime_features(),
+            &compute_budget,
+            false,
+            true,
+        )
+        .unwrap();
+        self.transaction_processor
+            .set_program_runtime_environment(environment);
+    }
+
     pub fn set_tick_height(&self, tick_height: u64) {
         self.tick_height.store(tick_height, Relaxed)
     }

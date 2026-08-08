@@ -268,6 +268,7 @@ fn new_executed_processing_result(
                 return_data: None,
                 executed_units: 0,
                 accounts_deltas,
+                vm_traces: Vec::new(),
             },
             programs_modified_by_tx: HashMap::new(),
         },

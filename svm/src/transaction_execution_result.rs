@@ -1,7 +1,9 @@
 use {
     crate::account_loader::LoadedTransaction,
     solana_message::inner_instruction::InnerInstructionsList,
-    solana_program_runtime::program_cache_entry::ProgramCacheEntry,
+    solana_program_runtime::{
+        invoke_context::VmExecutionTrace, program_cache_entry::ProgramCacheEntry,
+    },
     solana_pubkey::Pubkey,
     solana_transaction_context::transaction::TransactionReturnData,
     solana_transaction_error::TransactionResult,
@@ -37,6 +39,8 @@ pub struct TransactionExecutionDetails {
     /// deltas related to total account data size changes for this transaction.
     /// NOTE: set to None IFF `status` is not `Ok`.
     pub accounts_deltas: Option<AccountsDeltas>,
+    // Sonic: empty unless execution used a trace-enabled SBPF environment.
+    pub vm_traces: Vec<VmExecutionTrace>,
 }
 
 impl TransactionExecutionDetails {
