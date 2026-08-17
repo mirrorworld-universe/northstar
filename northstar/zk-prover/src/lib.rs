@@ -1,3 +1,5 @@
+pub mod transaction;
+
 use {
     ark_bn254::{Bn254, Fr, G1Affine, G2Affine},
     ark_ff::{BigInteger, PrimeField},
@@ -394,8 +396,8 @@ impl<const N: usize> ConstraintSynthesizer<Fr> for PaddedPublicInputCircuitV1<N>
     }
 }
 
-pub fn setup<R: Rng>(
-    circuit: OneAccountTransitionCircuitV1,
+pub fn setup<R: Rng, C: ConstraintSynthesizer<Fr>>(
+    circuit: C,
     rng: &mut R,
 ) -> Result<ProvingKey<Bn254>, ProverError> {
     Ok(Groth16::<Bn254>::generate_random_parameters_with_reduction(
@@ -403,9 +405,9 @@ pub fn setup<R: Rng>(
     )?)
 }
 
-pub fn prove<R: Rng>(
+pub fn prove<R: Rng, C: ConstraintSynthesizer<Fr>>(
     proving_key: &ProvingKey<Bn254>,
-    circuit: OneAccountTransitionCircuitV1,
+    circuit: C,
     rng: &mut R,
 ) -> Result<Proof<Bn254>, ProverError> {
     Ok(Groth16::<Bn254>::create_random_proof_with_reduction(
