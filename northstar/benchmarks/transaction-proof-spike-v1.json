@@ -1,0 +1,90 @@
+{
+  "schema": "northstar-transaction-proof-benchmark-v1",
+  "measured_at": "2026-08-19",
+  "revision": "2b7d5e70c7609001b2bf358e02a6542a716fb9a6",
+  "protocol": {
+    "warmup_runs": 1,
+    "measured_runs": 3,
+    "sp1_backend": "cuda",
+    "network_proving": false
+  },
+  "hardware": {
+    "instance": "aws-g6e.4xlarge",
+    "cpu": "AMD EPYC 7R13 Processor",
+    "vcpus": 16,
+    "ram_bytes": 133264101376,
+    "gpu": "NVIDIA L40S",
+    "gpu_memory_mib": 46068,
+    "gpu_compute_capability": "8.9",
+    "gpu_driver": "580.173.02",
+    "os": "Ubuntu 26.04 LTS",
+    "kernel": "7.0.0-1010-aws"
+  },
+  "software": {
+    "rustc": "1.97.1 (8bab26f4f 2026-07-14)",
+    "sp1": "6.1.0",
+    "cargo_prove": "cargo-prove sp1 (d454975 2026-04-11T01:54:01.305546215Z)",
+    "solana_sbpf": "0.22.0"
+  },
+  "fixture": {
+    "trace_bytes": 42413,
+    "witness_bytes": 339819,
+    "vm_rows": 208,
+    "executed_units": 218,
+    "transaction_fee": 5000,
+    "sp1_guest_cycles": 111050365
+  },
+  "sp1_execute": {
+    "execute_ms": [4746, 4740, 4749],
+    "setup_ms": [6968, 7935, 7929],
+    "process_wall_seconds": [12.40, 13.37, 13.37],
+    "peak_gpu_memory_mib": [9109, 11456, 11456],
+    "peak_gpu_server_rss_kib": [11644340, 11661784, 11657648]
+  },
+  "sp1_core": {
+    "setup_ms": [11558, 12472, 12404],
+    "prove_and_verify_ms": [28695, 28631, 29252],
+    "process_wall_seconds": [40.95, 41.68, 42.36],
+    "peak_gpu_memory_mib": [31055, 31510, 31064],
+    "peak_gpu_server_rss_kib": [19751560, 19771548, 20227932],
+    "saved_artifact_bytes": 27343935,
+    "proving_key_bytes": null,
+    "verifying_key_bytes": null
+  },
+  "sp1_groth16": {
+    "setup_ms": [11670, 12724, 12703],
+    "prove_wrap_and_verify_ms": [86917, 89568, 94821],
+    "process_wall_seconds": [99.27, 102.86, 108.09],
+    "peak_gpu_memory_mib": [31025, 31498, 31466],
+    "peak_gpu_server_rss_kib": [31762792, 31773172, 31745416],
+    "onchain_proof_bytes": 356,
+    "saved_artifact_bytes": 1950,
+    "cold_first_prove_wrap_and_verify_ms": 244088,
+    "proving_key_bytes": null,
+    "verifying_key_bytes": null
+  },
+  "custom_groth16": {
+    "table_ms": [23, 23, 23],
+    "constraint_generation_ms": [11, 11, 11],
+    "setup_ms": [32, 31, 31],
+    "prove_ms": [29, 30, 29],
+    "verify_ms": [3, 3, 3],
+    "process_wall_seconds": [0.10, 0.10, 0.10],
+    "peak_process_rss_kib": [22360, 22200, 22160],
+    "rows": 208,
+    "constraints": 2712,
+    "constraints_per_row": 13.038461538461538,
+    "syscalls": 1,
+    "proving_key_bytes": 565456,
+    "verifying_key_bytes": 520,
+    "proof_bytes": 128
+  },
+  "notes": [
+    "All proofs were generated and verified locally on the listed host; no mock or network prover was used.",
+    "SP1 phase timings come from in-process timers; process wall time includes prover startup and shutdown.",
+    "SP1 peak RSS samples the sp1-gpu-server subprocess once per second.",
+    "The cold first Groth16 run includes one-time wrapping artifact initialization and is excluded from the three-run warm range.",
+    "SP1 6.1 CUDA proving keys are opaque through the selected SDK interface, so SP1 key sizes are not reported.",
+    "Custom Groth16 is a direct bounded-fixture proof, not a recursive wrapper or production-complete SBPF circuit."
+  ]
+}

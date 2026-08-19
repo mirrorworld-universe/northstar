@@ -61,12 +61,13 @@ async fn main() -> Result<()> {
         if proof.public_values.as_slice() != expected {
             bail!("SP1 core public values differ from canonical inputs");
         }
+        let proof_path = "northstar-sp1-core.bin";
+        proof.save(proof_path)?;
         measurements.push(Measurement {
             phase: "sp1_core_prove_verify",
             wall_ms: started.elapsed().as_millis(),
-            bytes: Some(proof.bytes().len()),
+            bytes: Some(usize::try_from(fs::metadata(proof_path)?.len())?),
         });
-        proof.save("northstar-sp1-core.bin")?;
     }
 
     if command == "groth16" || command == "all" {
