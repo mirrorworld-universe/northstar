@@ -1,8 +1,8 @@
 use {
     crate::{
-        replay, AccountWitnessV1, ProgramWordV1, ReplayError, ReplayWitnessV1, ResultWitnessV1,
-        RuntimeWitnessV1, VmRowV1, SBPF_VERSION_V0, TRACE_SCHEMA_VERSION_V1, WITNESS_MAGIC_V1,
-        WITNESS_VERSION_V1,
+        replay, AccountWitnessV1, CallTargetV1, ProgramWordV1, ReplayError, ReplayWitnessV1,
+        ResultWitnessV1, RuntimeWitnessV1, VmRowV1, SBPF_VERSION_V0, TRACE_SCHEMA_VERSION_V1,
+        WITNESS_MAGIC_V1, WITNESS_VERSION_V1,
     },
     northstar_zk_types::{ER_STEP_PROOF_KIND_FULL_TRANSACTION, ER_STEP_PROOF_VERSION_V1},
     solana_account::ReadableAccount,
@@ -133,7 +133,7 @@ fn build_from_execution(
         })
         .collect();
     let program_words = program_words(vm_trace);
-    let vm_rows = vm_trace
+    let vm_rows: Vec<_> = vm_trace
         .rows
         .iter()
         .map(|row| VmRowV1 {
@@ -142,6 +142,8 @@ fn build_from_execution(
             syscall_key: row.syscall_key.unwrap_or_default(),
         })
         .collect();
+    let entry_pc = vm_rows.first().ok_or(ReplayError::Trace)?.registers[11];
+    let call_targets = call_targets(&vm_rows)?;
 
     let witness = ReplayWitnessV1 {
         magic: WITNESS_MAGIC_V1,
@@ -179,11 +181,13 @@ fn build_from_execution(
             syscall_registry_hash: hash(b"agave-syscalls-v0-sol-memcpy-only-fixture").to_bytes(),
             program_id: executed.fixture.program_id.to_bytes(),
             programdata_id: executed.fixture.programdata_id.to_bytes(),
+            entry_pc,
             program_elf: executed.fixture.program_elf,
             program_hash: vm_trace.program_hash,
         },
         event_tags,
         program_words,
+        call_targets,
         vm_rows,
         program_input_before: vm_trace.program_input_before.clone(),
         program_input_after: vm_trace.program_input_after.clone(),
@@ -230,6 +234,34 @@ fn account_witness(
         rent_epoch: account.rent_epoch(),
         data: account.data().to_vec(),
     }
+}
+
+fn call_targets(rows: &[VmRowV1]) -> Result<Vec<CallTargetV1>, ReplayError> {
+    let mut targets = std::collections::BTreeMap::new();
+    for pair in rows.windows(2) {
+        let row = &pair[0];
+        if row.instruction[0] == 0x85 && row.syscall_key == 0 {
+            let function_hash = u32::from_le_bytes(
+                row.instruction[4..8]
+                    .try_into()
+                    .expect("fixed instruction slice"),
+            );
+            let target_pc = pair[1].registers[11];
+            if targets
+                .insert(function_hash, target_pc)
+                .is_some_and(|old| old != target_pc)
+            {
+                return Err(ReplayError::Trace);
+            }
+        }
+    }
+    Ok(targets
+        .into_iter()
+        .map(|(function_hash, target_pc)| CallTargetV1 {
+            function_hash,
+            target_pc,
+        })
+        .collect())
 }
 
 fn program_words(trace: &VmExecutionTrace) -> Vec<ProgramWordV1> {

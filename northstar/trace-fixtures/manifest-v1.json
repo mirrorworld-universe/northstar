@@ -18,8 +18,8 @@
       ],
       "trace_bytes": 42413,
       "trace_sha256": "5ca3c4e6a5bc58838df2ae986dd887a962fea53a37048beb5758fedec50c102c",
-      "witness_bytes": 339819,
-      "witness_sha256": "4f1d5d2837fea47c51285c9f6fbaf8ee08efef44e238479374b45e7d09b620f1",
+      "witness_bytes": 339927,
+      "witness_sha256": "831bd44a7577659d2e87849d44dce4f3c46e8e301e58c2eb06effd738ac41b24",
       "vm_rows": 208,
       "executed_units": 218,
       "transaction_fee": 5000

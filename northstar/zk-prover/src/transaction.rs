@@ -8,6 +8,10 @@ use {
     solana_sbpf::ebpf,
 };
 
+/// Fixture-specific Groth16 harness, not a reusable SBPF transition circuit.
+///
+/// `replay` validates the witness during synthesis and setup fixes those values as constants.
+/// Soundness therefore depends on native replay and this verifying key must not be deployed.
 #[derive(Clone, Debug)]
 pub struct SbpfExecutionTableCircuitV1 {
     pub public: ErStepPublicInputsV1,
