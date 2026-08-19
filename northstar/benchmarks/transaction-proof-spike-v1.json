@@ -1,11 +1,13 @@
 {
   "schema": "northstar-transaction-proof-benchmark-v1",
   "measured_at": "2026-08-19",
-  "revision": "2b7d5e70c7609001b2bf358e02a6542a716fb9a6",
+  "revision": "4eefa8ba5e6112ce0c948c7ee7ba6c0d0d5f2fea",
   "protocol": {
-    "warmup_runs": 1,
-    "measured_runs": 3,
-    "sp1_backend": "cuda",
+    "gpu_warmup_runs": 1,
+    "gpu_measured_runs": 3,
+    "cpu_execute_warmup_runs": 1,
+    "cpu_execute_measured_runs": 3,
+    "cpu_proof_measured_runs": 1,
     "network_proving": false
   },
   "hardware": {
@@ -24,53 +26,82 @@
     "rustc": "1.97.1 (8bab26f4f 2026-07-14)",
     "sp1": "6.1.0",
     "cargo_prove": "cargo-prove sp1 (d454975 2026-04-11T01:54:01.305546215Z)",
-    "solana_sbpf": "0.22.0"
+    "solana_sbpf": "0.22.0",
+    "cpu_groth16_wrapper": "ghcr.io/succinctlabs/sp1-gnark:v6.1.0"
   },
   "fixture": {
     "trace_bytes": 42413,
-    "witness_bytes": 339819,
+    "witness_bytes": 339927,
+    "witness_sha256": "831bd44a7577659d2e87849d44dce4f3c46e8e301e58c2eb06effd738ac41b24",
     "vm_rows": 208,
     "executed_units": 218,
     "transaction_fee": 5000,
-    "sp1_guest_cycles": 111050365
+    "sp1_guest_cycles": 109365172
   },
-  "sp1_execute": {
-    "execute_ms": [4746, 4740, 4749],
-    "setup_ms": [6968, 7935, 7929],
-    "process_wall_seconds": [12.40, 13.37, 13.37],
-    "peak_gpu_memory_mib": [9109, 11456, 11456],
-    "peak_gpu_server_rss_kib": [11644340, 11661784, 11657648]
+  "sp1_cuda": {
+    "execute": {
+      "execute_ms": [4680, 4664, 4678],
+      "setup_ms": [8049, 7480, 7546],
+      "process_wall_seconds": [13.51, 12.83, 12.92],
+      "peak_gpu_memory_mib": [11456, 11932, 11868],
+      "peak_gpu_server_rss_kib": [11684532, 11666140, 11633976]
+    },
+    "core": {
+      "setup_ms": [11844, 11871, 11901],
+      "prove_and_verify_ms": [28653, 28394, 28347],
+      "process_wall_seconds": [41.20, 40.93, 41.14],
+      "peak_gpu_memory_mib": [31087, 31087, 31023],
+      "peak_gpu_server_rss_kib": [19462908, 20199320, 20237268],
+      "saved_artifact_bytes": 25871485
+    },
+    "groth16": {
+      "setup_ms": [11781, 12042, 12660],
+      "prove_wrap_and_verify_ms": [90856, 90186, 93965],
+      "process_wall_seconds": [103.74, 102.92, 107.33],
+      "peak_gpu_memory_mib": [31057, 31510, 31057],
+      "peak_gpu_server_rss_kib": [31818252, 31799408, 31765776],
+      "onchain_proof_bytes": 356,
+      "saved_artifact_bytes": 1950
+    }
   },
-  "sp1_core": {
-    "setup_ms": [11558, 12472, 12404],
-    "prove_and_verify_ms": [28695, 28631, 29252],
-    "process_wall_seconds": [40.95, 41.68, 42.36],
-    "peak_gpu_memory_mib": [31055, 31510, 31064],
-    "peak_gpu_server_rss_kib": [19751560, 19771548, 20227932],
-    "saved_artifact_bytes": 27343935,
-    "proving_key_bytes": null,
-    "verifying_key_bytes": null
+  "sp1_cpu": {
+    "execute": {
+      "execute_ms": [4621, 4621, 4662],
+      "setup_ms": [2932, 2927, 2928],
+      "process_wall_seconds": [35.83, 35.80, 35.87],
+      "peak_process_rss_kib": [7497080, 7500400, 7509808]
+    },
+    "core": {
+      "setup_ms": 2937,
+      "prove_and_verify_ms": 1259360,
+      "process_wall_seconds": 1291.64,
+      "peak_process_rss_kib": 112856468,
+      "saved_artifact_bytes": 25871485
+    },
+    "groth16": {
+      "setup_ms": 2961,
+      "prove_wrap_and_verify_ms": 1931956,
+      "process_wall_seconds": 1964.88,
+      "peak_process_rss_kib": 101954248,
+      "onchain_proof_bytes": 356,
+      "saved_artifact_bytes": 1950
+    }
   },
-  "sp1_groth16": {
-    "setup_ms": [11670, 12724, 12703],
-    "prove_wrap_and_verify_ms": [86917, 89568, 94821],
-    "process_wall_seconds": [99.27, 102.86, 108.09],
-    "peak_gpu_memory_mib": [31025, 31498, 31466],
-    "peak_gpu_server_rss_kib": [31762792, 31773172, 31745416],
-    "onchain_proof_bytes": 356,
-    "saved_artifact_bytes": 1950,
-    "cold_first_prove_wrap_and_verify_ms": 244088,
-    "proving_key_bytes": null,
-    "verifying_key_bytes": null
+  "cpu_gpu_comparison": {
+    "execute_phase_cpu_over_gpu_median": 0.9878,
+    "core_prove_verify_gpu_speedup": 44.353,
+    "core_process_wall_gpu_speedup": 31.396,
+    "groth16_prove_wrap_verify_gpu_speedup": 21.264,
+    "groth16_process_wall_gpu_speedup": 18.940
   },
   "custom_groth16": {
     "table_ms": [23, 23, 23],
     "constraint_generation_ms": [11, 11, 11],
-    "setup_ms": [32, 31, 31],
-    "prove_ms": [29, 30, 29],
+    "setup_ms": [31, 31, 31],
+    "prove_ms": [29, 31, 30],
     "verify_ms": [3, 3, 3],
     "process_wall_seconds": [0.10, 0.10, 0.10],
-    "peak_process_rss_kib": [22360, 22200, 22160],
+    "peak_process_rss_kib": [22764, 22516, 22448],
     "rows": 208,
     "constraints": 2712,
     "constraints_per_row": 13.038461538461538,
@@ -81,10 +112,11 @@
   },
   "notes": [
     "All proofs were generated and verified locally on the listed host; no mock or network prover was used.",
-    "SP1 phase timings come from in-process timers; process wall time includes prover startup and shutdown.",
-    "SP1 peak RSS samples the sp1-gpu-server subprocess once per second.",
-    "The cold first Groth16 run includes one-time wrapping artifact initialization and is excluded from the three-run warm range.",
+    "CUDA and CPU measurements use the same guest ELF, witness, public inputs, host, revision, and SP1 version.",
+    "CUDA phase medians use three runs after one warmup. CPU proof measurements use one run because core and Groth16 took 21.5 and 32.7 minutes and approached host memory capacity.",
+    "SP1 phase timings come from in-process timers; process wall time includes prover initialization and shutdown.",
+    "CUDA peak RSS samples the sp1-gpu-server subprocess once per second; CPU peak RSS comes from GNU time.",
     "SP1 6.1 CUDA proving keys are opaque through the selected SDK interface, so SP1 key sizes are not reported.",
-    "Custom Groth16 is a direct bounded-fixture proof, not a recursive wrapper or production-complete SBPF circuit."
+    "Custom Groth16 is a direct fixture-specific harness proof, not a recursive wrapper or production-complete SBPF circuit."
   ]
 }
