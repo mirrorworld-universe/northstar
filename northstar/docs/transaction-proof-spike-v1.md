@@ -31,7 +31,7 @@ PATH="$HOME/.sp1/bin:$PATH" cargo run --release -p northstar-zkvm-replay-script 
 PATH="$HOME/.sp1/bin:$PATH" SP1_PROVER=cpu cargo run --release -p northstar-zkvm-replay-script -- core
 PATH="$HOME/.sp1/bin:$PATH" SP1_PROVER=cpu cargo run --release -p northstar-zkvm-replay-script -- groth16
 # CUDA 12, Nvidia compute capability >= 8.0, and >= 24 GB VRAM:
-PATH="$HOME/.sp1/bin:$PATH" SP1_PROVER=cuda cargo run --release -p northstar-zkvm-replay-script -- all
+PATH="$HOME/.sp1/bin:$PATH" SP1_PROVER=cuda cargo run --release -p northstar-zkvm-replay-script --features cuda -- all
 ```
 
 Heavy proofs are explicit commands, not default workspace tests.
