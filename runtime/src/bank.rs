@@ -1513,6 +1513,8 @@ impl Bank {
                 parent
                     .transaction_processor
                     .new_from_isolated_cache(slot, epoch)
+            } else if ephemeral {
+                parent.transaction_processor.new_from_ephemeral(slot, epoch)
             } else {
                 TransactionBatchProcessor::new_from(&parent.transaction_processor, slot, epoch)
             }
