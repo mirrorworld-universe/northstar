@@ -132,6 +132,7 @@ members = [
     "northstar/programs/token-bridge",
     "northstar/zk-prover",
     "northstar/zk-types",
+    "northstar/transaction-proof",
     "northstar/zk-verifier-bench",
 ]
 
@@ -586,6 +587,7 @@ zstd = "0.13.3"
 northstar = { path = "northstar" }
 northstar-portal.path = "northstar/programs/portal"
 northstar-zk-prover.path = "northstar/zk-prover"
+northstar-transaction-proof.path = "northstar/transaction-proof"
 northstar-zk-types.path = "northstar/zk-types"
 
 [profile.dev]

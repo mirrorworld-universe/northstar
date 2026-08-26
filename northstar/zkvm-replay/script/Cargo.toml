@@ -1,0 +1,60 @@
+[package]
+name = "northstar-zkvm-replay-script"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+cuda = ["sp1-sdk/cuda"]
+
+[dependencies]
+anyhow = "1"
+hex = "0.4"
+northstar-zkvm-replay-shared = { path = "../shared" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sp1-sdk.workspace = true
+sp1-core-executor = "=6.1.0"
+sp1-core-executor-runner = "=6.1.0"
+sp1-core-executor-runner-binary = "=6.1.0"
+sp1-core-machine = "=6.1.0"
+sp1-hypercube = "=6.1.0"
+sp1-lib = "=6.1.0"
+sp1-primitives = "=6.1.0"
+sp1-prover = "=6.1.0"
+sp1-prover-types = "=6.1.0"
+sp1-recursion-executor = "=6.1.0"
+sp1-verifier = "=6.1.0"
+sp1-derive = "=6.1.0"
+slop-air = "=6.1.0"
+slop-algebra = "=6.1.0"
+slop-alloc = "=6.1.0"
+slop-basefold = "=6.1.0"
+slop-basefold-prover = "=6.1.0"
+slop-bn254 = "=6.1.0"
+slop-challenger = "=6.1.0"
+slop-commit = "=6.1.0"
+slop-futures = "=6.1.0"
+slop-jagged = "=6.1.0"
+slop-keccak-air = "=6.1.0"
+slop-koala-bear = "=6.1.0"
+slop-matrix = "=6.1.0"
+slop-maybe-rayon = "=6.1.0"
+slop-merkle-tree = "=6.1.0"
+slop-multilinear = "=6.1.0"
+slop-poseidon2 = "=6.1.0"
+slop-primitives = "=6.1.0"
+slop-stacked = "=6.1.0"
+slop-sumcheck = "=6.1.0"
+slop-symmetric = "=6.1.0"
+slop-tensor = "=6.1.0"
+slop-uni-stark = "=6.1.0"
+slop-whir = "=6.1.0"
+slop-fri = "=6.1.0"
+slop-utils = "=6.1.0"
+p3-fri = "=0.3.2-succinct"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[build-dependencies]
+sp1-build.workspace = true

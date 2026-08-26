@@ -4,6 +4,37 @@
   "proof_version": 1,
   "fixtures": [
     {
+      "name": "bounded-full-transaction-success",
+      "test": "solana_runtime::conformance::proof_fixture::tests::fixture_is_real_deterministic_signed_bank_execution",
+      "coverage": [
+        "legacy-wire",
+        "one-signer",
+        "ed25519",
+        "fees",
+        "sbf-registers",
+        "sol-memcpy",
+        "account-data",
+        "commit"
+      ],
+      "trace_bytes": 42413,
+      "trace_sha256": "5ca3c4e6a5bc58838df2ae986dd887a962fea53a37048beb5758fedec50c102c",
+      "witness_bytes": 339927,
+      "witness_sha256": "831bd44a7577659d2e87849d44dce4f3c46e8e301e58c2eb06effd738ac41b24",
+      "vm_rows": 208,
+      "executed_units": 218,
+      "transaction_fee": 5000
+    },
+    {
+      "name": "bounded-full-transaction-rollback",
+      "test": "solana_runtime::conformance::proof_fixture::tests::paired_write_then_fail_fixture_rolls_back_mutation",
+      "coverage": ["sbf-write-attempt", "executed-failure", "fees", "rollback"],
+      "trace_bytes": 51200,
+      "trace_sha256": "9ab42ce4a93329071bb298193106669e68f8813903213d04f6ad04970121a415",
+      "vm_rows": 345,
+      "executed_units": 355,
+      "transaction_fee": 5000
+    },
+    {
       "name": "sbf-system-cpi-success",
       "test": "solana_runtime::conformance::txn::tests::test_simple_transfer",
       "coverage": [
