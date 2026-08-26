@@ -4321,6 +4321,117 @@ mod tests {
     }
 
     #[test]
+    fn test_concurrent_system_transfers_keep_builtin_available() {
+        let parent_bank = create_test_bank();
+        let sender = Keypair::new();
+        parent_bank.freeze();
+
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.activate();
+        runtime.credit_deposit(&sender.pubkey(), 100_000_000_000);
+        let rpc_client = rpc_client(&runtime);
+        wait_for_rpc_ready(&rpc_client);
+
+        for round in 0..10 {
+            let blockhash = rpc_client
+                .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
+                .unwrap()
+                .0;
+            let transactions = (0..20)
+                .map(|index| {
+                    Transaction::new_signed_with_payer(
+                        &[transfer(
+                            &sender.pubkey(),
+                            &sender.pubkey(),
+                            round * 20 + index + 1,
+                        )],
+                        Some(&sender.pubkey()),
+                        &[&sender],
+                        blockhash,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let barrier = Arc::new(std::sync::Barrier::new(transactions.len()));
+            let handles = transactions
+                .into_iter()
+                .map(|transaction| {
+                    let rpc_addr = runtime.rpc_addr();
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        let rpc_client = RpcClient::new(rpc_addr);
+                        barrier.wait();
+                        rpc_client
+                            .send_transaction_with_config(
+                                &transaction,
+                                RpcSendTransactionConfig {
+                                    skip_preflight: false,
+                                    preflight_commitment: Some(
+                                        CommitmentConfig::processed().commitment,
+                                    ),
+                                    ..Default::default()
+                                },
+                            )
+                            .map_err(|err| err.to_string())
+                    })
+                })
+                .collect::<Vec<_>>();
+            let results = handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>();
+            let send_errors = results
+                .iter()
+                .filter_map(|result| result.as_ref().err().cloned())
+                .collect::<Vec<_>>();
+            assert!(
+                send_errors.is_empty(),
+                "round {round}: concurrent System Program preflight failed: {send_errors:?}"
+            );
+
+            let signatures = results.into_iter().map(Result::unwrap).collect::<Vec<_>>();
+            wait_for(
+                "concurrent transfer statuses",
+                Duration::from_secs(2),
+                || {
+                    rpc_client
+                        .get_signature_statuses(&signatures)
+                        .is_ok_and(|response| response.value.iter().all(Option::is_some))
+                },
+            );
+            let transaction_errors = rpc_client
+                .get_signature_statuses(&signatures)
+                .unwrap()
+                .value
+                .into_iter()
+                .filter_map(|status| status.and_then(|status| status.err))
+                .collect::<Vec<_>>();
+            assert!(
+                transaction_errors.is_empty(),
+                "round {round}: concurrent System Program execution failed: {transaction_errors:?}"
+            );
+        }
+        runtime.shutdown();
+    }
+
+    #[test]
     fn test_er_history_get_transaction_and_signature_status_after_reset() {
         agave_logger::setup();
 

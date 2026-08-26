@@ -351,8 +351,13 @@ impl ProgramCacheForTxBatch {
         self.slot
     }
 
-    pub fn set_slot_for_tests(&mut self, slot: Slot) {
+    // Sonic: child ER banks clone the parent's builtin-only batch cache.
+    pub fn set_slot(&mut self, slot: Slot) {
         self.slot = slot;
+    }
+
+    pub fn set_slot_for_tests(&mut self, slot: Slot) {
+        self.set_slot(slot);
     }
 
     pub fn merge(&mut self, modified_entries: &HashMap<Pubkey, Arc<ProgramCacheEntry>>) {
