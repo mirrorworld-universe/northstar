@@ -7,7 +7,7 @@ use {
     borsh::{BorshDeserialize, BorshSerialize},
     northstar_portal::{Checkpoint, DelegationRecord, Session, SessionBridge},
     pinocchio::{
-        cpi::{invoke, invoke_signed, Seed, Signer},
+        cpi::{invoke_signed, Seed, Signer},
         error::ProgramError,
         instruction::{InstructionAccount as AccountMeta, InstructionView as Instruction},
         no_allocator,
@@ -735,10 +735,13 @@ fn process_undelegate_er_token_account(
         system_program_info,
     )?;
     copy_data(er_token_account, buffer)?;
+    let er_state = load_er_token_account_data(buffer)?;
+    let er_seeds = er_signer_seeds(&er_state);
+    let er_signer = Signer::from(&er_seeds);
 
     let portal_accounts = [
         AccountMeta::writable_signer(authority.address()),
-        AccountMeta::writable(er_token_account.address()),
+        AccountMeta::writable_signer(er_token_account.address()),
         AccountMeta::readonly(program_id),
         AccountMeta::writable(delegation_record.address()),
         AccountMeta::readonly(&pinocchio_system::ID),
@@ -750,7 +753,7 @@ fn process_undelegate_er_token_account(
         accounts: &portal_accounts,
         data: &portal_data,
     };
-    invoke(
+    invoke_signed(
         &portal_instruction,
         &[
             &*authority,
@@ -760,6 +763,7 @@ fn process_undelegate_er_token_account(
             &*system_program_info,
             &*session,
         ],
+        &[er_signer],
     )?;
 
     if !er_token_account.owned_by(program_id) {
