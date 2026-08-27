@@ -253,6 +253,50 @@ async fn deposit_transfer_and_withdraw_round_trip() {
 }
 
 #[tokio::test]
+async fn transfer_rejects_identical_source_and_destination() {
+    let mut world = TestWorld::new().await;
+    let payer_pubkey = world.payer.pubkey();
+
+    let initialize_vault = initialize_vault_ix(&world);
+    let initialize_alice_er = initialize_er_ix(&world, world.alice.pubkey(), world.alice_er);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[initialize_vault, initialize_alice_er],
+        &[&world.payer],
+    )
+    .await;
+    let deposit = deposit_ix(&world, 600);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[deposit],
+        &[&world.payer, &world.alice],
+    )
+    .await;
+
+    let self_transfer = Instruction {
+        program_id: northstar_token_bridge::id(),
+        accounts: vec![
+            AccountMeta::new_readonly(world.alice.pubkey(), true),
+            AccountMeta::new(world.alice_er, false),
+            AccountMeta::new(world.alice_er, false),
+        ],
+        data: borsh::to_vec(&TokenBridgeInstruction::Transfer { amount: 600 }).unwrap(),
+    };
+    let result = process_result(
+        &mut world.context,
+        &payer_pubkey,
+        &[self_transfer],
+        &[&world.payer, &world.alice],
+    )
+    .await;
+
+    assert!(result.is_err(), "self-transfer must be rejected");
+    assert_eq!(world.er_amount(world.alice_er).await, 600);
+}
+
+#[tokio::test]
 async fn delegate_and_undelegate_preserve_er_token_account_state() {
     let mut world = TestWorld::new().await;
     let payer_pubkey = world.payer.pubkey();
@@ -490,9 +534,20 @@ async fn process(
     instructions: &[Instruction],
     signers: &[&Keypair],
 ) {
+    process_result(context, payer, instructions, signers)
+        .await
+        .unwrap();
+}
+
+async fn process_result(
+    context: &mut ProgramTestContext,
+    payer: &Pubkey,
+    instructions: &[Instruction],
+    signers: &[&Keypair],
+) -> Result<(), solana_program_test::BanksClientError> {
     let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(instructions, Some(payer), signers, blockhash);
-    context.banks_client.process_transaction(tx).await.unwrap();
+    context.banks_client.process_transaction(tx).await
 }
 
 fn shared_to_account(account: &AccountSharedData) -> Account {

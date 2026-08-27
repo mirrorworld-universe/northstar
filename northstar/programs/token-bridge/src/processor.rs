@@ -381,6 +381,9 @@ fn process_transfer(
     let destination = next_account_info(account_info_iter)?;
 
     require_signer(authority)?;
+    if source.address() == destination.address() {
+        return Err(ProgramError::InvalidAccountData);
+    }
     let mut source_state = load_er_token_account(program_id, source)?;
     let mut destination_state = load_er_token_account(program_id, destination)?;
     if source_state.owner != key_bytes(authority.address())
