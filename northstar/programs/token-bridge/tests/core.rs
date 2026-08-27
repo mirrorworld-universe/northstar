@@ -33,6 +33,7 @@ struct TestWorld {
     vault: Pubkey,
     alice_er: Pubkey,
     bob_er: Pubkey,
+    unregistered_er: Pubkey,
     alice_token: Pubkey,
     bob_token: Pubkey,
     vault_token: Pubkey,
@@ -59,6 +60,7 @@ impl TestWorld {
             &session_bridge,
             &bob.pubkey(),
         );
+        let unregistered_er = Pubkey::new_unique();
         let alice_token = Pubkey::new_unique();
         let bob_token = Pubkey::new_unique();
         let vault_token = Pubkey::new_unique();
@@ -126,6 +128,24 @@ impl TestWorld {
                 rent_epoch: 0,
             },
         );
+        let unregistered_state = ErTokenAccount {
+            discriminator: ErTokenAccount::DISCRIMINATOR,
+            session_bridge: session_bridge.to_bytes(),
+            owner: alice.pubkey().to_bytes(),
+            mint: mint.to_bytes(),
+            amount: 600,
+            bump: 255,
+        };
+        program_test.add_account(
+            unregistered_er,
+            Account {
+                lamports: Rent::default().minimum_balance(account_size(&unregistered_state)),
+                data: borsh::to_vec(&unregistered_state).unwrap(),
+                owner: northstar_token_bridge::id(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        );
 
         let context = program_test.start_with_context().await;
         Self {
@@ -139,6 +159,7 @@ impl TestWorld {
             vault,
             alice_er,
             bob_er,
+            unregistered_er,
             alice_token,
             bob_token,
             vault_token,
@@ -294,6 +315,42 @@ async fn transfer_rejects_identical_source_and_destination() {
 
     assert!(result.is_err(), "self-transfer must be rejected");
     assert_eq!(world.er_amount(world.alice_er).await, 600);
+}
+
+#[tokio::test]
+async fn transfer_rejects_unregistered_er_account() {
+    let mut world = TestWorld::new().await;
+    let payer_pubkey = world.payer.pubkey();
+
+    let initialize_bob_er = initialize_er_ix(&world, world.bob.pubkey(), world.bob_er);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[initialize_bob_er],
+        &[&world.payer],
+    )
+    .await;
+
+    let transfer = Instruction {
+        program_id: northstar_token_bridge::id(),
+        accounts: vec![
+            AccountMeta::new_readonly(world.alice.pubkey(), true),
+            AccountMeta::new(world.unregistered_er, false),
+            AccountMeta::new(world.bob_er, false),
+        ],
+        data: borsh::to_vec(&TokenBridgeInstruction::Transfer { amount: 600 }).unwrap(),
+    };
+    let result = process_result(
+        &mut world.context,
+        &payer_pubkey,
+        &[transfer],
+        &[&world.payer, &world.alice],
+    )
+    .await;
+
+    assert!(result.is_err(), "ER token account PDA must be registered");
+    assert_eq!(world.er_amount(world.unregistered_er).await, 600);
+    assert_eq!(world.er_amount(world.bob_er).await, 0);
 }
 
 #[tokio::test]

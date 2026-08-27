@@ -778,6 +778,7 @@ fn process_undelegate_er_token_account(
     )?;
     copy_data(er_token_account, buffer)?;
     let er_state = load_er_token_account_data(buffer)?;
+    require_er_token_account_pda(program_id, er_token_account.address(), &er_state)?;
     if er_state.owner != key_bytes(authority.address()) {
         return Err(ProgramError::InvalidAccountData);
     }
@@ -862,6 +863,7 @@ fn load_er_token_account(
     if !state.is_valid() {
         return Err(ProgramError::InvalidAccountData);
     }
+    require_er_token_account_pda(program_id, account.address(), &state)?;
     Ok(state)
 }
 
@@ -872,6 +874,20 @@ fn load_er_token_account_data(account: &AccountInfo) -> Result<ErTokenAccount, P
         return Err(ProgramError::InvalidAccountData);
     }
     Ok(state)
+}
+
+fn require_er_token_account_pda(
+    program_id: &Pubkey,
+    account: &Pubkey,
+    state: &ErTokenAccount,
+) -> ProgramResult {
+    let session_bridge = Pubkey::new_from_array(state.session_bridge);
+    let owner = Pubkey::new_from_array(state.owner);
+    let (expected, bump) = find_er_token_account_pda(program_id, &session_bridge, &owner);
+    if *account != expected || state.bump != bump {
+        return Err(ProgramError::InvalidSeeds);
+    }
+    Ok(())
 }
 
 fn require_bridge_delegation(
