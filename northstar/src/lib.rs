@@ -1155,6 +1155,32 @@ impl Manager {
                 None
             }
             Some(PortalAccount::DepositReceipt(receipt)) => {
+                let expected_session =
+                    northstar_portal::find_session_pda(&self.config.portal_program_id).0;
+                let (expected_receipt, receipt_bump) = northstar_portal::find_deposit_receipt_pda(
+                    &self.config.portal_program_id,
+                    &receipt.session,
+                    &receipt.recipient,
+                );
+                if !receipt.is_valid()
+                    || receipt.session != expected_session
+                    || pubkey != expected_receipt
+                    || receipt.bump != receipt_bump
+                {
+                    return None;
+                }
+                let session_account = bank.get_account(&receipt.session)?;
+                if session_account.owner() != &self.config.portal_program_id {
+                    return None;
+                }
+                let PortalAccount::Session(session_state) =
+                    portal_state::try_parse_raw_portal_account(session_account.data())?
+                else {
+                    return None;
+                };
+                if !session_state.is_valid() {
+                    return None;
+                }
                 let prev_escrow = bank
                     .parent()
                     .and_then(|parent| parent.get_account(&pubkey))
@@ -3061,6 +3087,46 @@ mod portal_e2e_tests {
         assert!(!events
             .iter()
             .any(|event| matches!(event, L1Event::TokenDeposited { .. })));
+    }
+
+    #[test]
+    fn test_fee_deposit_rejects_unregistered_receipt() {
+        setup();
+        let (bank, _bank_forks, portal_program, _mint_keypair) = setup_bank_with_portal();
+        bank.freeze();
+
+        let deposit_bank = Bank::new_from_parent(bank, SlotLeader::new_unique(), 2);
+        let recipient = Pubkey::new_unique();
+        let receipt = northstar_portal::DepositReceipt {
+            discriminator: northstar_portal::DepositReceipt::DISCRIMINATOR,
+            session: northstar_portal::find_session_pda(&portal_program).0,
+            recipient,
+            balance: 0,
+            withdrawn: 0,
+            bump: 255,
+        };
+        let receipt_data = borsh::to_vec(&receipt).unwrap();
+        let lamports = solana_rent::Rent::default()
+            .minimum_balance(receipt_data.len())
+            .saturating_add(1_000);
+        let mut receipt_account =
+            AccountSharedData::new(lamports, receipt_data.len(), &portal_program);
+        receipt_account
+            .data_as_mut_slice()
+            .copy_from_slice(&receipt_data);
+        deposit_bank.store_account(&Pubkey::new_unique(), &receipt_account);
+        deposit_bank.freeze();
+
+        let manager = Manager::new(ManagerConfig {
+            portal_program_id: portal_program,
+            manager_account: Arc::new(Keypair::new()),
+            checkpoint_plan_dir: None,
+        });
+        let events = manager.get_l1_events(&deposit_bank);
+
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, L1Event::FeeDeposited { .. })));
     }
 
     #[test]
