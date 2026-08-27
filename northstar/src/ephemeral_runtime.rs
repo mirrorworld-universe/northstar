@@ -25,6 +25,7 @@ use {
     solana_ledger::{blockstore::Blockstore, leader_schedule_cache::LeaderScheduleCache},
     solana_loader_v3_interface::state::UpgradeableLoaderState,
     solana_message::{v0::LoadedAddresses, Message, VersionedMessage},
+    solana_program_pack::Pack,
     solana_pubkey::Pubkey,
     solana_rpc::{
         er_history::{ErHistoryStore, DEFAULT_MAX_RETAINED_SLOTS},
@@ -47,6 +48,7 @@ use {
     solana_svm::account_loader::PROGRAM_OWNERS,
     solana_transaction::versioned::VersionedTransaction,
     solana_transaction_status::{TransactionStatusMeta, VersionedTransactionWithStatusMeta},
+    spl_token_interface::state::Mint,
     std::{
         collections::{HashMap, HashSet},
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -1701,20 +1703,35 @@ impl EphemeralRuntime {
         });
         let mut cumulative_by_bridge = HashMap::<Pubkey, u64>::new();
         let mut settlements = Vec::new();
+        let Some(active_session) = *self.session_pda.read().unwrap() else {
+            return settlements;
+        };
         for event in events {
             let Some(session_bridge_account) =
                 self.l1_anchor_bank.get_account(&event.session_bridge)
             else {
                 continue;
             };
+            if session_bridge_account.owner() != &self.portal_program_id {
+                continue;
+            }
             let Some(crate::portal_state::PortalAccount::SessionBridge(bridge)) =
                 crate::portal_state::try_parse_raw_portal_account(session_bridge_account.data())
             else {
                 continue;
             };
-            if bridge.bridge_program != event.bridge_program {
+            if bridge.bridge_program != event.bridge_program || bridge.session != active_session {
                 continue;
             }
+            let Some(mint_account) = self.l1_anchor_bank.get_account(&bridge.mint) else {
+                continue;
+            };
+            if mint_account.owner() != &bridge.token_program {
+                continue;
+            }
+            let Ok(mint_state) = Mint::unpack(mint_account.data()) else {
+                continue;
+            };
             let vault = bridge.vault;
             let Some(vault_account) = self.l1_anchor_bank.get_account(&vault) else {
                 continue;
@@ -1724,8 +1741,11 @@ impl EphemeralRuntime {
             ) else {
                 continue;
             };
-            if !vault_state.is_valid()
+            if vault_account.owner() != &bridge.bridge_program
+                || !vault_state.is_valid()
                 || vault_state.session_bridge != event.session_bridge.to_bytes()
+                || vault_state.mint != bridge.mint.to_bytes()
+                || vault_state.token_program != bridge.token_program.to_bytes()
             {
                 continue;
             }
@@ -1761,7 +1781,7 @@ impl EphemeralRuntime {
                 token_program: bridge.token_program,
                 amount: payout,
                 withdrawn: next_cumulative,
-                decimals: event.decimals,
+                decimals: mint_state.decimals,
             });
         }
         settlements
@@ -2333,6 +2353,7 @@ mod tests {
         solana_lattice_hash::lt_hash::LtHash,
         solana_message::{Message, SanitizedMessage},
         solana_net_utils::SocketAddrSpace,
+        solana_program_pack::Pack,
         solana_rpc_client::rpc_client::RpcClient,
         solana_rpc_client_types::config::{
             CommitmentConfig, RpcSendTransactionConfig, RpcSimulateTransactionConfig,
@@ -2345,6 +2366,7 @@ mod tests {
         solana_transaction_status::{
             TransactionConfirmationStatus, TransactionWithStatusMeta, UiTransactionEncoding,
         },
+        spl_token_interface::state::Mint,
         std::{
             collections::HashSet,
             sync::{atomic::AtomicU64, mpsc},
@@ -2801,7 +2823,7 @@ mod tests {
         let vault = Pubkey::new_unique();
         let vault_token_account = Pubkey::new_unique();
         let mint = Pubkey::new_unique();
-        let token_program = Pubkey::new_unique();
+        let token_program = spl_token_interface::id();
         let er_token_account = Pubkey::new_unique();
         let destination = Pubkey::new_unique();
 
@@ -2821,6 +2843,22 @@ mod tests {
             .data_as_mut_slice()
             .copy_from_slice(&bridge_data);
         parent_bank.store_account(&session_bridge, &bridge_account);
+
+        let mut mint_data = vec![0; Mint::LEN];
+        Pack::pack(
+            Mint {
+                mint_authority: None.into(),
+                supply: 600_000_000,
+                decimals: 6,
+                is_initialized: true,
+                freeze_authority: None.into(),
+            },
+            &mut mint_data,
+        )
+        .unwrap();
+        let mut mint_account = AccountSharedData::new(1_000_000, mint_data.len(), &token_program);
+        mint_account.data_as_mut_slice().copy_from_slice(&mint_data);
+        parent_bank.store_account(&mint, &mint_account);
 
         let vault_state = northstar_token_bridge::state::TokenVault {
             discriminator: northstar_token_bridge::state::TokenVault::DISCRIMINATOR,
@@ -2860,6 +2898,7 @@ mod tests {
             Arc::new(Keypair::new()),
         )
         .unwrap();
+        runtime.set_session_pda(session);
         runtime
             .token_withdrawal_payout_events
             .write()
@@ -2870,7 +2909,7 @@ mod tests {
                 er_token_account,
                 l1_destination_token_account: destination,
                 amount: 200_000_000,
-                decimals: 6,
+                decimals: 9,
                 signature: solana_signature::Signature::from([7; 64]),
                 er_slot: 10,
             });
@@ -2882,6 +2921,7 @@ mod tests {
         assert_eq!(settlements[0].withdrawn, 200_000_000);
         assert_eq!(settlements[0].vault, vault);
         assert_eq!(settlements[0].l1_destination_token_account, destination);
+        assert_eq!(settlements[0].decimals, 6);
 
         runtime.shutdown();
     }
