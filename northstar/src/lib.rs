@@ -200,6 +200,7 @@ struct DurableSettlementPlan {
     owner_changes: Vec<DurableAccountOwnerSettlement>,
     lamport_changes: Vec<DurableAccountLamportsSettlement>,
     receipt_balances: Vec<DurableReceiptBalanceSettlement>,
+    token_withdrawals: Vec<DurableTokenWithdrawalSettlement>,
 }
 
 #[derive(borsh::BorshDeserialize, borsh::BorshSerialize)]
@@ -228,6 +229,21 @@ struct DurableReceiptBalanceSettlement {
     balance: u64,
     withdrawn: u64,
     payout_lamports: u64,
+}
+
+#[derive(borsh::BorshDeserialize, borsh::BorshSerialize)]
+struct DurableTokenWithdrawalSettlement {
+    bridge_program: [u8; 32],
+    session_bridge: [u8; 32],
+    er_token_account: [u8; 32],
+    vault: [u8; 32],
+    vault_token_account: [u8; 32],
+    l1_destination_token_account: [u8; 32],
+    mint: [u8; 32],
+    token_program: [u8; 32],
+    amount: u64,
+    withdrawn: u64,
+    decimals: u8,
 }
 
 impl From<&SettlementPlan> for DurableSettlementPlan {
@@ -269,6 +285,25 @@ impl From<&SettlementPlan> for DurableSettlementPlan {
                     balance: receipt.balance,
                     withdrawn: receipt.withdrawn,
                     payout_lamports: receipt.payout_lamports,
+                })
+                .collect(),
+            token_withdrawals: plan
+                .token_withdrawals
+                .iter()
+                .map(|withdrawal| DurableTokenWithdrawalSettlement {
+                    bridge_program: withdrawal.bridge_program.to_bytes(),
+                    session_bridge: withdrawal.session_bridge.to_bytes(),
+                    er_token_account: withdrawal.er_token_account.to_bytes(),
+                    vault: withdrawal.vault.to_bytes(),
+                    vault_token_account: withdrawal.vault_token_account.to_bytes(),
+                    l1_destination_token_account: withdrawal
+                        .l1_destination_token_account
+                        .to_bytes(),
+                    mint: withdrawal.mint.to_bytes(),
+                    token_program: withdrawal.token_program.to_bytes(),
+                    amount: withdrawal.amount,
+                    withdrawn: withdrawal.withdrawn,
+                    decimals: withdrawal.decimals,
                 })
                 .collect(),
         }
@@ -314,6 +349,25 @@ impl From<DurableSettlementPlan> for SettlementPlan {
                     balance: receipt.balance,
                     withdrawn: receipt.withdrawn,
                     payout_lamports: receipt.payout_lamports,
+                })
+                .collect(),
+            token_withdrawals: plan
+                .token_withdrawals
+                .into_iter()
+                .map(|withdrawal| settlement::TokenWithdrawalSettlement {
+                    bridge_program: Pubkey::new_from_array(withdrawal.bridge_program),
+                    session_bridge: Pubkey::new_from_array(withdrawal.session_bridge),
+                    er_token_account: Pubkey::new_from_array(withdrawal.er_token_account),
+                    vault: Pubkey::new_from_array(withdrawal.vault),
+                    vault_token_account: Pubkey::new_from_array(withdrawal.vault_token_account),
+                    l1_destination_token_account: Pubkey::new_from_array(
+                        withdrawal.l1_destination_token_account,
+                    ),
+                    mint: Pubkey::new_from_array(withdrawal.mint),
+                    token_program: Pubkey::new_from_array(withdrawal.token_program),
+                    amount: withdrawal.amount,
+                    withdrawn: withdrawal.withdrawn,
+                    decimals: withdrawal.decimals,
                 })
                 .collect(),
             unsupported_changes: vec![],
@@ -410,27 +464,28 @@ impl Manager {
         let diff = runtime.state_diff_from_l1();
         let er_slot = runtime.bank().slot();
         let receipt_balances = runtime.settlement_receipt_balances(session_pda);
-        build_settlement_plan(
+        let token_withdrawals = runtime.settlement_token_withdrawals(er_slot);
+        let mut plan = build_settlement_plan(
             &diff,
             &runtime.delegated_accounts(),
             er_slot,
             receipt_balances,
         )
         .or_else(|| {
-            (!runtime.settlement_token_withdrawals(er_slot).is_empty()).then(|| {
-                let mut plan = SettlementPlan {
-                    er_slot,
-                    checksum: [0; 32],
-                    chunks: vec![],
-                    owner_changes: vec![],
-                    lamport_changes: vec![],
-                    receipt_balances: vec![],
-                    unsupported_changes: vec![],
-                };
-                plan.checksum = plan.recomputed_checksum();
-                plan
+            (!token_withdrawals.is_empty()).then(|| SettlementPlan {
+                er_slot,
+                checksum: [0; 32],
+                chunks: vec![],
+                owner_changes: vec![],
+                lamport_changes: vec![],
+                receipt_balances: vec![],
+                token_withdrawals: vec![],
+                unsupported_changes: vec![],
             })
-        })
+        })?;
+        plan.token_withdrawals = token_withdrawals;
+        plan.checksum = plan.recomputed_checksum();
+        Some(plan)
     }
 
     /// Build Portal settlement instructions for current data-only diff.
@@ -540,11 +595,11 @@ impl Manager {
                     );
                     return None;
                 }
-                let transactions = plan.portal_retry_transactions_after_begin(
-                    self.config.portal_program_id,
+                let transactions = self.settlement_transactions_for_plan(
+                    &plan,
                     session_pda,
-                    self.config.manager_account.as_ref(),
                     recent_blockhash,
+                    false,
                 );
                 (plan, transactions)
             }
@@ -915,25 +970,36 @@ impl Manager {
         plan: &SettlementPlan,
         session_pda: Pubkey,
         recent_blockhash: Hash,
+        include_begin: bool,
     ) -> Vec<Transaction> {
-        let mut transactions = plan.portal_transactions(
-            self.config.portal_program_id,
-            session_pda,
-            self.config.manager_account.as_ref(),
-            recent_blockhash,
-        );
-        if let Some(runtime) = &self.runtime {
-            let token_withdrawals = runtime.settlement_token_withdrawals(plan.er_slot);
-            transactions.extend(settlement::token_withdrawal_transactions(
-                &token_withdrawals,
+        let mut transactions = if include_begin {
+            plan.portal_transactions(
                 self.config.portal_program_id,
                 session_pda,
-                plan.er_slot,
-                plan.checksum,
                 self.config.manager_account.as_ref(),
                 recent_blockhash,
-            ));
-        }
+            )
+        } else {
+            plan.portal_retry_transactions_after_begin(
+                self.config.portal_program_id,
+                session_pda,
+                self.config.manager_account.as_ref(),
+                recent_blockhash,
+            )
+        };
+        let Some(finish_transaction) = transactions.pop() else {
+            return vec![];
+        };
+        transactions.extend(settlement::token_withdrawal_transactions(
+            &plan.token_withdrawals,
+            self.config.portal_program_id,
+            session_pda,
+            plan.er_slot,
+            plan.checksum,
+            self.config.manager_account.as_ref(),
+            recent_blockhash,
+        ));
+        transactions.push(finish_transaction);
         transactions
     }
 
@@ -990,6 +1056,7 @@ impl Manager {
                     plan,
                     session_pda,
                     recent_blockhash,
+                    true,
                 ));
                 Some(transactions)
             }
@@ -998,7 +1065,12 @@ impl Manager {
                     "Portal checkpoint committed; settling er_slot={} checksum={:?}",
                     plan.er_slot, plan.checksum,
                 );
-                Some(self.settlement_transactions_for_plan(plan, session_pda, recent_blockhash))
+                Some(self.settlement_transactions_for_plan(
+                    plan,
+                    session_pda,
+                    recent_blockhash,
+                    true,
+                ))
             }
             CheckpointStatus::Challenged => {
                 warn!(

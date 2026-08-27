@@ -39,6 +39,7 @@ pub enum PortalInstruction {
     RespondChallenge(RespondChallenge),
     BisectChallenge(BisectChallenge),
     TimeoutChallenge(TimeoutChallenge),
+    AccumulateTokenWithdrawal(AccumulateTokenWithdrawal),
     #[cfg(feature = "zk-verifier-prototype")]
     VerifyErStepProofV1(VerifyErStepProofV1),
 }
@@ -174,6 +175,15 @@ pub struct RegisterSessionBridge {
     pub bridge_program: Pubkey,
     pub vault: Pubkey,
     pub token_program: Pubkey,
+}
+
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+pub struct AccumulateTokenWithdrawal {
+    pub er_slot: u64,
+    pub checksum: Hash32,
+    pub amount: u64,
+    pub withdrawn: u64,
+    pub decimals: u8,
 }
 
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]

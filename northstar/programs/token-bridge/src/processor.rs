@@ -525,15 +525,19 @@ fn process_settle_withdrawal(
     let session = next_account_info(account_info_iter)?;
     let checkpoint = next_account_info(account_info_iter)?;
     let session_bridge = next_account_info(account_info_iter)?;
+    let portal_program = next_account_info(account_info_iter)?;
     let vault = next_account_info(account_info_iter)?;
-    let _er_token_account = next_account_info(account_info_iter)?;
+    let er_token_account = next_account_info(account_info_iter)?;
     let vault_token_account = next_account_info(account_info_iter)?;
     let destination_token_account = next_account_info(account_info_iter)?;
     let mint = next_account_info(account_info_iter)?;
     let token_program = next_account_info(account_info_iter)?;
 
     require_signer(validator)?;
-    if session.owner() != checkpoint.owner() || session_bridge.owner() != session.owner() {
+    if session.owner() != checkpoint.owner()
+        || session_bridge.owner() != session.owner()
+        || portal_program.address() != session.owner()
+    {
         return Err(ProgramError::InvalidAccountOwner);
     }
     let expected_checkpoint = Pubkey::find_program_address(
@@ -588,6 +592,9 @@ fn process_settle_withdrawal(
     if destination.mint.to_bytes() != bridge.mint.to_bytes() {
         return Err(ProgramError::InvalidAccountData);
     }
+    if withdrawn <= vault_state.withdrawn {
+        return Ok(());
+    }
 
     let expected_withdrawn = vault_state
         .withdrawn
@@ -607,7 +614,40 @@ fn process_settle_withdrawal(
         Seed::from(session_bridge.address().as_ref()),
         Seed::from(&vault_bump),
     ];
-    let vault_signer = Signer::from(&vault_seeds);
+    let portal_accounts = [
+        AccountMeta::readonly_signer(validator.address()),
+        AccountMeta::writable(session.address()),
+        AccountMeta::readonly(session_bridge.address()),
+        AccountMeta::readonly_signer(vault.address()),
+        AccountMeta::readonly(er_token_account.address()),
+        AccountMeta::readonly(vault_token_account.address()),
+        AccountMeta::readonly(destination_token_account.address()),
+        AccountMeta::readonly(mint.address()),
+        AccountMeta::readonly(token_program.address()),
+    ];
+    let portal_data =
+        encode_portal_token_withdrawal(er_slot, checksum, amount, withdrawn, decimals);
+    let portal_instruction = Instruction {
+        program_id: session.owner(),
+        accounts: &portal_accounts,
+        data: &portal_data,
+    };
+    invoke_signed(
+        &portal_instruction,
+        &[
+            &*validator,
+            &*session,
+            &*session_bridge,
+            &*vault,
+            &*er_token_account,
+            &*vault_token_account,
+            &*destination_token_account,
+            &*mint,
+            &*token_program,
+        ],
+        &[Signer::from(&vault_seeds)],
+    )?;
+
     TransferChecked::<_>::new(
         vault_token_account,
         mint,
@@ -616,7 +656,7 @@ fn process_settle_withdrawal(
         amount,
         decimals,
     )
-    .invoke_signed(&[vault_signer])?;
+    .invoke_signed(&[Signer::from(&vault_seeds)])?;
     store(vault, &vault_state)
 }
 
@@ -1011,5 +1051,22 @@ fn encode_portal_delegate(grid_id: u64) -> [u8; 9] {
     let mut data = [0; 9];
     data[0] = 3;
     data[1..].copy_from_slice(&grid_id.to_le_bytes());
+    data
+}
+
+fn encode_portal_token_withdrawal(
+    er_slot: u64,
+    checksum: [u8; 32],
+    amount: u64,
+    withdrawn: u64,
+    decimals: u8,
+) -> [u8; 58] {
+    let mut data = [0; 58];
+    data[0] = 26;
+    data[1..9].copy_from_slice(&er_slot.to_le_bytes());
+    data[9..41].copy_from_slice(&checksum);
+    data[41..49].copy_from_slice(&amount.to_le_bytes());
+    data[49..57].copy_from_slice(&withdrawn.to_le_bytes());
+    data[57] = decimals;
     data
 }

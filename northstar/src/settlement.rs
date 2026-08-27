@@ -135,6 +135,7 @@ pub struct SettlementPlan {
     pub owner_changes: Vec<AccountOwnerSettlement>,
     pub lamport_changes: Vec<AccountLamportsSettlement>,
     pub receipt_balances: Vec<ReceiptBalanceSettlement>,
+    pub token_withdrawals: Vec<TokenWithdrawalSettlement>,
     pub unsupported_changes: Vec<SettlementUnsupportedChange>,
 }
 
@@ -144,6 +145,7 @@ impl SettlementPlan {
             && self.owner_changes.is_empty()
             && self.lamport_changes.is_empty()
             && self.receipt_balances.is_empty()
+            && self.token_withdrawals.is_empty()
     }
 
     pub fn has_unsupported_changes(&self) -> bool {
@@ -157,6 +159,7 @@ impl SettlementPlan {
             &self.owner_changes,
             &self.lamport_changes,
             &self.receipt_balances,
+            &self.token_withdrawals,
         )
     }
 
@@ -257,15 +260,25 @@ impl SettlementPlan {
         validator: &Keypair,
         include_begin: bool,
     ) -> Vec<Vec<Instruction>> {
-        split_settlement_instruction_batches(
-            self.portal_instructions_inner(
-                portal_program_id,
-                session_pda,
-                validator.pubkey(),
-                include_begin,
-            ),
-            validator,
-        )
+        let mut instructions = self.portal_instructions_inner(
+            portal_program_id,
+            session_pda,
+            validator.pubkey(),
+            include_begin,
+        );
+        if self.token_withdrawals.is_empty() {
+            return split_settlement_instruction_batches(instructions, validator);
+        }
+        let finish = instructions.pop();
+        let had_effects = !instructions.is_empty();
+        let mut batches = split_settlement_instruction_batches(instructions, validator);
+        if had_effects && batches.is_empty() {
+            return vec![];
+        }
+        if let Some(finish) = finish {
+            batches.push(vec![finish]);
+        }
+        batches
     }
 
     pub fn portal_instructions(
@@ -520,9 +533,10 @@ pub fn token_withdrawal_transactions(
                 program_id: withdrawal.bridge_program,
                 accounts: vec![
                     AccountMeta::new_readonly(validator.pubkey(), true),
-                    AccountMeta::new_readonly(session_pda, false),
+                    AccountMeta::new(session_pda, false),
                     AccountMeta::new_readonly(checkpoint, false),
                     AccountMeta::new_readonly(withdrawal.session_bridge, false),
+                    AccountMeta::new_readonly(portal_program_id, false),
                     AccountMeta::new(withdrawal.vault, false),
                     AccountMeta::new_readonly(withdrawal.er_token_account, false),
                     AccountMeta::new(withdrawal.vault_token_account, false),
@@ -737,11 +751,13 @@ pub fn build_settlement_plan(
             &owner_changes,
             &lamport_changes,
             &receipt_balances,
+            &[],
         ),
         chunks,
         owner_changes,
         lamport_changes,
         receipt_balances,
+        token_withdrawals: vec![],
         unsupported_changes,
     })
 }
@@ -835,6 +851,7 @@ fn checksum_settlement(
     owner_changes: &[AccountOwnerSettlement],
     lamport_changes: &[AccountLamportsSettlement],
     receipt_balances: &[ReceiptBalanceSettlement],
+    token_withdrawals: &[TokenWithdrawalSettlement],
 ) -> [u8; 32] {
     let mut checksum = initial_settlement_checksum(er_slot);
     for chunk in chunks {
@@ -864,6 +881,9 @@ fn checksum_settlement(
             receipt.withdrawn,
             receipt.payout_lamports,
         );
+    }
+    for withdrawal in token_withdrawals {
+        checksum = accumulate_token_withdrawal_checksum(checksum, withdrawal);
     }
     checksum
 }
@@ -924,6 +944,28 @@ fn accumulate_receipt_checksum(
         &balance.to_le_bytes(),
         &withdrawn.to_le_bytes(),
         &payout_lamports.to_le_bytes(),
+    ])
+    .to_bytes()
+}
+
+fn accumulate_token_withdrawal_checksum(
+    accumulator: [u8; 32],
+    withdrawal: &TokenWithdrawalSettlement,
+) -> [u8; 32] {
+    hashv(&[
+        &accumulator,
+        b"token_withdrawal",
+        withdrawal.bridge_program.as_ref(),
+        withdrawal.session_bridge.as_ref(),
+        withdrawal.er_token_account.as_ref(),
+        withdrawal.vault.as_ref(),
+        withdrawal.vault_token_account.as_ref(),
+        withdrawal.l1_destination_token_account.as_ref(),
+        withdrawal.mint.as_ref(),
+        withdrawal.token_program.as_ref(),
+        &withdrawal.amount.to_le_bytes(),
+        &withdrawal.withdrawn.to_le_bytes(),
+        &[withdrawal.decimals],
     ])
     .to_bytes()
 }
@@ -1305,6 +1347,51 @@ mod tests {
     }
 
     #[test]
+    fn token_withdrawal_changes_settlement_checksum() {
+        let token = TokenWithdrawalSettlement {
+            bridge_program: Pubkey::new_unique(),
+            session_bridge: Pubkey::new_unique(),
+            er_token_account: Pubkey::new_unique(),
+            vault: Pubkey::new_unique(),
+            vault_token_account: Pubkey::new_unique(),
+            l1_destination_token_account: Pubkey::new_unique(),
+            mint: Pubkey::new_unique(),
+            token_program: Pubkey::new_unique(),
+            amount: 9,
+            withdrawn: 12,
+            decimals: 6,
+        };
+        let plan = SettlementPlan {
+            er_slot: 1,
+            checksum: [0; 32],
+            chunks: vec![],
+            owner_changes: vec![],
+            lamport_changes: vec![],
+            receipt_balances: vec![],
+            token_withdrawals: vec![token.clone()],
+            unsupported_changes: vec![],
+        };
+        let expected = hashv(&[
+            &initial_settlement_checksum(plan.er_slot),
+            b"token_withdrawal",
+            token.bridge_program.as_ref(),
+            token.session_bridge.as_ref(),
+            token.er_token_account.as_ref(),
+            token.vault.as_ref(),
+            token.vault_token_account.as_ref(),
+            token.l1_destination_token_account.as_ref(),
+            token.mint.as_ref(),
+            token.token_program.as_ref(),
+            &token.amount.to_le_bytes(),
+            &token.withdrawn.to_le_bytes(),
+            &[token.decimals],
+        ])
+        .to_bytes();
+
+        assert_eq!(plan.recomputed_checksum(), expected);
+    }
+
+    #[test]
     fn empty_plan_emits_no_instructions() {
         let plan = SettlementPlan {
             er_slot: 1,
@@ -1313,6 +1400,7 @@ mod tests {
             owner_changes: vec![],
             lamport_changes: vec![],
             receipt_balances: vec![],
+            token_withdrawals: vec![],
             unsupported_changes: vec![],
         };
         assert!(plan
@@ -1351,6 +1439,7 @@ mod tests {
             owner_changes: vec![],
             lamport_changes: vec![],
             receipt_balances: vec![],
+            token_withdrawals: vec![],
             unsupported_changes: vec![SettlementUnsupportedChange::LamportsChanged {
                 account: unsupported_account,
                 l1_lamports: 1,
@@ -1407,6 +1496,7 @@ mod tests {
             owner_changes: vec![],
             lamport_changes: vec![],
             receipt_balances: vec![],
+            token_withdrawals: vec![],
             unsupported_changes: vec![],
         };
 
@@ -1459,6 +1549,7 @@ mod tests {
                 withdrawn: 0,
                 payout_lamports: 0,
             }],
+            token_withdrawals: vec![],
             unsupported_changes: vec![],
         };
 
