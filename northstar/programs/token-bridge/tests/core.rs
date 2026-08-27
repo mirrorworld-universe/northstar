@@ -297,6 +297,91 @@ async fn transfer_rejects_identical_source_and_destination() {
 }
 
 #[tokio::test]
+async fn initialize_er_token_account_rejects_existing_account() {
+    let mut world = TestWorld::new().await;
+    let payer_pubkey = world.payer.pubkey();
+
+    let initialize_vault = initialize_vault_ix(&world);
+    let initialize_alice_er = initialize_er_ix(&world, world.alice.pubkey(), world.alice_er);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[initialize_vault, initialize_alice_er],
+        &[&world.payer],
+    )
+    .await;
+    let deposit = deposit_ix(&world, 600);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[deposit],
+        &[&world.payer, &world.alice],
+    )
+    .await;
+
+    let initialize_again = initialize_er_ix(&world, world.alice.pubkey(), world.alice_er);
+    let result = process_result(
+        &mut world.context,
+        &payer_pubkey,
+        &[initialize_again],
+        &[&world.payer],
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "initialized ER token account must be rejected"
+    );
+    assert_eq!(world.er_amount(world.alice_er).await, 600);
+}
+
+#[tokio::test]
+async fn initialize_vault_rejects_existing_account() {
+    let mut world = TestWorld::new().await;
+    let payer_pubkey = world.payer.pubkey();
+
+    let initialize_vault = initialize_vault_ix(&world);
+    let initialize_alice_er = initialize_er_ix(&world, world.alice.pubkey(), world.alice_er);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[initialize_vault, initialize_alice_er],
+        &[&world.payer],
+    )
+    .await;
+    let deposit = deposit_ix(&world, 600);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[deposit],
+        &[&world.payer, &world.alice],
+    )
+    .await;
+
+    let initialize_again = initialize_vault_ix(&world);
+    let result = process_result(
+        &mut world.context,
+        &payer_pubkey,
+        &[initialize_again],
+        &[&world.payer],
+    )
+    .await;
+
+    assert!(result.is_err(), "initialized vault must be rejected");
+    let vault_account = world
+        .context
+        .banks_client
+        .get_account(world.vault)
+        .await
+        .unwrap()
+        .unwrap();
+    let vault_state =
+        borsh::from_slice::<northstar_token_bridge::state::TokenVault>(&vault_account.data)
+            .unwrap();
+    assert_eq!(vault_state.deposited, 600);
+}
+
+#[tokio::test]
 async fn delegate_and_undelegate_preserve_er_token_account_state() {
     let mut world = TestWorld::new().await;
     let payer_pubkey = world.payer.pubkey();

@@ -175,8 +175,8 @@ fn process_initialize_vault(program_id: &Pubkey, accounts: &mut [AccountInfo]) -
             ],
             system_program_info,
         )?;
-    } else if !vault.owned_by(program_id) {
-        return Err(ProgramError::InvalidAccountOwner);
+    } else {
+        return Err(ProgramError::AccountAlreadyInitialized);
     }
 
     store(vault, &state)
@@ -228,8 +228,8 @@ fn process_initialize_er_token_account(
             ],
             system_program_info,
         )?;
-    } else if !er_token_account.owned_by(program_id) {
-        return Err(ProgramError::InvalidAccountOwner);
+    } else {
+        return Err(ProgramError::AccountAlreadyInitialized);
     }
 
     store(er_token_account, &state)
