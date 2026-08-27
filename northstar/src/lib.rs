@@ -1213,18 +1213,32 @@ impl Manager {
         else {
             return None;
         };
+        let expected_session = northstar_portal::find_session_pda(&self.config.portal_program_id).0;
+        let (expected_session_bridge, session_bridge_bump) =
+            northstar_portal::find_session_bridge_pda(
+                &self.config.portal_program_id,
+                &session_bridge.session,
+                &session_bridge.mint,
+            );
+        if !session_bridge.is_valid()
+            || session_bridge.session != expected_session
+            || session_bridge_key != expected_session_bridge
+            || session_bridge.bump != session_bridge_bump
+        {
+            return None;
+        }
         let bridge_program = session_bridge.bridge_program;
         if account.owner() != &bridge_program {
             return None;
         }
         let er_token_account = Pubkey::new_from_array(receipt.er_token_account);
-        let expected_receipt = northstar_token_bridge::find_token_deposit_receipt_pda(
-            &bridge_program,
-            &session_bridge_key,
-            &er_token_account,
-        )
-        .0;
-        if pubkey != expected_receipt {
+        let (expected_receipt, receipt_bump) =
+            northstar_token_bridge::find_token_deposit_receipt_pda(
+                &bridge_program,
+                &session_bridge_key,
+                &er_token_account,
+            );
+        if pubkey != expected_receipt || receipt.bump != receipt_bump {
             return None;
         }
 
@@ -2989,7 +3003,7 @@ mod portal_e2e_tests {
     }
 
     #[test]
-    fn test_token_deposit_receipt_emits_l1_event() {
+    fn test_token_deposit_receipt_rejects_unregistered_session_bridge() {
         setup();
         let (bank, _bank_forks, portal_program, _mint_keypair) = setup_bank_with_portal();
         let bridge_program = Pubkey::new_unique();
@@ -3044,20 +3058,9 @@ mod portal_e2e_tests {
             checkpoint_plan_dir: None,
         });
         let events = manager.get_l1_events(&deposit_bank);
-        assert!(events.iter().any(|event| matches!(
-            event,
-            L1Event::TokenDeposited {
-                session_pda,
-                session_bridge: event_session_bridge,
-                bridge_program: event_bridge,
-                er_token_account: event_account,
-                amount: 600_000_000,
-                delta: 600_000_000,
-            } if *session_pda == session
-                && *event_session_bridge == session_bridge
-                && *event_bridge == bridge_program
-                && *event_account == er_token_account
-        )));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, L1Event::TokenDeposited { .. })));
     }
 
     #[test]
