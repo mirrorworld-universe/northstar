@@ -1416,10 +1416,15 @@ impl Manager {
         let prev_account = bank.parent()?.get_account(pubkey)?;
 
         match try_parse_raw_portal_account(prev_account.data())? {
-            PortalAccount::Session(session) => Some(L1Event::SessionClosed {
-                session_pda: *pubkey,
-                grid_id: session.grid_id,
-            }),
+            PortalAccount::Session(session) => {
+                let (expected_session, session_bump) =
+                    northstar_portal::find_session_pda(&self.config.portal_program_id);
+                (session.is_valid() && *pubkey == expected_session && session.bump == session_bump)
+                    .then_some(L1Event::SessionClosed {
+                        session_pda: *pubkey,
+                        grid_id: session.grid_id,
+                    })
+            }
             // Find the delegated account that was undelegated
             // by scanning for accounts whose owner changed FROM portal
             PortalAccount::DelegationRecord(_record) => Some(L1Event::AccountUndelegated {
@@ -3167,7 +3172,8 @@ mod portal_e2e_tests {
         session_account
             .data_as_mut_slice()
             .copy_from_slice(&session_data);
-        event_bank.store_account(&Pubkey::new_unique(), &session_account);
+        let unregistered_session = Pubkey::new_unique();
+        event_bank.store_account(&unregistered_session, &session_account);
         event_bank.freeze();
 
         let manager = Manager::new(ManagerConfig {
@@ -3180,6 +3186,11 @@ mod portal_e2e_tests {
         assert!(!events
             .iter()
             .any(|event| matches!(event, L1Event::SessionOpened { .. })));
+
+        let close_bank = Bank::new_from_parent(Arc::new(event_bank), SlotLeader::new_unique(), 3);
+        assert!(manager
+            .parse_zeroed_account(&close_bank, &unregistered_session)
+            .is_none());
     }
 
     #[test]
