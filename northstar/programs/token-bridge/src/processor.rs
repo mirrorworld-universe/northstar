@@ -776,6 +776,9 @@ fn process_undelegate_er_token_account(
     )?;
     copy_data(er_token_account, buffer)?;
     let er_state = load_er_token_account_data(buffer)?;
+    if er_state.owner != key_bytes(authority.address()) {
+        return Err(ProgramError::InvalidAccountData);
+    }
     let er_seeds = er_signer_seeds(&er_state);
     let er_signer = Signer::from(&er_seeds);
 
