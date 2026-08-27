@@ -151,10 +151,10 @@ fn live_validator_spl_token_bridge_round_trip() {
         &rpc,
         &[
             delegate_er_ix(&payer.pubkey(), session, session_bridge, alice_er),
-            delegate_er_ix(&payer.pubkey(), session, session_bridge, bob_er),
+            delegate_er_ix(&bob.pubkey(), session, session_bridge, bob_er),
         ],
         &payer.pubkey(),
-        &[&payer],
+        &[&payer, &bob],
     );
     eprintln!("waiting for delegated ER accounts: alice={alice_er}, bob={bob_er}");
     wait_for_er_amount(&er_rpc, alice_er, 0);

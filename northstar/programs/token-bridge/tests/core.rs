@@ -409,7 +409,7 @@ async fn delegate_and_undelegate_preserve_er_token_account_state() {
         &mut world.context,
         &payer_pubkey,
         &[delegate],
-        &[&world.payer],
+        &[&world.payer, &world.alice],
     )
     .await;
     assert_eq!(world.account_owner(world.alice_er).await, PORTAL_PROGRAM_ID);
@@ -441,6 +441,37 @@ async fn delegate_and_undelegate_preserve_er_token_account_state() {
 }
 
 #[tokio::test]
+async fn delegate_er_token_account_requires_owner() {
+    let mut world = TestWorld::new().await;
+    let payer_pubkey = world.payer.pubkey();
+
+    let initialize_alice_er = initialize_er_ix(&world, world.alice.pubkey(), world.alice_er);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[initialize_alice_er],
+        &[&world.payer],
+    )
+    .await;
+
+    let delegate = delegate_ix_for_authority(&world, world.payer.pubkey());
+    let result = process_result(
+        &mut world.context,
+        &payer_pubkey,
+        &[delegate],
+        &[&world.payer],
+    )
+    .await;
+
+    assert!(result.is_err(), "ER token owner must authorize delegation");
+    assert_eq!(
+        world.account_owner(world.alice_er).await,
+        northstar_token_bridge::id()
+    );
+    assert_eq!(world.er_amount(world.alice_er).await, 0);
+}
+
+#[tokio::test]
 async fn undelegate_er_token_account_requires_owner() {
     let mut world = TestWorld::new().await;
     let payer_pubkey = world.payer.pubkey();
@@ -467,7 +498,7 @@ async fn undelegate_er_token_account_requires_owner() {
         &mut world.context,
         &payer_pubkey,
         &[delegate],
-        &[&world.payer],
+        &[&world.payer, &world.alice],
     )
     .await;
 
@@ -616,6 +647,10 @@ fn withdraw_ix_for(
 }
 
 fn delegate_ix(world: &TestWorld) -> Instruction {
+    delegate_ix_for_authority(world, world.alice.pubkey())
+}
+
+fn delegate_ix_for_authority(world: &TestWorld, authority: Pubkey) -> Instruction {
     let (delegation_record, _) = Pubkey::find_program_address(
         &[DelegationRecord::SEED_PREFIX, world.alice_er.as_ref()],
         &PORTAL_PROGRAM_ID,
@@ -624,7 +659,7 @@ fn delegate_ix(world: &TestWorld) -> Instruction {
     Instruction {
         program_id: northstar_token_bridge::id(),
         accounts: vec![
-            AccountMeta::new(world.payer.pubkey(), true),
+            AccountMeta::new(authority, true),
             AccountMeta::new(world.alice_er, false),
             AccountMeta::new_readonly(northstar_token_bridge::id(), false),
             AccountMeta::new_readonly(world.session_bridge, false),

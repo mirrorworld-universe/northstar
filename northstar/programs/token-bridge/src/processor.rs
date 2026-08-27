@@ -681,7 +681,9 @@ fn process_delegate_er_token_account(
     require_system_program(system_program_info)?;
     load_session_bridge(program_id, session_bridge, portal_program)?;
     let er_state = load_er_token_account(program_id, er_token_account)?;
-    if er_state.session_bridge != key_bytes(session_bridge.address()) {
+    if er_state.session_bridge != key_bytes(session_bridge.address())
+        || er_state.owner != key_bytes(payer.address())
+    {
         return Err(ProgramError::InvalidAccountData);
     }
 
