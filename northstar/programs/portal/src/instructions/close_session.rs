@@ -24,9 +24,9 @@ use {
 pub fn process_close_session(program_id: &Pubkey, accounts: &mut [AccountInfo]) -> ProgramResult {
     pinocchio_log::log!("Instruction: CloseSession");
 
-    // TODO: close_session should iterate and refund all DepositReceipt PDAs
-    // associated with this session back to their respective recipients.
-    // For now, deposit receipts persist independently after session close.
+    // TODO: Bind session-scoped state to a persistent generation before supporting safe reopen.
+    // SessionBridge accounts, token vaults, deposit receipts, delegated accounts, and delegation
+    // records can outlive this singleton Session PDA; close must retire or migrate all of them.
     let [closer, session, fee_vault, _system_program, checkpoint_cursor, ..] = accounts else {
         pinocchio_log::log!("ERROR: CloseSession failed: not enough account keys");
         return Err(ProgramError::NotEnoughAccountKeys);
