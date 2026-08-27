@@ -1133,6 +1133,12 @@ impl Manager {
         match try_parse_raw_portal_account(data) {
             // Check if this is a new session (didn't exist in parent)
             Some(PortalAccount::Session(session)) => {
+                let (expected_session, session_bump) =
+                    northstar_portal::find_session_pda(&self.config.portal_program_id);
+                if !session.is_valid() || pubkey != expected_session || session.bump != session_bump
+                {
+                    return None;
+                }
                 self.is_new_in_slot(bank, &pubkey)
                     .then_some(L1Event::SessionOpened {
                         session_pda: pubkey,
@@ -3127,6 +3133,53 @@ mod portal_e2e_tests {
         assert!(!events
             .iter()
             .any(|event| matches!(event, L1Event::FeeDeposited { .. })));
+    }
+
+    #[test]
+    fn test_session_event_rejects_unregistered_account() {
+        setup();
+        let (bank, _bank_forks, portal_program, _mint_keypair) = setup_bank_with_portal();
+        bank.freeze();
+
+        let event_bank = Bank::new_from_parent(bank, SlotLeader::new_unique(), 2);
+        let session = northstar_portal::Session {
+            discriminator: northstar_portal::Session::DISCRIMINATOR,
+            grid_id: 1,
+            ttl_slots: 100,
+            fee_cap: 1_000,
+            created_at: 1,
+            nonce: 0,
+            authority: Pubkey::new_unique(),
+            validator: Pubkey::new_unique(),
+            settlement_interval_slots: 10,
+            last_settled_l1_slot: 0,
+            last_settled_er_slot: 0,
+            settlement_status: northstar_portal::SettlementStatus::Idle,
+            settlement_er_slot: 0,
+            settlement_checksum: [0; 32],
+            settlement_accumulator: [0; 32],
+            settlement_started_l1_slot: 0,
+            bump: 255,
+        };
+        let session_data = borsh::to_vec(&session).unwrap();
+        let mut session_account =
+            AccountSharedData::new(1_000_000, session_data.len(), &portal_program);
+        session_account
+            .data_as_mut_slice()
+            .copy_from_slice(&session_data);
+        event_bank.store_account(&Pubkey::new_unique(), &session_account);
+        event_bank.freeze();
+
+        let manager = Manager::new(ManagerConfig {
+            portal_program_id: portal_program,
+            manager_account: Arc::new(Keypair::new()),
+            checkpoint_plan_dir: None,
+        });
+        let events = manager.get_l1_events(&event_bank);
+
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, L1Event::SessionOpened { .. })));
     }
 
     #[test]
