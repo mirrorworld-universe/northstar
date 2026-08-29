@@ -3,7 +3,8 @@ use {
     log::warn,
     northstar_portal::{
         find_checkpoint_cursor_pda, find_checkpoint_pda, find_delegation_record_pda,
-        BeginSettlement, CommitCheckpoint, FinishSettlement, PortalInstruction, ProposeCheckpoint,
+        find_token_withdrawal_authorization_pda, AccumulateTokenWithdrawal, BeginSettlement,
+        CommitCheckpoint, FinishSettlement, PortalInstruction, ProposeCheckpoint,
         SettleAccountLamports, SettleAccountOwner, SettleDepositReceipt, WriteSettlementChunk,
         MAX_SETTLEMENT_CHUNK, MAX_SETTLEMENT_LAMPORT_ACCOUNTS,
     },
@@ -516,6 +517,57 @@ impl SettlementPlan {
     }
 }
 
+pub fn token_withdrawal_authorization_transactions(
+    withdrawals: &[TokenWithdrawalSettlement],
+    portal_program_id: Pubkey,
+    session_pda: Pubkey,
+    er_slot: Slot,
+    checksum: [u8; 32],
+    validator: &Keypair,
+    recent_blockhash: Hash,
+) -> Vec<Transaction> {
+    let checkpoint = find_checkpoint_pda(&portal_program_id, &session_pda, er_slot).0;
+    withdrawals
+        .iter()
+        .map(|withdrawal| {
+            let authorization = find_token_withdrawal_authorization_pda(
+                &portal_program_id,
+                &checkpoint,
+                &withdrawal.vault,
+                withdrawal.withdrawn,
+            )
+            .0;
+            let instruction = Instruction {
+                program_id: portal_program_id,
+                accounts: vec![
+                    AccountMeta::new(validator.pubkey(), true),
+                    AccountMeta::new(session_pda, false),
+                    AccountMeta::new_readonly(withdrawal.session_bridge, false),
+                    AccountMeta::new_readonly(withdrawal.vault, false),
+                    AccountMeta::new_readonly(withdrawal.er_token_account, false),
+                    AccountMeta::new_readonly(withdrawal.vault_token_account, false),
+                    AccountMeta::new_readonly(withdrawal.l1_destination_token_account, false),
+                    AccountMeta::new_readonly(withdrawal.mint, false),
+                    AccountMeta::new_readonly(withdrawal.token_program, false),
+                    AccountMeta::new(authorization, false),
+                    AccountMeta::new_readonly(system_program::id(), false),
+                ],
+                data: borsh::to_vec(&PortalInstruction::AccumulateTokenWithdrawal(
+                    AccumulateTokenWithdrawal {
+                        er_slot,
+                        checksum,
+                        amount: withdrawal.amount,
+                        withdrawn: withdrawal.withdrawn,
+                        decimals: withdrawal.decimals,
+                    },
+                ))
+                .unwrap(),
+            };
+            sign_settlement_transaction(&[instruction], validator, recent_blockhash)
+        })
+        .collect()
+}
+
 pub fn token_withdrawal_transactions(
     withdrawals: &[TokenWithdrawalSettlement],
     portal_program_id: Pubkey,
@@ -535,6 +587,16 @@ pub fn token_withdrawal_transactions(
                     AccountMeta::new_readonly(validator.pubkey(), true),
                     AccountMeta::new(session_pda, false),
                     AccountMeta::new_readonly(checkpoint, false),
+                    AccountMeta::new(
+                        find_token_withdrawal_authorization_pda(
+                            &portal_program_id,
+                            &checkpoint,
+                            &withdrawal.vault,
+                            withdrawal.withdrawn,
+                        )
+                        .0,
+                        false,
+                    ),
                     AccountMeta::new_readonly(withdrawal.session_bridge, false),
                     AccountMeta::new_readonly(portal_program_id, false),
                     AccountMeta::new(withdrawal.vault, false),

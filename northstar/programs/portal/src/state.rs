@@ -338,6 +338,26 @@ impl SessionBridge {
     }
 }
 
+#[p_state]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct TokenWithdrawalAuthorization {
+    pub discriminator: [u8; 8],
+    pub checkpoint: Pubkey,
+    pub tuple_hash: Hash32,
+    pub consumed: bool,
+    pub bump: u8,
+}
+
+impl TokenWithdrawalAuthorization {
+    pub const SEED_PREFIX: &[u8] = b"token_withdrawal_auth";
+    pub const DISCRIMINATOR: [u8; 8] = [201, 36, 84, 147, 113, 63, 92, 11];
+
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        self.discriminator == Self::DISCRIMINATOR
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

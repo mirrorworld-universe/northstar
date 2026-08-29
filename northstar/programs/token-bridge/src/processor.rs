@@ -524,6 +524,7 @@ fn process_settle_withdrawal(
     let validator = next_account_info(account_info_iter)?;
     let session = next_account_info(account_info_iter)?;
     let checkpoint = next_account_info(account_info_iter)?;
+    let authorization = next_account_info(account_info_iter)?;
     let session_bridge = next_account_info(account_info_iter)?;
     let portal_program = next_account_info(account_info_iter)?;
     let vault = next_account_info(account_info_iter)?;
@@ -616,7 +617,9 @@ fn process_settle_withdrawal(
     ];
     let portal_accounts = [
         AccountMeta::readonly_signer(validator.address()),
-        AccountMeta::writable(session.address()),
+        AccountMeta::readonly(session.address()),
+        AccountMeta::readonly(checkpoint.address()),
+        AccountMeta::writable(authorization.address()),
         AccountMeta::readonly(session_bridge.address()),
         AccountMeta::readonly_signer(vault.address()),
         AccountMeta::readonly(er_token_account.address()),
@@ -626,7 +629,7 @@ fn process_settle_withdrawal(
         AccountMeta::readonly(token_program.address()),
     ];
     let portal_data =
-        encode_portal_token_withdrawal(er_slot, checksum, amount, withdrawn, decimals);
+        encode_portal_consume_token_withdrawal(er_slot, checksum, amount, withdrawn, decimals);
     let portal_instruction = Instruction {
         program_id: session.owner(),
         accounts: &portal_accounts,
@@ -637,6 +640,8 @@ fn process_settle_withdrawal(
         &[
             &*validator,
             &*session,
+            &*checkpoint,
+            &*authorization,
             &*session_bridge,
             &*vault,
             &*er_token_account,
@@ -1075,7 +1080,7 @@ fn encode_portal_delegate(grid_id: u64) -> [u8; 9] {
     data
 }
 
-fn encode_portal_token_withdrawal(
+fn encode_portal_consume_token_withdrawal(
     er_slot: u64,
     checksum: [u8; 32],
     amount: u64,
@@ -1083,7 +1088,7 @@ fn encode_portal_token_withdrawal(
     decimals: u8,
 ) -> [u8; 58] {
     let mut data = [0; 58];
-    data[0] = 26;
+    data[0] = 27;
     data[1..9].copy_from_slice(&er_slot.to_le_bytes());
     data[9..41].copy_from_slice(&checksum);
     data[41..49].copy_from_slice(&amount.to_le_bytes());
