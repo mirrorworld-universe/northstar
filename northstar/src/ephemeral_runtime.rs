@@ -80,19 +80,30 @@ impl DropCallback for NoopDropCallback {
 const MAX_WITHDRAWAL_PAYOUT_EVENTS: usize = 10_000;
 
 #[cfg(test)]
+const TEST_PORT_RANGE: core::ops::Range<u16> = 20_000..30_000;
+#[cfg(test)]
+static NEXT_TEST_PORT: AtomicU64 = AtomicU64::new(TEST_PORT_RANGE.start as u64);
+#[cfg(test)]
 static TEST_SOCKET_ADDRS: Mutex<Vec<SocketAddr>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
 pub(crate) fn find_free_test_addr() -> SocketAddr {
     loop {
-        let udp = solana_net_utils::sockets::bind_to(IpAddr::V4(Ipv4Addr::LOCALHOST), 0).unwrap();
-        let addr = udp.local_addr().unwrap();
-        if std::net::TcpListener::bind(addr).is_err() {
+        let candidate = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let range_len = u64::from(TEST_PORT_RANGE.end - TEST_PORT_RANGE.start);
+        let port = TEST_PORT_RANGE.start + (candidate % range_len) as u16;
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+        let Ok(udp) = solana_net_utils::sockets::bind_to(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+        else {
             continue;
-        }
+        };
+        let Ok(tcp) = std::net::TcpListener::bind(addr) else {
+            continue;
+        };
 
-        // Test threads probe ports concurrently. Retain chosen addresses so another
-        // thread cannot reuse a just-probed port before its runtime binds it.
+        // Keep test allocations outside Linux's default ephemeral client-port range. Dropping
+        // these probes before runtime startup is then safe from concurrent outbound connections.
+        drop((udp, tcp));
         let mut allocated = TEST_SOCKET_ADDRS.lock().unwrap();
         if allocated.contains(&addr) {
             continue;
@@ -2403,6 +2414,14 @@ mod tests {
 
     fn find_free_addr() -> SocketAddr {
         crate::ephemeral_runtime::find_free_test_addr()
+    }
+
+    #[test]
+    fn runtime_addresses_avoid_ephemeral_client_ports() {
+        for _ in 0..3 {
+            let port = find_free_addr().port();
+            assert!((20_000..30_000).contains(&port));
+        }
     }
 
     fn wait_for_rpc_ready(rpc_client: &RpcClient) {
