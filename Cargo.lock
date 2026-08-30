@@ -5328,6 +5328,8 @@ dependencies = [
  "northstar-zk-types",
  "rand_chacha 0.3.1",
  "serde_json",
+ "sha2 0.10.9",
+ "solana-runtime",
  "solana-sbpf",
 ]
 
