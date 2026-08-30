@@ -61,7 +61,21 @@ pub fn build_replay_witness_v1() -> Result<ReplayWitnessV1, ReplayError> {
 }
 
 pub fn build_benchmark_replay_witness_v1(iterations: u32) -> Result<ReplayWitnessV1, ReplayError> {
-    build_validated_witness(execute_full_transaction_benchmark_fixture_v1(iterations))
+    build_benchmark_replay_artifacts_v1(iterations).map(|artifacts| artifacts.0)
+}
+
+pub fn build_benchmark_replay_artifacts_v1(
+    iterations: u32,
+) -> Result<(ReplayWitnessV1, Vec<u8>), ReplayError> {
+    let executed = execute_full_transaction_benchmark_fixture_v1(iterations);
+    executed.assert_expected_success();
+    let trace_bytes = executed
+        .trace
+        .canonical_bytes()
+        .map_err(|_| ReplayError::Encoding)?;
+    let witness = assemble_replay_witness_v1(executed)?;
+    replay(&witness)?;
+    Ok((witness, trace_bytes))
 }
 
 fn build_validated_witness(

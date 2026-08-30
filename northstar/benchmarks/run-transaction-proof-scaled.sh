@@ -28,7 +28,8 @@ mkdir -p "$fixture_dir"
 
 for spec in "1k 71" "10k 1071" "100k 11071"; do
   read -r profile iterations <<< "$spec"
-  "$root_target/generate_fixture" "$fixture_dir/$profile.bin" "$iterations"
+  "$root_target/generate_fixture" "$fixture_dir/$profile.bin" "$iterations" \
+    "$fixture_dir/$profile.trace-v1.bin"
 done
 sha256sum "$fixture_dir"/*.bin > "$results/fixture-sha256.txt"
 
