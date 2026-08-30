@@ -89,16 +89,20 @@ run_sp1() {
   mkdir -p "$phase_dir"
   for ((i = 1; i <= warmups; i++)); do
     local status=0
-    SP1_PROVER=cuda "$sp1_bin" "$mode" "$fixture" \
-      "$phase_dir/warmup-$i.json" "$profile" \
-      > "$phase_dir/warmup-$i.stdout.txt" 2> "$phase_dir/warmup-$i.stderr.txt" || status=$?
+    (
+      cd "$phase_dir" && SP1_PROVER=cuda "$sp1_bin" "$mode" "$fixture" \
+        "$phase_dir/warmup-$i.json" "$profile" \
+        > "$phase_dir/warmup-$i.stdout.txt" 2> "$phase_dir/warmup-$i.stderr.txt"
+    ) || status=$?
     wait_for_gpu_server || true
     ((status == 0)) || return "$status"
   done
   for ((i = 1; i <= runs; i++)); do
     local status=0
-    monitor_run "$phase_dir/run-$i" env SP1_PROVER=cuda \
-      "$sp1_bin" "$mode" "$fixture" "$phase_dir/run-$i.json" "$profile" || status=$?
+    (
+      cd "$phase_dir" && monitor_run "$phase_dir/run-$i" env SP1_PROVER=cuda \
+        "$sp1_bin" "$mode" "$fixture" "$phase_dir/run-$i.json" "$profile"
+    ) || status=$?
     wait_for_gpu_server || true
     ((status == 0)) || return "$status"
   done
