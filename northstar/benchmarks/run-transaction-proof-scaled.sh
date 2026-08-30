@@ -55,6 +55,17 @@ monitor_run() {
   return "$status"
 }
 
+wait_for_gpu_server() {
+  for _ in $(seq 1 30); do
+    if ! pgrep -f "$HOME/.sp1/bin/sp1-gpu-server" >/dev/null; then
+      sleep 2
+      return
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 run_custom() {
   local profile=$1
   local phase_dir="$results/$profile/custom"
@@ -76,13 +87,19 @@ run_sp1() {
   local fixture="$fixture_dir/$profile.bin"
   mkdir -p "$phase_dir"
   for ((i = 1; i <= warmups; i++)); do
+    local status=0
     SP1_PROVER=cuda "$sp1_bin" "$mode" "$fixture" \
       "$phase_dir/warmup-$i.json" "$profile" \
-      > "$phase_dir/warmup-$i.stdout.txt" 2> "$phase_dir/warmup-$i.stderr.txt" || return
+      > "$phase_dir/warmup-$i.stdout.txt" 2> "$phase_dir/warmup-$i.stderr.txt" || status=$?
+    wait_for_gpu_server || true
+    ((status == 0)) || return "$status"
   done
   for ((i = 1; i <= runs; i++)); do
+    local status=0
     monitor_run "$phase_dir/run-$i" env SP1_PROVER=cuda \
-      "$sp1_bin" "$mode" "$fixture" "$phase_dir/run-$i.json" "$profile" || return
+      "$sp1_bin" "$mode" "$fixture" "$phase_dir/run-$i.json" "$profile" || status=$?
+    wait_for_gpu_server || true
+    ((status == 0)) || return "$status"
   done
 }
 
