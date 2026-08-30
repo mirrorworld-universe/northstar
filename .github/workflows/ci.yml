@@ -22,8 +22,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ensure-rust-toolchain
-      - run: rustup toolchain install nightly --component rustfmt
-      - run: cargo +nightly fmt --all -- --check
+      # Pin rustfmt so nightly style changes do not invalidate unchanged upstream files.
+      - run: rustup toolchain install nightly-2026-07-20 --component rustfmt
+      - run: cargo +nightly-2026-07-20 fmt --all -- --check
 
   clippy:
     name: Clippy

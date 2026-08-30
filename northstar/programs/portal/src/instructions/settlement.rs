@@ -83,6 +83,42 @@ pub(crate) fn accumulate_receipt_checksum(
     .to_bytes()
 }
 
+pub(crate) struct TokenWithdrawalChecksum<'a> {
+    pub bridge_program: &'a Pubkey,
+    pub session_bridge: &'a Pubkey,
+    pub er_token_account: &'a Pubkey,
+    pub vault: &'a Pubkey,
+    pub vault_token_account: &'a Pubkey,
+    pub destination_token_account: &'a Pubkey,
+    pub mint: &'a Pubkey,
+    pub token_program: &'a Pubkey,
+    pub amount: u64,
+    pub withdrawn: u64,
+    pub decimals: u8,
+}
+
+pub(crate) fn accumulate_token_withdrawal_checksum(
+    accumulator: [u8; 32],
+    withdrawal: &TokenWithdrawalChecksum<'_>,
+) -> [u8; 32] {
+    hashv(&[
+        &accumulator,
+        b"token_withdrawal",
+        withdrawal.bridge_program.as_ref(),
+        withdrawal.session_bridge.as_ref(),
+        withdrawal.er_token_account.as_ref(),
+        withdrawal.vault.as_ref(),
+        withdrawal.vault_token_account.as_ref(),
+        withdrawal.destination_token_account.as_ref(),
+        withdrawal.mint.as_ref(),
+        withdrawal.token_program.as_ref(),
+        &withdrawal.amount.to_le_bytes(),
+        &withdrawal.withdrawn.to_le_bytes(),
+        &[withdrawal.decimals],
+    ])
+    .to_bytes()
+}
+
 fn load_session(program_id: &Pubkey, session: &AccountInfo) -> Result<Session, ProgramError> {
     let (expected_session_key, _) = find_session_pda(program_id);
     if session.address() != &expected_session_key {

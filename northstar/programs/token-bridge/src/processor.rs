@@ -7,7 +7,7 @@ use {
     borsh::{BorshDeserialize, BorshSerialize},
     northstar_portal::{Checkpoint, DelegationRecord, Session, SessionBridge},
     pinocchio::{
-        cpi::{invoke, invoke_signed, Seed, Signer},
+        cpi::{invoke_signed, Seed, Signer},
         error::ProgramError,
         instruction::{InstructionAccount as AccountMeta, InstructionView as Instruction},
         no_allocator,
@@ -175,8 +175,8 @@ fn process_initialize_vault(program_id: &Pubkey, accounts: &mut [AccountInfo]) -
             ],
             system_program_info,
         )?;
-    } else if !vault.owned_by(program_id) {
-        return Err(ProgramError::InvalidAccountOwner);
+    } else {
+        return Err(ProgramError::AccountAlreadyInitialized);
     }
 
     store(vault, &state)
@@ -228,8 +228,8 @@ fn process_initialize_er_token_account(
             ],
             system_program_info,
         )?;
-    } else if !er_token_account.owned_by(program_id) {
-        return Err(ProgramError::InvalidAccountOwner);
+    } else {
+        return Err(ProgramError::AccountAlreadyInitialized);
     }
 
     store(er_token_account, &state)
@@ -381,6 +381,9 @@ fn process_transfer(
     let destination = next_account_info(account_info_iter)?;
 
     require_signer(authority)?;
+    if source.address() == destination.address() {
+        return Err(ProgramError::InvalidAccountData);
+    }
     let mut source_state = load_er_token_account(program_id, source)?;
     let mut destination_state = load_er_token_account(program_id, destination)?;
     if source_state.owner != key_bytes(authority.address())
@@ -521,16 +524,21 @@ fn process_settle_withdrawal(
     let validator = next_account_info(account_info_iter)?;
     let session = next_account_info(account_info_iter)?;
     let checkpoint = next_account_info(account_info_iter)?;
+    let authorization = next_account_info(account_info_iter)?;
     let session_bridge = next_account_info(account_info_iter)?;
+    let portal_program = next_account_info(account_info_iter)?;
     let vault = next_account_info(account_info_iter)?;
-    let _er_token_account = next_account_info(account_info_iter)?;
+    let er_token_account = next_account_info(account_info_iter)?;
     let vault_token_account = next_account_info(account_info_iter)?;
     let destination_token_account = next_account_info(account_info_iter)?;
     let mint = next_account_info(account_info_iter)?;
     let token_program = next_account_info(account_info_iter)?;
 
     require_signer(validator)?;
-    if session.owner() != checkpoint.owner() || session_bridge.owner() != session.owner() {
+    if session.owner() != checkpoint.owner()
+        || session_bridge.owner() != session.owner()
+        || portal_program.address() != session.owner()
+    {
         return Err(ProgramError::InvalidAccountOwner);
     }
     let expected_checkpoint = Pubkey::find_program_address(
@@ -585,6 +593,9 @@ fn process_settle_withdrawal(
     if destination.mint.to_bytes() != bridge.mint.to_bytes() {
         return Err(ProgramError::InvalidAccountData);
     }
+    if withdrawn <= vault_state.withdrawn {
+        return Ok(());
+    }
 
     let expected_withdrawn = vault_state
         .withdrawn
@@ -604,7 +615,44 @@ fn process_settle_withdrawal(
         Seed::from(session_bridge.address().as_ref()),
         Seed::from(&vault_bump),
     ];
-    let vault_signer = Signer::from(&vault_seeds);
+    let portal_accounts = [
+        AccountMeta::readonly_signer(validator.address()),
+        AccountMeta::readonly(session.address()),
+        AccountMeta::readonly(checkpoint.address()),
+        AccountMeta::writable(authorization.address()),
+        AccountMeta::readonly(session_bridge.address()),
+        AccountMeta::readonly_signer(vault.address()),
+        AccountMeta::readonly(er_token_account.address()),
+        AccountMeta::readonly(vault_token_account.address()),
+        AccountMeta::readonly(destination_token_account.address()),
+        AccountMeta::readonly(mint.address()),
+        AccountMeta::readonly(token_program.address()),
+    ];
+    let portal_data =
+        encode_portal_consume_token_withdrawal(er_slot, checksum, amount, withdrawn, decimals);
+    let portal_instruction = Instruction {
+        program_id: session.owner(),
+        accounts: &portal_accounts,
+        data: &portal_data,
+    };
+    invoke_signed(
+        &portal_instruction,
+        &[
+            &*validator,
+            &*session,
+            &*checkpoint,
+            &*authorization,
+            &*session_bridge,
+            &*vault,
+            &*er_token_account,
+            &*vault_token_account,
+            &*destination_token_account,
+            &*mint,
+            &*token_program,
+        ],
+        &[Signer::from(&vault_seeds)],
+    )?;
+
     TransferChecked::<_>::new(
         vault_token_account,
         mint,
@@ -613,7 +661,7 @@ fn process_settle_withdrawal(
         amount,
         decimals,
     )
-    .invoke_signed(&[vault_signer])?;
+    .invoke_signed(&[Signer::from(&vault_seeds)])?;
     store(vault, &vault_state)
 }
 
@@ -638,7 +686,9 @@ fn process_delegate_er_token_account(
     require_system_program(system_program_info)?;
     load_session_bridge(program_id, session_bridge, portal_program)?;
     let er_state = load_er_token_account(program_id, er_token_account)?;
-    if er_state.session_bridge != key_bytes(session_bridge.address()) {
+    if er_state.session_bridge != key_bytes(session_bridge.address())
+        || er_state.owner != key_bytes(payer.address())
+    {
         return Err(ProgramError::InvalidAccountData);
     }
 
@@ -732,10 +782,17 @@ fn process_undelegate_er_token_account(
         system_program_info,
     )?;
     copy_data(er_token_account, buffer)?;
+    let er_state = load_er_token_account_data(buffer)?;
+    require_er_token_account_pda(program_id, er_token_account.address(), &er_state)?;
+    if er_state.owner != key_bytes(authority.address()) {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    let er_seeds = er_signer_seeds(&er_state);
+    let er_signer = Signer::from(&er_seeds);
 
     let portal_accounts = [
         AccountMeta::writable_signer(authority.address()),
-        AccountMeta::writable(er_token_account.address()),
+        AccountMeta::writable_signer(er_token_account.address()),
         AccountMeta::readonly(program_id),
         AccountMeta::writable(delegation_record.address()),
         AccountMeta::readonly(&pinocchio_system::ID),
@@ -747,7 +804,7 @@ fn process_undelegate_er_token_account(
         accounts: &portal_accounts,
         data: &portal_data,
     };
-    invoke(
+    invoke_signed(
         &portal_instruction,
         &[
             &*authority,
@@ -757,6 +814,7 @@ fn process_undelegate_er_token_account(
             &*system_program_info,
             &*session,
         ],
+        &[er_signer],
     )?;
 
     if !er_token_account.owned_by(program_id) {
@@ -810,6 +868,7 @@ fn load_er_token_account(
     if !state.is_valid() {
         return Err(ProgramError::InvalidAccountData);
     }
+    require_er_token_account_pda(program_id, account.address(), &state)?;
     Ok(state)
 }
 
@@ -820,6 +879,20 @@ fn load_er_token_account_data(account: &AccountInfo) -> Result<ErTokenAccount, P
         return Err(ProgramError::InvalidAccountData);
     }
     Ok(state)
+}
+
+fn require_er_token_account_pda(
+    program_id: &Pubkey,
+    account: &Pubkey,
+    state: &ErTokenAccount,
+) -> ProgramResult {
+    let session_bridge = Pubkey::new_from_array(state.session_bridge);
+    let owner = Pubkey::new_from_array(state.owner);
+    let (expected, bump) = find_er_token_account_pda(program_id, &session_bridge, &owner);
+    if *account != expected || state.bump != bump {
+        return Err(ProgramError::InvalidSeeds);
+    }
+    Ok(())
 }
 
 fn require_bridge_delegation(
@@ -1004,5 +1077,22 @@ fn encode_portal_delegate(grid_id: u64) -> [u8; 9] {
     let mut data = [0; 9];
     data[0] = 3;
     data[1..].copy_from_slice(&grid_id.to_le_bytes());
+    data
+}
+
+fn encode_portal_consume_token_withdrawal(
+    er_slot: u64,
+    checksum: [u8; 32],
+    amount: u64,
+    withdrawn: u64,
+    decimals: u8,
+) -> [u8; 58] {
+    let mut data = [0; 58];
+    data[0] = 27;
+    data[1..9].copy_from_slice(&er_slot.to_le_bytes());
+    data[9..41].copy_from_slice(&checksum);
+    data[41..49].copy_from_slice(&amount.to_le_bytes());
+    data[49..57].copy_from_slice(&withdrawn.to_le_bytes());
+    data[57] = decimals;
     data
 }

@@ -33,6 +33,7 @@ struct TestWorld {
     vault: Pubkey,
     alice_er: Pubkey,
     bob_er: Pubkey,
+    unregistered_er: Pubkey,
     alice_token: Pubkey,
     bob_token: Pubkey,
     vault_token: Pubkey,
@@ -59,6 +60,7 @@ impl TestWorld {
             &session_bridge,
             &bob.pubkey(),
         );
+        let unregistered_er = Pubkey::new_unique();
         let alice_token = Pubkey::new_unique();
         let bob_token = Pubkey::new_unique();
         let vault_token = Pubkey::new_unique();
@@ -126,6 +128,24 @@ impl TestWorld {
                 rent_epoch: 0,
             },
         );
+        let unregistered_state = ErTokenAccount {
+            discriminator: ErTokenAccount::DISCRIMINATOR,
+            session_bridge: session_bridge.to_bytes(),
+            owner: alice.pubkey().to_bytes(),
+            mint: mint.to_bytes(),
+            amount: 600,
+            bump: 255,
+        };
+        program_test.add_account(
+            unregistered_er,
+            Account {
+                lamports: Rent::default().minimum_balance(account_size(&unregistered_state)),
+                data: borsh::to_vec(&unregistered_state).unwrap(),
+                owner: northstar_token_bridge::id(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        );
 
         let context = program_test.start_with_context().await;
         Self {
@@ -139,6 +159,7 @@ impl TestWorld {
             vault,
             alice_er,
             bob_er,
+            unregistered_er,
             alice_token,
             bob_token,
             vault_token,
@@ -253,6 +274,171 @@ async fn deposit_transfer_and_withdraw_round_trip() {
 }
 
 #[tokio::test]
+async fn transfer_rejects_identical_source_and_destination() {
+    let mut world = TestWorld::new().await;
+    let payer_pubkey = world.payer.pubkey();
+
+    let initialize_vault = initialize_vault_ix(&world);
+    let initialize_alice_er = initialize_er_ix(&world, world.alice.pubkey(), world.alice_er);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[initialize_vault, initialize_alice_er],
+        &[&world.payer],
+    )
+    .await;
+    let deposit = deposit_ix(&world, 600);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[deposit],
+        &[&world.payer, &world.alice],
+    )
+    .await;
+
+    let self_transfer = Instruction {
+        program_id: northstar_token_bridge::id(),
+        accounts: vec![
+            AccountMeta::new_readonly(world.alice.pubkey(), true),
+            AccountMeta::new(world.alice_er, false),
+            AccountMeta::new(world.alice_er, false),
+        ],
+        data: borsh::to_vec(&TokenBridgeInstruction::Transfer { amount: 600 }).unwrap(),
+    };
+    let result = process_result(
+        &mut world.context,
+        &payer_pubkey,
+        &[self_transfer],
+        &[&world.payer, &world.alice],
+    )
+    .await;
+
+    assert!(result.is_err(), "self-transfer must be rejected");
+    assert_eq!(world.er_amount(world.alice_er).await, 600);
+}
+
+#[tokio::test]
+async fn transfer_rejects_unregistered_er_account() {
+    let mut world = TestWorld::new().await;
+    let payer_pubkey = world.payer.pubkey();
+
+    let initialize_bob_er = initialize_er_ix(&world, world.bob.pubkey(), world.bob_er);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[initialize_bob_er],
+        &[&world.payer],
+    )
+    .await;
+
+    let transfer = Instruction {
+        program_id: northstar_token_bridge::id(),
+        accounts: vec![
+            AccountMeta::new_readonly(world.alice.pubkey(), true),
+            AccountMeta::new(world.unregistered_er, false),
+            AccountMeta::new(world.bob_er, false),
+        ],
+        data: borsh::to_vec(&TokenBridgeInstruction::Transfer { amount: 600 }).unwrap(),
+    };
+    let result = process_result(
+        &mut world.context,
+        &payer_pubkey,
+        &[transfer],
+        &[&world.payer, &world.alice],
+    )
+    .await;
+
+    assert!(result.is_err(), "ER token account PDA must be registered");
+    assert_eq!(world.er_amount(world.unregistered_er).await, 600);
+    assert_eq!(world.er_amount(world.bob_er).await, 0);
+}
+
+#[tokio::test]
+async fn initialize_er_token_account_rejects_existing_account() {
+    let mut world = TestWorld::new().await;
+    let payer_pubkey = world.payer.pubkey();
+
+    let initialize_vault = initialize_vault_ix(&world);
+    let initialize_alice_er = initialize_er_ix(&world, world.alice.pubkey(), world.alice_er);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[initialize_vault, initialize_alice_er],
+        &[&world.payer],
+    )
+    .await;
+    let deposit = deposit_ix(&world, 600);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[deposit],
+        &[&world.payer, &world.alice],
+    )
+    .await;
+
+    let initialize_again = initialize_er_ix(&world, world.alice.pubkey(), world.alice_er);
+    let result = process_result(
+        &mut world.context,
+        &payer_pubkey,
+        &[initialize_again],
+        &[&world.payer],
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "initialized ER token account must be rejected"
+    );
+    assert_eq!(world.er_amount(world.alice_er).await, 600);
+}
+
+#[tokio::test]
+async fn initialize_vault_rejects_existing_account() {
+    let mut world = TestWorld::new().await;
+    let payer_pubkey = world.payer.pubkey();
+
+    let initialize_vault = initialize_vault_ix(&world);
+    let initialize_alice_er = initialize_er_ix(&world, world.alice.pubkey(), world.alice_er);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[initialize_vault, initialize_alice_er],
+        &[&world.payer],
+    )
+    .await;
+    let deposit = deposit_ix(&world, 600);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[deposit],
+        &[&world.payer, &world.alice],
+    )
+    .await;
+
+    let initialize_again = initialize_vault_ix(&world);
+    let result = process_result(
+        &mut world.context,
+        &payer_pubkey,
+        &[initialize_again],
+        &[&world.payer],
+    )
+    .await;
+
+    assert!(result.is_err(), "initialized vault must be rejected");
+    let vault_account = world
+        .context
+        .banks_client
+        .get_account(world.vault)
+        .await
+        .unwrap()
+        .unwrap();
+    let vault_state =
+        borsh::from_slice::<northstar_token_bridge::state::TokenVault>(&vault_account.data)
+            .unwrap();
+    assert_eq!(vault_state.deposited, 600);
+}
+
+#[tokio::test]
 async fn delegate_and_undelegate_preserve_er_token_account_state() {
     let mut world = TestWorld::new().await;
     let payer_pubkey = world.payer.pubkey();
@@ -280,7 +466,7 @@ async fn delegate_and_undelegate_preserve_er_token_account_state() {
         &mut world.context,
         &payer_pubkey,
         &[delegate],
-        &[&world.payer],
+        &[&world.payer, &world.alice],
     )
     .await;
     assert_eq!(world.account_owner(world.alice_er).await, PORTAL_PROGRAM_ID);
@@ -290,7 +476,7 @@ async fn delegate_and_undelegate_preserve_er_token_account_state() {
         &mut world.context,
         &payer_pubkey,
         &[undelegate],
-        &[&world.payer],
+        &[&world.payer, &world.alice],
     )
     .await;
     assert_eq!(
@@ -309,6 +495,85 @@ async fn delegate_and_undelegate_preserve_er_token_account_state() {
     .await;
     assert_eq!(world.token_amount(world.alice_token).await, 500);
     assert_eq!(world.er_amount(world.alice_er).await, 500);
+}
+
+#[tokio::test]
+async fn delegate_er_token_account_requires_owner() {
+    let mut world = TestWorld::new().await;
+    let payer_pubkey = world.payer.pubkey();
+
+    let initialize_alice_er = initialize_er_ix(&world, world.alice.pubkey(), world.alice_er);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[initialize_alice_er],
+        &[&world.payer],
+    )
+    .await;
+
+    let delegate = delegate_ix_for_authority(&world, world.payer.pubkey());
+    let result = process_result(
+        &mut world.context,
+        &payer_pubkey,
+        &[delegate],
+        &[&world.payer],
+    )
+    .await;
+
+    assert!(result.is_err(), "ER token owner must authorize delegation");
+    assert_eq!(
+        world.account_owner(world.alice_er).await,
+        northstar_token_bridge::id()
+    );
+    assert_eq!(world.er_amount(world.alice_er).await, 0);
+}
+
+#[tokio::test]
+async fn undelegate_er_token_account_requires_owner() {
+    let mut world = TestWorld::new().await;
+    let payer_pubkey = world.payer.pubkey();
+
+    let initialize_vault = initialize_vault_ix(&world);
+    let initialize_alice_er = initialize_er_ix(&world, world.alice.pubkey(), world.alice_er);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[initialize_vault, initialize_alice_er],
+        &[&world.payer],
+    )
+    .await;
+    let deposit = deposit_ix(&world, 600);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[deposit],
+        &[&world.payer, &world.alice],
+    )
+    .await;
+    let delegate = delegate_ix(&world);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[delegate],
+        &[&world.payer, &world.alice],
+    )
+    .await;
+
+    let undelegate = undelegate_ix_for_authority(&world, world.payer.pubkey());
+    let result = process_result(
+        &mut world.context,
+        &payer_pubkey,
+        &[undelegate],
+        &[&world.payer],
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "ER token owner must authorize undelegation"
+    );
+    assert_eq!(world.account_owner(world.alice_er).await, PORTAL_PROGRAM_ID);
+    assert_eq!(world.er_amount(world.alice_er).await, 600);
 }
 
 fn initialize_vault_ix(world: &TestWorld) -> Instruction {
@@ -439,6 +704,10 @@ fn withdraw_ix_for(
 }
 
 fn delegate_ix(world: &TestWorld) -> Instruction {
+    delegate_ix_for_authority(world, world.alice.pubkey())
+}
+
+fn delegate_ix_for_authority(world: &TestWorld, authority: Pubkey) -> Instruction {
     let (delegation_record, _) = Pubkey::find_program_address(
         &[DelegationRecord::SEED_PREFIX, world.alice_er.as_ref()],
         &PORTAL_PROGRAM_ID,
@@ -447,7 +716,7 @@ fn delegate_ix(world: &TestWorld) -> Instruction {
     Instruction {
         program_id: northstar_token_bridge::id(),
         accounts: vec![
-            AccountMeta::new(world.payer.pubkey(), true),
+            AccountMeta::new(authority, true),
             AccountMeta::new(world.alice_er, false),
             AccountMeta::new_readonly(northstar_token_bridge::id(), false),
             AccountMeta::new_readonly(world.session_bridge, false),
@@ -463,6 +732,10 @@ fn delegate_ix(world: &TestWorld) -> Instruction {
 }
 
 fn undelegate_ix(world: &TestWorld) -> Instruction {
+    undelegate_ix_for_authority(world, world.alice.pubkey())
+}
+
+fn undelegate_ix_for_authority(world: &TestWorld, authority: Pubkey) -> Instruction {
     let (delegation_record, _) = Pubkey::find_program_address(
         &[DelegationRecord::SEED_PREFIX, world.alice_er.as_ref()],
         &PORTAL_PROGRAM_ID,
@@ -471,7 +744,7 @@ fn undelegate_ix(world: &TestWorld) -> Instruction {
     Instruction {
         program_id: northstar_token_bridge::id(),
         accounts: vec![
-            AccountMeta::new(world.payer.pubkey(), true),
+            AccountMeta::new(authority, true),
             AccountMeta::new(world.alice_er, false),
             AccountMeta::new_readonly(northstar_token_bridge::id(), false),
             AccountMeta::new_readonly(PORTAL_PROGRAM_ID, false),
@@ -490,9 +763,20 @@ async fn process(
     instructions: &[Instruction],
     signers: &[&Keypair],
 ) {
+    process_result(context, payer, instructions, signers)
+        .await
+        .unwrap();
+}
+
+async fn process_result(
+    context: &mut ProgramTestContext,
+    payer: &Pubkey,
+    instructions: &[Instruction],
+    signers: &[&Keypair],
+) -> Result<(), solana_program_test::BanksClientError> {
     let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(instructions, Some(payer), signers, blockhash);
-    context.banks_client.process_transaction(tx).await.unwrap();
+    context.banks_client.process_transaction(tx).await
 }
 
 fn shared_to_account(account: &AccountSharedData) -> Account {

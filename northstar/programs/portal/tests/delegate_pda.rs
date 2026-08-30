@@ -268,7 +268,7 @@ impl RunningScenario {
             program_id: PORTAL_PROGRAM_ID,
             accounts: vec![
                 AccountMeta::new(self.inner.payer.pubkey(), true),
-                AccountMeta::new(self.inner.delegated.pubkey(), false),
+                AccountMeta::new(self.inner.delegated.pubkey(), true),
                 AccountMeta::new_readonly(owner_program, false),
                 AccountMeta::new(delegation_record, false),
                 AccountMeta::new_readonly(system_program::id(), false),
@@ -288,6 +288,22 @@ impl RunningScenario {
         let tx = Transaction::new_signed_with_payer(
             &[ix],
             Some(&self.inner.payer.pubkey()),
+            &[&self.inner.payer, &self.inner.delegated],
+            blockhash,
+        );
+        banks.process_transaction(tx).await
+    }
+
+    async fn undelegate_without_delegated_signer(
+        &mut self,
+    ) -> Result<(), solana_program_test::BanksClientError> {
+        let mut ix = self.build_undelegate_ix(self.inner.owner_program);
+        ix.accounts[1].is_signer = false;
+        let banks: &mut BanksClient = &mut self.context.banks_client;
+        let blockhash = banks.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(
+            &[ix],
+            Some(&self.inner.payer.pubkey()),
             &[&self.inner.payer],
             blockhash,
         );
@@ -301,7 +317,7 @@ impl RunningScenario {
         let tx = Transaction::new_signed_with_payer(
             &[ix],
             Some(&self.inner.payer.pubkey()),
-            &[&self.inner.payer],
+            &[&self.inner.payer, &self.inner.delegated],
             blockhash,
         );
         banks.process_transaction(tx).await
@@ -619,6 +635,31 @@ async fn undelegate_keypair_wallet_round_trip() {
         .unwrap()
         .expect("delegated_account still exists");
     assert_eq!(acct.owner, running.inner.owner_program);
+}
+
+#[tokio::test]
+async fn undelegate_requires_delegated_account_signature() {
+    let mut scenario =
+        StagedScenario::new(DelegateScenario::new()).with_delegated(vec![], PORTAL_PROGRAM_ID);
+    let owner_program = scenario.inner.owner_program;
+    scenario = scenario.with_buffer(vec![], owner_program);
+
+    let mut running = scenario.start().await;
+    running.delegate().await.expect("delegate should succeed");
+
+    let result = running.undelegate_without_delegated_signer().await;
+    assert!(
+        result.is_err(),
+        "delegated account must authorize undelegation"
+    );
+    let delegated = running
+        .context
+        .banks_client
+        .get_account(running.inner.delegated.pubkey())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(delegated.owner, PORTAL_PROGRAM_ID);
 }
 
 #[tokio::test]

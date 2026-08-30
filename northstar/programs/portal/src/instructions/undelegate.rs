@@ -24,7 +24,7 @@ use {
 ///
 /// Accounts:
 /// 0. `[signer, writable]` authority (receives the delegation_record's lamport refund)
-/// 1. `[writable]` delegated_account
+/// 1. `[signer, writable]` delegated_account
 /// 2. `[]` owner_program (must equal `delegation_record.owner_program`)
 /// 3. `[writable]` delegation_record PDA (closed)
 /// 4. `[]` system_program
@@ -33,7 +33,7 @@ use {
     id = 4,
     accounts = [
         authority(signer, mut),
-        delegated_account(mut),
+        delegated_account(signer, mut),
         owner_program,
         delegation_record(mut, state = DelegationRecord),
         system_program,
@@ -49,7 +49,7 @@ pub fn process_undelegate(program_id: &Pubkey, accounts: &mut [AccountInfo]) -> 
     id = 10,
     accounts = [
         authority(signer, mut),
-        delegated_account(mut),
+        delegated_account(signer, mut),
         owner_program,
         delegation_record(mut, state = DelegationRecord),
         system_program,
@@ -76,6 +76,9 @@ fn process_undelegate_inner(
     };
 
     if !authority.is_signer() {
+        return Err(PortalError::Unauthorized.into());
+    }
+    if !delegated_account.is_signer() {
         return Err(PortalError::Unauthorized.into());
     }
 
