@@ -23,7 +23,7 @@ mkdir -p "$fixture_dir"
   free -b | head -2
   nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
   rustc --version
-  "$HOME/.sp1/bin/cargo-prove" --version
+  cargo prove --version
 } > "$results/environment.txt" 2>&1
 
 for spec in "1k 71" "10k 1071" "100k 11071"; do

@@ -1,6 +1,6 @@
 # Full transaction-processor proof specification v1
 
-Status: frozen for the first two proving spikes.
+Status: frozen. Scaled fixtures may add rows but must not change this contract.
 
 This document defines proof kind `2`, version `1` of `northstar-er-step-v1`. It keeps the Portal-facing eight-field ABI byte-for-byte compatible with `ErStepPublicInputsV1`; proof kind `1` remains the one-account feasibility circuit.
 

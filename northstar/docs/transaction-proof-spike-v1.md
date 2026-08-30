@@ -85,4 +85,6 @@ Bound but not independently derived:
 
 Unsupported and fail-closed: CPI, precompiles, other syscalls, builtins, deployment/upgrade, lookup tables, durable nonce, unknown transaction/version/event/opcode, and trailing witness bytes.
 
-SP1 Groth16 output is not compatible with Portal's current verifier ABI. Custom Groth16 is direct, fixture-specific, and not recursive. The 1K/10K/100K sweep and larger-CU projections remain future work; the custom track must first generalize its circuit beyond fixed fixture constants.
+SP1 Groth16 output is not compatible with Portal's current verifier ABI. Custom Groth16 is direct, fixture-specific, and not recursive.
+
+The completed 1K/10K/100K sweep, larger-CU projections, and hybrid architecture decision are recorded in `full-svm-proving-architecture-decision-v1.md`. Canonical scaled traces and hashes are in `../trace-fixtures/scaled-v1/`; full measured ranges are in `../benchmarks/transaction-proof-scaled-v1.json`.
