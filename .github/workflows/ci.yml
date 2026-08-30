@@ -46,7 +46,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler libprotobuf-dev libudev-dev libclang-dev
-      - run: cargo clippy --all --tests -- -D warnings
+      - run: cargo clippy --locked --all --tests -- -D warnings
 
   test:
     name: Test
@@ -88,9 +88,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-solana-platform-tools-v3-${{ steps.solana_tools.outputs.platform_tools_version }}-
       - name: Build Portal SBF program
-        run: cargo build-sbf --manifest-path northstar/programs/portal/Cargo.toml
+        run: cargo build-sbf --manifest-path northstar/programs/portal/Cargo.toml -- --locked
       - name: Build Token Bridge SBF program
-        run: cargo build-sbf --manifest-path northstar/programs/token-bridge/Cargo.toml
+        run: cargo build-sbf --manifest-path northstar/programs/token-bridge/Cargo.toml -- --locked
       - name: Save Solana platform tools
         if: env.SAVE_CI_CACHE == 'true' && steps.solana_platform_tools_cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -100,19 +100,19 @@ jobs:
             ~/.local/share/solana/install/active_release/bin/platform-tools-sdk/sbf/dependencies/platform-tools
           key: ${{ runner.os }}-solana-platform-tools-v3-${{ steps.solana_tools.outputs.platform_tools_version }}-${{ hashFiles('Cargo.lock') }}
       - name: Build test validator
-        run: cargo build --bin solana-test-validator
+        run: cargo build --locked --bin solana-test-validator
       - name: Test devnet SPL smoke state format
-        run: cargo test -p northstar-token-bridge --example devnet_smoke
+        run: cargo test --locked -p northstar-token-bridge --example devnet_smoke
       - name: Run SPL token bridge core tests
-        run: BPF_OUT_DIR="$PWD/target/deploy" cargo test -p northstar-token-bridge --test core
+        run: BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar-token-bridge --test core
       - name: Run SPL token bridge validator E2E
-        run: BPF_OUT_DIR="$PWD/target/deploy" cargo test -p northstar-token-bridge --test validator_e2e -- --nocapture
+        run: BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar-token-bridge --test validator_e2e -- --nocapture
       - name: Run Northstar crate tests
-        run: BPF_OUT_DIR="$PWD/target/deploy" cargo test -p northstar -p northstar-portal --no-fail-fast
+        run: BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar -p northstar-portal --no-fail-fast
       - name: Run Northstar SVM regression tests
-        run: cargo test -p solana-svm northstar --no-fail-fast
+        run: cargo test --locked -p solana-svm northstar --no-fail-fast
       - name: Run Northstar core service tests
-        run: cargo test -p solana-core northstar_service --no-fail-fast
+        run: cargo test --locked -p solana-core northstar_service --no-fail-fast
 
   deploy:
     name: Build and Deploy on Devnet
@@ -177,18 +177,20 @@ jobs:
           rm -f "$DEPLOY_DIR/northstar_portal.so" "$DEPLOY_DIR/northstar_token_bridge.so"
           ./cargo-build-sbf \
             --manifest-path northstar/programs/portal/Cargo.toml \
-            --sbf-out-dir "$DEPLOY_DIR"
+            --sbf-out-dir "$DEPLOY_DIR" \
+            -- --locked
           ./cargo-build-sbf \
             --manifest-path northstar/programs/token-bridge/Cargo.toml \
-            --sbf-out-dir "$DEPLOY_DIR"
+            --sbf-out-dir "$DEPLOY_DIR" \
+            -- --locked
           test -s "$DEPLOY_DIR/northstar_portal.so"
           test -s "$DEPLOY_DIR/northstar_token_bridge.so"
 
       - name: Build validator binary
-        run: cargo build --release --target-dir /solana/northstar/ --bin agave-validator
+        run: cargo build --locked --release --target-dir /solana/northstar/ --bin agave-validator
 
       - name: Build Northstar Solana CLI
-        run: cargo build --release --target-dir /solana/northstar/ --package solana-cli --bin solana --no-default-features
+        run: cargo build --locked --release --target-dir /solana/northstar/ --package solana-cli --bin solana --no-default-features
 
       - name: Confirm binary exists
         run: |

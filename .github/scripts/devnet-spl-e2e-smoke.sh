@@ -97,7 +97,7 @@ run_devnet_smoke() {
   if [ -n "$DEVNET_SMOKE_BIN" ]; then
     RUST_LOG=warn "$DEVNET_SMOKE_BIN" "$@"
   else
-    RUST_LOG=warn cargo run --quiet --release --target-dir "$CARGO_TARGET_DIR" \
+    RUST_LOG=warn cargo run --locked --quiet --release --target-dir "$CARGO_TARGET_DIR" \
       --package northstar-token-bridge --example devnet_smoke -- "$@"
   fi
 }
