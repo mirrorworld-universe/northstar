@@ -14,22 +14,30 @@ use {
     pinocchio_system::instructions::CreateAccount,
 };
 
+const TOKEN_VAULT_SEED_PREFIX: &[u8] = b"token_vault";
+
 /// Register the SPL bridge/vault used by a session and mint.
 ///
 /// This is Portal-owned discovery state for SDKs and routers. Asset custody and
 /// accounting remain in the bridge program.
 ///
 /// Accounts:
-/// 0. `[signer, writable]` authority / payer (must match `session.authority`)
+/// 0. `[signer, writable]` payer
 /// 1. `[]` session PDA
 /// 2. `[writable]` session_bridge PDA (`["session_bridge", session, mint]`)
-/// 3. `[]` system_program
+/// 3. `[]` initialized SPL mint
+/// 4. `[executable]` bridge program
+/// 5. `[executable]` SPL Token program
+/// 6. `[]` system_program
 #[p_instruction(
     id = 22,
     accounts = [
-        authority(signer, mut),
+        payer(signer, mut),
         session(state = Session),
         session_bridge(mut, state = SessionBridge),
+        mint_account,
+        bridge_program_account,
+        token_program_account,
         system_program
     ],
     data = [
@@ -49,12 +57,17 @@ pub fn process_register_session_bridge(
         token_program,
     }: RegisterSessionBridge,
 ) -> ProgramResult {
-    let [authority, session, session_bridge, _system_program, ..] = accounts else {
+    let [payer, session, session_bridge, mint_account, bridge_program_account, token_program_account, system_program, ..] =
+        accounts
+    else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    if !authority.is_signer() {
+    if !payer.is_signer() {
         return Err(PortalError::Unauthorized.into());
+    }
+    if system_program.address() != &pinocchio_system::ID {
+        return Err(ProgramError::IncorrectProgramId);
     }
 
     let (expected_session, _) = find_session_pda(program_id);
@@ -70,13 +83,36 @@ pub fn process_register_session_bridge(
     if !session_state.is_valid() {
         return Err(PortalError::SessionStateInvalid.into());
     }
-    if &session_state.authority != authority.address() {
-        return Err(PortalError::Unauthorized.into());
-    }
 
     let (expected_bridge, bridge_bump) =
         find_session_bridge_pda(program_id, session.address(), &mint);
     if session_bridge.address() != &expected_bridge {
+        return Err(PortalError::InvalidPdaSeeds.into());
+    }
+
+    if mint_account.address() != &mint
+        || bridge_program_account.address() != &bridge_program
+        || token_program_account.address() != &token_program
+    {
+        return Err(PortalError::InvalidAccountData.into());
+    }
+    if token_program != pinocchio_token::ID
+        || !token_program_account.executable()
+        || !bridge_program_account.executable()
+    {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    let mint_state = pinocchio_token::state::Mint::from_account_view(mint_account)?;
+    if !mint_state.is_initialized() {
+        return Err(PortalError::InvalidAccountData.into());
+    }
+
+    let (expected_vault, _) = Pubkey::find_program_address(
+        &[TOKEN_VAULT_SEED_PREFIX, session_bridge.address().as_ref()],
+        &bridge_program,
+    );
+    if vault != expected_vault {
         return Err(PortalError::InvalidPdaSeeds.into());
     }
 
@@ -104,7 +140,7 @@ pub fn process_register_session_bridge(
         let signer = Signer::from(signer_seeds);
 
         CreateAccount {
-            from: authority,
+            from: payer,
             to: session_bridge,
             lamports,
             space: bridge_size as u64,

@@ -287,7 +287,7 @@ fn withdraw(config: &Config) -> Result<()> {
 fn register_session_bridge_ix(
     portal_program: Pubkey,
     bridge_program: Pubkey,
-    authority: Pubkey,
+    payer: Pubkey,
     session: Pubkey,
     session_bridge: Pubkey,
     mint: Pubkey,
@@ -296,9 +296,12 @@ fn register_session_bridge_ix(
     Instruction {
         program_id: portal_program,
         accounts: vec![
-            AccountMeta::new(authority, true),
+            AccountMeta::new(payer, true),
             AccountMeta::new_readonly(session, false),
             AccountMeta::new(session_bridge, false),
+            AccountMeta::new_readonly(mint, false),
+            AccountMeta::new_readonly(bridge_program, false),
+            AccountMeta::new_readonly(spl_token_interface::id(), false),
             AccountMeta::new_readonly(system_program::id(), false),
         ],
         data: borsh::to_vec(&PortalInstruction::RegisterSessionBridge(
