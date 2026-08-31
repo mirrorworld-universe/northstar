@@ -168,6 +168,7 @@ fn prepare(config: &Config) -> Result<()> {
             config.portal_program,
             config.bridge_program,
             payer.pubkey(),
+            payer.pubkey(),
             session,
             session_bridge,
             er_token_account,
@@ -439,6 +440,7 @@ fn delegate_er_ix(
     portal_program: Pubkey,
     bridge_program: Pubkey,
     payer: Pubkey,
+    owner: Pubkey,
     session: Pubkey,
     session_bridge: Pubkey,
     er_account: Pubkey,
@@ -453,6 +455,7 @@ fn delegate_er_ix(
         program_id: bridge_program,
         accounts: vec![
             AccountMeta::new(payer, true),
+            AccountMeta::new_readonly(owner, true),
             AccountMeta::new(er_account, false),
             AccountMeta::new_readonly(bridge_program, false),
             AccountMeta::new_readonly(session_bridge, false),

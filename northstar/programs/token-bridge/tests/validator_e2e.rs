@@ -165,8 +165,20 @@ fn live_validator_spl_token_bridge_round_trip() {
     send_tx(
         &rpc,
         &[
-            delegate_er_ix(&payer.pubkey(), session, session_bridge, alice_er),
-            delegate_er_ix(&bob.pubkey(), session, session_bridge, bob_er),
+            delegate_er_ix(
+                &payer.pubkey(),
+                &payer.pubkey(),
+                session,
+                session_bridge,
+                alice_er,
+            ),
+            delegate_er_ix(
+                &payer.pubkey(),
+                &bob.pubkey(),
+                session,
+                session_bridge,
+                bob_er,
+            ),
         ],
         &payer.pubkey(),
         &[&payer, &bob],
@@ -430,6 +442,7 @@ fn start_withdrawal_ix(
 
 fn delegate_er_ix(
     payer: &Pubkey,
+    owner: &Pubkey,
     session: Pubkey,
     session_bridge: Pubkey,
     er_account: Pubkey,
@@ -443,6 +456,7 @@ fn delegate_er_ix(
         program_id: northstar_token_bridge::id(),
         accounts: vec![
             AccountMeta::new(*payer, true),
+            AccountMeta::new_readonly(*owner, true),
             AccountMeta::new(er_account, false),
             AccountMeta::new_readonly(northstar_token_bridge::id(), false),
             AccountMeta::new_readonly(session_bridge, false),
