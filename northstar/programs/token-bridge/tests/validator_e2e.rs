@@ -118,18 +118,33 @@ fn live_validator_spl_token_bridge_round_trip() {
     );
     wait_token_amount(&rpc, alice_token.pubkey(), 1_000_000_000);
 
-    eprintln!("registering session bridge");
+    eprintln!("rejecting non-canonical vault registration");
+    assert_tx_rejected(
+        &rpc,
+        &[register_session_bridge_ix(
+            &bob.pubkey(),
+            session,
+            session_bridge,
+            mint.pubkey(),
+            Pubkey::new_unique(),
+        )],
+        &payer.pubkey(),
+        &[&payer, &bob],
+    );
+    assert!(rpc.get_account(&session_bridge).is_err());
+
+    eprintln!("registering session bridge with non-session authority");
     send_tx(
         &rpc,
         &[register_session_bridge_ix(
-            &payer.pubkey(),
+            &bob.pubkey(),
             session,
             session_bridge,
             mint.pubkey(),
             vault,
         )],
         &payer.pubkey(),
-        &[&payer],
+        &[&payer, &bob],
     );
     eprintln!("initializing bridge accounts");
     send_tx(
@@ -151,10 +166,10 @@ fn live_validator_spl_token_bridge_round_trip() {
         &rpc,
         &[
             delegate_er_ix(&payer.pubkey(), session, session_bridge, alice_er),
-            delegate_er_ix(&payer.pubkey(), session, session_bridge, bob_er),
+            delegate_er_ix(&bob.pubkey(), session, session_bridge, bob_er),
         ],
         &payer.pubkey(),
-        &[&payer],
+        &[&payer, &bob],
     );
     eprintln!("waiting for delegated ER accounts: alice={alice_er}, bob={bob_er}");
     wait_for_er_amount(&er_rpc, alice_er, 0);
@@ -257,7 +272,7 @@ fn open_session_ix(
 }
 
 fn register_session_bridge_ix(
-    authority: &Pubkey,
+    registrant: &Pubkey,
     session: Pubkey,
     session_bridge: Pubkey,
     mint: Pubkey,
@@ -266,9 +281,12 @@ fn register_session_bridge_ix(
     Instruction {
         program_id: PORTAL_PROGRAM_ID,
         accounts: vec![
-            AccountMeta::new(*authority, true),
+            AccountMeta::new(*registrant, true),
             AccountMeta::new_readonly(session, false),
             AccountMeta::new(session_bridge, false),
+            AccountMeta::new_readonly(mint, false),
+            AccountMeta::new_readonly(northstar_token_bridge::id(), false),
+            AccountMeta::new_readonly(spl_token_interface::id(), false),
             AccountMeta::new_readonly(system_program::id(), false),
         ],
         data: borsh::to_vec(&PortalInstruction::RegisterSessionBridge(
@@ -656,6 +674,22 @@ fn send_tx(rpc: &RpcClient, instructions: &[Instruction], payer: &Pubkey, signer
             max_retries: Some(20),
             ..RpcSendTransactionConfig::default()
         },
+    );
+}
+
+fn assert_tx_rejected(
+    rpc: &RpcClient,
+    instructions: &[Instruction],
+    payer: &Pubkey,
+    signers: &[&Keypair],
+) {
+    let blockhash = rpc.get_latest_blockhash().unwrap();
+    let tx = Transaction::new_signed_with_payer(instructions, Some(payer), signers, blockhash);
+    let simulation = rpc.simulate_transaction(&tx).unwrap().value;
+    assert!(
+        simulation.err.is_some(),
+        "transaction unexpectedly succeeded: {:?}",
+        simulation.logs
     );
 }
 

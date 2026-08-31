@@ -200,6 +200,7 @@ struct DurableSettlementPlan {
     owner_changes: Vec<DurableAccountOwnerSettlement>,
     lamport_changes: Vec<DurableAccountLamportsSettlement>,
     receipt_balances: Vec<DurableReceiptBalanceSettlement>,
+    token_withdrawals: Vec<DurableTokenWithdrawalSettlement>,
 }
 
 #[derive(borsh::BorshDeserialize, borsh::BorshSerialize)]
@@ -228,6 +229,21 @@ struct DurableReceiptBalanceSettlement {
     balance: u64,
     withdrawn: u64,
     payout_lamports: u64,
+}
+
+#[derive(borsh::BorshDeserialize, borsh::BorshSerialize)]
+struct DurableTokenWithdrawalSettlement {
+    bridge_program: [u8; 32],
+    session_bridge: [u8; 32],
+    er_token_account: [u8; 32],
+    vault: [u8; 32],
+    vault_token_account: [u8; 32],
+    l1_destination_token_account: [u8; 32],
+    mint: [u8; 32],
+    token_program: [u8; 32],
+    amount: u64,
+    withdrawn: u64,
+    decimals: u8,
 }
 
 impl From<&SettlementPlan> for DurableSettlementPlan {
@@ -269,6 +285,25 @@ impl From<&SettlementPlan> for DurableSettlementPlan {
                     balance: receipt.balance,
                     withdrawn: receipt.withdrawn,
                     payout_lamports: receipt.payout_lamports,
+                })
+                .collect(),
+            token_withdrawals: plan
+                .token_withdrawals
+                .iter()
+                .map(|withdrawal| DurableTokenWithdrawalSettlement {
+                    bridge_program: withdrawal.bridge_program.to_bytes(),
+                    session_bridge: withdrawal.session_bridge.to_bytes(),
+                    er_token_account: withdrawal.er_token_account.to_bytes(),
+                    vault: withdrawal.vault.to_bytes(),
+                    vault_token_account: withdrawal.vault_token_account.to_bytes(),
+                    l1_destination_token_account: withdrawal
+                        .l1_destination_token_account
+                        .to_bytes(),
+                    mint: withdrawal.mint.to_bytes(),
+                    token_program: withdrawal.token_program.to_bytes(),
+                    amount: withdrawal.amount,
+                    withdrawn: withdrawal.withdrawn,
+                    decimals: withdrawal.decimals,
                 })
                 .collect(),
         }
@@ -314,6 +349,25 @@ impl From<DurableSettlementPlan> for SettlementPlan {
                     balance: receipt.balance,
                     withdrawn: receipt.withdrawn,
                     payout_lamports: receipt.payout_lamports,
+                })
+                .collect(),
+            token_withdrawals: plan
+                .token_withdrawals
+                .into_iter()
+                .map(|withdrawal| settlement::TokenWithdrawalSettlement {
+                    bridge_program: Pubkey::new_from_array(withdrawal.bridge_program),
+                    session_bridge: Pubkey::new_from_array(withdrawal.session_bridge),
+                    er_token_account: Pubkey::new_from_array(withdrawal.er_token_account),
+                    vault: Pubkey::new_from_array(withdrawal.vault),
+                    vault_token_account: Pubkey::new_from_array(withdrawal.vault_token_account),
+                    l1_destination_token_account: Pubkey::new_from_array(
+                        withdrawal.l1_destination_token_account,
+                    ),
+                    mint: Pubkey::new_from_array(withdrawal.mint),
+                    token_program: Pubkey::new_from_array(withdrawal.token_program),
+                    amount: withdrawal.amount,
+                    withdrawn: withdrawal.withdrawn,
+                    decimals: withdrawal.decimals,
                 })
                 .collect(),
             unsupported_changes: vec![],
@@ -410,27 +464,28 @@ impl Manager {
         let diff = runtime.state_diff_from_l1();
         let er_slot = runtime.bank().slot();
         let receipt_balances = runtime.settlement_receipt_balances(session_pda);
-        build_settlement_plan(
+        let token_withdrawals = runtime.settlement_token_withdrawals(er_slot);
+        let mut plan = build_settlement_plan(
             &diff,
             &runtime.delegated_accounts(),
             er_slot,
             receipt_balances,
         )
         .or_else(|| {
-            (!runtime.settlement_token_withdrawals(er_slot).is_empty()).then(|| {
-                let mut plan = SettlementPlan {
-                    er_slot,
-                    checksum: [0; 32],
-                    chunks: vec![],
-                    owner_changes: vec![],
-                    lamport_changes: vec![],
-                    receipt_balances: vec![],
-                    unsupported_changes: vec![],
-                };
-                plan.checksum = plan.recomputed_checksum();
-                plan
+            (!token_withdrawals.is_empty()).then(|| SettlementPlan {
+                er_slot,
+                checksum: [0; 32],
+                chunks: vec![],
+                owner_changes: vec![],
+                lamport_changes: vec![],
+                receipt_balances: vec![],
+                token_withdrawals: vec![],
+                unsupported_changes: vec![],
             })
-        })
+        })?;
+        plan.token_withdrawals = token_withdrawals;
+        plan.checksum = plan.recomputed_checksum();
+        Some(plan)
     }
 
     /// Build Portal settlement instructions for current data-only diff.
@@ -483,6 +538,22 @@ impl Manager {
             return None;
         }
         self.cleanup_terminal_checkpoint_plans(l1_bank, session_pda);
+        if let Some(plan) = self.pending_token_release_plan(l1_bank, session_pda) {
+            let transactions = settlement::token_withdrawal_transactions(
+                &plan.token_withdrawals,
+                self.config.portal_program_id,
+                session_pda,
+                plan.er_slot,
+                plan.checksum,
+                self.config.manager_account.as_ref(),
+                recent_blockhash,
+            );
+            return (!transactions.is_empty()).then_some((
+                plan.er_slot,
+                plan.checksum,
+                transactions,
+            ));
+        }
 
         let (plan, transactions) = match session_state.settlement_status {
             SettlementStatus::Idle => {
@@ -540,11 +611,11 @@ impl Manager {
                     );
                     return None;
                 }
-                let transactions = plan.portal_retry_transactions_after_begin(
-                    self.config.portal_program_id,
+                let transactions = self.settlement_transactions_for_plan(
+                    &plan,
                     session_pda,
-                    self.config.manager_account.as_ref(),
                     recent_blockhash,
+                    false,
                 );
                 (plan, transactions)
             }
@@ -692,6 +763,59 @@ impl Manager {
         }
     }
 
+    fn token_withdrawals_complete(l1_bank: &Bank, plan: &SettlementPlan) -> bool {
+        plan.token_withdrawals.iter().all(|withdrawal| {
+            l1_bank
+                .get_account(&withdrawal.vault)
+                .filter(|account| account.owner() == &withdrawal.bridge_program)
+                .and_then(|account| {
+                    borsh::from_slice::<northstar_token_bridge::state::TokenVault>(account.data())
+                        .ok()
+                })
+                .is_some_and(|vault| vault.is_valid() && vault.withdrawn >= withdrawal.withdrawn)
+        })
+    }
+
+    fn pending_token_release_plan(
+        &self,
+        l1_bank: &Bank,
+        session_pda: Pubkey,
+    ) -> Option<SettlementPlan> {
+        let plans = self
+            .checkpoint_plans
+            .read()
+            .unwrap()
+            .iter()
+            .filter_map(|((plan_session, _), plan)| {
+                (plan_session == &session_pda).then_some(plan.clone())
+            })
+            .collect::<Vec<_>>();
+
+        plans.into_iter().find(|plan| {
+            if plan.token_withdrawals.is_empty() || Self::token_withdrawals_complete(l1_bank, plan)
+            {
+                return false;
+            }
+            let checkpoint =
+                find_checkpoint_pda(&self.config.portal_program_id, &session_pda, plan.er_slot).0;
+            l1_bank
+                .get_account(&checkpoint)
+                .filter(|account| account.owner() == &self.config.portal_program_id)
+                .and_then(|account| try_parse_raw_portal_account(account.data()))
+                .is_some_and(|account| {
+                    matches!(
+                        account,
+                        PortalAccount::Checkpoint(checkpoint)
+                            if checkpoint.is_valid()
+                                && checkpoint.session == session_pda
+                                && checkpoint.er_slot == plan.er_slot
+                                && checkpoint.effect_commitment == plan.checksum
+                                && checkpoint.status == CheckpointStatus::Settled
+                    )
+                })
+        })
+    }
+
     fn cleanup_terminal_checkpoint_plans(&self, l1_bank: &Bank, session_pda: Pubkey) {
         // IMPORTANT: `get_program_accounts` falls back to a global AccountsIndex scan when the
         // validator has no program-id secondary index. Settlement runs on every frozen bank, so
@@ -717,14 +841,14 @@ impl Manager {
             else {
                 continue;
             };
-            if checkpoint.session == session_pda
-                && matches!(
-                    checkpoint.status,
-                    CheckpointStatus::Settled
-                        | CheckpointStatus::Cancelled
-                        | CheckpointStatus::Invalid
-                )
-            {
+            let can_remove = matches!(
+                checkpoint.status,
+                CheckpointStatus::Cancelled | CheckpointStatus::Invalid
+            ) || (checkpoint.status == CheckpointStatus::Settled
+                && self
+                    .cached_checkpoint_plan(session_pda, checkpoint.er_slot)
+                    .is_none_or(|plan| Self::token_withdrawals_complete(l1_bank, &plan)));
+            if checkpoint.session == session_pda && can_remove {
                 self.remove_checkpoint_plan(session_pda, &checkpoint);
             }
         }
@@ -915,25 +1039,45 @@ impl Manager {
         plan: &SettlementPlan,
         session_pda: Pubkey,
         recent_blockhash: Hash,
+        include_begin: bool,
     ) -> Vec<Transaction> {
-        let mut transactions = plan.portal_transactions(
-            self.config.portal_program_id,
-            session_pda,
-            self.config.manager_account.as_ref(),
-            recent_blockhash,
-        );
-        if let Some(runtime) = &self.runtime {
-            let token_withdrawals = runtime.settlement_token_withdrawals(plan.er_slot);
-            transactions.extend(settlement::token_withdrawal_transactions(
-                &token_withdrawals,
+        let mut transactions = if include_begin {
+            plan.portal_transactions(
                 self.config.portal_program_id,
                 session_pda,
-                plan.er_slot,
-                plan.checksum,
                 self.config.manager_account.as_ref(),
                 recent_blockhash,
-            ));
-        }
+            )
+        } else {
+            plan.portal_retry_transactions_after_begin(
+                self.config.portal_program_id,
+                session_pda,
+                self.config.manager_account.as_ref(),
+                recent_blockhash,
+            )
+        };
+        let Some(finish_transaction) = transactions.pop() else {
+            return vec![];
+        };
+        transactions.extend(settlement::token_withdrawal_authorization_transactions(
+            &plan.token_withdrawals,
+            self.config.portal_program_id,
+            session_pda,
+            plan.er_slot,
+            plan.checksum,
+            self.config.manager_account.as_ref(),
+            recent_blockhash,
+        ));
+        transactions.push(finish_transaction);
+        transactions.extend(settlement::token_withdrawal_transactions(
+            &plan.token_withdrawals,
+            self.config.portal_program_id,
+            session_pda,
+            plan.er_slot,
+            plan.checksum,
+            self.config.manager_account.as_ref(),
+            recent_blockhash,
+        ));
         transactions
     }
 
@@ -990,6 +1134,7 @@ impl Manager {
                     plan,
                     session_pda,
                     recent_blockhash,
+                    true,
                 ));
                 Some(transactions)
             }
@@ -998,7 +1143,12 @@ impl Manager {
                     "Portal checkpoint committed; settling er_slot={} checksum={:?}",
                     plan.er_slot, plan.checksum,
                 );
-                Some(self.settlement_transactions_for_plan(plan, session_pda, recent_blockhash))
+                Some(self.settlement_transactions_for_plan(
+                    plan,
+                    session_pda,
+                    recent_blockhash,
+                    true,
+                ))
             }
             CheckpointStatus::Challenged => {
                 warn!(
@@ -1012,12 +1162,28 @@ impl Manager {
                 None
             }
             CheckpointStatus::Settled => {
-                debug!(
-                    "Portal checkpoint already settled: er_slot={} checkpoint={}",
-                    plan.er_slot, checkpoint_pda,
-                );
-                self.remove_checkpoint_plan(session_pda, &checkpoint);
-                None
+                if Self::token_withdrawals_complete(l1_bank, plan) {
+                    debug!(
+                        "Portal checkpoint fully settled: er_slot={} checkpoint={}",
+                        plan.er_slot, checkpoint_pda,
+                    );
+                    self.remove_checkpoint_plan(session_pda, &checkpoint);
+                    None
+                } else {
+                    warn!(
+                        "Portal checkpoint has pending token releases: er_slot={} checkpoint={}",
+                        plan.er_slot, checkpoint_pda,
+                    );
+                    Some(settlement::token_withdrawal_transactions(
+                        &plan.token_withdrawals,
+                        self.config.portal_program_id,
+                        session_pda,
+                        plan.er_slot,
+                        plan.checksum,
+                        self.config.manager_account.as_ref(),
+                        recent_blockhash,
+                    ))
+                }
             }
             CheckpointStatus::Cancelled => {
                 warn!(
@@ -1061,6 +1227,12 @@ impl Manager {
         match try_parse_raw_portal_account(data) {
             // Check if this is a new session (didn't exist in parent)
             Some(PortalAccount::Session(session)) => {
+                let (expected_session, session_bump) =
+                    northstar_portal::find_session_pda(&self.config.portal_program_id);
+                if !session.is_valid() || pubkey != expected_session || session.bump != session_bump
+                {
+                    return None;
+                }
                 self.is_new_in_slot(bank, &pubkey)
                     .then_some(L1Event::SessionOpened {
                         session_pda: pubkey,
@@ -1083,6 +1255,32 @@ impl Manager {
                 None
             }
             Some(PortalAccount::DepositReceipt(receipt)) => {
+                let expected_session =
+                    northstar_portal::find_session_pda(&self.config.portal_program_id).0;
+                let (expected_receipt, receipt_bump) = northstar_portal::find_deposit_receipt_pda(
+                    &self.config.portal_program_id,
+                    &receipt.session,
+                    &receipt.recipient,
+                );
+                if !receipt.is_valid()
+                    || receipt.session != expected_session
+                    || pubkey != expected_receipt
+                    || receipt.bump != receipt_bump
+                {
+                    return None;
+                }
+                let session_account = bank.get_account(&receipt.session)?;
+                if session_account.owner() != &self.config.portal_program_id {
+                    return None;
+                }
+                let PortalAccount::Session(session_state) =
+                    portal_state::try_parse_raw_portal_account(session_account.data())?
+                else {
+                    return None;
+                };
+                if !session_state.is_valid() {
+                    return None;
+                }
                 let prev_escrow = bank
                     .parent()
                     .and_then(|parent| parent.get_account(&pubkey))
@@ -1109,7 +1307,8 @@ impl Manager {
             | Some(PortalAccount::Challenge(_))
             | Some(PortalAccount::DataAvailabilityProof(_))
             | Some(PortalAccount::StepProofAccount(_))
-            | Some(PortalAccount::SessionBridge(_)) => None,
+            | Some(PortalAccount::SessionBridge(_))
+            | Some(PortalAccount::TokenWithdrawalAuthorization(_)) => None,
             None => {
                 // Unrecognized — log and skip
                 debug!("Unrecognized portal account at {pubkey}");
@@ -1141,18 +1340,32 @@ impl Manager {
         else {
             return None;
         };
+        let expected_session = northstar_portal::find_session_pda(&self.config.portal_program_id).0;
+        let (expected_session_bridge, session_bridge_bump) =
+            northstar_portal::find_session_bridge_pda(
+                &self.config.portal_program_id,
+                &session_bridge.session,
+                &session_bridge.mint,
+            );
+        if !session_bridge.is_valid()
+            || session_bridge.session != expected_session
+            || session_bridge_key != expected_session_bridge
+            || session_bridge.bump != session_bridge_bump
+        {
+            return None;
+        }
         let bridge_program = session_bridge.bridge_program;
         if account.owner() != &bridge_program {
             return None;
         }
         let er_token_account = Pubkey::new_from_array(receipt.er_token_account);
-        let expected_receipt = northstar_token_bridge::find_token_deposit_receipt_pda(
-            &bridge_program,
-            &session_bridge_key,
-            &er_token_account,
-        )
-        .0;
-        if pubkey != expected_receipt {
+        let (expected_receipt, receipt_bump) =
+            northstar_token_bridge::find_token_deposit_receipt_pda(
+                &bridge_program,
+                &session_bridge_key,
+                &er_token_account,
+            );
+        if pubkey != expected_receipt || receipt.bump != receipt_bump {
             return None;
         }
 
@@ -1298,10 +1511,15 @@ impl Manager {
         let prev_account = bank.parent()?.get_account(pubkey)?;
 
         match try_parse_raw_portal_account(prev_account.data())? {
-            PortalAccount::Session(session) => Some(L1Event::SessionClosed {
-                session_pda: *pubkey,
-                grid_id: session.grid_id,
-            }),
+            PortalAccount::Session(session) => {
+                let (expected_session, session_bump) =
+                    northstar_portal::find_session_pda(&self.config.portal_program_id);
+                (session.is_valid() && *pubkey == expected_session && session.bump == session_bump)
+                    .then_some(L1Event::SessionClosed {
+                        session_pda: *pubkey,
+                        grid_id: session.grid_id,
+                    })
+            }
             // Find the delegated account that was undelegated
             // by scanning for accounts whose owner changed FROM portal
             PortalAccount::DelegationRecord(_record) => Some(L1Event::AccountUndelegated {
@@ -2917,7 +3135,7 @@ mod portal_e2e_tests {
     }
 
     #[test]
-    fn test_token_deposit_receipt_emits_l1_event() {
+    fn test_token_deposit_receipt_rejects_unregistered_session_bridge() {
         setup();
         let (bank, _bank_forks, portal_program, _mint_keypair) = setup_bank_with_portal();
         let bridge_program = Pubkey::new_unique();
@@ -2972,20 +3190,102 @@ mod portal_e2e_tests {
             checkpoint_plan_dir: None,
         });
         let events = manager.get_l1_events(&deposit_bank);
-        assert!(events.iter().any(|event| matches!(
-            event,
-            L1Event::TokenDeposited {
-                session_pda,
-                session_bridge: event_session_bridge,
-                bridge_program: event_bridge,
-                er_token_account: event_account,
-                amount: 600_000_000,
-                delta: 600_000_000,
-            } if *session_pda == session
-                && *event_session_bridge == session_bridge
-                && *event_bridge == bridge_program
-                && *event_account == er_token_account
-        )));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, L1Event::TokenDeposited { .. })));
+    }
+
+    #[test]
+    fn test_fee_deposit_rejects_unregistered_receipt() {
+        setup();
+        let (bank, _bank_forks, portal_program, _mint_keypair) = setup_bank_with_portal();
+        bank.freeze();
+
+        let deposit_bank = Bank::new_from_parent(bank, SlotLeader::new_unique(), 2);
+        let recipient = Pubkey::new_unique();
+        let receipt = northstar_portal::DepositReceipt {
+            discriminator: northstar_portal::DepositReceipt::DISCRIMINATOR,
+            session: northstar_portal::find_session_pda(&portal_program).0,
+            recipient,
+            balance: 0,
+            withdrawn: 0,
+            bump: 255,
+        };
+        let receipt_data = borsh::to_vec(&receipt).unwrap();
+        let lamports = solana_rent::Rent::default()
+            .minimum_balance(receipt_data.len())
+            .saturating_add(1_000);
+        let mut receipt_account =
+            AccountSharedData::new(lamports, receipt_data.len(), &portal_program);
+        receipt_account
+            .data_as_mut_slice()
+            .copy_from_slice(&receipt_data);
+        deposit_bank.store_account(&Pubkey::new_unique(), &receipt_account);
+        deposit_bank.freeze();
+
+        let manager = Manager::new(ManagerConfig {
+            portal_program_id: portal_program,
+            manager_account: Arc::new(Keypair::new()),
+            checkpoint_plan_dir: None,
+        });
+        let events = manager.get_l1_events(&deposit_bank);
+
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, L1Event::FeeDeposited { .. })));
+    }
+
+    #[test]
+    fn test_session_event_rejects_unregistered_account() {
+        setup();
+        let (bank, _bank_forks, portal_program, _mint_keypair) = setup_bank_with_portal();
+        bank.freeze();
+
+        let event_bank = Bank::new_from_parent(bank, SlotLeader::new_unique(), 2);
+        let session = northstar_portal::Session {
+            discriminator: northstar_portal::Session::DISCRIMINATOR,
+            grid_id: 1,
+            ttl_slots: 100,
+            fee_cap: 1_000,
+            created_at: 1,
+            nonce: 0,
+            authority: Pubkey::new_unique(),
+            validator: Pubkey::new_unique(),
+            settlement_interval_slots: 10,
+            last_settled_l1_slot: 0,
+            last_settled_er_slot: 0,
+            settlement_status: northstar_portal::SettlementStatus::Idle,
+            settlement_er_slot: 0,
+            settlement_checksum: [0; 32],
+            settlement_accumulator: [0; 32],
+            settlement_started_l1_slot: 0,
+            bump: 255,
+        };
+        let session_data = borsh::to_vec(&session).unwrap();
+        let mut session_account =
+            AccountSharedData::new(1_000_000, session_data.len(), &portal_program);
+        session_account
+            .data_as_mut_slice()
+            .copy_from_slice(&session_data);
+        let unregistered_session = Pubkey::new_unique();
+        event_bank.store_account(&unregistered_session, &session_account);
+        event_bank.freeze();
+
+        let manager = Manager::new(ManagerConfig {
+            portal_program_id: portal_program,
+            manager_account: Arc::new(Keypair::new()),
+            checkpoint_plan_dir: None,
+        });
+        let events = manager.get_l1_events(&event_bank);
+
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, L1Event::SessionOpened { .. })));
+
+        let close_bank = Bank::new_from_parent(Arc::new(event_bank), SlotLeader::new_unique(), 3);
+        assert!(manager
+            .parse_zeroed_account(&close_bank, &unregistered_session)
+            .is_none());
     }
 
     #[test]
@@ -3446,6 +3746,55 @@ mod portal_e2e_tests {
 
     fn first_portal_instruction(transaction: &Transaction) -> PortalInstruction {
         borsh::from_slice(&transaction.message.instructions[0].data).unwrap()
+    }
+
+    #[test]
+    fn token_withdrawal_release_follows_finish_settlement() {
+        let portal_program = Pubkey::new_unique();
+        let bridge_program = Pubkey::new_unique();
+        let validator = Arc::new(Keypair::new());
+        let manager = Manager::new(ManagerConfig {
+            portal_program_id: portal_program,
+            manager_account: Arc::clone(&validator),
+            checkpoint_plan_dir: None,
+        });
+        let plan = SettlementPlan {
+            er_slot: 42,
+            checksum: [7; 32],
+            chunks: vec![],
+            owner_changes: vec![],
+            lamport_changes: vec![],
+            receipt_balances: vec![],
+            token_withdrawals: vec![settlement::TokenWithdrawalSettlement {
+                bridge_program,
+                session_bridge: Pubkey::new_unique(),
+                er_token_account: Pubkey::new_unique(),
+                vault: Pubkey::new_unique(),
+                vault_token_account: Pubkey::new_unique(),
+                l1_destination_token_account: Pubkey::new_unique(),
+                mint: Pubkey::new_unique(),
+                token_program: Pubkey::new_unique(),
+                amount: 10,
+                withdrawn: 10,
+                decimals: 6,
+            }],
+            unsupported_changes: vec![],
+        };
+
+        let transactions = manager.settlement_transactions_for_plan(
+            &plan,
+            Pubkey::new_unique(),
+            Hash::new_unique(),
+            true,
+        );
+        let program_id = |transaction: &Transaction| {
+            let instruction = &transaction.message.instructions[0];
+            transaction.message.account_keys[instruction.program_id_index as usize]
+        };
+
+        assert_eq!(transactions.len(), 4);
+        assert_eq!(program_id(&transactions[2]), portal_program);
+        assert_eq!(program_id(&transactions[3]), bridge_program);
     }
 
     #[test]

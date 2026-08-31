@@ -17,10 +17,7 @@ pub(crate) fn is_valid_settlement_checkpoint(
         && checkpoint.session == *session
         && checkpoint.er_slot == er_slot
         && checkpoint.effect_commitment == *checksum
-        && matches!(
-            checkpoint.status,
-            CheckpointStatus::Committed | CheckpointStatus::Settled
-        )
+        && checkpoint.status == CheckpointStatus::Settled
 }
 
 #[cfg(test)]
@@ -89,7 +86,7 @@ mod tests {
             bump: 255,
         };
 
-        assert!(is_valid_settlement_checkpoint(
+        assert!(!is_valid_settlement_checkpoint(
             &checkpoint,
             &session,
             er_slot,

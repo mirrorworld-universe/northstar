@@ -2,6 +2,7 @@ use {
     crate::{
         Challenge, Checkpoint, CheckpointCursor, DataAvailabilityProof, DelegationRecord,
         DepositReceipt, FeeVault, Session, SessionBridge, StepProofAccount,
+        TokenWithdrawalAuthorization,
     },
     pinocchio::Address as Pubkey,
 };
@@ -82,5 +83,21 @@ pub fn find_session_bridge_pda(
     mint: &Pubkey,
 ) -> (Pubkey, u8) {
     let seeds = &[SessionBridge::SEED_PREFIX, session.as_ref(), mint.as_ref()];
+    find_program_address(seeds, program_id)
+}
+
+pub fn find_token_withdrawal_authorization_pda(
+    program_id: &Pubkey,
+    checkpoint: &Pubkey,
+    vault: &Pubkey,
+    withdrawn: u64,
+) -> (Pubkey, u8) {
+    let withdrawn_bytes = withdrawn.to_le_bytes();
+    let seeds = &[
+        TokenWithdrawalAuthorization::SEED_PREFIX,
+        checkpoint.as_ref(),
+        vault.as_ref(),
+        withdrawn_bytes.as_ref(),
+    ];
     find_program_address(seeds, program_id)
 }

@@ -134,8 +134,14 @@ fn process_instruction(
         Ok((25, payload)) => deserialize_args(payload).and_then(|timeout| {
             instructions::process_timeout_challenge(program_id, accounts, timeout)
         }),
+        Ok((26, payload)) => deserialize_args(payload).and_then(|settlement| {
+            instructions::process_accumulate_token_withdrawal(program_id, accounts, settlement)
+        }),
+        Ok((27, payload)) => deserialize_args(payload).and_then(|settlement| {
+            instructions::process_consume_token_withdrawal(program_id, accounts, settlement)
+        }),
         #[cfg(feature = "zk-verifier-prototype")]
-        Ok((26, payload)) => deserialize_args(payload)
+        Ok((28, payload)) => deserialize_args(payload)
             .and_then(|proof| instructions::process_verify_er_step_proof_v1(accounts, proof)),
         Ok((_, _)) | Err(_) => Err(ProgramError::InvalidInstructionData),
     }

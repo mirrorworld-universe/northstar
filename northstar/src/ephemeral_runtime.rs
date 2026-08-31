@@ -25,6 +25,7 @@ use {
     solana_ledger::{blockstore::Blockstore, leader_schedule_cache::LeaderScheduleCache},
     solana_loader_v3_interface::state::UpgradeableLoaderState,
     solana_message::{v0::LoadedAddresses, Message, VersionedMessage},
+    solana_program_pack::Pack,
     solana_pubkey::Pubkey,
     solana_rpc::{
         er_history::{ErHistoryStore, DEFAULT_MAX_RETAINED_SLOTS},
@@ -47,6 +48,7 @@ use {
     solana_svm::account_loader::PROGRAM_OWNERS,
     solana_transaction::versioned::VersionedTransaction,
     solana_transaction_status::{TransactionStatusMeta, VersionedTransactionWithStatusMeta},
+    spl_token_interface::state::Mint,
     std::{
         collections::{HashMap, HashSet},
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -78,19 +80,30 @@ impl DropCallback for NoopDropCallback {
 const MAX_WITHDRAWAL_PAYOUT_EVENTS: usize = 10_000;
 
 #[cfg(test)]
+const TEST_PORT_RANGE: core::ops::Range<u16> = 20_000..30_000;
+#[cfg(test)]
+static NEXT_TEST_PORT: AtomicU64 = AtomicU64::new(TEST_PORT_RANGE.start as u64);
+#[cfg(test)]
 static TEST_SOCKET_ADDRS: Mutex<Vec<SocketAddr>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
 pub(crate) fn find_free_test_addr() -> SocketAddr {
     loop {
-        let udp = solana_net_utils::sockets::bind_to(IpAddr::V4(Ipv4Addr::LOCALHOST), 0).unwrap();
-        let addr = udp.local_addr().unwrap();
-        if std::net::TcpListener::bind(addr).is_err() {
+        let candidate = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let range_len = u64::from(TEST_PORT_RANGE.end - TEST_PORT_RANGE.start);
+        let port = TEST_PORT_RANGE.start + (candidate % range_len) as u16;
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+        let Ok(udp) = solana_net_utils::sockets::bind_to(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+        else {
             continue;
-        }
+        };
+        let Ok(tcp) = std::net::TcpListener::bind(addr) else {
+            continue;
+        };
 
-        // Test threads probe ports concurrently. Retain chosen addresses so another
-        // thread cannot reuse a just-probed port before its runtime binds it.
+        // Keep test allocations outside Linux's default ephemeral client-port range. Dropping
+        // these probes before runtime startup is then safe from concurrent outbound connections.
+        drop((udp, tcp));
         let mut allocated = TEST_SOCKET_ADDRS.lock().unwrap();
         if allocated.contains(&addr) {
             continue;
@@ -1701,20 +1714,35 @@ impl EphemeralRuntime {
         });
         let mut cumulative_by_bridge = HashMap::<Pubkey, u64>::new();
         let mut settlements = Vec::new();
+        let Some(active_session) = *self.session_pda.read().unwrap() else {
+            return settlements;
+        };
         for event in events {
             let Some(session_bridge_account) =
                 self.l1_anchor_bank.get_account(&event.session_bridge)
             else {
                 continue;
             };
+            if session_bridge_account.owner() != &self.portal_program_id {
+                continue;
+            }
             let Some(crate::portal_state::PortalAccount::SessionBridge(bridge)) =
                 crate::portal_state::try_parse_raw_portal_account(session_bridge_account.data())
             else {
                 continue;
             };
-            if bridge.bridge_program != event.bridge_program {
+            if bridge.bridge_program != event.bridge_program || bridge.session != active_session {
                 continue;
             }
+            let Some(mint_account) = self.l1_anchor_bank.get_account(&bridge.mint) else {
+                continue;
+            };
+            if mint_account.owner() != &bridge.token_program {
+                continue;
+            }
+            let Ok(mint_state) = Mint::unpack(mint_account.data()) else {
+                continue;
+            };
             let vault = bridge.vault;
             let Some(vault_account) = self.l1_anchor_bank.get_account(&vault) else {
                 continue;
@@ -1724,8 +1752,11 @@ impl EphemeralRuntime {
             ) else {
                 continue;
             };
-            if !vault_state.is_valid()
+            if vault_account.owner() != &bridge.bridge_program
+                || !vault_state.is_valid()
                 || vault_state.session_bridge != event.session_bridge.to_bytes()
+                || vault_state.mint != bridge.mint.to_bytes()
+                || vault_state.token_program != bridge.token_program.to_bytes()
             {
                 continue;
             }
@@ -1761,7 +1792,7 @@ impl EphemeralRuntime {
                 token_program: bridge.token_program,
                 amount: payout,
                 withdrawn: next_cumulative,
-                decimals: event.decimals,
+                decimals: mint_state.decimals,
             });
         }
         settlements
@@ -2333,6 +2364,7 @@ mod tests {
         solana_lattice_hash::lt_hash::LtHash,
         solana_message::{Message, SanitizedMessage},
         solana_net_utils::SocketAddrSpace,
+        solana_program_pack::Pack,
         solana_rpc_client::rpc_client::RpcClient,
         solana_rpc_client_types::config::{
             CommitmentConfig, RpcSendTransactionConfig, RpcSimulateTransactionConfig,
@@ -2345,6 +2377,7 @@ mod tests {
         solana_transaction_status::{
             TransactionConfirmationStatus, TransactionWithStatusMeta, UiTransactionEncoding,
         },
+        spl_token_interface::state::Mint,
         std::{
             collections::HashSet,
             sync::{atomic::AtomicU64, mpsc},
@@ -2381,6 +2414,14 @@ mod tests {
 
     fn find_free_addr() -> SocketAddr {
         crate::ephemeral_runtime::find_free_test_addr()
+    }
+
+    #[test]
+    fn runtime_addresses_avoid_ephemeral_client_ports() {
+        for _ in 0..3 {
+            let port = find_free_addr().port();
+            assert!((20_000..30_000).contains(&port));
+        }
     }
 
     fn wait_for_rpc_ready(rpc_client: &RpcClient) {
@@ -2801,7 +2842,7 @@ mod tests {
         let vault = Pubkey::new_unique();
         let vault_token_account = Pubkey::new_unique();
         let mint = Pubkey::new_unique();
-        let token_program = Pubkey::new_unique();
+        let token_program = spl_token_interface::id();
         let er_token_account = Pubkey::new_unique();
         let destination = Pubkey::new_unique();
 
@@ -2821,6 +2862,22 @@ mod tests {
             .data_as_mut_slice()
             .copy_from_slice(&bridge_data);
         parent_bank.store_account(&session_bridge, &bridge_account);
+
+        let mut mint_data = vec![0; Mint::LEN];
+        Pack::pack(
+            Mint {
+                mint_authority: None.into(),
+                supply: 600_000_000,
+                decimals: 6,
+                is_initialized: true,
+                freeze_authority: None.into(),
+            },
+            &mut mint_data,
+        )
+        .unwrap();
+        let mut mint_account = AccountSharedData::new(1_000_000, mint_data.len(), &token_program);
+        mint_account.data_as_mut_slice().copy_from_slice(&mint_data);
+        parent_bank.store_account(&mint, &mint_account);
 
         let vault_state = northstar_token_bridge::state::TokenVault {
             discriminator: northstar_token_bridge::state::TokenVault::DISCRIMINATOR,
@@ -2860,6 +2917,7 @@ mod tests {
             Arc::new(Keypair::new()),
         )
         .unwrap();
+        runtime.set_session_pda(session);
         runtime
             .token_withdrawal_payout_events
             .write()
@@ -2870,7 +2928,7 @@ mod tests {
                 er_token_account,
                 l1_destination_token_account: destination,
                 amount: 200_000_000,
-                decimals: 6,
+                decimals: 9,
                 signature: solana_signature::Signature::from([7; 64]),
                 er_slot: 10,
             });
@@ -2882,6 +2940,7 @@ mod tests {
         assert_eq!(settlements[0].withdrawn, 200_000_000);
         assert_eq!(settlements[0].vault, vault);
         assert_eq!(settlements[0].l1_destination_token_account, destination);
+        assert_eq!(settlements[0].decimals, 6);
 
         runtime.shutdown();
     }
@@ -4317,6 +4376,117 @@ mod tests {
             .unwrap();
         assert_eq!(simulation.value.err, None);
 
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_concurrent_system_transfers_keep_builtin_available() {
+        let parent_bank = create_test_bank();
+        let sender = Keypair::new();
+        parent_bank.freeze();
+
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.activate();
+        runtime.credit_deposit(&sender.pubkey(), 100_000_000_000);
+        let rpc_client = rpc_client(&runtime);
+        wait_for_rpc_ready(&rpc_client);
+
+        for round in 0..10 {
+            let blockhash = rpc_client
+                .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
+                .unwrap()
+                .0;
+            let transactions = (0..20)
+                .map(|index| {
+                    Transaction::new_signed_with_payer(
+                        &[transfer(
+                            &sender.pubkey(),
+                            &sender.pubkey(),
+                            round * 20 + index + 1,
+                        )],
+                        Some(&sender.pubkey()),
+                        &[&sender],
+                        blockhash,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let barrier = Arc::new(std::sync::Barrier::new(transactions.len()));
+            let handles = transactions
+                .into_iter()
+                .map(|transaction| {
+                    let rpc_addr = runtime.rpc_addr();
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        let rpc_client = RpcClient::new(rpc_addr);
+                        barrier.wait();
+                        rpc_client
+                            .send_transaction_with_config(
+                                &transaction,
+                                RpcSendTransactionConfig {
+                                    skip_preflight: false,
+                                    preflight_commitment: Some(
+                                        CommitmentConfig::processed().commitment,
+                                    ),
+                                    ..Default::default()
+                                },
+                            )
+                            .map_err(|err| err.to_string())
+                    })
+                })
+                .collect::<Vec<_>>();
+            let results = handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>();
+            let send_errors = results
+                .iter()
+                .filter_map(|result| result.as_ref().err().cloned())
+                .collect::<Vec<_>>();
+            assert!(
+                send_errors.is_empty(),
+                "round {round}: concurrent System Program preflight failed: {send_errors:?}"
+            );
+
+            let signatures = results.into_iter().map(Result::unwrap).collect::<Vec<_>>();
+            wait_for(
+                "concurrent transfer statuses",
+                Duration::from_secs(2),
+                || {
+                    rpc_client
+                        .get_signature_statuses(&signatures)
+                        .is_ok_and(|response| response.value.iter().all(Option::is_some))
+                },
+            );
+            let transaction_errors = rpc_client
+                .get_signature_statuses(&signatures)
+                .unwrap()
+                .value
+                .into_iter()
+                .filter_map(|status| status.and_then(|status| status.err))
+                .collect::<Vec<_>>();
+            assert!(
+                transaction_errors.is_empty(),
+                "round {round}: concurrent System Program execution failed: {transaction_errors:?}"
+            );
+        }
         runtime.shutdown();
     }
 

@@ -4,6 +4,7 @@ use {
     pinocchio_system::instructions::{Allocate, Assign, Transfer},
 };
 
+pub mod accumulate_token_withdrawal;
 pub mod checkpoint;
 pub mod close_session;
 pub mod delegate;
@@ -57,6 +58,9 @@ fn initialize_pda_account(
 #[cfg(feature = "zk-verifier-prototype")]
 pub use verifier::process_verify_er_step_proof_v1;
 pub use {
+    accumulate_token_withdrawal::{
+        process_accumulate_token_withdrawal, process_consume_token_withdrawal,
+    },
     checkpoint::{
         process_bisect_challenge, process_cancel_checkpoint, process_commit_checkpoint,
         process_create_step_proof, process_open_challenge, process_propose_checkpoint,

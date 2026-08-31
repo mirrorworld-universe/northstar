@@ -355,6 +355,25 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         }
     }
 
+    // Sonic: ER child banks inherit the parent's complete builtin snapshot. Re-extracting
+    // from the global cache during rapid bank rotation can omit native programs, which have
+    // no loader-owned account to recover from during transaction execution.
+    pub fn new_from_ephemeral(&self, slot: Slot, epoch: Epoch) -> Self {
+        let mut builtin_program_cache = self.builtin_program_cache.read().unwrap().clone();
+        builtin_program_cache.set_slot(slot);
+        Self {
+            slot,
+            epoch,
+            sysvar_cache: RwLock::<SysvarCache>::default(),
+            epoch_boundary_preparation: self.epoch_boundary_preparation.clone(),
+            global_program_cache: self.global_program_cache.clone(),
+            program_runtime_environment: self.program_runtime_environment.clone(),
+            builtin_program_ids: RwLock::new(self.builtin_program_ids.read().unwrap().clone()),
+            builtin_program_cache: RwLock::new(builtin_program_cache),
+            execution_cost: self.execution_cost,
+        }
+    }
+
     // Northstar: like `new_from`, but with an isolated `ProgramCache`.
     //
     // Used by the ephemeral rollup so its `ProgramCache` (and the cooperative
@@ -375,24 +394,9 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             &self.global_program_cache.read().unwrap(),
         )));
 
-        // Pre-populate the builtin program cache from the isolated global cache.
-        let mut builtin_program_cache = ProgramCacheForTxBatch::new(slot);
-        let mut search_for: Vec<ProgramToLoad> = builtin_program_ids
-            .iter()
-            .map(|program_id| ProgramToLoad {
-                program_id,
-                loader: ProgramCacheEntryOwner::NativeLoader,
-                match_criteria: ProgramCacheMatchCriteria::NoCriteria,
-                last_modification_slot: 0,
-            })
-            .collect();
-        global_program_cache.read().unwrap().extract(
-            &mut search_for,
-            &mut builtin_program_cache,
-            &environments,
-            false,
-            false,
-        );
+        // Sonic: copy builtin entrypoints directly; they have no reloadable backing accounts.
+        let mut builtin_program_cache = self.builtin_program_cache.read().unwrap().clone();
+        builtin_program_cache.set_slot(slot);
 
         Self {
             slot,
@@ -1184,6 +1188,8 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             .map_err(|(index, err)| TransactionError::InstructionError(index, err));
         process_message_time.stop();
 
+        // Sonic: carry optional SBPF witness data into conformance output.
+        let vm_traces = invoke_context.take_vm_traces();
         drop(invoke_context);
 
         execute_timings.execute_accessories.process_message_us += process_message_time.as_us();
@@ -1294,6 +1300,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                 return_data,
                 executed_units,
                 accounts_deltas,
+                vm_traces,
             },
             loaded_transaction,
             programs_modified_by_tx: program_cache_for_tx_batch.drain_modified_entries(),

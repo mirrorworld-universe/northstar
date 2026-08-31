@@ -5,7 +5,7 @@ use qualifier_attr::qualifiers;
 use {
     crate::{
         execution_budget::MAX_INSTRUCTION_STACK_DEPTH_SIMD_0268,
-        invoke_context::{BpfAllocator, InvokeContext},
+        invoke_context::{BpfAllocator, InvokeContext, VmExecutionTrace, VmTraceRow},
         mem_pool::VmMemoryPool,
         memory_context::{MemoryContext, SerializedAccountMetadata},
         program_cache_entry::ProgramCacheEntry,
@@ -21,6 +21,7 @@ use {
         vm::{ContextObject, EbpfVm, ExecutionMode},
     },
     solana_sdk_ids::bpf_loader_deprecated,
+    solana_sha256_hasher::hash,
     solana_svm_log_collector::ic_logger_msg,
     solana_svm_measure::measure::Measure,
     solana_transaction_context::IndexOfAccount,
@@ -277,6 +278,9 @@ pub fn execute<'a, 'b: 'a>(
         )?
     };
 
+    // Sonic: collect witness data only in an explicitly trace-enabled environment.
+    let trace_enabled = executable.get_config().enable_register_tracing;
+    let trace_input_before = trace_enabled.then(|| parameter_bytes.as_slice().to_vec());
     let execution_result = {
         let mut execution_mode = ExecutionMode::PreferJit;
 
@@ -316,6 +320,73 @@ pub fn execute<'a, 'b: 'a>(
         let (compute_units_consumed, result) =
             vm.execute_program(executable, &mut execution_mode, &mut call_frames);
         let register_trace = std::mem::take(&mut vm.register_trace);
+        let compute_units_after = vm.context().get_remaining();
+        drop(vm);
+
+        if trace_enabled {
+            let text = executable.get_text_bytes().1;
+            let rows = register_trace
+                .into_iter()
+                .map(|registers| {
+                    let offset = usize::try_from(registers[11])
+                        .unwrap_or(usize::MAX)
+                        .saturating_mul(ebpf::INSN_SIZE);
+                    let mut instruction = [0; ebpf::INSN_SIZE];
+                    if let Some(bytes) = text.get(offset..offset.saturating_add(ebpf::INSN_SIZE)) {
+                        instruction.copy_from_slice(bytes);
+                    }
+                    let function_key = u32::from_le_bytes(instruction[4..8].try_into().unwrap());
+                    let syscall_key = (instruction[0] == ebpf::CALL_IMM
+                        && executable
+                            .get_function_registry()
+                            .lookup_by_key(function_key)
+                            .is_none()
+                        && executable
+                            .get_loader()
+                            .get_function_registry()
+                            .lookup_by_key(function_key)
+                            .is_some())
+                    .then_some(function_key);
+                    VmTraceRow {
+                        registers,
+                        instruction,
+                        syscall_key,
+                    }
+                })
+                .collect();
+            let heap_size = invoke_context.get_compute_budget().heap_size as usize;
+            invoke_context.insert_vm_trace(VmExecutionTrace {
+                instruction_trace_index: 0,
+                parent_instruction_trace_index: None,
+                stack_height: 0,
+                program_id,
+                program_hash: hash(text).to_bytes(),
+                sbpf_version: match executable.get_sbpf_version() {
+                    solana_sbpf::program::SBPFVersion::V0 => 0,
+                    solana_sbpf::program::SBPFVersion::V1 => 1,
+                    solana_sbpf::program::SBPFVersion::V2 => 2,
+                    solana_sbpf::program::SBPFVersion::V3 => 3,
+                    solana_sbpf::program::SBPFVersion::V4 => 4,
+                    solana_sbpf::program::SBPFVersion::Reserved => u8::MAX,
+                },
+                compute_units_before: compute_meter_prev,
+                compute_units_after,
+                rows,
+                program_input_before: trace_input_before.clone().unwrap_or_default(),
+                program_input_after: parameter_bytes.as_slice().to_vec(),
+                stack_after: stack
+                    .as_slice()
+                    .get(..executable.get_config().stack_size())
+                    .unwrap_or_default()
+                    .to_vec(),
+                heap_after: heap
+                    .as_slice()
+                    .get(..heap_size)
+                    .unwrap_or_default()
+                    .to_vec(),
+            });
+        }
+
         MEMORY_POOL.with_borrow_mut(|memory_pool| {
             memory_pool.put_stack(stack);
             memory_pool.put_heap(heap);
@@ -323,8 +394,6 @@ pub fn execute<'a, 'b: 'a>(
             debug_assert!(memory_pool.stack_len() <= MAX_INSTRUCTION_STACK_DEPTH_SIMD_0268);
             debug_assert!(memory_pool.heap_len() <= MAX_INSTRUCTION_STACK_DEPTH_SIMD_0268);
         });
-        drop(vm);
-        invoke_context.insert_register_trace(register_trace);
 
         // This section is a little convoluted due to the nested and sibling (CPI) invocations.
         let total_execute_ns = execute_time.end_as_ns();

@@ -1,0 +1,44 @@
+[package]
+name = "northstar-transaction-proof"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["host"]
+host = [
+    "dep:agave-feature-set",
+    "dep:bincode",
+    "dep:solana-account",
+    "dep:solana-program-runtime",
+    "dep:solana-pubkey",
+    "dep:solana-runtime",
+    "dep:solana-sha256-hasher",
+    "dep:solana-svm",
+    "dep:solana-svm-transaction",
+]
+
+[dependencies]
+ark-bn254 = "0.5"
+ark-ff = "0.5"
+borsh = { workspace = true, features = ["derive"] }
+ed25519-dalek = { version = "2.2", default-features = false, features = ["alloc", "fast", "zeroize"] }
+light-poseidon = "0.4"
+northstar-zk-types = { workspace = true }
+sha2 = "0.10"
+thiserror = { workspace = true }
+
+agave-feature-set = { workspace = true, optional = true }
+bincode = { workspace = true, optional = true }
+solana-account = { workspace = true, optional = true }
+solana-program-runtime = { workspace = true, optional = true }
+solana-pubkey = { workspace = true, optional = true }
+solana-runtime = { workspace = true, features = ["conformance"], optional = true }
+solana-sha256-hasher = { workspace = true, optional = true }
+solana-svm = { workspace = true, optional = true }
+solana-svm-transaction = { workspace = true, optional = true }
+
+[dev-dependencies]
+hex = "0.4"
+
+[lints]
+workspace = true

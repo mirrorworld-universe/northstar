@@ -25,6 +25,8 @@ conformance = [
     "agave-unstable-api",
     "dep:prost",
     "dep:protosol",
+    # Sonic: canonical proof-trace interchange types.
+    "dep:northstar-zk-types",
     "dev-context-only-utils",
     "solana-svm/conformance",
 ]
@@ -85,6 +87,8 @@ log = { workspace = true }
 mockall = { workspace = true }
 num-derive = { workspace = true }
 num-traits = { workspace = true }
+# Sonic: used only by the conformance trace harness.
+northstar-zk-types = { workspace = true, optional = true }
 prost = { version = "0.11", optional = true }
 protosol = { workspace = true, optional = true }
 qualifier_attr = { workspace = true }
@@ -204,6 +208,8 @@ proptest = { workspace = true }
 solana-accounts-db = { path = "../accounts-db", features = ["agave-unstable-api", "dev-context-only-utils"] }
 solana-builtins = { path = "../builtins", features = ["agave-unstable-api", "dev-context-only-utils"] }
 solana-instruction-error = { workspace = true }
+solana-program-option = { workspace = true }
+solana-program-pack = { workspace = true }
 solana-runtime = { path = ".", features = ["agave-unstable-api", "dev-context-only-utils"] }
 solana-runtime-transaction = { path = "../runtime-transaction", features = ["agave-unstable-api", "dev-context-only-utils"] }
 solana-sdk-ids = { workspace = true }
@@ -214,6 +220,7 @@ solana-stake-interface = { workspace = true, features = ["bincode"] }
 solana-svm = { path = "../svm", features = ["agave-unstable-api", "dev-context-only-utils"] }
 solana-transaction-context = { path = "../transaction-context", features = ["agave-unstable-api", "bincode", "dev-context-only-utils"] }
 solana-vote-program = { path = "../programs/vote", default-features = false, features = ["agave-unstable-api", "dev-context-only-utils"] }
+spl-token-2022-interface = { workspace = true }
 static_assertions = { workspace = true }
 test-case = { workspace = true }
 

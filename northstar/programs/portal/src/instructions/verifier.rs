@@ -9,7 +9,7 @@ use {
 mod verifier_key;
 
 #[p_instruction(
-    id = 26,
+    id = 28,
     data = [proof: [u8; 256], public_inputs: [u8; 256]]
 )]
 pub fn process_verify_er_step_proof_v1(
