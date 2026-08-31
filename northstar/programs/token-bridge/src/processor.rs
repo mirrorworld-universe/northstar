@@ -672,6 +672,7 @@ fn process_delegate_er_token_account(
 ) -> ProgramResult {
     let account_info_iter = &mut accounts.iter_mut();
     let payer = next_account_info(account_info_iter)?;
+    let owner = next_account_info(account_info_iter)?;
     let er_token_account = next_account_info(account_info_iter)?;
     let bridge_program = next_account_info(account_info_iter)?;
     let session_bridge = next_account_info(account_info_iter)?;
@@ -682,12 +683,13 @@ fn process_delegate_er_token_account(
     let system_program_info = next_account_info(account_info_iter)?;
 
     require_signer(payer)?;
+    require_signer(owner)?;
     require_self_program(program_id, bridge_program)?;
     require_system_program(system_program_info)?;
     load_session_bridge(program_id, session_bridge, portal_program)?;
     let er_state = load_er_token_account(program_id, er_token_account)?;
     if er_state.session_bridge != key_bytes(session_bridge.address())
-        || er_state.owner != key_bytes(payer.address())
+        || er_state.owner != key_bytes(owner.address())
     {
         return Err(ProgramError::InvalidAccountData);
     }
