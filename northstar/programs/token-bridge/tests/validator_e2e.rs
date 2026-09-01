@@ -191,6 +191,7 @@ fn live_validator_spl_token_bridge_round_trip() {
         &rpc,
         &[deposit_ix(
             payer.pubkey(),
+            payer.pubkey(),
             vault,
             alice_er,
             session_bridge,
@@ -356,6 +357,7 @@ fn initialize_er_ix(
 }
 
 fn deposit_ix(
+    payer: Pubkey,
     owner: Pubkey,
     vault: Pubkey,
     er_account: Pubkey,
@@ -377,7 +379,8 @@ fn deposit_ix(
     Instruction {
         program_id: northstar_token_bridge::id(),
         accounts: vec![
-            AccountMeta::new(owner, true),
+            AccountMeta::new(payer, true),
+            AccountMeta::new_readonly(owner, true),
             AccountMeta::new(vault, false),
             AccountMeta::new(er_account, false),
             AccountMeta::new_readonly(session_bridge, false),
