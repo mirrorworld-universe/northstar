@@ -186,6 +186,7 @@ fn prepare(config: &Config) -> Result<()> {
             config.portal_program,
             config.bridge_program,
             payer.pubkey(),
+            payer.pubkey(),
             vault,
             er_token_account,
             session_bridge,
@@ -367,6 +368,7 @@ fn initialize_er_ix(
 fn deposit_ix(
     portal_program: Pubkey,
     bridge_program: Pubkey,
+    payer: Pubkey,
     owner: Pubkey,
     vault: Pubkey,
     er_account: Pubkey,
@@ -388,7 +390,8 @@ fn deposit_ix(
     Instruction {
         program_id: bridge_program,
         accounts: vec![
-            AccountMeta::new(owner, true),
+            AccountMeta::new(payer, true),
+            AccountMeta::new_readonly(owner, true),
             AccountMeta::new(vault, false),
             AccountMeta::new(er_account, false),
             AccountMeta::new_readonly(session_bridge, false),

@@ -14,7 +14,7 @@ use {
         sysvars::{rent::Rent, Sysvar},
         AccountView as AccountInfo, Address as Pubkey, ProgramResult,
     },
-    pinocchio_system::instructions::CreateAccount,
+    pinocchio_system::instructions::{Allocate, Assign, CreateAccount, Transfer},
     pinocchio_token::instructions::TransferChecked,
     solana_program_pack::Pack,
     spl_token_interface::state::Account as SplTokenAccount,
@@ -242,6 +242,7 @@ fn process_deposit(
     decimals: u8,
 ) -> ProgramResult {
     let account_info_iter = &mut accounts.iter_mut();
+    let payer = next_account_info(account_info_iter)?;
     let owner = next_account_info(account_info_iter)?;
     let vault = next_account_info(account_info_iter)?;
     let er_token_account = next_account_info(account_info_iter)?;
@@ -255,6 +256,7 @@ fn process_deposit(
     let delegation_record = next_account_info(account_info_iter)?;
     let system_program_info = next_account_info(account_info_iter)?;
 
+    require_signer(payer)?;
     require_signer(owner)?;
     require_system_program(system_program_info)?;
     let bridge = load_session_bridge(program_id, session_bridge, portal_program)?;
@@ -320,7 +322,7 @@ fn process_deposit(
     if deposit_receipt.lamports() == 0 {
         let bump_seed = [receipt_bump];
         create_pda(
-            owner,
+            payer,
             deposit_receipt,
             account_size(&initial_receipt),
             program_id,
@@ -978,11 +980,36 @@ fn create_pda<const N: usize>(
     require_system_program(system_program_info)?;
     let lamports = Rent::get()?.try_minimum_balance(space)?;
     let signer = Signer::from(&seeds);
-    CreateAccount {
-        from: payer,
-        to: pda,
-        lamports,
+    if pda.lamports() == 0 {
+        return CreateAccount {
+            from: payer,
+            to: pda,
+            lamports,
+            space: space as u64,
+            owner,
+        }
+        .invoke_signed(&[signer]);
+    }
+    if !pda.is_data_empty() || !pda.owned_by(&pinocchio_system::ID) {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    if pda.lamports() < lamports {
+        Transfer {
+            from: payer,
+            to: pda,
+            lamports: lamports
+                .checked_sub(pda.lamports())
+                .ok_or(ProgramError::ArithmeticOverflow)?,
+        }
+        .invoke()?;
+    }
+    Allocate {
+        account: pda,
         space: space as u64,
+    }
+    .invoke_signed(core::slice::from_ref(&signer))?;
+    Assign {
+        account: pda,
         owner,
     }
     .invoke_signed(&[signer])
@@ -999,7 +1026,7 @@ fn create_buffer(
     if expected != *buffer.address() {
         return Err(ProgramError::InvalidSeeds);
     }
-    if buffer.lamports() == 0 {
+    if !buffer.owned_by(program_id) {
         let bump_seed = [bump];
         create_pda(
             payer,

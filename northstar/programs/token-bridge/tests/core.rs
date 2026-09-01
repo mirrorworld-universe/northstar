@@ -6,14 +6,19 @@ use {
         instruction::TokenBridgeInstruction, state::ErTokenAccount,
     },
     solana_account::{Account, AccountSharedData, ReadableAccount},
+    solana_account_info::AccountInfo,
     solana_instruction::{AccountMeta, Instruction},
     solana_keypair::Keypair,
+    solana_program::program::invoke_signed,
+    solana_program_entrypoint::ProgramResult,
+    solana_program_error::ProgramError,
     solana_program_pack::Pack,
-    solana_program_test::{ProgramTest, ProgramTestContext},
+    solana_program_test::{processor, ProgramTest, ProgramTestContext},
     solana_pubkey::Pubkey,
     solana_rent::Rent,
     solana_sdk_ids::system_program,
     solana_signer::Signer,
+    solana_system_interface::instruction as system_instruction,
     solana_transaction::Transaction,
     spl_token_interface::state::{Account as SplTokenAccount, AccountState, Mint},
 };
@@ -21,6 +26,42 @@ use {
 const PORTAL_PROGRAM_ID: Pubkey =
     Pubkey::from_str_const("GikCSCpYUq7QR7esoK6GM4UbJzKgdKNvS5bR1rBYH5E4");
 const DECIMALS: u8 = 6;
+const PDA_OWNER_SEED: &[u8] = b"owner";
+
+fn process_pda_owner_delegate(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    data: &[u8],
+) -> ProgramResult {
+    let [payer, owner, er_token_account, bridge_program, session_bridge, portal_program, session, delegation_record, buffer, system_program_info] =
+        accounts
+    else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    let (expected_owner, bump) = Pubkey::find_program_address(&[PDA_OWNER_SEED], program_id);
+    if expected_owner != *owner.key {
+        return Err(ProgramError::InvalidSeeds);
+    }
+    let instruction = Instruction {
+        program_id: northstar_token_bridge::id(),
+        accounts: vec![
+            AccountMeta::new(*payer.key, true),
+            AccountMeta::new_readonly(*owner.key, true),
+            AccountMeta::new(*er_token_account.key, false),
+            AccountMeta::new_readonly(*bridge_program.key, false),
+            AccountMeta::new_readonly(*session_bridge.key, false),
+            AccountMeta::new_readonly(*portal_program.key, false),
+            AccountMeta::new_readonly(*session.key, false),
+            AccountMeta::new(*delegation_record.key, false),
+            AccountMeta::new(*buffer.key, false),
+            AccountMeta::new_readonly(*system_program_info.key, false),
+        ],
+        data: data.to_vec(),
+    };
+    let bump_seed = [bump];
+    let signer_seeds = [PDA_OWNER_SEED, &bump_seed];
+    invoke_signed(&instruction, accounts, &[&signer_seeds])
+}
 
 struct TestWorld {
     context: ProgramTestContext,
@@ -28,6 +69,8 @@ struct TestWorld {
     alice: Keypair,
     bob: Keypair,
     program_authority: Keypair,
+    owner_program_id: Pubkey,
+    pda_authority: Pubkey,
     mint: Pubkey,
     session: Pubkey,
     session_bridge: Pubkey,
@@ -35,9 +78,11 @@ struct TestWorld {
     alice_er: Pubkey,
     bob_er: Pubkey,
     program_er: Pubkey,
+    pda_er: Pubkey,
     unregistered_er: Pubkey,
     alice_token: Pubkey,
     bob_token: Pubkey,
+    program_token: Pubkey,
     vault_token: Pubkey,
 }
 
@@ -47,6 +92,8 @@ impl TestWorld {
         let alice = Keypair::new();
         let bob = Keypair::new();
         let program_authority = Keypair::new();
+        let owner_program_id = Pubkey::new_unique();
+        let (pda_authority, _) = Pubkey::find_program_address(&[PDA_OWNER_SEED], &owner_program_id);
         let mint = Pubkey::new_unique();
         let (session, session_bump) =
             Pubkey::find_program_address(&[Session::SEED_PREFIX], &PORTAL_PROGRAM_ID);
@@ -68,14 +115,26 @@ impl TestWorld {
             &session_bridge,
             &program_authority.pubkey(),
         );
+        let (pda_er, _) = find_er_token_account_pda(
+            &northstar_token_bridge::id(),
+            &session_bridge,
+            &pda_authority,
+        );
         let unregistered_er = Pubkey::new_unique();
         let alice_token = Pubkey::new_unique();
         let bob_token = Pubkey::new_unique();
+        let program_token = Pubkey::new_unique();
         let vault_token = Pubkey::new_unique();
 
         let mut program_test =
             ProgramTest::new("northstar_token_bridge", northstar_token_bridge::id(), None);
         program_test.add_program("northstar_portal", PORTAL_PROGRAM_ID, None);
+        program_test.prefer_bpf(false);
+        program_test.add_program(
+            "pda_owner",
+            owner_program_id,
+            processor!(process_pda_owner_delegate),
+        );
         for (address, account) in
             solana_program_binaries::by_id(&spl_token_interface::id(), &Rent::default()).unwrap()
         {
@@ -87,7 +146,7 @@ impl TestWorld {
         program_test.add_account(
             program_authority.pubkey(),
             Account {
-                owner: northstar_token_bridge::id(),
+                owner: owner_program_id,
                 ..system_account(1_000_000_000)
             },
         );
@@ -123,6 +182,10 @@ impl TestWorld {
         program_test.add_account(mint, mint_account());
         program_test.add_account(alice_token, token_account(mint, alice.pubkey(), 1_000));
         program_test.add_account(bob_token, token_account(mint, bob.pubkey(), 0));
+        program_test.add_account(
+            program_token,
+            token_account(mint, program_authority.pubkey(), 1_000),
+        );
         program_test.add_account(vault_token, token_account(mint, vault, 0));
         let bridge = SessionBridge {
             discriminator: SessionBridge::DISCRIMINATOR,
@@ -169,6 +232,8 @@ impl TestWorld {
             alice,
             bob,
             program_authority,
+            owner_program_id,
+            pda_authority,
             mint,
             session,
             session_bridge,
@@ -176,9 +241,11 @@ impl TestWorld {
             alice_er,
             bob_er,
             program_er,
+            pda_er,
             unregistered_er,
             alice_token,
             bob_token,
+            program_token,
             vault_token,
         }
     }
@@ -580,6 +647,148 @@ async fn delegate_er_token_account_accepts_program_owned_authority() {
 }
 
 #[tokio::test]
+async fn delegate_er_token_account_accepts_pda_owner_via_cpi() {
+    let mut world = TestWorld::new().await;
+    let payer_pubkey = world.payer.pubkey();
+
+    let initialize_pda_er = initialize_er_ix(&world, world.pda_authority, world.pda_er);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[initialize_pda_er],
+        &[&world.payer],
+    )
+    .await;
+
+    let delegate = pda_delegate_ix(&world);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[delegate],
+        &[&world.payer],
+    )
+    .await;
+
+    assert_eq!(world.account_owner(world.pda_er).await, PORTAL_PROGRAM_ID);
+}
+
+#[tokio::test]
+async fn deposit_accepts_program_owned_authority_with_separate_payer() {
+    let mut world = TestWorld::new().await;
+    let payer_pubkey = world.payer.pubkey();
+    let initialize_vault = initialize_vault_ix(&world);
+    let initialize_program_er =
+        initialize_er_ix(&world, world.program_authority.pubkey(), world.program_er);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[initialize_vault, initialize_program_er],
+        &[&world.payer],
+    )
+    .await;
+
+    let deposit = deposit_ix_for(
+        &world,
+        world.program_authority.pubkey(),
+        world.program_er,
+        world.program_token,
+        600,
+    );
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[deposit],
+        &[&world.payer, &world.program_authority],
+    )
+    .await;
+
+    assert_eq!(world.er_amount(world.program_er).await, 600);
+}
+
+#[tokio::test]
+async fn delegate_initializes_prefunded_buffer_pda() {
+    let mut world = TestWorld::new().await;
+    let payer_pubkey = world.payer.pubkey();
+    let initialize_alice_er = initialize_er_ix(&world, world.alice.pubkey(), world.alice_er);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[initialize_alice_er],
+        &[&world.payer],
+    )
+    .await;
+
+    let (buffer, _) = find_buffer_pda(&northstar_token_bridge::id(), &world.alice_er);
+    let prefund =
+        system_instruction::transfer(&payer_pubkey, &buffer, Rent::default().minimum_balance(0));
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[prefund],
+        &[&world.payer],
+    )
+    .await;
+
+    let delegate = delegate_ix(&world);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[delegate],
+        &[&world.payer, &world.alice],
+    )
+    .await;
+
+    assert_eq!(world.account_owner(world.alice_er).await, PORTAL_PROGRAM_ID);
+}
+
+#[tokio::test]
+async fn undelegate_initializes_prefunded_buffer_pda() {
+    let mut world = TestWorld::new().await;
+    let payer_pubkey = world.payer.pubkey();
+    let initialize_alice_er = initialize_er_ix(&world, world.alice.pubkey(), world.alice_er);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[initialize_alice_er],
+        &[&world.payer],
+    )
+    .await;
+    let delegate = delegate_ix(&world);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[delegate],
+        &[&world.payer, &world.alice],
+    )
+    .await;
+
+    let (buffer, _) = find_buffer_pda(&northstar_token_bridge::id(), &world.alice_er);
+    let prefund =
+        system_instruction::transfer(&payer_pubkey, &buffer, Rent::default().minimum_balance(0));
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[prefund],
+        &[&world.payer],
+    )
+    .await;
+
+    let undelegate = undelegate_ix(&world);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[undelegate],
+        &[&world.payer, &world.alice],
+    )
+    .await;
+
+    assert_eq!(
+        world.account_owner(world.alice_er).await,
+        northstar_token_bridge::id()
+    );
+}
+
+#[tokio::test]
 async fn undelegate_er_token_account_requires_owner() {
     let mut world = TestWorld::new().await;
     let payer_pubkey = world.payer.pubkey();
@@ -660,25 +869,39 @@ fn initialize_er_ix(world: &TestWorld, owner: Pubkey, er_account: Pubkey) -> Ins
 }
 
 fn deposit_ix(world: &TestWorld, amount: u64) -> Instruction {
+    deposit_ix_for(
+        world,
+        world.alice.pubkey(),
+        world.alice_er,
+        world.alice_token,
+        amount,
+    )
+}
+
+fn deposit_ix_for(
+    world: &TestWorld,
+    owner: Pubkey,
+    er_account: Pubkey,
+    source_token: Pubkey,
+    amount: u64,
+) -> Instruction {
     let (deposit_receipt, _) = northstar_token_bridge::find_token_deposit_receipt_pda(
         &northstar_token_bridge::id(),
         &world.session_bridge,
-        &world.alice_er,
+        &er_account,
     );
-    let delegation_record = Pubkey::find_program_address(
-        &[b"delegation", world.alice_er.as_ref()],
-        &PORTAL_PROGRAM_ID,
-    )
-    .0;
+    let delegation_record =
+        Pubkey::find_program_address(&[b"delegation", er_account.as_ref()], &PORTAL_PROGRAM_ID).0;
     Instruction {
         program_id: northstar_token_bridge::id(),
         accounts: vec![
-            AccountMeta::new(world.alice.pubkey(), true),
+            AccountMeta::new(world.payer.pubkey(), true),
+            AccountMeta::new_readonly(owner, true),
             AccountMeta::new(world.vault, false),
-            AccountMeta::new(world.alice_er, false),
+            AccountMeta::new(er_account, false),
             AccountMeta::new_readonly(world.session_bridge, false),
             AccountMeta::new_readonly(PORTAL_PROGRAM_ID, false),
-            AccountMeta::new(world.alice_token, false),
+            AccountMeta::new(source_token, false),
             AccountMeta::new(world.vault_token, false),
             AccountMeta::new_readonly(world.mint, false),
             AccountMeta::new_readonly(spl_token_interface::id(), false),
@@ -778,6 +1001,31 @@ fn delegate_ix_for_authority_and_account(
             AccountMeta::new(world.payer.pubkey(), true),
             AccountMeta::new_readonly(authority, true),
             AccountMeta::new(er_account, false),
+            AccountMeta::new_readonly(northstar_token_bridge::id(), false),
+            AccountMeta::new_readonly(world.session_bridge, false),
+            AccountMeta::new_readonly(PORTAL_PROGRAM_ID, false),
+            AccountMeta::new_readonly(world.session, false),
+            AccountMeta::new(delegation_record, false),
+            AccountMeta::new(buffer, false),
+            AccountMeta::new_readonly(system_program::id(), false),
+        ],
+        data: borsh::to_vec(&TokenBridgeInstruction::DelegateErTokenAccount { grid_id: 1 })
+            .unwrap(),
+    }
+}
+
+fn pda_delegate_ix(world: &TestWorld) -> Instruction {
+    let (delegation_record, _) = Pubkey::find_program_address(
+        &[DelegationRecord::SEED_PREFIX, world.pda_er.as_ref()],
+        &PORTAL_PROGRAM_ID,
+    );
+    let (buffer, _) = find_buffer_pda(&northstar_token_bridge::id(), &world.pda_er);
+    Instruction {
+        program_id: world.owner_program_id,
+        accounts: vec![
+            AccountMeta::new(world.payer.pubkey(), true),
+            AccountMeta::new_readonly(world.pda_authority, false),
+            AccountMeta::new(world.pda_er, false),
             AccountMeta::new_readonly(northstar_token_bridge::id(), false),
             AccountMeta::new_readonly(world.session_bridge, false),
             AccountMeta::new_readonly(PORTAL_PROGRAM_ID, false),
