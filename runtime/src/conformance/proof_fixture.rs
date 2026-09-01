@@ -67,6 +67,20 @@ pub fn full_transaction_fixture_v1() -> FullTransactionFixtureV1 {
     )
 }
 
+pub fn full_transaction_benchmark_fixture_v1(iterations: u32) -> FullTransactionFixtureV1 {
+    let mut instruction_data = vec![1];
+    instruction_data.extend_from_slice(&iterations.to_le_bytes());
+    full_transaction_fixture(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../svm/tests/example-programs/proof-benchmark-loop/proof_benchmark_loop.so"
+        ),
+        b"northstar-full-transaction-proof-benchmark-v1",
+        &instruction_data,
+        true,
+    )
+}
+
 pub fn full_transaction_rollback_fixture_v1() -> FullTransactionFixtureV1 {
     full_transaction_fixture(
         concat!(
@@ -161,6 +175,12 @@ fn full_transaction_fixture(
 
 pub fn execute_full_transaction_fixture_v1() -> ExecutedFullTransactionFixtureV1 {
     execute_fixture(full_transaction_fixture_v1())
+}
+
+pub fn execute_full_transaction_benchmark_fixture_v1(
+    iterations: u32,
+) -> ExecutedFullTransactionFixtureV1 {
+    execute_fixture(full_transaction_benchmark_fixture_v1(iterations))
 }
 
 pub fn execute_full_transaction_rollback_fixture_v1() -> ExecutedFullTransactionFixtureV1 {

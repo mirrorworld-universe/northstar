@@ -1,0 +1,15 @@
+[package]
+name = "proof-benchmark-loop"
+version = "4.3.0-alpha.2"
+edition = "2021"
+
+[dependencies]
+solana-account-info = "3.1.1"
+solana-program-entrypoint = "3.1.1"
+solana-program-error = "3.0.1"
+solana-pubkey = { version = "4.2.0", default-features = false }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[workspace]

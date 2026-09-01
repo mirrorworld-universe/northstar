@@ -9,8 +9,8 @@ use {
     solana_program_runtime::invoke_context::VmExecutionTrace,
     solana_runtime::conformance::{
         proof_fixture::{
-            execute_full_transaction_fixture_v1, ExecutedFullTransactionFixtureV1,
-            TRANSACTION_FEE_V1,
+            execute_full_transaction_benchmark_fixture_v1, execute_full_transaction_fixture_v1,
+            ExecutedFullTransactionFixtureV1, TRANSACTION_FEE_V1,
         },
         txn::BankTxnProcessingResult,
     },
@@ -20,17 +20,74 @@ use {
 };
 
 const REVISION: [u8; 20] = [
-    0x9c, 0x73, 0xb8, 0x41, 0x45, 0x47, 0x1b, 0x22, 0xd0, 0x0b, 0x01, 0x69, 0x84, 0x29, 0x3e, 0x04,
-    0x26, 0x35, 0xad, 0xe9,
+    0x1f, 0xdd, 0xab, 0x64, 0x0a, 0x68, 0xee, 0x7a, 0x43, 0xbe, 0x26, 0x44, 0x70, 0xa8, 0x9c, 0x53,
+    0x02, 0x58, 0x1c, 0xfe,
 ];
 
-pub fn build_replay_witness_v1() -> Result<ReplayWitnessV1, ReplayError> {
-    let executed = execute_full_transaction_fixture_v1();
-    executed.assert_expected_success();
-    build_from_execution(executed)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BenchmarkProfileV1 {
+    pub name: &'static str,
+    pub iterations: u32,
+    pub expected_vm_rows: usize,
 }
 
-fn build_from_execution(
+pub const BENCHMARK_PROFILES_V1: [BenchmarkProfileV1; 3] = [
+    BenchmarkProfileV1 {
+        name: "1k",
+        iterations: 71,
+        expected_vm_rows: 999,
+    },
+    BenchmarkProfileV1 {
+        name: "10k",
+        iterations: 1_071,
+        expected_vm_rows: 9_999,
+    },
+    BenchmarkProfileV1 {
+        name: "100k",
+        iterations: 11_071,
+        expected_vm_rows: 99_999,
+    },
+];
+
+pub fn benchmark_profile_v1(name: &str) -> Option<BenchmarkProfileV1> {
+    BENCHMARK_PROFILES_V1
+        .iter()
+        .copied()
+        .find(|profile| profile.name == name)
+}
+
+pub fn build_replay_witness_v1() -> Result<ReplayWitnessV1, ReplayError> {
+    build_validated_witness(execute_full_transaction_fixture_v1())
+}
+
+pub fn build_benchmark_replay_witness_v1(iterations: u32) -> Result<ReplayWitnessV1, ReplayError> {
+    build_benchmark_replay_artifacts_v1(iterations).map(|artifacts| artifacts.0)
+}
+
+pub fn build_benchmark_replay_artifacts_v1(
+    iterations: u32,
+) -> Result<(ReplayWitnessV1, Vec<u8>), ReplayError> {
+    let executed = execute_full_transaction_benchmark_fixture_v1(iterations);
+    executed.assert_expected_success();
+    let trace_bytes = executed
+        .trace
+        .canonical_bytes()
+        .map_err(|_| ReplayError::Encoding)?;
+    let witness = assemble_replay_witness_v1(executed)?;
+    replay(&witness)?;
+    Ok((witness, trace_bytes))
+}
+
+fn build_validated_witness(
+    executed: ExecutedFullTransactionFixtureV1,
+) -> Result<ReplayWitnessV1, ReplayError> {
+    executed.assert_expected_success();
+    let witness = assemble_replay_witness_v1(executed)?;
+    replay(&witness)?;
+    Ok(witness)
+}
+
+pub fn assemble_replay_witness_v1(
     executed: ExecutedFullTransactionFixtureV1,
 ) -> Result<ReplayWitnessV1, ReplayError> {
     let BankTxnProcessingResult::Processed {
@@ -212,7 +269,6 @@ fn build_from_execution(
     };
     let mut witness = witness;
     crate::set_trace_hash(&mut witness);
-    replay(&witness)?;
     Ok(witness)
 }
 
@@ -309,6 +365,14 @@ mod tests {
             encode_witness(&second).unwrap()
         );
         assert_eq!(replay(&first).unwrap(), replay(&second).unwrap());
+    }
+
+    #[test]
+    fn benchmark_profiles_have_stable_row_counts() {
+        for profile in BENCHMARK_PROFILES_V1 {
+            let witness = build_benchmark_replay_witness_v1(profile.iterations).unwrap();
+            assert_eq!(witness.vm_rows.len(), profile.expected_vm_rows);
+        }
     }
 
     fn assert_rejected(

@@ -22,29 +22,54 @@ pub struct SbpfExecutionTableCircuitV1 {
 pub struct ExecutionTableMetricsV1 {
     pub rows: usize,
     pub opcodes: Vec<u8>,
+    pub alu_rows: usize,
+    pub branch_rows: usize,
+    pub load_rows: usize,
+    pub store_rows: usize,
+    pub call_rows: usize,
+    pub exit_rows: usize,
     pub syscalls: usize,
 }
 
 pub fn execution_table_metrics(witness: &ReplayWitnessV1) -> ExecutionTableMetricsV1 {
-    let mut opcodes = witness
-        .vm_rows
-        .iter()
-        .map(|row| {
-            let instruction = ebpf::get_insn(&row.instruction, 0);
-            instruction.opc
-        })
-        .collect::<Vec<_>>();
+    let mut opcodes = Vec::new();
+    let mut metrics = ExecutionTableMetricsV1 {
+        rows: witness.vm_rows.len(),
+        opcodes: Vec::new(),
+        alu_rows: 0,
+        branch_rows: 0,
+        load_rows: 0,
+        store_rows: 0,
+        call_rows: 0,
+        exit_rows: 0,
+        syscalls: 0,
+    };
+    for row in &witness.vm_rows {
+        let opcode = ebpf::get_insn(&row.instruction, 0).opc;
+        opcodes.push(opcode);
+        let class = opcode & 0x07;
+        let operation = opcode & 0xf0;
+        match class {
+            1 => metrics.load_rows = metrics.load_rows.saturating_add(1),
+            2 | 3 => metrics.store_rows = metrics.store_rows.saturating_add(1),
+            4 | 7 => metrics.alu_rows = metrics.alu_rows.saturating_add(1),
+            5 | 6 if operation == 0x80 => {
+                metrics.call_rows = metrics.call_rows.saturating_add(1);
+            }
+            5 | 6 if operation == 0x90 => {
+                metrics.exit_rows = metrics.exit_rows.saturating_add(1);
+            }
+            5 | 6 => metrics.branch_rows = metrics.branch_rows.saturating_add(1),
+            _ => {}
+        }
+        if row.syscall_key != 0 {
+            metrics.syscalls = metrics.syscalls.saturating_add(1);
+        }
+    }
     opcodes.sort_unstable();
     opcodes.dedup();
-    ExecutionTableMetricsV1 {
-        rows: witness.vm_rows.len(),
-        opcodes,
-        syscalls: witness
-            .vm_rows
-            .iter()
-            .filter(|row| row.syscall_key != 0)
-            .count(),
-    }
+    metrics.opcodes = opcodes;
+    metrics
 }
 
 impl ConstraintSynthesizer<Fr> for SbpfExecutionTableCircuitV1 {

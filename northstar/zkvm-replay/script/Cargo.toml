@@ -7,6 +7,7 @@ publish.workspace = true
 [features]
 default = []
 cuda = ["sp1-sdk/cuda"]
+profiling = ["sp1-sdk/profiling"]
 
 [dependencies]
 anyhow = "1"
