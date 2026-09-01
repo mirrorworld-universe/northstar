@@ -5,6 +5,7 @@ edition = "2021"
 
 [features]
 default = ["host"]
+cycle-tracking = []
 host = [
     "dep:agave-feature-set",
     "dep:bincode",

@@ -158,6 +158,15 @@ impl From<CommitmentError> for ReplayError {
     }
 }
 
+fn track<T>(_name: &str, operation: impl FnOnce() -> T) -> T {
+    #[cfg(all(feature = "cycle-tracking", target_os = "zkvm"))]
+    println!("cycle-tracker-report-start: {_name}");
+    let output = operation();
+    #[cfg(all(feature = "cycle-tracking", target_os = "zkvm"))]
+    println!("cycle-tracker-report-end: {_name}");
+    output
+}
+
 pub fn encode_witness(witness: &ReplayWitnessV1) -> Result<Vec<u8>, ReplayError> {
     borsh::to_vec(witness).map_err(|_| ReplayError::Encoding)
 }
@@ -167,12 +176,16 @@ pub fn decode_witness(bytes: &[u8]) -> Result<ReplayWitnessV1, ReplayError> {
 }
 
 pub fn replay(witness: &ReplayWitnessV1) -> Result<ErStepPublicInputsV1, ReplayError> {
-    let elf_hash = program_elf_hash(witness);
-    validate_header(witness)?;
+    let elf_hash = track("hash_program_elf", || program_elf_hash(witness));
+    track("header", || validate_header(witness))?;
     validate_transaction(witness)?;
-    validate_accounts_and_result(witness)?;
+    track("accounts_fees_result", || {
+        validate_accounts_and_result(witness)
+    })?;
     validate_trace(witness, elf_hash)?;
-    let public = derive_public_inputs_with_elf_hash(witness, elf_hash)?;
+    let public = track("poseidon_commitments", || {
+        derive_public_inputs_with_elf_hash(witness, elf_hash)
+    })?;
     FullTransactionPublicInputsV1::try_from(public).map_err(|_| ReplayError::Domain)?;
     Ok(public)
 }
@@ -195,7 +208,9 @@ fn validate_header(witness: &ReplayWitnessV1) -> Result<(), ReplayError> {
 }
 
 fn validate_transaction(witness: &ReplayWitnessV1) -> Result<(), ReplayError> {
-    let parsed = parse_legacy_transaction(&witness.transaction_bytes)?;
+    let parsed = track("transaction_wire", || {
+        parse_legacy_transaction(&witness.transaction_bytes)
+    })?;
     if parsed.message != witness.message_bytes
         || parsed.signature != witness.signature
         || parsed.signer != witness.signer
@@ -213,26 +228,32 @@ fn validate_transaction(witness: &ReplayWitnessV1) -> Result<(), ReplayError> {
     {
         return Err(ReplayError::Wire);
     }
-    let key = VerifyingKey::from_bytes(&witness.signer).map_err(|_| ReplayError::Signature)?;
-    let signature = Signature::from_bytes(&witness.signature);
-    key.verify_strict(&witness.message_bytes, &signature)
-        .map_err(|_| ReplayError::Signature)?;
-    if !witness
-        .runtime
-        .recent_blockhashes
-        .iter()
-        .any(|hash| hash == &witness.recent_blockhash)
-    {
+    track("ed25519_signature", || {
+        let key = VerifyingKey::from_bytes(&witness.signer).map_err(|_| ReplayError::Signature)?;
+        let signature = Signature::from_bytes(&witness.signature);
+        key.verify_strict(&witness.message_bytes, &signature)
+            .map_err(|_| ReplayError::Signature)
+    })?;
+    let blockhash_valid = track("blockhash", || {
+        witness
+            .runtime
+            .recent_blockhashes
+            .iter()
+            .any(|hash| hash == &witness.recent_blockhash)
+    });
+    if !blockhash_valid {
         return Err(ReplayError::Blockhash);
     }
     Ok(())
 }
 
 fn validate_accounts_and_result(witness: &ReplayWitnessV1) -> Result<(), ReplayError> {
+    let supported_instruction_data = witness.instruction_data == [1]
+        || (witness.instruction_data.len() == 5 && witness.instruction_data[0] == 1);
     if witness.pre_accounts.len() != 2
         || witness.post_accounts.len() != 2
         || !witness.rollback_accounts.is_empty()
-        || witness.instruction_data != [1]
+        || !supported_instruction_data
     {
         return Err(ReplayError::Accounts);
     }
@@ -282,11 +303,12 @@ fn validate_accounts_and_result(witness: &ReplayWitnessV1) -> Result<(), ReplayE
 fn validate_trace(witness: &ReplayWitnessV1, elf_hash: [u8; 32]) -> Result<(), ReplayError> {
     let first = witness.vm_rows.first().ok_or(ReplayError::Trace)?;
     let last = witness.vm_rows.last().ok_or(ReplayError::Trace)?;
+    let expected_trace_hash = track("hash_trace", || trace_hash(witness, elf_hash));
     if witness.program_words.is_empty()
         || witness.event_tags.last() != Some(&6)
         || witness.compute_units_before <= witness.compute_units_after
         || witness.result.executed_units == 0
-        || witness.trace_hash != trace_hash(witness, elf_hash)
+        || witness.trace_hash != expected_trace_hash
         || first.registers[11] != witness.runtime.entry_pc
         || last.instruction != EXIT_INSTRUCTION
         || last.syscall_key != 0
@@ -333,50 +355,55 @@ fn validate_trace(witness: &ReplayWitnessV1, elf_hash: [u8; 32]) -> Result<(), R
     {
         return Err(ReplayError::Trace);
     }
-    let mut used_call_targets = BTreeSet::new();
-    let mut call_stack = Vec::new();
-    for (index, row) in witness.vm_rows.iter().enumerate() {
-        let word = words.get(&row.registers[11]).ok_or(ReplayError::Program)?;
-        if word.instruction != row.instruction {
-            return Err(ReplayError::Program);
-        }
-        let next = index
-            .checked_add(1)
-            .and_then(|next_index| witness.vm_rows.get(next_index));
-        if let Some(next) = next {
-            validate_row(row, next, word.lddw_high, &call_targets)?;
-        }
-        if row.instruction[0] == 0x85 && row.syscall_key == 0 {
-            let function_hash = u32::from_le_bytes(
-                row.instruction[4..8]
-                    .try_into()
-                    .expect("fixed instruction slice"),
-            );
-            used_call_targets.insert(function_hash);
-            let return_pc = row.registers[11]
+    track("sbpf_rows_memory_syscalls", || {
+        let mut used_call_targets = BTreeSet::new();
+        let mut call_stack = Vec::new();
+        for (index, row) in witness.vm_rows.iter().enumerate() {
+            let word = words.get(&row.registers[11]).ok_or(ReplayError::Program)?;
+            if word.instruction != row.instruction {
+                return Err(ReplayError::Program);
+            }
+            let next = index
                 .checked_add(1)
-                .ok_or(ReplayError::Register)?;
-            let saved_registers: [u64; 5] = row.registers[6..11]
-                .try_into()
-                .expect("fixed register slice");
-            call_stack.push((return_pc, saved_registers));
-        } else if row.instruction == EXIT_INSTRUCTION {
-            match next {
-                Some(next) => {
-                    let (return_pc, saved_registers) =
-                        call_stack.pop().ok_or(ReplayError::Register)?;
-                    if next.registers[11] != return_pc || next.registers[6..11] != saved_registers {
-                        return Err(ReplayError::Register);
+                .and_then(|next_index| witness.vm_rows.get(next_index));
+            if let Some(next) = next {
+                validate_row(row, next, word.lddw_high, &call_targets)?;
+            }
+            if row.instruction[0] == 0x85 && row.syscall_key == 0 {
+                let function_hash = u32::from_le_bytes(
+                    row.instruction[4..8]
+                        .try_into()
+                        .expect("fixed instruction slice"),
+                );
+                used_call_targets.insert(function_hash);
+                let return_pc = row.registers[11]
+                    .checked_add(1)
+                    .ok_or(ReplayError::Register)?;
+                let saved_registers: [u64; 5] = row.registers[6..11]
+                    .try_into()
+                    .expect("fixed register slice");
+                call_stack.push((return_pc, saved_registers));
+            } else if row.instruction == EXIT_INSTRUCTION {
+                match next {
+                    Some(next) => {
+                        let (return_pc, saved_registers) =
+                            call_stack.pop().ok_or(ReplayError::Register)?;
+                        if next.registers[11] != return_pc
+                            || next.registers[6..11] != saved_registers
+                        {
+                            return Err(ReplayError::Register);
+                        }
                     }
+                    None if !call_stack.is_empty() => return Err(ReplayError::Register),
+                    None => {}
                 }
-                None if !call_stack.is_empty() => return Err(ReplayError::Register),
-                None => {}
             }
         }
-    }
-    if !call_stack.is_empty() || used_call_targets.len() != call_targets.len() {
-        return Err(ReplayError::Trace);
-    }
+        if !call_stack.is_empty() || used_call_targets.len() != call_targets.len() {
+            return Err(ReplayError::Trace);
+        }
+        Ok(())
+    })?;
     Ok(())
 }
 

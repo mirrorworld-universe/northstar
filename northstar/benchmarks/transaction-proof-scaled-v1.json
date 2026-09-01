@@ -1,0 +1,1129 @@
+{
+  "schema": "northstar-transaction-proof-scaled-summary-v1",
+  "environment": "revision=2d26a8b13c753bd2e507304c77e8278b77c65285\ntree=\ndate=2026-08-30T14:22:28+00:00\nLinux ip-172-31-50-157 7.0.0-1010-aws #10-Ubuntu SMP PREEMPT Thu Jul 23 02:06:04 UTC 2026 x86_64 GNU/Linux\nCPU(s):                                  16\nOn-line CPU(s) list:                     0-15\nModel name:                              AMD EPYC 7R13 Processor\nThread(s) per core:                      2\nCore(s) per socket:                      8\nSocket(s):                               1\nNUMA node0 CPU(s):                       0-15\n               total        used        free      shared  buff/cache   available\nMem:     133264101376  3581333504 108734476288    21741568 22790877184 129682767872\nNVIDIA L40S, 46068 MiB, 580.173.02\nrustc 1.97.1 (8bab26f4f 2026-07-14)\ncargo_prove=cargo-prove sp1 (d454975 2026-04-11T01:54:01.305546215Z)\n",
+  "fixture_sha256": [
+    {
+      "sha256": "4259836c8ef68f5160e4dae3394577767e657fc3339128bdee6b76aa6ee40f5e",
+      "file": "100k.bin"
+    },
+    {
+      "sha256": "4cf99168e2c5ae22d9118fb093567365d30029f71695de09aba5e91de5a82d9a",
+      "file": "100k.trace-v1.bin"
+    },
+    {
+      "sha256": "5482ad4f909e0ff1f0867a9065fe2a6212e56279bfa2509874f2fa215703253c",
+      "file": "10k.bin"
+    },
+    {
+      "sha256": "c08260cc5d7bce31aec1f1adc3add17cf45575cd060a80758e7ef74b2fa0242d",
+      "file": "10k.trace-v1.bin"
+    },
+    {
+      "sha256": "2f47cb264b0a53c2c0be07853bf8867a1294c2e5896fa16e359e7d8fc9529391",
+      "file": "1k.bin"
+    },
+    {
+      "sha256": "469954035d3eb0da51fe9be84dd5869f8caf237a873187de2f9f0ab01938bea6",
+      "file": "1k.trace-v1.bin"
+    }
+  ],
+  "profiles": {
+    "1k": {
+      "rows": 999,
+      "custom": {
+        "tracing_ms": {
+          "median": 6,
+          "min": 6,
+          "max": 6,
+          "runs": 3
+        },
+        "witness_generation_ms": {
+          "median": 0,
+          "min": 0,
+          "max": 0,
+          "runs": 3
+        },
+        "native_execution_ms": {
+          "median": 8,
+          "min": 8,
+          "max": 8,
+          "runs": 3
+        },
+        "constraint_generation_ms": {
+          "median": 25,
+          "min": 25,
+          "max": 26,
+          "runs": 3
+        },
+        "setup_ms": {
+          "median": 92,
+          "min": 91,
+          "max": 92,
+          "runs": 3
+        },
+        "prove_ms": {
+          "median": 81,
+          "min": 80,
+          "max": 81,
+          "runs": 3
+        },
+        "verify_ms": {
+          "median": 3,
+          "min": 3,
+          "max": 3,
+          "runs": 3
+        },
+        "trace_bytes": {
+          "median": 119543,
+          "min": 119543,
+          "max": 119543,
+          "runs": 3
+        },
+        "witness_bytes": {
+          "median": 422911,
+          "min": 422911,
+          "max": 422911,
+          "runs": 3
+        },
+        "rows": {
+          "median": 999,
+          "min": 999,
+          "max": 999,
+          "runs": 3
+        },
+        "constraints": {
+          "median": 12995,
+          "min": 12995,
+          "max": 12995,
+          "runs": 3
+        },
+        "constraints_per_row": {
+          "median": 13.008008008008009,
+          "min": 13.008008008008009,
+          "max": 13.008008008008009,
+          "runs": 3
+        },
+        "proving_key_bytes": {
+          "median": 2603952,
+          "min": 2603952,
+          "max": 2603952,
+          "runs": 3
+        },
+        "verifying_key_bytes": {
+          "median": 520,
+          "min": 520,
+          "max": 520,
+          "runs": 3
+        },
+        "proof_bytes": {
+          "median": 128,
+          "min": 128,
+          "max": 128,
+          "runs": 3
+        },
+        "peak_process_rss_kib": {
+          "median": 57284,
+          "min": 57172,
+          "max": 57320,
+          "runs": 3
+        },
+        "trace_sha256": [
+          "469954035d3eb0da51fe9be84dd5869f8caf237a873187de2f9f0ab01938bea6"
+        ],
+        "witness_sha256": [
+          "2f47cb264b0a53c2c0be07853bf8867a1294c2e5896fa16e359e7d8fc9529391"
+        ],
+        "fixed": {
+          "iterations": 71,
+          "opcodes": [
+            5,
+            7,
+            15,
+            21,
+            24,
+            31,
+            47,
+            61,
+            79,
+            85,
+            87,
+            93,
+            95,
+            97,
+            99,
+            103,
+            113,
+            114,
+            115,
+            119,
+            121,
+            122,
+            123,
+            133,
+            135,
+            149,
+            173,
+            183,
+            189,
+            191
+          ],
+          "alu_rows": 648,
+          "branch_rows": 120,
+          "load_rows": 56,
+          "store_rows": 128,
+          "call_rows": 15,
+          "exit_rows": 15,
+          "syscalls": 1,
+          "accounts": 3,
+          "account_data_bytes": 52,
+          "executed_units": 1009
+        }
+      },
+      "sp1_execute": {
+        "wall_ms": {
+          "median": 5888,
+          "min": 5727,
+          "max": 5907,
+          "runs": 3
+        },
+        "cycles": {
+          "median": 121748232,
+          "min": 121748232,
+          "max": 121748232,
+          "runs": 3
+        },
+        "gas": {
+          "median": 116418032,
+          "min": 116418032,
+          "max": 116418032,
+          "runs": 3
+        },
+        "syscalls": {
+          "median": 768,
+          "min": 768,
+          "max": 768,
+          "runs": 3
+        },
+        "touched_memory_addresses": {
+          "median": 0,
+          "min": 0,
+          "max": 0,
+          "runs": 3
+        },
+        "cycle_tracker": {
+          "accounts_fees_result": {
+            "median": 2781,
+            "min": 2781,
+            "max": 2781,
+            "runs": 3
+          },
+          "blockhash": {
+            "median": 1218,
+            "min": 1218,
+            "max": 1218,
+            "runs": 3
+          },
+          "decode_witness": {
+            "median": 1075304,
+            "min": 1075304,
+            "max": 1075304,
+            "runs": 3
+          },
+          "ed25519_signature": {
+            "median": 95589,
+            "min": 95589,
+            "max": 95589,
+            "runs": 3
+          },
+          "hash_program_elf": {
+            "median": 692465,
+            "min": 692465,
+            "max": 692465,
+            "runs": 3
+          },
+          "hash_trace": {
+            "median": 25371928,
+            "min": 25371928,
+            "max": 25371928,
+            "runs": 3
+          },
+          "header": {
+            "median": 931,
+            "min": 931,
+            "max": 931,
+            "runs": 3
+          },
+          "poseidon_commitments": {
+            "median": 94016709,
+            "min": 94016709,
+            "max": 94016709,
+            "runs": 3
+          },
+          "sbpf_rows_memory_syscalls": {
+            "median": 398388,
+            "min": 398388,
+            "max": 398388,
+            "runs": 3
+          },
+          "transaction_wire": {
+            "median": 3255,
+            "min": 3255,
+            "max": 3255,
+            "runs": 3
+          }
+        },
+        "peak_gpu_memory_mib": {
+          "median": 493.0,
+          "min": 493.0,
+          "max": 495.0,
+          "runs": 3
+        },
+        "peak_combined_rss_kib": {
+          "median": 9898768,
+          "min": 9705120,
+          "max": 9945260,
+          "runs": 3
+        }
+      },
+      "sp1_core": {
+        "setup_ms": {
+          "median": 11813,
+          "min": 11791,
+          "max": 11823,
+          "runs": 3
+        },
+        "prove_ms": {
+          "median": 23243,
+          "min": 23223,
+          "max": 23293,
+          "runs": 3
+        },
+        "verify_ms": {
+          "median": 1162,
+          "min": 1161,
+          "max": 1162,
+          "runs": 3
+        },
+        "artifact_bytes": {
+          "median": 28936465,
+          "min": 28936465,
+          "max": 28936465,
+          "runs": 3
+        },
+        "peak_gpu_memory_mib": {
+          "median": 31087.0,
+          "min": 31055.0,
+          "max": 31087.0,
+          "runs": 3
+        },
+        "peak_combined_rss_kib": {
+          "median": 20063676,
+          "min": 20049688,
+          "max": 20165188,
+          "runs": 3
+        }
+      },
+      "sp1_groth16": {
+        "setup_ms": {
+          "median": 12426,
+          "min": 12311,
+          "max": 12816,
+          "runs": 3
+        },
+        "prove_and_wrap_ms": {
+          "median": 92957,
+          "min": 92673,
+          "max": 94760,
+          "runs": 3
+        },
+        "verify_ms": {
+          "median": 330,
+          "min": 330,
+          "max": 331,
+          "runs": 3
+        },
+        "onchain_proof_bytes": {
+          "median": 356,
+          "min": 356,
+          "max": 356,
+          "runs": 3
+        },
+        "artifact_bytes": {
+          "median": 1949,
+          "min": 1949,
+          "max": 1949,
+          "runs": 3
+        },
+        "peak_gpu_memory_mib": {
+          "median": 31057.0,
+          "min": 31057.0,
+          "max": 31478.0,
+          "runs": 3
+        },
+        "peak_combined_rss_kib": {
+          "median": 31886452,
+          "min": 31828052,
+          "max": 31903420,
+          "runs": 3
+        }
+      }
+    },
+    "10k": {
+      "rows": 9999,
+      "custom": {
+        "tracing_ms": {
+          "median": 8,
+          "min": 8,
+          "max": 9,
+          "runs": 3
+        },
+        "witness_generation_ms": {
+          "median": 2,
+          "min": 2,
+          "max": 2,
+          "runs": 3
+        },
+        "native_execution_ms": {
+          "median": 10,
+          "min": 10,
+          "max": 10,
+          "runs": 3
+        },
+        "constraint_generation_ms": {
+          "median": 207,
+          "min": 205,
+          "max": 208,
+          "runs": 3
+        },
+        "setup_ms": {
+          "median": 777,
+          "min": 771,
+          "max": 783,
+          "runs": 3
+        },
+        "prove_ms": {
+          "median": 684,
+          "min": 665,
+          "max": 684,
+          "runs": 3
+        },
+        "verify_ms": {
+          "median": 3,
+          "min": 3,
+          "max": 3,
+          "runs": 3
+        },
+        "trace_bytes": {
+          "median": 1055543,
+          "min": 1055543,
+          "max": 1055543,
+          "runs": 3
+        },
+        "witness_bytes": {
+          "median": 1394911,
+          "min": 1394911,
+          "max": 1394911,
+          "runs": 3
+        },
+        "rows": {
+          "median": 9999,
+          "min": 9999,
+          "max": 9999,
+          "runs": 3
+        },
+        "constraints": {
+          "median": 129995,
+          "min": 129995,
+          "max": 129995,
+          "runs": 3
+        },
+        "constraints_per_row": {
+          "median": 13.000800080008,
+          "min": 13.000800080008,
+          "max": 13.000800080008,
+          "runs": 3
+        },
+        "proving_key_bytes": {
+          "median": 24993968,
+          "min": 24993968,
+          "max": 24993968,
+          "runs": 3
+        },
+        "verifying_key_bytes": {
+          "median": 520,
+          "min": 520,
+          "max": 520,
+          "runs": 3
+        },
+        "proof_bytes": {
+          "median": 128,
+          "min": 128,
+          "max": 128,
+          "runs": 3
+        },
+        "peak_process_rss_kib": {
+          "median": 437632,
+          "min": 437564,
+          "max": 438604,
+          "runs": 3
+        },
+        "trace_sha256": [
+          "c08260cc5d7bce31aec1f1adc3add17cf45575cd060a80758e7ef74b2fa0242d"
+        ],
+        "witness_sha256": [
+          "5482ad4f909e0ff1f0867a9065fe2a6212e56279bfa2509874f2fa215703253c"
+        ],
+        "fixed": {
+          "iterations": 1071,
+          "opcodes": [
+            5,
+            7,
+            15,
+            21,
+            24,
+            31,
+            47,
+            61,
+            79,
+            85,
+            87,
+            93,
+            95,
+            97,
+            99,
+            103,
+            113,
+            114,
+            115,
+            119,
+            121,
+            122,
+            123,
+            133,
+            135,
+            149,
+            173,
+            183,
+            189,
+            191
+          ],
+          "alu_rows": 7648,
+          "branch_rows": 1120,
+          "load_rows": 56,
+          "store_rows": 1128,
+          "call_rows": 15,
+          "exit_rows": 15,
+          "syscalls": 1,
+          "accounts": 3,
+          "account_data_bytes": 52,
+          "executed_units": 10009
+        }
+      },
+      "sp1_execute": {
+        "wall_ms": {
+          "median": 12085,
+          "min": 11909,
+          "max": 12184,
+          "runs": 3
+        },
+        "cycles": {
+          "median": 264048896,
+          "min": 264048896,
+          "max": 264048896,
+          "runs": 3
+        },
+        "gas": {
+          "median": 261204497,
+          "min": 261204497,
+          "max": 261204497,
+          "runs": 3
+        },
+        "syscalls": {
+          "median": 770,
+          "min": 770,
+          "max": 770,
+          "runs": 3
+        },
+        "touched_memory_addresses": {
+          "median": 0,
+          "min": 0,
+          "max": 0,
+          "runs": 3
+        },
+        "cycle_tracker": {
+          "accounts_fees_result": {
+            "median": 2781,
+            "min": 2781,
+            "max": 2781,
+            "runs": 3
+          },
+          "blockhash": {
+            "median": 1218,
+            "min": 1218,
+            "max": 1218,
+            "runs": 3
+          },
+          "decode_witness": {
+            "median": 7509256,
+            "min": 7509256,
+            "max": 7509256,
+            "runs": 3
+          },
+          "ed25519_signature": {
+            "median": 95611,
+            "min": 95611,
+            "max": 95611,
+            "runs": 3
+          },
+          "hash_program_elf": {
+            "median": 692465,
+            "min": 692465,
+            "max": 692465,
+            "runs": 3
+          },
+          "hash_trace": {
+            "median": 92065547,
+            "min": 92065547,
+            "max": 92065547,
+            "runs": 3
+          },
+          "header": {
+            "median": 931,
+            "min": 931,
+            "max": 931,
+            "runs": 3
+          },
+          "poseidon_commitments": {
+            "median": 159787780,
+            "min": 159787780,
+            "max": 159787780,
+            "runs": 3
+          },
+          "sbpf_rows_memory_syscalls": {
+            "median": 3674388,
+            "min": 3674388,
+            "max": 3674388,
+            "runs": 3
+          },
+          "transaction_wire": {
+            "median": 3255,
+            "min": 3255,
+            "max": 3255,
+            "runs": 3
+          }
+        },
+        "peak_gpu_memory_mib": {
+          "median": 9077.0,
+          "min": 9045.0,
+          "max": 9109.0,
+          "runs": 3
+        },
+        "peak_combined_rss_kib": {
+          "median": 12273600,
+          "min": 12258228,
+          "max": 12310012,
+          "runs": 3
+        }
+      },
+      "sp1_core": {
+        "setup_ms": {
+          "median": 11852,
+          "min": 11840,
+          "max": 11854,
+          "runs": 3
+        },
+        "prove_ms": {
+          "median": 43054,
+          "min": 43013,
+          "max": 43802,
+          "runs": 3
+        },
+        "verify_ms": {
+          "median": 2388,
+          "min": 2387,
+          "max": 2388,
+          "runs": 3
+        },
+        "artifact_bytes": {
+          "median": 59754465,
+          "min": 59754465,
+          "max": 59754465,
+          "runs": 3
+        },
+        "peak_gpu_memory_mib": {
+          "median": 31119.0,
+          "min": 31087.0,
+          "max": 31119.0,
+          "runs": 3
+        },
+        "peak_combined_rss_kib": {
+          "median": 19343304,
+          "min": 18919036,
+          "max": 19598992,
+          "runs": 3
+        }
+      },
+      "sp1_groth16": {
+        "setup_ms": {
+          "median": 12183,
+          "min": 11775,
+          "max": 12375,
+          "runs": 3
+        },
+        "prove_and_wrap_ms": {
+          "median": 124505,
+          "min": 124061,
+          "max": 129343,
+          "runs": 3
+        },
+        "verify_ms": {
+          "median": 331,
+          "min": 331,
+          "max": 332,
+          "runs": 3
+        },
+        "onchain_proof_bytes": {
+          "median": 356,
+          "min": 356,
+          "max": 356,
+          "runs": 3
+        },
+        "artifact_bytes": {
+          "median": 1950,
+          "min": 1950,
+          "max": 1950,
+          "runs": 3
+        },
+        "peak_gpu_memory_mib": {
+          "median": 31574.0,
+          "min": 31185.0,
+          "max": 31638.0,
+          "runs": 3
+        },
+        "peak_combined_rss_kib": {
+          "median": 31913056,
+          "min": 31892088,
+          "max": 31931992,
+          "runs": 3
+        }
+      }
+    },
+    "100k": {
+      "rows": 99999,
+      "custom": {
+        "tracing_ms": {
+          "median": 33,
+          "min": 33,
+          "max": 34,
+          "runs": 3
+        },
+        "witness_generation_ms": {
+          "median": 21,
+          "min": 21,
+          "max": 22,
+          "runs": 3
+        },
+        "native_execution_ms": {
+          "median": 27,
+          "min": 27,
+          "max": 27,
+          "runs": 3
+        },
+        "constraint_generation_ms": {
+          "median": 2064,
+          "min": 2060,
+          "max": 2068,
+          "runs": 3
+        },
+        "setup_ms": {
+          "median": 7985,
+          "min": 7983,
+          "max": 8004,
+          "runs": 3
+        },
+        "prove_ms": {
+          "median": 7087,
+          "min": 7031,
+          "max": 7102,
+          "runs": 3
+        },
+        "verify_ms": {
+          "median": 3,
+          "min": 3,
+          "max": 3,
+          "runs": 3
+        },
+        "trace_bytes": {
+          "median": 10415543,
+          "min": 10415543,
+          "max": 10415543,
+          "runs": 3
+        },
+        "witness_bytes": {
+          "median": 11114911,
+          "min": 11114911,
+          "max": 11114911,
+          "runs": 3
+        },
+        "rows": {
+          "median": 99999,
+          "min": 99999,
+          "max": 99999,
+          "runs": 3
+        },
+        "constraints": {
+          "median": 1299995,
+          "min": 1299995,
+          "max": 1299995,
+          "runs": 3
+        },
+        "constraints_per_row": {
+          "median": 13.000080000800008,
+          "min": 13.000080000800008,
+          "max": 13.000080000800008,
+          "runs": 3
+        },
+        "proving_key_bytes": {
+          "median": 275108528,
+          "min": 275108528,
+          "max": 275108528,
+          "runs": 3
+        },
+        "verifying_key_bytes": {
+          "median": 520,
+          "min": 520,
+          "max": 520,
+          "runs": 3
+        },
+        "proof_bytes": {
+          "median": 128,
+          "min": 128,
+          "max": 128,
+          "runs": 3
+        },
+        "peak_process_rss_kib": {
+          "median": 4300564,
+          "min": 4299184,
+          "max": 4307048,
+          "runs": 3
+        },
+        "trace_sha256": [
+          "4cf99168e2c5ae22d9118fb093567365d30029f71695de09aba5e91de5a82d9a"
+        ],
+        "witness_sha256": [
+          "4259836c8ef68f5160e4dae3394577767e657fc3339128bdee6b76aa6ee40f5e"
+        ],
+        "fixed": {
+          "iterations": 11071,
+          "opcodes": [
+            5,
+            7,
+            15,
+            21,
+            24,
+            31,
+            47,
+            61,
+            79,
+            85,
+            87,
+            93,
+            95,
+            97,
+            99,
+            103,
+            113,
+            114,
+            115,
+            119,
+            121,
+            122,
+            123,
+            133,
+            135,
+            149,
+            173,
+            183,
+            189,
+            191
+          ],
+          "alu_rows": 77648,
+          "branch_rows": 11120,
+          "load_rows": 56,
+          "store_rows": 11128,
+          "call_rows": 15,
+          "exit_rows": 15,
+          "syscalls": 1,
+          "accounts": 3,
+          "account_data_bytes": 52,
+          "executed_units": 100009
+        }
+      },
+      "sp1_execute": {
+        "wall_ms": {
+          "median": 70292,
+          "min": 68326,
+          "max": 73448,
+          "runs": 3
+        },
+        "cycles": {
+          "median": 1685232522,
+          "min": 1685232522,
+          "max": 1685232522,
+          "runs": 3
+        },
+        "gas": {
+          "median": 1719183161,
+          "min": 1719183161,
+          "max": 1719183161,
+          "runs": 3
+        },
+        "syscalls": {
+          "median": 747,
+          "min": 747,
+          "max": 747,
+          "runs": 3
+        },
+        "touched_memory_addresses": {
+          "median": 0,
+          "min": 0,
+          "max": 0,
+          "runs": 3
+        },
+        "cycle_tracker": {
+          "accounts_fees_result": {
+            "median": 2781,
+            "min": 2781,
+            "max": 2781,
+            "runs": 3
+          },
+          "blockhash": {
+            "median": 1218,
+            "min": 1218,
+            "max": 1218,
+            "runs": 3
+          },
+          "decode_witness": {
+            "median": 69989908,
+            "min": 69989908,
+            "max": 69989908,
+            "runs": 3
+          },
+          "ed25519_signature": {
+            "median": 95418,
+            "min": 95418,
+            "max": 95418,
+            "runs": 3
+          },
+          "hash_program_elf": {
+            "median": 692465,
+            "min": 692465,
+            "max": 692465,
+            "runs": 3
+          },
+          "hash_trace": {
+            "median": 759027422,
+            "min": 759027422,
+            "max": 759027422,
+            "runs": 3
+          },
+          "header": {
+            "median": 931,
+            "min": 931,
+            "max": 931,
+            "runs": 3
+          },
+          "poseidon_commitments": {
+            "median": 817509072,
+            "min": 817509072,
+            "max": 817509072,
+            "runs": 3
+          },
+          "sbpf_rows_memory_syscalls": {
+            "median": 36434388,
+            "min": 36434388,
+            "max": 36434388,
+            "runs": 3
+          },
+          "transaction_wire": {
+            "median": 3255,
+            "min": 3255,
+            "max": 3255,
+            "runs": 3
+          }
+        },
+        "peak_gpu_memory_mib": {
+          "median": 9109.0,
+          "min": 9109.0,
+          "max": 9109.0,
+          "runs": 3
+        },
+        "peak_combined_rss_kib": {
+          "median": 15518520,
+          "min": 15517868,
+          "max": 15521844,
+          "runs": 3
+        }
+      },
+      "sp1_core": {
+        "setup_ms": {
+          "median": 11805,
+          "min": 11787,
+          "max": 11872,
+          "runs": 3
+        },
+        "prove_ms": {
+          "median": 258412,
+          "min": 258039,
+          "max": 258902,
+          "runs": 3
+        },
+        "verify_ms": {
+          "median": 14761,
+          "min": 14754,
+          "max": 14773,
+          "runs": 3
+        },
+        "artifact_bytes": {
+          "median": 369944683,
+          "min": 369944683,
+          "max": 369944683,
+          "runs": 3
+        },
+        "peak_gpu_memory_mib": {
+          "median": 31087.0,
+          "min": 31087.0,
+          "max": 31119.0,
+          "runs": 3
+        },
+        "peak_combined_rss_kib": {
+          "median": 23044608,
+          "min": 22915340,
+          "max": 23644188,
+          "runs": 3
+        }
+      },
+      "sp1_groth16": {
+        "setup_ms": {
+          "median": 12280,
+          "min": 12186,
+          "max": 12783,
+          "runs": 3
+        },
+        "prove_and_wrap_ms": {
+          "median": 457219,
+          "min": 455744,
+          "max": 457919,
+          "runs": 3
+        },
+        "verify_ms": {
+          "median": 331,
+          "min": 331,
+          "max": 331,
+          "runs": 3
+        },
+        "onchain_proof_bytes": {
+          "median": 356,
+          "min": 356,
+          "max": 356,
+          "runs": 3
+        },
+        "artifact_bytes": {
+          "median": 1951,
+          "min": 1951,
+          "max": 1951,
+          "runs": 3
+        },
+        "peak_gpu_memory_mib": {
+          "median": 31542.0,
+          "min": 31217.0,
+          "max": 31574.0,
+          "runs": 3
+        },
+        "peak_combined_rss_kib": {
+          "median": 31954660,
+          "min": 31954296,
+          "max": 32014000,
+          "runs": 3
+        }
+      }
+    }
+  },
+  "projections": {
+    "classification": "projected",
+    "assumption": "benchmark loop uses executed CU = VM rows + 10; transaction mixes can differ materially",
+    "series": {
+      "sp1_execute_cycles": {
+        "method": "ordinary least squares over measured 999/9999/99999-row loop fixtures",
+        "intercept": 106054117.69074774,
+        "per_row": 15792.024081081081,
+        "targets": {
+          "50000": 895497401.503991,
+          "200000": 3264301013.666153,
+          "1400000": 22214729910.963448
+        }
+      },
+      "sp1_execute_wall_ms": {
+        "method": "ordinary least squares over measured 999/9999/99999-row loop fixtures",
+        "intercept": 5409.14900450451,
+        "per_row": 0.6490045045045044,
+        "targets": {
+          "50000": 37852.884184684684,
+          "200000": 135203.55986036034,
+          "1400000": 914008.9652657657
+        }
+      },
+      "sp1_core_prove_ms": {
+        "method": "ordinary least squares over measured 999/9999/99999-row loop fixtures",
+        "intercept": 20085.938063063048,
+        "per_row": 2.382507507507508,
+        "targets": {
+          "50000": 139187.48836336337,
+          "200000": 496563.6144894896,
+          "1400000": 3355572.6234984994
+        }
+      },
+      "sp1_groth16_prove_and_wrap_ms": {
+        "method": "ordinary least squares over measured 999/9999/99999-row loop fixtures",
+        "intercept": 88497.9086936937,
+        "per_row": 3.6864714714714713,
+        "targets": {
+          "50000": 272784.61755255255,
+          "200000": 825755.3382732732,
+          "1400000": 5249521.1040390385
+        }
+      },
+      "custom_constraint_generation_ms": {
+        "method": "ordinary least squares over measured 999/9999/99999-row loop fixtures",
+        "intercept": 2.742833333333465,
+        "per_row": 0.020611111111111108,
+        "targets": {
+          "50000": 1033.0922777777778,
+          "200000": 4124.758944444444,
+          "1400000": 28858.092277777774
+        }
+      },
+      "custom_setup_ms": {
+        "method": "ordinary least squares over measured 999/9999/99999-row loop fixtures",
+        "intercept": -3.920126126125524,
+        "per_row": 0.07987387387387386,
+        "targets": {
+          "50000": 3988.974828828829,
+          "200000": 15970.055909909908,
+          "1400000": 111818.70455855854
+        }
+      },
+      "custom_prove_ms": {
+        "method": "ordinary least squares over measured 999/9999/99999-row loop fixtures",
+        "intercept": -6.651301801800855,
+        "per_row": 0.0709204204204204,
+        "targets": {
+          "50000": 3538.6605150150153,
+          "200000": 14176.723578078076,
+          "1400000": 99281.22808258256
+        }
+      }
+    },
+    "solana_groth16_verifier_cu_baseline": 108915
+  }
+}

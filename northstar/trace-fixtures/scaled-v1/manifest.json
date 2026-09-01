@@ -1,0 +1,59 @@
+{
+  "schema": "northstar-transaction-proof-scaled-fixtures-v1",
+  "benchmark_revision": "2d26a8b13c753bd2e507304c77e8278b77c65285",
+  "runtime_revision": "1fddab640a68ee7a43be264470a89c5302581cfe",
+  "proof_kind": 2,
+  "proof_version": 1,
+  "trace_schema_version": 1,
+  "public_abi": [
+    "domain",
+    "session_context",
+    "slot_step",
+    "pre_state_root",
+    "post_state_root",
+    "tx_effect_root",
+    "readonly_l1_root",
+    "settlement_effect_root"
+  ],
+  "profiles": [
+    {
+      "name": "1k",
+      "loop_iterations": 71,
+      "vm_rows": 999,
+      "executed_units": 1009,
+      "trace_bytes": 119543,
+      "trace_sha256": "469954035d3eb0da51fe9be84dd5869f8caf237a873187de2f9f0ab01938bea6",
+      "compressed_trace": "1k.trace-v1.bin.zst",
+      "compressed_trace_bytes": 10131,
+      "compressed_trace_sha256": "108fb35d14b1f59062bca87cf1aabf4bfd3c3d07bf2d178aa7f929088e7e9fd9",
+      "witness_bytes": 422911,
+      "witness_sha256": "2f47cb264b0a53c2c0be07853bf8867a1294c2e5896fa16e359e7d8fc9529391"
+    },
+    {
+      "name": "10k",
+      "loop_iterations": 1071,
+      "vm_rows": 9999,
+      "executed_units": 10009,
+      "trace_bytes": 1055543,
+      "trace_sha256": "c08260cc5d7bce31aec1f1adc3add17cf45575cd060a80758e7ef74b2fa0242d",
+      "compressed_trace": "10k.trace-v1.bin.zst",
+      "compressed_trace_bytes": 46398,
+      "compressed_trace_sha256": "53493ac3e235e44bcdcec8fcc83e4f8dd0588c04bc84c73c2420a731fd97e253",
+      "witness_bytes": 1394911,
+      "witness_sha256": "5482ad4f909e0ff1f0867a9065fe2a6212e56279bfa2509874f2fa215703253c"
+    },
+    {
+      "name": "100k",
+      "loop_iterations": 11071,
+      "vm_rows": 99999,
+      "executed_units": 100009,
+      "trace_bytes": 10415543,
+      "trace_sha256": "4cf99168e2c5ae22d9118fb093567365d30029f71695de09aba5e91de5a82d9a",
+      "compressed_trace": "100k.trace-v1.bin.zst",
+      "compressed_trace_bytes": 406851,
+      "compressed_trace_sha256": "0891933e6ef7a06a936faa5d9b2998aafbc5368f2e64da4c52129928fb2616d1",
+      "witness_bytes": 11114911,
+      "witness_sha256": "4259836c8ef68f5160e4dae3394577767e657fc3339128bdee6b76aa6ee40f5e"
+    }
+  ]
+}
