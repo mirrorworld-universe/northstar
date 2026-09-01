@@ -128,11 +128,11 @@ jobs:
           path = pathlib.Path("target/idl/northstar_portal.json")
           idl = json.loads(path.read_text())
           instructions = idl["instructions"]
-          assert len(instructions) == 27
-          assert sorted(ix["discriminator"][0] for ix in instructions) == list(range(27))
-          assert len(idl["accounts"]) == 10
+          assert len(instructions) == 29
+          assert sorted(ix["discriminator"][0] for ix in instructions) == list(range(29))
+          assert len(idl["accounts"]) == 11
           assert all(len(account["discriminator"]) == 8 for account in idl["accounts"])
-          assert len(idl["types"]) == 18
+          assert len(idl["types"]) == 19
           definitions = {definition["name"] for definition in idl["types"]}
           assert {
               "Hash32",
