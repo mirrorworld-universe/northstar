@@ -14,7 +14,6 @@ use {
     solana_instruction::{AccountMeta, Instruction},
     solana_keypair::Keypair,
     solana_pubkey::Pubkey,
-    solana_rent::Rent,
     solana_rpc::er_history::DEFAULT_MAX_RETAINED_SLOTS,
     solana_runtime::bank::Bank,
     solana_sdk_ids::{system_program, sysvar},
@@ -59,8 +58,8 @@ fn scale_l1_slot_age_for_er(l1_slot_age: usize, slot_duration: Duration) -> usiz
     (l1_slot_age * solana_clock::DEFAULT_MS_PER_SLOT as usize).div_ceil(er_slot_ms)
 }
 
-fn deposit_receipt_escrow_lamports(lamports: u64, data_len: usize) -> u64 {
-    lamports.saturating_sub(Rent::default().minimum_balance(data_len))
+fn deposit_receipt_escrow_lamports(bank: &Bank, lamports: u64, data_len: usize) -> u64 {
+    lamports.saturating_sub(bank.get_minimum_balance_for_rent_exemption(data_len))
 }
 
 /// Fixed ER account that receives all bridged SOL withdrawals.
@@ -1283,17 +1282,18 @@ impl Manager {
                 }
                 let prev_escrow = bank
                     .parent()
-                    .and_then(|parent| parent.get_account(&pubkey))
-                    .and_then(|account| {
+                    .and_then(|parent| {
+                        let account = parent.get_account(&pubkey)?;
                         portal_state::try_parse_raw_portal_account(account.data())?;
                         Some(deposit_receipt_escrow_lamports(
+                            &parent,
                             account.lamports(),
                             account.data().len(),
                         ))
                     })
                     .unwrap_or(0);
                 let escrow =
-                    deposit_receipt_escrow_lamports(account.lamports(), account.data().len());
+                    deposit_receipt_escrow_lamports(bank, account.lamports(), account.data().len());
 
                 (escrow > prev_escrow).then(|| L1Event::FeeDeposited {
                     session_pda: receipt.session,
@@ -3537,6 +3537,7 @@ mod portal_e2e_tests {
         assert_eq!(receipt.balance, deposit_amount - withdraw_amount);
         assert_eq!(
             deposit_receipt_escrow_lamports(
+                &second_settlement_bank,
                 receipt_account.lamports(),
                 receipt_account.data().len(),
             ),

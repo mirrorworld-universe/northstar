@@ -1197,12 +1197,18 @@ mod tests {
     }
 
     fn setup_bank_with_portal() -> (Arc<Bank>, Arc<RwLock<BankForks>>, Pubkey, Keypair) {
+        setup_bank_with_portal_and_rent(Rent::default())
+    }
+
+    fn setup_bank_with_portal_and_rent(
+        rent: Rent,
+    ) -> (Arc<Bank>, Arc<RwLock<BankForks>>, Pubkey, Keypair) {
         let GenesisConfigInfo {
             mut genesis_config,
             mint_keypair,
             ..
         } = create_genesis_config(1_000_000_000_000);
-        genesis_config.rent = Rent::default();
+        genesis_config.rent = rent;
 
         let program_id = Pubkey::new_unique();
         let program_data = solana_runtime::loader_utils::load_program_from_file("northstar_portal");
@@ -1828,7 +1834,13 @@ mod tests {
     fn test_service_self_deposit_only_credits_er_deposit_amount_and_can_spend_it() {
         agave_logger::setup();
 
-        let (root_bank, bank_forks, program_id, mint_keypair) = setup_bank_with_portal();
+        let default_rent = Rent::default();
+        let l1_rent = Rent {
+            lamports_per_byte: default_rent.lamports_per_byte * 9 / 10,
+            ..default_rent
+        };
+        let (root_bank, bank_forks, program_id, mint_keypair) =
+            setup_bank_with_portal_and_rent(l1_rent);
         let owner = Keypair::new();
         root_bank
             .transfer(30_000_000_000, &mint_keypair, &owner.pubkey())
