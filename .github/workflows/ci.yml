@@ -67,6 +67,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler libprotobuf-dev libudev-dev libclang-dev
+      - name: Test SOL smoke restart finalization guard
+        run: bash .github/scripts/test-devnet-e2e-smoke.sh
       - name: Install Solana tools
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
