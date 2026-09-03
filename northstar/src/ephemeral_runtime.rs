@@ -127,6 +127,13 @@ struct RetiredBankForks {
     purge_slots: Vec<(Slot, BankId)>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PendingUndelegation {
+    request_pda: Pubkey,
+    frozen_at: Slot,
+    approved: bool,
+}
+
 /// One account whose ER state hash differs from the current L1 anchor state hash.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ErStateDiffAccount {
@@ -180,6 +187,8 @@ pub struct EphemeralRuntime {
     /// Shared with EphemeralTransactionClient — wrapped in RwLock so new
     /// delegations arriving from L1 can be added at runtime.
     delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+    frozen_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+    undelegation_requests: Arc<RwLock<HashMap<Pubkey, PendingUndelegation>>>,
     /// Shared with EphemeralTransactionClient - tracks accounts that have been written to on this ER.
     touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
     /// Sonic: Thin in-memory source of truth for ER-local account writes across
@@ -583,6 +592,8 @@ impl EphemeralRuntime {
         );
 
         let delegated_set = Arc::new(RwLock::new(delegated_accounts.clone()));
+        let frozen_accounts = Arc::new(RwLock::new(HashSet::new()));
+        let undelegation_requests = Arc::new(RwLock::new(HashMap::new()));
         let touched_accounts = Arc::new(RwLock::new(HashSet::new()));
         let er_account_overlay = Arc::new(RwLock::new(
             initial_account_snapshots
@@ -635,6 +646,7 @@ impl EphemeralRuntime {
                 block_commitment_cache.clone(),
             )
             .with_transaction_max_age(transaction_max_age)
+            .with_frozen_accounts(frozen_accounts.clone())
             .with_withdrawal_payout_events(
                 portal_program_id,
                 session_pda.clone(),
@@ -810,6 +822,8 @@ impl EphemeralRuntime {
             slot_advancer: None,
             initial_account_snapshots,
             delegated_accounts: delegated_set,
+            frozen_accounts,
+            undelegation_requests,
             touched_accounts,
             er_account_overlay,
             l1_anchor_bank: parent_bank,
@@ -1099,6 +1113,8 @@ impl EphemeralRuntime {
             // reset must not depend on seeing those historical events again.
             self.initial_account_snapshots.clear();
             self.delegated_accounts.write().unwrap().clear();
+            self.frozen_accounts.write().unwrap().clear();
+            self.undelegation_requests.write().unwrap().clear();
             self.touched_accounts.write().unwrap().clear();
             self.er_account_overlay.write().unwrap().clear();
             // Sonic: Hotfix: skip historical delegation hydration on the reset hot path.
@@ -2092,6 +2108,98 @@ impl EphemeralRuntime {
             er_account.owner(),
             er_account.lamports()
         );
+    }
+
+    pub fn handle_undelegation_request(
+        &self,
+        delegated_account: &Pubkey,
+        request_pda: Pubkey,
+        approved: bool,
+    ) {
+        let _bank_guard = self.bank_operation_lock.lock().unwrap();
+        if !self
+            .delegated_accounts
+            .read()
+            .unwrap()
+            .contains(delegated_account)
+        {
+            warn!("Ignoring undelegation request for non-delegated account {delegated_account}");
+            return;
+        }
+        self.frozen_accounts
+            .write()
+            .unwrap()
+            .insert(*delegated_account);
+        let frozen_at = self.bank().slot();
+        self.undelegation_requests
+            .write()
+            .unwrap()
+            .entry(*delegated_account)
+            .and_modify(|entry| {
+                entry.request_pda = request_pda;
+                entry.approved = approved;
+            })
+            .or_insert(PendingUndelegation {
+                request_pda,
+                frozen_at,
+                approved,
+            });
+        info!(
+            "Froze delegated account {delegated_account} at ER slot {frozen_at} for undelegation"
+        );
+    }
+
+    pub fn has_unapproved_undelegations(&self) -> bool {
+        self.undelegation_requests
+            .read()
+            .unwrap()
+            .values()
+            .any(|request| !request.approved)
+    }
+
+    pub fn ready_undelegation_approvals(&self, last_settled_er_slot: Slot) -> Vec<Pubkey> {
+        let changed_accounts = self
+            .state_diff_from_l1()
+            .accounts
+            .into_iter()
+            .map(|account| account.pubkey)
+            .collect::<HashSet<_>>();
+        self.undelegation_requests
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(account, request)| {
+                !request.approved
+                    && (last_settled_er_slot >= request.frozen_at
+                        || !changed_accounts.contains(account))
+            })
+            .map(|(_, request)| request.request_pda)
+            .collect()
+    }
+
+    pub fn complete_undelegation(&mut self, delegated_account: &Pubkey) {
+        let _bank_guard = self.bank_operation_lock.lock().unwrap();
+        self.delegated_accounts
+            .write()
+            .unwrap()
+            .remove(delegated_account);
+        self.frozen_accounts
+            .write()
+            .unwrap()
+            .remove(delegated_account);
+        self.undelegation_requests
+            .write()
+            .unwrap()
+            .remove(delegated_account);
+        self.touched_accounts
+            .write()
+            .unwrap()
+            .remove(delegated_account);
+        self.er_account_overlay
+            .write()
+            .unwrap()
+            .remove(delegated_account);
+        self.initial_account_snapshots.remove(delegated_account);
     }
 
     fn record_deposit_history(
@@ -6055,6 +6163,39 @@ mod tests {
         );
 
         assert_eq!(runtime.bank().get_balance(&recipient), 1_000_000);
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_undelegation_request_freezes_er_account_writes() {
+        let (parent_bank, mut runtime) = create_runtime();
+        runtime.activate();
+
+        let delegated_signer = Keypair::new();
+        let delegated = delegated_signer.pubkey();
+        runtime.handle_delegation_inner(
+            &delegated,
+            AccountSharedData::new(1_000_000_000, 0, &runtime.portal_program_id),
+            Some(system_program::id()),
+            Some(&parent_bank),
+        );
+        runtime.handle_undelegation_request(&delegated, Pubkey::new_unique(), false);
+
+        let recipient = Pubkey::new_unique();
+        let transaction = Transaction::new_signed_with_payer(
+            &[transfer(&delegated, &recipient, 1_000_000)],
+            Some(&delegated),
+            &[&delegated_signer],
+            runtime.bank().last_blockhash(),
+        );
+        TransactionClient::send_transactions_in_batch(
+            &runtime._tx_client,
+            vec![bincode::serialize(&VersionedTransaction::from(transaction)).unwrap()],
+            &SendTransactionServiceStats::default(),
+        );
+
+        assert_eq!(runtime.bank().get_balance(&recipient), 0);
+        assert_eq!(runtime.bank().get_balance(&delegated), 1_000_000_000);
         runtime.shutdown();
     }
 

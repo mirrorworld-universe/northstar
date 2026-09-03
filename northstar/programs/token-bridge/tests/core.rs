@@ -555,6 +555,22 @@ async fn delegate_and_undelegate_preserve_er_token_account_state() {
     .await;
     assert_eq!(world.account_owner(world.alice_er).await, PORTAL_PROGRAM_ID);
 
+    let request = request_undelegation_ix(&world);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[request],
+        &[&world.payer, &world.alice],
+    )
+    .await;
+    let approve = approve_undelegation_ix(&world);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[approve],
+        &[&world.payer],
+    )
+    .await;
     let undelegate = undelegate_ix(&world);
     process(
         &mut world.context,
@@ -579,6 +595,74 @@ async fn delegate_and_undelegate_preserve_er_token_account_state() {
     .await;
     assert_eq!(world.token_amount(world.alice_token).await, 500);
     assert_eq!(world.er_amount(world.alice_er).await, 500);
+}
+
+#[tokio::test]
+async fn undelegate_rejects_unsettled_token_deposit() {
+    let mut world = TestWorld::new().await;
+    let payer_pubkey = world.payer.pubkey();
+
+    let initialize_vault = initialize_vault_ix(&world);
+    let initialize_er = initialize_er_ix(&world, world.alice.pubkey(), world.alice_er);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[initialize_vault, initialize_er],
+        &[&world.payer],
+    )
+    .await;
+
+    let initial_deposit = deposit_ix(&world, 600);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[initial_deposit],
+        &[&world.payer, &world.alice],
+    )
+    .await;
+
+    let delegate = delegate_ix(&world);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[delegate],
+        &[&world.payer, &world.alice],
+    )
+    .await;
+
+    let unsettled_deposit = deposit_ix(&world, 100);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[unsettled_deposit],
+        &[&world.payer, &world.alice],
+    )
+    .await;
+    assert_eq!(world.er_amount(world.alice_er).await, 600);
+
+    let request = request_undelegation_ix(&world);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[request],
+        &[&world.payer, &world.alice],
+    )
+    .await;
+    let undelegate = undelegate_ix(&world);
+    let result = process_result(
+        &mut world.context,
+        &payer_pubkey,
+        &[undelegate],
+        &[&world.payer, &world.alice],
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "undelegation must reject an unsettled token deposit"
+    );
+    assert_eq!(world.account_owner(world.alice_er).await, PORTAL_PROGRAM_ID);
+    assert_eq!(world.er_amount(world.alice_er).await, 600);
 }
 
 #[tokio::test]
@@ -773,6 +857,22 @@ async fn undelegate_initializes_prefunded_buffer_pda() {
     )
     .await;
 
+    let request = request_undelegation_ix(&world);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[request],
+        &[&world.payer, &world.alice],
+    )
+    .await;
+    let approve = approve_undelegation_ix(&world);
+    process(
+        &mut world.context,
+        &payer_pubkey,
+        &[approve],
+        &[&world.payer],
+    )
+    .await;
     let undelegate = undelegate_ix(&world);
     process(
         &mut world.context,
@@ -819,7 +919,7 @@ async fn undelegate_er_token_account_requires_owner() {
     )
     .await;
 
-    let undelegate = undelegate_ix_for_authority(&world, world.payer.pubkey());
+    let undelegate = request_undelegation_ix_for_authority(&world, world.payer.pubkey());
     let result = process_result(
         &mut world.context,
         &payer_pubkey,
@@ -830,7 +930,7 @@ async fn undelegate_er_token_account_requires_owner() {
 
     assert!(
         result.is_err(),
-        "ER token owner must authorize undelegation"
+        "ER token owner must authorize the undelegation request"
     );
     assert_eq!(world.account_owner(world.alice_er).await, PORTAL_PROGRAM_ID);
     assert_eq!(world.er_amount(world.alice_er).await, 600);
@@ -1039,6 +1139,48 @@ fn pda_delegate_ix(world: &TestWorld) -> Instruction {
     }
 }
 
+fn request_undelegation_ix(world: &TestWorld) -> Instruction {
+    request_undelegation_ix_for_authority(world, world.alice.pubkey())
+}
+
+fn request_undelegation_ix_for_authority(world: &TestWorld, authority: Pubkey) -> Instruction {
+    let (delegation_record, _) = Pubkey::find_program_address(
+        &[DelegationRecord::SEED_PREFIX, world.alice_er.as_ref()],
+        &PORTAL_PROGRAM_ID,
+    );
+    let (request, _) =
+        northstar_portal::find_undelegation_request_pda(&PORTAL_PROGRAM_ID, &world.alice_er);
+    Instruction {
+        program_id: northstar_token_bridge::id(),
+        accounts: vec![
+            AccountMeta::new(world.payer.pubkey(), true),
+            AccountMeta::new_readonly(authority, true),
+            AccountMeta::new_readonly(world.alice_er, false),
+            AccountMeta::new_readonly(northstar_token_bridge::id(), false),
+            AccountMeta::new_readonly(PORTAL_PROGRAM_ID, false),
+            AccountMeta::new_readonly(world.session, false),
+            AccountMeta::new_readonly(delegation_record, false),
+            AccountMeta::new(request, false),
+            AccountMeta::new_readonly(system_program::id(), false),
+        ],
+        data: borsh::to_vec(&TokenBridgeInstruction::RequestUndelegation).unwrap(),
+    }
+}
+
+fn approve_undelegation_ix(world: &TestWorld) -> Instruction {
+    let (request, _) =
+        northstar_portal::find_undelegation_request_pda(&PORTAL_PROGRAM_ID, &world.alice_er);
+    Instruction {
+        program_id: PORTAL_PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new_readonly(world.payer.pubkey(), true),
+            AccountMeta::new_readonly(world.session, false),
+            AccountMeta::new(request, false),
+        ],
+        data: borsh::to_vec(&northstar_portal::PortalInstruction::ApproveUndelegation).unwrap(),
+    }
+}
+
 fn undelegate_ix(world: &TestWorld) -> Instruction {
     undelegate_ix_for_authority(world, world.alice.pubkey())
 }
@@ -1060,6 +1202,14 @@ fn undelegate_ix_for_authority(world: &TestWorld, authority: Pubkey) -> Instruct
             AccountMeta::new(delegation_record, false),
             AccountMeta::new(buffer, false),
             AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new(
+                northstar_portal::find_undelegation_request_pda(
+                    &PORTAL_PROGRAM_ID,
+                    &world.alice_er,
+                )
+                .0,
+                false,
+            ),
         ],
         data: borsh::to_vec(&TokenBridgeInstruction::UndelegateErTokenAccount).unwrap(),
     }

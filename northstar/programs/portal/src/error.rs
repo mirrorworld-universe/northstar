@@ -68,6 +68,10 @@ pub enum PortalError {
     DataAvailabilityCommitmentMismatch = 63,
     CheckpointChallengeWindowTooLong = 64,
     StepProofVerificationFailed = 65,
+    UndelegationRequestAlreadyInitialized = 66,
+    UndelegationRequestDeserializeFailed = 67,
+    UndelegationRequestStateInvalid = 68,
+    UndelegationNotSettled = 69,
 }
 
 impl From<PortalError> for ProgramError {

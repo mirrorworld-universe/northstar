@@ -11,6 +11,7 @@ pub mod delegate;
 pub mod deposit_fee;
 pub mod open_session;
 pub mod register_session_bridge;
+pub mod request_undelegation;
 pub mod settle_deposit_receipt;
 pub mod settlement;
 pub mod start_withdrawal;
@@ -72,6 +73,7 @@ pub use {
     deposit_fee::process_deposit_fee,
     open_session::process_open_session,
     register_session_bridge::process_register_session_bridge,
+    request_undelegation::{process_approve_undelegation, process_request_undelegation},
     settle_deposit_receipt::process_settle_deposit_receipt,
     settlement::{
         process_abort_settlement, process_begin_settlement, process_finish_settlement,

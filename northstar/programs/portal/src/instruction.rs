@@ -41,6 +41,8 @@ pub enum PortalInstruction {
     TimeoutChallenge(TimeoutChallenge),
     AccumulateTokenWithdrawal(AccumulateTokenWithdrawal),
     ConsumeTokenWithdrawal(ConsumeTokenWithdrawal),
+    RequestUndelegation,
+    ApproveUndelegation,
     #[cfg(feature = "zk-verifier-prototype")]
     VerifyErStepProofV1(VerifyErStepProofV1),
 }
