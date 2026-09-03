@@ -1,6 +1,8 @@
 use {
     borsh::BorshDeserialize,
-    northstar_portal::{OpenSession, PortalInstruction, RegisterSessionBridge},
+    northstar_portal::{
+        OpenSession, PortalInstruction, RegisterSessionBridge, UndelegationRequest,
+    },
     northstar_token_bridge::{
         find_buffer_pda, find_er_token_account_pda, find_token_vault_pda,
         instruction::TokenBridgeInstruction, state::ErTokenAccount,
@@ -38,6 +40,7 @@ const PORTAL_PROGRAM_ID: Pubkey =
 const DEPOSIT_AMOUNT: u64 = 600_000_000;
 const TRANSFER_AMOUNT: u64 = 250_000_000;
 const WITHDRAW_AMOUNT: u64 = 200_000_000;
+const MID_DELEGATION_DEPOSIT: u64 = 50_000_000;
 
 #[test]
 fn live_validator_spl_token_bridge_round_trip() {
@@ -248,12 +251,65 @@ fn live_validator_spl_token_bridge_round_trip() {
 
     send_tx(
         &rpc,
+        &[request_undelegation_ix(
+            &payer.pubkey(),
+            &bob.pubkey(),
+            session,
+            bob_er,
+        )],
+        &payer.pubkey(),
+        &[&payer, &bob],
+    );
+    wait_for_undelegation_approval(&rpc, bob_er);
+    send_tx(
+        &rpc,
         &[undelegate_er_ix(&bob.pubkey(), session, bob_er)],
         &payer.pubkey(),
         &[&payer, &bob],
     );
     wait_account_owner(&rpc, bob_er, northstar_token_bridge::id());
     wait_for_er_amount(&rpc, bob_er, TRANSFER_AMOUNT - WITHDRAW_AMOUNT);
+
+    send_tx(
+        &rpc,
+        &[deposit_ix(
+            payer.pubkey(),
+            payer.pubkey(),
+            vault,
+            alice_er,
+            session_bridge,
+            alice_token.pubkey(),
+            vault_token.pubkey(),
+            mint.pubkey(),
+            MID_DELEGATION_DEPOSIT,
+        )],
+        &payer.pubkey(),
+        &[&payer],
+    );
+    send_tx(
+        &rpc,
+        &[request_undelegation_ix(
+            &payer.pubkey(),
+            &payer.pubkey(),
+            session,
+            alice_er,
+        )],
+        &payer.pubkey(),
+        &[&payer],
+    );
+    wait_for_undelegation_approval(&rpc, alice_er);
+    send_tx(
+        &rpc,
+        &[undelegate_er_ix(&payer.pubkey(), session, alice_er)],
+        &payer.pubkey(),
+        &[&payer],
+    );
+    wait_account_owner(&rpc, alice_er, northstar_token_bridge::id());
+    wait_for_er_amount(
+        &rpc,
+        alice_er,
+        DEPOSIT_AMOUNT - TRANSFER_AMOUNT + MID_DELEGATION_DEPOSIT,
+    );
 
     validator.kill();
     let _ = std::fs::remove_dir_all(&ledger);
@@ -474,6 +530,37 @@ fn delegate_er_ix(
     }
 }
 
+fn request_undelegation_ix(
+    payer: &Pubkey,
+    authority: &Pubkey,
+    session: Pubkey,
+    er_account: Pubkey,
+) -> Instruction {
+    let delegation_record = portal_pubkey(northstar_portal::find_delegation_record_pda(
+        &PORTAL_PROGRAM_ID,
+        &er_account,
+    ));
+    let request = portal_pubkey(northstar_portal::find_undelegation_request_pda(
+        &PORTAL_PROGRAM_ID,
+        &er_account,
+    ));
+    Instruction {
+        program_id: northstar_token_bridge::id(),
+        accounts: vec![
+            AccountMeta::new(*payer, true),
+            AccountMeta::new_readonly(*authority, true),
+            AccountMeta::new_readonly(er_account, false),
+            AccountMeta::new_readonly(northstar_token_bridge::id(), false),
+            AccountMeta::new_readonly(PORTAL_PROGRAM_ID, false),
+            AccountMeta::new_readonly(session, false),
+            AccountMeta::new_readonly(delegation_record, false),
+            AccountMeta::new(request, false),
+            AccountMeta::new_readonly(system_program::id(), false),
+        ],
+        data: borsh::to_vec(&TokenBridgeInstruction::RequestUndelegation).unwrap(),
+    }
+}
+
 fn undelegate_er_ix(authority: &Pubkey, session: Pubkey, er_account: Pubkey) -> Instruction {
     let delegation_record = portal_pubkey(northstar_portal::find_delegation_record_pda(
         &PORTAL_PROGRAM_ID,
@@ -491,6 +578,13 @@ fn undelegate_er_ix(authority: &Pubkey, session: Pubkey, er_account: Pubkey) -> 
             AccountMeta::new(delegation_record, false),
             AccountMeta::new(buffer, false),
             AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new(
+                portal_pubkey(northstar_portal::find_undelegation_request_pda(
+                    &PORTAL_PROGRAM_ID,
+                    &er_account,
+                )),
+                false,
+            ),
         ],
         data: borsh::to_vec(&TokenBridgeInstruction::UndelegateErTokenAccount).unwrap(),
     }
@@ -663,6 +757,25 @@ fn wait_account_owner(rpc: &RpcClient, account: Pubkey, expected_owner: Pubkey) 
         sleep(Duration::from_millis(250));
     }
     panic!("timed out waiting for account {account} owner {expected_owner}");
+}
+
+fn wait_for_undelegation_approval(rpc: &RpcClient, er_account: Pubkey) {
+    let request = portal_pubkey(northstar_portal::find_undelegation_request_pda(
+        &PORTAL_PROGRAM_ID,
+        &er_account,
+    ));
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        if let Ok(account) = rpc.get_account(&request) {
+            if let Ok(state) = UndelegationRequest::try_from_slice(&account.data) {
+                if state.approved {
+                    return;
+                }
+            }
+        }
+        sleep(Duration::from_millis(500));
+    }
+    panic!("timed out waiting for undelegation approval for {er_account}");
 }
 
 fn wait_for_er_amount(rpc: &RpcClient, er_account: Pubkey, expected: u64) {

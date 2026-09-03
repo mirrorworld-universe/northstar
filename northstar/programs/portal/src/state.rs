@@ -295,6 +295,29 @@ impl DelegationRecord {
 
 #[p_state]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct UndelegationRequest {
+    pub discriminator: [u8; 8],
+    pub session: Pubkey,
+    pub delegated_account: Pubkey,
+    pub owner_program: Pubkey,
+    pub authority: Pubkey,
+    pub requested_at_l1_slot: u64,
+    pub approved: bool,
+    pub bump: u8,
+}
+
+impl UndelegationRequest {
+    pub const SEED_PREFIX: &[u8] = b"undelegation_request";
+    pub const DISCRIMINATOR: [u8; 8] = [141, 66, 225, 119, 110, 101, 37, 38];
+
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        self.discriminator == Self::DISCRIMINATOR
+    }
+}
+
+#[p_state]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct DepositReceipt {
     pub discriminator: [u8; 8],
     pub session: Pubkey,

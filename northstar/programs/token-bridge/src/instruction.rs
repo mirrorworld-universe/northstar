@@ -32,4 +32,5 @@ pub enum TokenBridgeInstruction {
         withdrawn: u64,
         decimals: u8,
     },
+    RequestUndelegation,
 }

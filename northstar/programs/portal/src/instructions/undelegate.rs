@@ -1,8 +1,8 @@
 use {
     crate::{
         error::PortalError,
-        pda::{find_delegation_record_pda, find_session_pda},
-        state::{DelegationRecord, Session, SettlementStatus},
+        pda::{find_delegation_record_pda, find_session_pda, find_undelegation_request_pda},
+        state::{DelegationRecord, Session, SettlementStatus, UndelegationRequest},
     },
     borsh::BorshDeserialize,
     pinocchio::{
@@ -29,6 +29,7 @@ use {
 /// 3. `[writable]` delegation_record PDA (closed)
 /// 4. `[]` system_program
 /// 5. `[]` session
+/// 6. `[writable]` approved undelegation request PDA (closed)
 #[p_instruction(
     id = 4,
     accounts = [
@@ -37,7 +38,8 @@ use {
         owner_program,
         delegation_record(mut, state = DelegationRecord),
         system_program,
-        session(state = Session)
+        session(state = Session),
+        undelegation_request(mut, state = UndelegationRequest)
     ]
 )]
 pub fn process_undelegate(program_id: &Pubkey, accounts: &mut [AccountInfo]) -> ProgramResult {
@@ -53,7 +55,8 @@ pub fn process_undelegate(program_id: &Pubkey, accounts: &mut [AccountInfo]) -> 
         owner_program,
         delegation_record(mut, state = DelegationRecord),
         system_program,
-        session(state = Session)
+        session(state = Session),
+        undelegation_request(mut, state = UndelegationRequest)
     ]
 )]
 pub fn process_undelegate_handoff(
@@ -69,7 +72,7 @@ fn process_undelegate_inner(
     accounts: &mut [AccountInfo],
     allow_non_empty_handoff: bool,
 ) -> ProgramResult {
-    let [authority, delegated_account, owner_program, delegation_record, _system_program, session, ..] =
+    let [authority, delegated_account, owner_program, delegation_record, _system_program, session, request, ..] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -120,6 +123,26 @@ fn process_undelegate_inner(
         return Err(PortalError::DelegatedAccountOwnerMismatch.into());
     }
 
+    let (expected_request, request_bump) =
+        find_undelegation_request_pda(program_id, &delegated_key);
+    if request.address() != &expected_request || !request.owned_by(program_id) {
+        return Err(PortalError::InvalidPdaSeeds.into());
+    }
+    let request_state = UndelegationRequest::try_from_slice(&request.try_borrow()?)
+        .map_err(|_| PortalError::UndelegationRequestDeserializeFailed)?;
+    if !request_state.is_valid()
+        || request_state.bump != request_bump
+        || request_state.session != *session.address()
+        || request_state.delegated_account != delegated_key
+        || request_state.owner_program != *owner_program.address()
+        || request_state.authority != *authority.address()
+    {
+        return Err(PortalError::UndelegationRequestStateInvalid.into());
+    }
+    if !request_state.approved {
+        return Err(PortalError::UndelegationNotSettled.into());
+    }
+
     let mut delegated_data = delegated_account.try_borrow_mut()?;
     let has_non_empty_data = delegated_data.iter().any(|byte| *byte != 0);
     if has_non_empty_data && !allow_non_empty_handoff {
@@ -132,18 +155,22 @@ fn process_undelegate_inner(
 
     unsafe { delegated_account.assign(owner_program.address()) };
 
-    let delegation_record_lamports = delegation_record.lamports();
-
-    if delegation_record_lamports > 0 {
+    let refund_lamports = delegation_record
+        .lamports()
+        .checked_add(request.lamports())
+        .ok_or(PortalError::ArithmeticOverflow)?;
+    if refund_lamports > 0 {
         let authority_lamports = authority
             .lamports()
-            .checked_add(delegation_record_lamports)
+            .checked_add(refund_lamports)
             .ok_or(PortalError::ArithmeticOverflow)?;
         authority.set_lamports(authority_lamports);
         delegation_record.set_lamports(0);
+        request.set_lamports(0);
     }
 
     delegation_record.try_borrow_mut()?.fill(0);
+    request.try_borrow_mut()?.fill(0);
 
     pinocchio_log::log!("Undelegate success");
 

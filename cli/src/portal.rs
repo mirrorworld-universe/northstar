@@ -6,7 +6,9 @@ use {
     },
     borsh::BorshDeserialize,
     clap::{App, AppSettings, Arg, ArgMatches, SubCommand},
-    northstar_portal::{DelegationRecord, OpenSession, PortalInstruction, WITHDRAWAL_SINK},
+    northstar_portal::{
+        DelegationRecord, OpenSession, PortalInstruction, UndelegationRequest, WITHDRAWAL_SINK,
+    },
     solana_account::Account,
     solana_clap_utils::{
         compute_budget::{COMPUTE_UNIT_PRICE_ARG, ComputeUnitLimit, compute_unit_price_arg},
@@ -625,6 +627,14 @@ fn find_delegation_record_pda(program_id: &Pubkey, delegated_account: &Pubkey) -
     Pubkey::find_program_address(&[b"delegation", delegated_account.as_ref()], program_id).0
 }
 
+fn find_undelegation_request_pda(program_id: &Pubkey, delegated_account: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[b"undelegation_request", delegated_account.as_ref()],
+        program_id,
+    )
+    .0
+}
+
 fn find_deposit_receipt_pda(program_id: &Pubkey, session: &Pubkey, recipient: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(
         &[b"deposit_receipt", session.as_ref(), recipient.as_ref()],
@@ -1107,17 +1117,49 @@ pub async fn process_portal_subcommand(
                     })?;
                 delegation_record_owner_program(&delegation_record)?
             };
-            let instruction = Instruction {
-                program_id: portal_program_id,
-                accounts: vec![
-                    AccountMeta::new(authority.pubkey(), true),
-                    AccountMeta::new(*delegated_account, false),
-                    AccountMeta::new_readonly(owner_program, false),
-                    AccountMeta::new(delegation_record_pda, false),
-                    AccountMeta::new_readonly(system_program::id(), false),
-                    AccountMeta::new_readonly(session_pda, false),
-                ],
-                data: borsh::to_vec(&PortalInstruction::Undelegate).unwrap(),
+            let request_pda = find_undelegation_request_pda(&portal_program_id, delegated_account);
+            let request_account = rpc_client
+                .get_account_with_commitment(&request_pda, config.commitment)
+                .await?
+                .value;
+            let instruction = if let Some(request_account) = request_account {
+                let request =
+                    UndelegationRequest::try_from_slice(&request_account.data).map_err(|_| {
+                        CliError::BadParameter("invalid undelegation request account".to_string())
+                    })?;
+                if !request.approved {
+                    return Err(Box::new(CliError::BadParameter(
+                        "undelegation is waiting for ER settlement".to_string(),
+                    )));
+                }
+                Instruction {
+                    program_id: portal_program_id,
+                    accounts: vec![
+                        AccountMeta::new(authority.pubkey(), true),
+                        AccountMeta::new(*delegated_account, true),
+                        AccountMeta::new_readonly(owner_program, false),
+                        AccountMeta::new(delegation_record_pda, false),
+                        AccountMeta::new_readonly(system_program::id(), false),
+                        AccountMeta::new_readonly(session_pda, false),
+                        AccountMeta::new(request_pda, false),
+                    ],
+                    data: borsh::to_vec(&PortalInstruction::Undelegate).unwrap(),
+                }
+            } else {
+                Instruction {
+                    program_id: portal_program_id,
+                    accounts: vec![
+                        AccountMeta::new(authority.pubkey(), true),
+                        AccountMeta::new_readonly(authority.pubkey(), true),
+                        AccountMeta::new_readonly(*delegated_account, true),
+                        AccountMeta::new_readonly(owner_program, false),
+                        AccountMeta::new_readonly(delegation_record_pda, false),
+                        AccountMeta::new_readonly(session_pda, false),
+                        AccountMeta::new(request_pda, false),
+                        AccountMeta::new_readonly(system_program::id(), false),
+                    ],
+                    data: borsh::to_vec(&PortalInstruction::RequestUndelegation).unwrap(),
+                }
             };
             process_portal_instruction(
                 rpc_client,

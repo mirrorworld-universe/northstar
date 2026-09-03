@@ -1,7 +1,7 @@
 use northstar_portal::{
     Challenge, Checkpoint, CheckpointCursor, DataAvailabilityProof, DelegationRecord,
     DepositReceipt, FeeVault, Session, SessionBridge, StepProofAccount,
-    TokenWithdrawalAuthorization,
+    TokenWithdrawalAuthorization, UndelegationRequest,
 };
 
 /// Enum representing any portal program account type.
@@ -18,6 +18,7 @@ pub enum PortalAccount {
     StepProofAccount(StepProofAccount),
     SessionBridge(SessionBridge),
     TokenWithdrawalAuthorization(TokenWithdrawalAuthorization),
+    UndelegationRequest(UndelegationRequest),
 }
 
 pub fn try_parse_raw_portal_account(data: &[u8]) -> Option<PortalAccount> {
@@ -65,6 +66,10 @@ pub fn try_parse_raw_portal_account(data: &[u8]) -> Option<PortalAccount> {
         borsh::from_slice::<TokenWithdrawalAuthorization>(data)
             .ok()
             .map(PortalAccount::TokenWithdrawalAuthorization)
+    } else if data.starts_with(&UndelegationRequest::DISCRIMINATOR) {
+        borsh::from_slice::<UndelegationRequest>(data)
+            .ok()
+            .map(PortalAccount::UndelegationRequest)
     } else {
         None
     }

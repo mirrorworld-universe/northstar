@@ -120,6 +120,9 @@ pub fn process_instruction(
         } => process_settle_withdrawal(
             program_id, accounts, er_slot, checksum, amount, withdrawn, decimals,
         ),
+        TokenBridgeInstruction::RequestUndelegation => {
+            process_request_undelegation(program_id, accounts)
+        }
     }
 }
 
@@ -757,6 +760,65 @@ fn process_delegate_er_token_account(
     close_buffer(buffer, payer)
 }
 
+fn process_request_undelegation(
+    program_id: &Pubkey,
+    accounts: &mut [AccountInfo],
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter_mut();
+    let payer = next_account_info(account_info_iter)?;
+    let authority = next_account_info(account_info_iter)?;
+    let er_token_account = next_account_info(account_info_iter)?;
+    let bridge_program = next_account_info(account_info_iter)?;
+    let portal_program = next_account_info(account_info_iter)?;
+    let session = next_account_info(account_info_iter)?;
+    let delegation_record = next_account_info(account_info_iter)?;
+    let request = next_account_info(account_info_iter)?;
+    let system_program_info = next_account_info(account_info_iter)?;
+
+    require_signer(payer)?;
+    require_signer(authority)?;
+    require_self_program(program_id, bridge_program)?;
+    require_system_program(system_program_info)?;
+    if !er_token_account.owned_by(portal_program.address()) {
+        return Err(ProgramError::InvalidAccountOwner);
+    }
+    let er_state = load_er_token_account_data(er_token_account)?;
+    require_er_token_account_pda(program_id, er_token_account.address(), &er_state)?;
+    if er_state.owner != key_bytes(authority.address()) {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    let er_seeds = er_signer_seeds(&er_state);
+    let portal_accounts = [
+        AccountMeta::writable_signer(payer.address()),
+        AccountMeta::readonly_signer(authority.address()),
+        AccountMeta::readonly_signer(er_token_account.address()),
+        AccountMeta::readonly(program_id),
+        AccountMeta::readonly(delegation_record.address()),
+        AccountMeta::readonly(session.address()),
+        AccountMeta::writable(request.address()),
+        AccountMeta::readonly(&pinocchio_system::ID),
+    ];
+    let portal_instruction = Instruction {
+        program_id: portal_program.address(),
+        accounts: &portal_accounts,
+        data: &[28],
+    };
+    invoke_signed(
+        &portal_instruction,
+        &[
+            &*payer,
+            &*authority,
+            &*er_token_account,
+            &*bridge_program,
+            &*delegation_record,
+            &*session,
+            &*request,
+            &*system_program_info,
+        ],
+        &[Signer::from(&er_seeds)],
+    )
+}
+
 fn process_undelegate_er_token_account(
     program_id: &Pubkey,
     accounts: &mut [AccountInfo],
@@ -770,6 +832,7 @@ fn process_undelegate_er_token_account(
     let delegation_record = next_account_info(account_info_iter)?;
     let buffer = next_account_info(account_info_iter)?;
     let system_program_info = next_account_info(account_info_iter)?;
+    let request = next_account_info(account_info_iter)?;
 
     require_signer(authority)?;
     require_self_program(program_id, bridge_program)?;
@@ -801,6 +864,7 @@ fn process_undelegate_er_token_account(
         AccountMeta::writable(delegation_record.address()),
         AccountMeta::readonly(&pinocchio_system::ID),
         AccountMeta::readonly(session.address()),
+        AccountMeta::writable(request.address()),
     ];
     let portal_data = [10];
     let portal_instruction = Instruction {
@@ -817,6 +881,7 @@ fn process_undelegate_er_token_account(
             &*delegation_record,
             &*system_program_info,
             &*session,
+            &*request,
         ],
         &[er_signer],
     )?;

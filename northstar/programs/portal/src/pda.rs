@@ -2,7 +2,7 @@ use {
     crate::{
         Challenge, Checkpoint, CheckpointCursor, DataAvailabilityProof, DelegationRecord,
         DepositReceipt, FeeVault, Session, SessionBridge, StepProofAccount,
-        TokenWithdrawalAuthorization,
+        TokenWithdrawalAuthorization, UndelegationRequest,
     },
     pinocchio::Address as Pubkey,
 };
@@ -31,6 +31,14 @@ pub fn find_fee_vault_pda(program_id: &Pubkey) -> (Pubkey, u8) {
 
 pub fn find_delegation_record_pda(program_id: &Pubkey, delegated_account: &Pubkey) -> (Pubkey, u8) {
     let seeds = &[DelegationRecord::SEED_PREFIX, delegated_account.as_ref()];
+    find_program_address(seeds, program_id)
+}
+
+pub fn find_undelegation_request_pda(
+    program_id: &Pubkey,
+    delegated_account: &Pubkey,
+) -> (Pubkey, u8) {
+    let seeds = &[UndelegationRequest::SEED_PREFIX, delegated_account.as_ref()];
     find_program_address(seeds, program_id)
 }
 
