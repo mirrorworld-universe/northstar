@@ -140,8 +140,10 @@ fn process_instruction(
         Ok((27, payload)) => deserialize_args(payload).and_then(|settlement| {
             instructions::process_consume_token_withdrawal(program_id, accounts, settlement)
         }),
+        Ok((28, _)) => instructions::process_request_undelegation(program_id, accounts),
+        Ok((29, _)) => instructions::process_approve_undelegation(program_id, accounts),
         #[cfg(feature = "zk-verifier-prototype")]
-        Ok((28, payload)) => deserialize_args(payload)
+        Ok((30, payload)) => deserialize_args(payload)
             .and_then(|proof| instructions::process_verify_er_step_proof_v1(accounts, proof)),
         Ok((_, _)) | Err(_) => Err(ProgramError::InvalidInstructionData),
     }

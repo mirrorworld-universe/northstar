@@ -153,6 +153,11 @@ pub enum L1Event {
         delegation_record_pda: Pubkey,
         delegated_account: Pubkey,
     },
+    UndelegationRequested {
+        request_pda: Pubkey,
+        delegated_account: Pubkey,
+        approved: bool,
+    },
     /// A fee deposit was made
     FeeDeposited {
         session_pda: Pubkey,
@@ -453,6 +458,56 @@ impl Manager {
             .map(|runtime| runtime.state_diff_from_l1())
     }
 
+    pub fn handle_undelegation_request(
+        &self,
+        delegated_account: &Pubkey,
+        request_pda: Pubkey,
+        approved: bool,
+    ) {
+        if let Some(runtime) = &self.runtime {
+            runtime.handle_undelegation_request(delegated_account, request_pda, approved);
+        }
+    }
+
+    pub fn handle_undelegation(&mut self, delegated_account: &Pubkey) {
+        if let Some(runtime) = &mut self.runtime {
+            runtime.complete_undelegation(delegated_account);
+        }
+    }
+
+    fn undelegation_approval_transactions(
+        &self,
+        session_pda: Pubkey,
+        last_settled_er_slot: u64,
+        recent_blockhash: Hash,
+    ) -> Vec<Transaction> {
+        let Some(runtime) = &self.runtime else {
+            return vec![];
+        };
+        runtime
+            .ready_undelegation_approvals(last_settled_er_slot)
+            .into_iter()
+            .map(|request_pda| {
+                let instruction = Instruction {
+                    program_id: self.config.portal_program_id,
+                    accounts: vec![
+                        AccountMeta::new_readonly(self.config.manager_account.pubkey(), true),
+                        AccountMeta::new_readonly(session_pda, false),
+                        AccountMeta::new(request_pda, false),
+                    ],
+                    data: borsh::to_vec(&northstar_portal::PortalInstruction::ApproveUndelegation)
+                        .unwrap(),
+                };
+                Transaction::new_signed_with_payer(
+                    &[instruction],
+                    Some(&self.config.manager_account.pubkey()),
+                    &[self.config.manager_account.as_ref()],
+                    recent_blockhash,
+                )
+            })
+            .collect()
+    }
+
     /// Build data-only delegated account settlement chunks.
     ///
     /// Returns `None` when there are no data changes to settle, so devnet
@@ -536,6 +591,7 @@ impl Manager {
         if !session_state.is_valid() {
             return None;
         }
+        let force_settlement = runtime.has_unapproved_undelegations();
         self.cleanup_terminal_checkpoint_plans(l1_bank, session_pda);
         if let Some(plan) = self.pending_token_release_plan(l1_bank, session_pda) {
             let transactions = settlement::token_withdrawal_transactions(
@@ -553,13 +609,21 @@ impl Manager {
                 transactions,
             ));
         }
+        let approvals = self.undelegation_approval_transactions(
+            session_pda,
+            session_state.last_settled_er_slot,
+            recent_blockhash,
+        );
+        if session_state.settlement_status == SettlementStatus::Idle && !approvals.is_empty() {
+            return Some((runtime.bank().slot(), [0; 32], approvals));
+        }
 
         let (plan, transactions) = match session_state.settlement_status {
             SettlementStatus::Idle => {
                 let next_settlement_slot = session_state
                     .last_settled_l1_slot
                     .saturating_add(session_state.settlement_interval_slots);
-                if l1_bank.slot() < next_settlement_slot {
+                if l1_bank.slot() < next_settlement_slot && !force_settlement {
                     return None;
                 }
                 if let Some((checkpoint_pda, checkpoint)) =
@@ -1302,6 +1366,26 @@ impl Manager {
                     depositor: receipt.recipient,
                 })
             }
+            Some(PortalAccount::UndelegationRequest(request)) => {
+                let (expected_request, bump) = northstar_portal::find_undelegation_request_pda(
+                    &self.config.portal_program_id,
+                    &request.delegated_account,
+                );
+                let expected_session =
+                    northstar_portal::find_session_pda(&self.config.portal_program_id).0;
+                if !request.is_valid()
+                    || pubkey != expected_request
+                    || request.bump != bump
+                    || request.session != expected_session
+                {
+                    return None;
+                }
+                Some(L1Event::UndelegationRequested {
+                    request_pda: pubkey,
+                    delegated_account: request.delegated_account,
+                    approved: request.approved,
+                })
+            }
             Some(PortalAccount::Checkpoint(_))
             | Some(PortalAccount::CheckpointCursor(_))
             | Some(PortalAccount::Challenge(_))
@@ -1771,6 +1855,39 @@ impl Manager {
             .collect()
     }
 
+    fn l1_undelegation_requests(
+        &self,
+        bank: &Bank,
+        session_pda: Pubkey,
+    ) -> Vec<(Pubkey, Pubkey, bool)> {
+        let Ok(accounts) = bank.get_filtered_indexed_accounts(
+            &IndexKey::ProgramId(self.config.portal_program_id),
+            |account| account.owner() == &self.config.portal_program_id,
+            None,
+        ) else {
+            return vec![];
+        };
+        accounts
+            .into_iter()
+            .filter_map(|(request_pda, account)| {
+                let PortalAccount::UndelegationRequest(request) =
+                    try_parse_raw_portal_account(account.data())?
+                else {
+                    return None;
+                };
+                let (expected, bump) = northstar_portal::find_undelegation_request_pda(
+                    &self.config.portal_program_id,
+                    &request.delegated_account,
+                );
+                (request.is_valid()
+                    && request.session == session_pda
+                    && request_pda == expected
+                    && request.bump == bump)
+                    .then_some((request.delegated_account, request_pda, request.approved))
+            })
+            .collect()
+    }
+
     /// Resume an active ER session from current L1 state at validator startup.
     pub fn resume_active_session_from_l1(&mut self, root_bank: Arc<Bank>) -> bool {
         if self.runtime.is_none() {
@@ -1811,6 +1928,12 @@ impl Manager {
             runtime.restore_unsettled_state(recovered);
             runtime.enable_unsettled_writes();
             runtime.activate();
+        }
+        let undelegation_requests = self.l1_undelegation_requests(&root_bank, session_pda);
+        if let Some(runtime) = &self.runtime {
+            for (delegated_account, request_pda, approved) in undelegation_requests {
+                runtime.handle_undelegation_request(&delegated_account, request_pda, approved);
+            }
         }
         self.mark_synced_through(root_bank.slot());
 

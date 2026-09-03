@@ -703,6 +703,22 @@ impl NorthStarService {
                                 } => {
                                     manager.handle_delegation(&bank, &delegated_account);
                                 }
+                                L1Event::UndelegationRequested {
+                                    request_pda,
+                                    delegated_account,
+                                    approved,
+                                } => {
+                                    manager.handle_undelegation_request(
+                                        &delegated_account,
+                                        request_pda,
+                                        approved,
+                                    );
+                                }
+                                L1Event::AccountUndelegated {
+                                    delegated_account, ..
+                                } => {
+                                    manager.handle_undelegation(&delegated_account);
+                                }
                                 L1Event::FeeDeposited {
                                     delta, depositor, ..
                                 } => {

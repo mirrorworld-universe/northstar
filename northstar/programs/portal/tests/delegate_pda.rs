@@ -273,15 +273,73 @@ impl RunningScenario {
                 AccountMeta::new(delegation_record, false),
                 AccountMeta::new_readonly(system_program::id(), false),
                 AccountMeta::new_readonly(find_session_pda().0, false),
+                AccountMeta::new(
+                    northstar_portal::find_undelegation_request_pda(
+                        &PORTAL_PROGRAM_ID,
+                        &self.inner.delegated.pubkey(),
+                    )
+                    .0,
+                    false,
+                ),
             ],
             data,
         }
+    }
+
+    async fn request_and_approve_undelegation(
+        &mut self,
+        owner_program: Pubkey,
+    ) -> Result<(), solana_program_test::BanksClientError> {
+        let delegated = self.inner.delegated.pubkey();
+        let (delegation_record, _) = find_delegation_record_pda(&delegated);
+        let request =
+            northstar_portal::find_undelegation_request_pda(&PORTAL_PROGRAM_ID, &delegated).0;
+        let request_ix = Instruction {
+            program_id: PORTAL_PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(self.inner.payer.pubkey(), true),
+                AccountMeta::new_readonly(self.inner.payer.pubkey(), true),
+                AccountMeta::new_readonly(delegated, true),
+                AccountMeta::new_readonly(owner_program, false),
+                AccountMeta::new_readonly(delegation_record, false),
+                AccountMeta::new_readonly(find_session_pda().0, false),
+                AccountMeta::new(request, false),
+                AccountMeta::new_readonly(system_program::id(), false),
+            ],
+            data: borsh::to_vec(&PortalInstruction::RequestUndelegation).unwrap(),
+        };
+        let banks = &mut self.context.banks_client;
+        let tx = Transaction::new_signed_with_payer(
+            &[request_ix],
+            Some(&self.inner.payer.pubkey()),
+            &[&self.inner.payer, &self.inner.delegated],
+            banks.get_latest_blockhash().await.unwrap(),
+        );
+        banks.process_transaction(tx).await?;
+
+        let approve_ix = Instruction {
+            program_id: PORTAL_PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new_readonly(self.inner.payer.pubkey(), true),
+                AccountMeta::new_readonly(find_session_pda().0, false),
+                AccountMeta::new(request, false),
+            ],
+            data: borsh::to_vec(&PortalInstruction::ApproveUndelegation).unwrap(),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[approve_ix],
+            Some(&self.inner.payer.pubkey()),
+            &[&self.inner.payer],
+            banks.get_latest_blockhash().await.unwrap(),
+        );
+        banks.process_transaction(tx).await
     }
 
     async fn undelegate_with(
         &mut self,
         owner_program: Pubkey,
     ) -> Result<(), solana_program_test::BanksClientError> {
+        self.request_and_approve_undelegation(owner_program).await?;
         let ix = self.build_undelegate_ix(owner_program);
         let banks: &mut BanksClient = &mut self.context.banks_client;
         let blockhash = banks.get_latest_blockhash().await.unwrap();
@@ -297,6 +355,8 @@ impl RunningScenario {
     async fn undelegate_without_delegated_signer(
         &mut self,
     ) -> Result<(), solana_program_test::BanksClientError> {
+        self.request_and_approve_undelegation(self.inner.owner_program)
+            .await?;
         let mut ix = self.build_undelegate_ix(self.inner.owner_program);
         ix.accounts[1].is_signer = false;
         let banks: &mut BanksClient = &mut self.context.banks_client;
@@ -311,6 +371,8 @@ impl RunningScenario {
     }
 
     async fn undelegate_handoff(&mut self) -> Result<(), solana_program_test::BanksClientError> {
+        self.request_and_approve_undelegation(self.inner.owner_program)
+            .await?;
         let ix = self.build_undelegate_handoff_ix(self.inner.owner_program);
         let banks: &mut BanksClient = &mut self.context.banks_client;
         let blockhash = banks.get_latest_blockhash().await.unwrap();

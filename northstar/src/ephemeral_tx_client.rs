@@ -55,6 +55,7 @@ pub struct EphemeralTransactionClient {
     /// Set of delegated account pubkeys for filtering.
     /// Wrapped in RwLock because new delegations can arrive from L1 at runtime.
     delegated_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+    frozen_accounts: Arc<RwLock<HashSet<Pubkey>>>,
     /// Accounts that have been written to on this ER.
     /// Once touched, their balance is "real" (not inherited from L1).
     touched_accounts: Arc<RwLock<HashSet<Pubkey>>>,
@@ -90,6 +91,7 @@ impl Clone for EphemeralTransactionClient {
             bank_forks: Arc::clone(&self.bank_forks),
             bank_operation_lock: Arc::clone(&self.bank_operation_lock),
             delegated_accounts: Arc::clone(&self.delegated_accounts),
+            frozen_accounts: Arc::clone(&self.frozen_accounts),
             touched_accounts: Arc::clone(&self.touched_accounts),
             er_account_overlay: Arc::clone(&self.er_account_overlay),
             active: Arc::clone(&self.active),
@@ -109,6 +111,7 @@ impl Clone for EphemeralTransactionClient {
 
 pub(crate) struct EphemeralTransactionClientOptions {
     er_account_overlay: Arc<RwLock<HashMap<Pubkey, AccountSharedData>>>,
+    frozen_accounts: Arc<RwLock<HashSet<Pubkey>>>,
     er_history_store: Arc<ErHistoryStore>,
     block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
     transaction_max_age: usize,
@@ -127,6 +130,7 @@ impl EphemeralTransactionClientOptions {
     ) -> Self {
         Self {
             er_account_overlay,
+            frozen_accounts: Arc::new(RwLock::new(HashSet::new())),
             er_history_store,
             block_commitment_cache,
             transaction_max_age: crate::DEFAULT_ER_TRANSACTION_MAX_AGE,
@@ -162,6 +166,14 @@ impl EphemeralTransactionClientOptions {
         unsettled_state_store: Arc<UnsettledStateStore>,
     ) -> Self {
         self.unsettled_state_store = unsettled_state_store;
+        self
+    }
+
+    pub(crate) fn with_frozen_accounts(
+        mut self,
+        frozen_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+    ) -> Self {
+        self.frozen_accounts = frozen_accounts;
         self
     }
 }
@@ -301,6 +313,7 @@ impl EphemeralTransactionClient {
             bank_forks,
             bank_operation_lock,
             delegated_accounts,
+            frozen_accounts: options.frozen_accounts,
             touched_accounts,
             er_account_overlay: options.er_account_overlay,
             active,
@@ -450,6 +463,34 @@ impl EphemeralTransactionClient {
         true
     }
 
+    fn transaction_writes_frozen_account(
+        bank: &Bank,
+        tx: &VersionedTransaction,
+        frozen_accounts: &HashSet<Pubkey>,
+    ) -> bool {
+        if frozen_accounts.is_empty() {
+            return false;
+        }
+        let Some(loaded_addresses) = Self::load_transaction_addresses(bank, tx) else {
+            return true;
+        };
+        let message = &tx.message;
+        message
+            .static_account_keys()
+            .iter()
+            .enumerate()
+            .any(|(index, key)| {
+                message.is_maybe_writable_with_reserved_addresses(
+                    index,
+                    Some(bank.get_reserved_account_keys()),
+                ) && frozen_accounts.contains(key)
+            })
+            || loaded_addresses
+                .writable
+                .iter()
+                .any(|key| frozen_accounts.contains(key))
+    }
+
     fn is_allowed_writable_on_bank(
         bank: &Bank,
         key: &Pubkey,
@@ -516,9 +557,14 @@ impl TransactionClient for EphemeralTransactionClient {
         let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
         let touched_accounts = self.touched_accounts.read().unwrap().clone();
         let enforce_account_access = self.session_pda.read().unwrap().is_some();
+        let frozen_accounts = self.frozen_accounts.read().unwrap().clone();
         let txs: Vec<_> = txs
             .into_iter()
             .filter(|tx| {
+                if Self::transaction_writes_frozen_account(&bank, tx, &frozen_accounts) {
+                    warn!("ER transaction rejected: writes to account pending undelegation");
+                    return false;
+                }
                 if enforce_account_access && self.has_processed_signature(tx) {
                     warn!(
                         "ER transaction already processed: sig={}",
@@ -1446,6 +1492,12 @@ impl solana_rpc::rpc::ErTxExecutor for EphemeralTransactionClient {
         let bank = self.bank();
         let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
         let touched_accounts = self.touched_accounts.read().unwrap().clone();
+        let frozen_accounts = self.frozen_accounts.read().unwrap().clone();
+        if Self::transaction_writes_frozen_account(&bank, &tx, &frozen_accounts) {
+            return Err(solana_rpc::rpc::ErTxError::Rejected(
+                "transaction writes to account pending undelegation".to_string(),
+            ));
+        }
         if !Self::is_transaction_allowed_on_bank_with_policy(
             &bank,
             &tx,
