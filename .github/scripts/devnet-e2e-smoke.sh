@@ -115,6 +115,75 @@ wait_for_l1_catchup() {
   return 1
 }
 
+wait_for_signature_finalization() {
+  local url=$1 signature=$2 label=${3:-transaction}
+  local params
+  params=$(jq -cn --arg signature "$signature" '[[$signature],{searchTransactionHistory:true}]')
+  for _ in $(seq 1 180); do
+    local status
+    status=$(rpc_result "$url" getSignatureStatuses "$params" 2>/dev/null || true)
+    if [ -n "$status" ]; then
+      if jq -e '.value[0].err != null' >/dev/null <<< "$status"; then
+        echo "$label failed: $(jq -c '.value[0].err' <<< "$status")" >&2
+        return 1
+      fi
+      if [ "$(jq -r '.value[0].confirmationStatus // empty' <<< "$status")" = finalized ]; then
+        return 0
+      fi
+    fi
+    sleep 5
+  done
+  echo "Timed out waiting for $label to finalize" >&2
+  return 1
+}
+
+deposit_receipt_address() {
+  local signature=$1
+  local params
+  params=$(jq -cn --arg signature "$signature" \
+    '[$signature,{encoding:"json",commitment:"finalized",maxSupportedTransactionVersion:0}]')
+  for _ in $(seq 1 30); do
+    local transaction receipt
+    transaction=$(rpc_result "$DEVNET_RPC" getTransaction "$params" 2>/dev/null || true)
+    if [ -n "$transaction" ]; then
+      receipt=$(jq -er --arg portal "$PORTAL_ADDRESS" '
+        .transaction.message as $message
+        | ($message.accountKeys | map(if type == "object" then .pubkey else . end)) as $keys
+        | first(
+            $message.instructions[]
+            | select($keys[.programIdIndex] == $portal)
+            | $keys[.accounts[2]]
+          )
+      ' <<< "$transaction" 2>/dev/null || true)
+      if [ -n "$receipt" ]; then
+        printf '%s\n' "$receipt"
+        return 0
+      fi
+    fi
+    sleep 2
+  done
+  echo "Timed out resolving the L1 deposit receipt" >&2
+  return 1
+}
+
+wait_for_account_owner() {
+  local url=$1 address=$2 expected_owner=$3 label=${4:-account}
+  local params
+  params=$(jq -cn --arg address "$address" \
+    '[$address,{encoding:"base64",commitment:"finalized"}]')
+  for _ in $(seq 1 180); do
+    local account owner
+    account=$(rpc_result "$url" getAccountInfo "$params" 2>/dev/null || true)
+    owner=$(jq -r '.value.owner // empty' <<< "$account" 2>/dev/null || true)
+    if [ "$owner" = "$expected_owner" ]; then
+      return 0
+    fi
+    sleep 5
+  done
+  echo "Timed out waiting for $label $address owned by $expected_owner" >&2
+  return 1
+}
+
 wait_for_session() {
   local expected=$1
   for _ in $(seq 1 360); do
@@ -211,10 +280,16 @@ POST_DEPOSIT_L1_BALANCE=$(get_balance "$DEVNET_RPC" "$WALLET_ADDRESS" confirmed)
 PHASE=wait_for_er_credit
 CREDITED_BALANCE=$(wait_for_deposit_credit "$BASELINE_ER_BALANCE")
 
+PHASE=wait_for_l1_deposit_finalization
+wait_for_signature_finalization "$L1_LOCAL_RPC" "$DEPOSIT_SIGNATURE" "local L1 deposit"
+DEPOSIT_RECEIPT_PDA=$(deposit_receipt_address "$DEPOSIT_SIGNATURE")
+
 PHASE=restart_with_unsettled_state
 restart_validator
 wait_for_l1_rpc
 wait_for_l1_catchup
+PHASE=wait_for_restored_l1_deposit
+wait_for_account_owner "$L1_LOCAL_RPC" "$DEPOSIT_RECEIPT_PDA" "$PORTAL_ADDRESS" "restored L1 deposit receipt"
 wait_for_session "$SESSION_PDA"
 
 PHASE=verify_restored_state
