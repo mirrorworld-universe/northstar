@@ -15,6 +15,18 @@ const SLOTS_INTERVAL: Slot = 10;
 /// Max amount of seconds to wait before triggering reporting of stats.
 const DURATION_INTERVAL: Duration = Duration::from_secs(5);
 
+fn per_second(count: u64, elapsed: Duration) -> u64 {
+    let elapsed_nanos = elapsed.as_nanos();
+    if elapsed_nanos == 0 {
+        return 0;
+    }
+
+    let rate = u128::from(count)
+        .saturating_mul(1_000_000_000)
+        .div_euclid(elapsed_nanos);
+    u64::try_from(rate).unwrap_or(u64::MAX)
+}
+
 /// A struct to control when stats should be reported depending on how many slots or time has passed.
 #[derive(Debug)]
 pub(super) struct Reporting {
@@ -32,10 +44,11 @@ impl Reporting {
         }
     }
 
-    /// Returns `true` if reporting should be done else `false`.
-    fn should_report(&self, root_slot: Slot) -> bool {
-        root_slot >= self.slot.saturating_add(SLOTS_INTERVAL)
-            || self.time.elapsed() > DURATION_INTERVAL
+    /// Returns `Some(duration since last report)` if reporting should be done else `None`.
+    fn should_report(&self, root_slot: Slot) -> Option<Duration> {
+        let elapsed = self.time.elapsed();
+        (root_slot >= self.slot.saturating_add(SLOTS_INTERVAL) || elapsed > DURATION_INTERVAL)
+            .then_some(elapsed)
     }
 }
 
@@ -51,9 +64,7 @@ pub(super) struct SigVerifierStats {
     /// Stats on how long [`extract_and_filter_msgs`] took.
     pub(super) extract_filter_msgs_us: WelfordStats,
     /// Number of packets received.
-    pub(super) num_pkts: WelfordStats,
-    /// Number of discarded packets received from the streamer.
-    pub(super) num_discarded_pkts: Saturating<u64>,
+    pub(super) num_pkts: Saturating<u64>,
     /// Number of times we failed to deserialize a packet.
     pub(super) num_malformed_pkts: Saturating<u64>,
     /// Number of votes discarded due to an invalid rank.
@@ -70,8 +81,10 @@ pub(super) struct SigVerifierStats {
     pub(super) num_generated_certs_received: Saturating<u64>,
     /// Number of times a vote was too far in the future and discarded.
     pub(super) vote_too_far_in_future: Saturating<u64>,
+    pub(super) cert_too_far_in_future: Saturating<u64>,
+    pub(super) num_keep_vote_failed: Saturating<u64>,
+    pub(super) vote_pool_duplicate: Saturating<u64>,
     pub(super) invalid_vote_banning_validator: Saturating<u64>,
-    pub(super) invalid_vote_already_banned: Saturating<u64>,
     /// Last time the stats were reported.
     last_report: Reporting,
 }
@@ -82,9 +95,8 @@ impl SigVerifierStats {
             vote_stats: SigVerifyVoteStats::default(),
             cert_stats: SigVerifyCertStats::default(),
             extract_filter_msgs_us: WelfordStats::default(),
-            num_pkts: WelfordStats::default(),
+            num_pkts: Saturating(0),
             discard_vote_invalid_rank: Saturating(0),
-            num_discarded_pkts: Saturating(0),
             num_malformed_pkts: Saturating(0),
             discard_vote_no_epoch_stakes: Saturating(0),
             num_old_votes_received: Saturating(0),
@@ -92,31 +104,40 @@ impl SigVerifierStats {
             num_verified_certs_received: Saturating(0),
             num_generated_certs_received: Saturating(0),
             vote_too_far_in_future: Saturating(0),
+            cert_too_far_in_future: Saturating(0),
             verify_and_send_batch_us: WelfordStats::default(),
             invalid_vote_banning_validator: Saturating(0),
-            invalid_vote_already_banned: Saturating(0),
+            num_keep_vote_failed: Saturating(0),
+            vote_pool_duplicate: Saturating(0),
             last_report: Reporting::new(root_slot),
         }
+    }
+
+    pub(super) fn elapsed_since_last_report(&self) -> Duration {
+        self.last_report.time.elapsed()
     }
 
     /// Reports stats if they have not been reported in some time.
     ///
     /// Also resets all stats.
     pub(super) fn maybe_report(&mut self, root_slot: Slot) {
-        if self.last_report.should_report(root_slot) {
-            self.do_report(root_slot);
-            *self = SigVerifierStats::new(root_slot);
+        if let Some(elapsed) = self.last_report.should_report(root_slot) {
+            let mut stats = SigVerifierStats::new(root_slot);
+            std::mem::swap(self, &mut stats);
+            stats.do_report(root_slot, elapsed);
         }
     }
 
     /// Reports stats regardless of when they were last reported.
-    pub(super) fn do_report(&mut self, root_slot: Slot) {
+    ///
+    /// `root_slot` should be the current root slot and is reported.
+    /// `elapsed` should be the time since last report and is reported.
+    pub(super) fn do_report(self, root_slot: Slot, elapsed: Duration) {
         let Self {
             vote_stats,
             cert_stats,
             extract_filter_msgs_us,
             num_pkts,
-            num_discarded_pkts,
             num_malformed_pkts,
             num_old_votes_received,
             num_old_certs_received,
@@ -126,16 +147,19 @@ impl SigVerifierStats {
             discard_vote_no_epoch_stakes,
             verify_and_send_batch_us,
             vote_too_far_in_future,
+            cert_too_far_in_future,
             invalid_vote_banning_validator,
-            invalid_vote_already_banned,
+            num_keep_vote_failed,
+            vote_pool_duplicate,
             last_report: _,
         } = self;
 
-        vote_stats.report();
+        vote_stats.report(elapsed);
         cert_stats.report();
         datapoint_info!(
             "bls_sig_verifier_stats",
             ("root_slot", root_slot, i64),
+            ("elapsed_ms", elapsed.as_millis(), i64),
             (
                 "extract_and_verify_us_count",
                 extract_filter_msgs_us.count(),
@@ -151,7 +175,6 @@ impl SigVerifierStats {
                 discard_vote_invalid_rank.0,
                 i64
             ),
-            ("num_discarded_pkts", num_discarded_pkts.0, i64),
             ("num_old_votes_received", num_old_votes_received.0, i64),
             (
                 "num_verified_certs_received",
@@ -186,25 +209,21 @@ impl SigVerifierStats {
                 i64
             ),
             ("vote_too_far_in_future", vote_too_far_in_future.0, i64),
+            ("cert_too_far_in_future", cert_too_far_in_future.0, i64),
             (
                 "invalid_vote_banning_validator",
                 invalid_vote_banning_validator.0,
                 i64
             ),
-            (
-                "invalid_vote_already_banned",
-                invalid_vote_already_banned.0,
-                i64
-            ),
-            ("num_pkts_max", num_pkts.maximum().unwrap_or(0), i64),
-            ("num_pkts_mean", num_pkts.mean().unwrap_or(0), i64),
-            ("num_pkts_count", num_pkts.count(), i64),
+            ("num_keep_vote_failed", num_keep_vote_failed.0, i64),
+            ("vote_pool_duplicate", vote_pool_duplicate.0, i64),
+            ("num_pkts", num_pkts.0, i64),
         );
     }
 }
 
 /// Stats from sigverifying certs.
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub(super) struct SigVerifyCertStats {
     /// Number of certs [`verify_and_send_certificates`] attempted to verify the signature of.
     pub(super) certs_to_sig_verify: Saturating<u64>,
@@ -216,22 +235,13 @@ pub(super) struct SigVerifyCertStats {
     /// Number of certs skipped because another cert of the same `CertificateType` was verified in
     /// the same batch.
     pub(super) redundant_certs_skipped: Saturating<u64>,
-    /// Number of times we are banning a validator that was already banned.
-    pub(super) already_banned: Saturating<u64>,
     /// Number of times we are banning a validator.
     pub(super) banning_validator: Saturating<u64>,
 
     /// Number of times cert verification failed.
     pub(super) certificate_verification_failed: Saturating<u64>,
-    /// Number of times the cert was too far in the future and discarded.
-    pub(super) too_far_in_future: Saturating<u64>,
 
-    /// How many messages are outstanding on the channel.
-    pub(super) pool_outstanding_msgs: Saturating<u64>,
-    /// Number of votes sent successfully over the channel to consensus pool.
-    pub(super) pool_sent: Saturating<u64>,
-    /// Number of times the channel to consensus pool was full and we resorted to blocking send.
-    pub(super) pool_channel_full: Saturating<u64>,
+    pub(super) pool_sender: SenderStats,
 
     /// Stats for [`verify_and_send_certificates`].
     pub(super) fn_verify_and_send_certs_stats: WelfordStats,
@@ -244,46 +254,35 @@ impl SigVerifyCertStats {
             sig_verified_certs,
             unnecessary_certs_verified,
             redundant_certs_skipped,
-            already_banned,
             banning_validator,
             certificate_verification_failed,
-            too_far_in_future,
-            pool_outstanding_msgs,
-            pool_sent,
-            pool_channel_full,
+            pool_sender,
             fn_verify_and_send_certs_stats,
         } = other;
         self.certs_to_sig_verify += certs_to_sig_verify;
         self.sig_verified_certs += sig_verified_certs;
         self.unnecessary_certs_verified += unnecessary_certs_verified;
         self.redundant_certs_skipped += redundant_certs_skipped;
-        self.already_banned += already_banned;
         self.banning_validator += banning_validator;
         self.certificate_verification_failed += certificate_verification_failed;
-        self.too_far_in_future += too_far_in_future;
-        self.pool_outstanding_msgs += pool_outstanding_msgs;
-        self.pool_sent += pool_sent;
-        self.pool_channel_full += pool_channel_full;
+        self.pool_sender.merge(pool_sender);
         self.fn_verify_and_send_certs_stats
             .merge(fn_verify_and_send_certs_stats);
     }
 
-    pub(super) fn report(&self) {
+    pub(super) fn report(self) {
         let Self {
             certs_to_sig_verify,
             sig_verified_certs,
             unnecessary_certs_verified,
             redundant_certs_skipped,
-            already_banned,
             banning_validator,
             certificate_verification_failed,
-            too_far_in_future,
-            pool_outstanding_msgs,
-            pool_sent,
-            pool_channel_full,
+            pool_sender,
             fn_verify_and_send_certs_stats,
         } = self;
 
+        pool_sender.report();
         datapoint_info!(
             "bls_cert_sigverify_stats",
             ("certs_to_sig_verify", certs_to_sig_verify.0, i64),
@@ -294,17 +293,12 @@ impl SigVerifyCertStats {
                 i64
             ),
             ("redundant_certs_skipped", redundant_certs_skipped.0, i64),
-            ("already_banned", already_banned.0, i64),
             ("banning_validator", banning_validator.0, i64),
             (
                 "certificate_verification_failed",
                 certificate_verification_failed.0,
                 i64
             ),
-            ("too_far_in_future", too_far_in_future.0, i64),
-            ("pool_outstanding_msgs", pool_outstanding_msgs.0, i64),
-            ("pool_sent", pool_sent.0, i64),
-            ("pool_channel_full", pool_channel_full.0, i64),
             (
                 "fn_verify_and_send_certs_count",
                 fn_verify_and_send_certs_stats.count(),
@@ -319,13 +313,24 @@ impl SigVerifyCertStats {
     }
 }
 
-/// Stats from sigverifying votes.
+impl Default for SigVerifyCertStats {
+    fn default() -> Self {
+        Self {
+            certs_to_sig_verify: Saturating(0),
+            sig_verified_certs: Saturating(0),
+            unnecessary_certs_verified: Saturating(0),
+            redundant_certs_skipped: Saturating(0),
+            banning_validator: Saturating(0),
+            certificate_verification_failed: Saturating(0),
+            pool_sender: new_cert_stats_pool_sender_stats(),
+            fn_verify_and_send_certs_stats: WelfordStats::default(),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
-pub(super) struct SigVerifyVoteStats {
-    /// Number of votes [`verify_and_send_votes`] was requested to verify the signature of.
-    pub(super) votes_to_sig_verify: Saturating<u64>,
-
+pub(super) struct VoteVerificationStats {
     /// Number of times optimistic verification succeeded
     pub(super) optimistic_verification_succeeded: Saturating<u64>,
     /// Number of times optimistic verification failed
@@ -334,118 +339,48 @@ pub(super) struct SigVerifyVoteStats {
     pub(super) optimistic_batch: WelfordStats,
     /// Number of votes that were individually verified.
     pub(super) num_individual_verified: Saturating<u64>,
-
-    /// Number of times we are banning a validator that was already banned.
-    pub(super) already_banned: Saturating<u64>,
     /// Number of times we are banning a validator.
     pub(super) banning_validator: Saturating<u64>,
-
-    /// Number of votes sent successfully over the channel to metrics.
-    pub(super) metrics_sent: Saturating<u64>,
-    /// Number of times the channel to metrics was full.
-    pub(super) metrics_channel_full: Saturating<u64>,
-    /// Number of votes sent successfully over the channel to rewards.
-    pub(super) rewards_sent: Saturating<u64>,
-    /// Number of times the channel to rewards was full.
-    pub(super) rewards_channel_full: Saturating<u64>,
-    /// How many messages are outstanding on the channel.
-    pub(super) pool_outstanding_msgs: Saturating<u64>,
-    /// Number of votes sent successfully over the channel to consensus pool.
-    pub(super) pool_sent: Saturating<u64>,
-    /// Number of times the channel to consensus pool was full and we resorted to blocking send.
-    pub(super) pool_channel_full: Saturating<u64>,
-    /// Number of votes sent successfully over the channel to repair.
-    pub(super) repair_sent: Saturating<u64>,
-    /// Number of times the channel to repair was full.
-    pub(super) repair_channel_full: Saturating<u64>,
-
-    /// Stats for [`verify_and_send_votes`].
-    pub(super) fn_verify_and_send_votes_stats: WelfordStats,
     /// Stats for [`verify_votes_optimistic`].
     pub(super) fn_verify_votes_optimistic_stats: WelfordStats,
-
     /// Stats for [`verify_individual_votes`].
     pub(super) fn_verify_individual_votes_stats: WelfordStats,
-
-    /// Stats for number of distinct votes in batches.
-    pub(super) distinct_votes_stats: WelfordStats,
 }
 
-impl SigVerifyVoteStats {
+impl VoteVerificationStats {
     pub(super) fn merge(&mut self, other: Self) {
         let Self {
-            votes_to_sig_verify,
             optimistic_verification_succeeded,
             optimistic_verification_failed,
             optimistic_batch,
             num_individual_verified,
-            already_banned,
             banning_validator,
-            metrics_sent,
-            metrics_channel_full,
-            rewards_sent,
-            rewards_channel_full,
-            repair_sent,
-            repair_channel_full,
-            pool_outstanding_msgs,
-            pool_sent,
-            pool_channel_full,
-            fn_verify_and_send_votes_stats,
             fn_verify_votes_optimistic_stats,
             fn_verify_individual_votes_stats,
-            distinct_votes_stats,
         } = other;
-        self.votes_to_sig_verify += votes_to_sig_verify;
         self.optimistic_verification_succeeded += optimistic_verification_succeeded;
         self.optimistic_verification_failed += optimistic_verification_failed;
         self.optimistic_batch.merge(optimistic_batch);
         self.num_individual_verified += num_individual_verified;
-        self.already_banned += already_banned;
         self.banning_validator += banning_validator;
-        self.metrics_sent += metrics_sent;
-        self.metrics_channel_full += metrics_channel_full;
-        self.rewards_sent += rewards_sent;
-        self.rewards_channel_full += rewards_channel_full;
-        self.repair_sent += repair_sent;
-        self.repair_channel_full += repair_channel_full;
-        self.pool_outstanding_msgs += pool_outstanding_msgs;
-        self.pool_sent += pool_sent;
-        self.pool_channel_full += pool_channel_full;
-        self.fn_verify_and_send_votes_stats
-            .merge(fn_verify_and_send_votes_stats);
         self.fn_verify_votes_optimistic_stats
             .merge(fn_verify_votes_optimistic_stats);
         self.fn_verify_individual_votes_stats
             .merge(fn_verify_individual_votes_stats);
-        self.distinct_votes_stats.merge(distinct_votes_stats);
     }
 
-    pub(super) fn report(&self) {
+    pub(super) fn report(self) {
         let Self {
-            votes_to_sig_verify,
             optimistic_verification_succeeded,
             optimistic_verification_failed,
             optimistic_batch,
             num_individual_verified,
-            already_banned,
             banning_validator,
-            metrics_sent,
-            metrics_channel_full,
-            rewards_sent,
-            rewards_channel_full,
-            repair_sent,
-            repair_channel_full,
-            pool_outstanding_msgs,
-            pool_sent,
-            pool_channel_full,
-            fn_verify_and_send_votes_stats,
             fn_verify_votes_optimistic_stats,
             fn_verify_individual_votes_stats,
-            distinct_votes_stats,
         } = self;
         datapoint_info!(
-            "bls_vote_sigverify_stats",
-            ("votes_to_sig_verify", votes_to_sig_verify.0, i64),
+            "bls_vote_sigverify_verification_stats",
             (
                 "optimistic_verification_succeeded",
                 optimistic_verification_succeeded.0,
@@ -462,28 +397,13 @@ impl SigVerifyVoteStats {
                 optimistic_batch.mean().unwrap_or(0),
                 i64
             ),
+            (
+                "optimistic_batch_max",
+                optimistic_batch.maximum().unwrap_or(0),
+                i64
+            ),
             ("num_individual_verified", num_individual_verified.0, i64),
-            ("already_banned", already_banned.0, i64),
             ("banning_validator", banning_validator.0, i64),
-            ("metrics_sent", metrics_sent.0, i64),
-            ("metrics_channel_full", metrics_channel_full.0, i64),
-            ("rewards_sent", rewards_sent.0, i64),
-            ("rewards_channel_full", rewards_channel_full.0, i64),
-            ("repair_sent", repair_sent.0, i64),
-            ("repair_channel_full", repair_channel_full.0, i64),
-            ("pool_outstanding_msgs", pool_outstanding_msgs.0, i64),
-            ("pool_sent", pool_sent.0, i64),
-            ("pool_channel_full", pool_channel_full.0, i64),
-            (
-                "fn_verify_and_send_votes_count",
-                fn_verify_and_send_votes_stats.count(),
-                i64
-            ),
-            (
-                "fn_verify_and_send_votes_mean",
-                fn_verify_and_send_votes_stats.mean().unwrap_or(0),
-                i64
-            ),
             (
                 "fn_verify_votes_optimistic_count",
                 fn_verify_votes_optimistic_stats.count(),
@@ -504,12 +424,163 @@ impl SigVerifyVoteStats {
                 fn_verify_individual_votes_stats.mean().unwrap_or(0),
                 i64
             ),
+        );
+    }
+}
+
+#[derive(Debug, Default)]
+#[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
+/// Stats from sigverifying votes.
+pub(super) struct SigVerifyVoteStats {
+    /// Number of votes [`verify_and_send_votes`] was requested to verify the signature of.
+    pub(super) votes_to_sig_verify: Saturating<u64>,
+    pub(super) senders: VoteSenderStats,
+    /// Stats for [`verify_and_send_votes`].
+    pub(super) fn_verify_and_send_votes_stats: WelfordStats,
+    /// Stats for number of distinct votes in batches.
+    pub(super) distinct_votes_stats: WelfordStats,
+    pub(super) vote_verification_stats: VoteVerificationStats,
+}
+
+impl SigVerifyVoteStats {
+    pub(super) fn merge(&mut self, other: Self) {
+        let Self {
+            votes_to_sig_verify,
+            fn_verify_and_send_votes_stats,
+            distinct_votes_stats,
+            senders,
+            vote_verification_stats,
+        } = other;
+        self.votes_to_sig_verify += votes_to_sig_verify;
+        self.fn_verify_and_send_votes_stats
+            .merge(fn_verify_and_send_votes_stats);
+        self.distinct_votes_stats.merge(distinct_votes_stats);
+        self.senders.merge(senders);
+        self.vote_verification_stats.merge(vote_verification_stats);
+    }
+
+    pub(super) fn report(self, elapsed: Duration) {
+        let Self {
+            votes_to_sig_verify,
+            fn_verify_and_send_votes_stats,
+            distinct_votes_stats,
+            senders,
+            vote_verification_stats,
+        } = self;
+        senders.report();
+        vote_verification_stats.report();
+        let votes_per_sec = per_second(votes_to_sig_verify.0, elapsed);
+        datapoint_info!(
+            "bls_vote_sigverify_stats",
+            ("votes_to_sig_verify", votes_to_sig_verify.0, i64),
+            ("votes_to_sig_verify_per_sec", votes_per_sec, i64),
+            (
+                "fn_verify_and_send_votes_count",
+                fn_verify_and_send_votes_stats.count(),
+                i64
+            ),
+            (
+                "fn_verify_and_send_votes_mean",
+                fn_verify_and_send_votes_stats.mean().unwrap_or(0),
+                i64
+            ),
             ("distinct_votes_count", distinct_votes_stats.count(), i64),
             (
                 "distinct_votes_mean",
                 distinct_votes_stats.mean().unwrap_or(0),
                 i64
             ),
+        );
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct VoteSenderStats {
+    pub(super) metrics_sender: SenderStats,
+    pub(super) rewards_sender: SenderStats,
+    pub(super) pool_sender: SenderStats,
+    pub(super) repair_sender: SenderStats,
+}
+
+impl VoteSenderStats {
+    pub(super) fn merge(&mut self, other: Self) {
+        let Self {
+            metrics_sender,
+            rewards_sender,
+            pool_sender,
+            repair_sender,
+        } = other;
+        self.metrics_sender.merge(metrics_sender);
+        self.rewards_sender.merge(rewards_sender);
+        self.pool_sender.merge(pool_sender);
+        self.repair_sender.merge(repair_sender);
+    }
+
+    pub(super) fn report(self) {
+        let Self {
+            metrics_sender,
+            rewards_sender,
+            pool_sender,
+            repair_sender,
+        } = self;
+        metrics_sender.report();
+        rewards_sender.report();
+        pool_sender.report();
+        repair_sender.report();
+    }
+}
+
+impl Default for VoteSenderStats {
+    fn default() -> Self {
+        Self {
+            metrics_sender: SenderStats::new("bls_vote_sigverify_metrics_sender_stats"),
+            rewards_sender: SenderStats::new("bls_vote_sigverify_rewards_sender_stats"),
+            repair_sender: SenderStats::new("bls_vote_sigverify_repair_sender_stats"),
+            pool_sender: SenderStats::new("bls_vote_sigverify_pool_sender_stats"),
+        }
+    }
+}
+
+fn new_cert_stats_pool_sender_stats() -> SenderStats {
+    SenderStats::new("bls_cert_sigverify_pool_sender_stats")
+}
+
+#[derive(Debug)]
+pub(crate) struct SenderStats {
+    name: &'static str,
+    pub(super) sent: Saturating<u64>,
+    pub(super) channel_full: Saturating<u64>,
+}
+
+impl SenderStats {
+    pub(crate) fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            sent: Saturating(0),
+            channel_full: Saturating(0),
+        }
+    }
+
+    pub(super) fn merge(&mut self, other: Self) {
+        let Self {
+            sent,
+            channel_full,
+            name: _,
+        } = other;
+        self.sent += sent;
+        self.channel_full += channel_full;
+    }
+
+    pub(super) fn report(self) {
+        let Self {
+            sent,
+            channel_full,
+            name,
+        } = self;
+        datapoint_info!(
+            name,
+            ("sent", sent.0, i64),
+            ("channel_full", channel_full.0, i64),
         );
     }
 }

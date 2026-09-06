@@ -11,7 +11,6 @@ mod serde_snapshot_tests {
             snapshot_utils::StorageAndNextAccountsFileId,
         },
         agave_fs::{FileInfo, buffered_reader::FileBufRead as _, io_setup::IoSetupState},
-        log::info,
         rand::{Rng, rng},
         solana_account::{AccountSharedData, ReadableAccount},
         solana_accounts_db::{
@@ -95,19 +94,12 @@ mod serde_snapshot_tests {
         )
     }
 
-    fn account_storages_to_stream<W>(
-        stream: &mut W,
-        slot: Slot,
-        account_storage_entries: &[Arc<AccountStorageEntry>],
-    ) -> wincode::WriteResult<()>
+    fn accounts_db_fields_to_stream<W>(stream: &mut W, slot: Slot) -> wincode::WriteResult<()>
     where
         W: Write,
     {
         let bank_hash_stats = BankHashStats::default();
-        serialize_into(
-            stream,
-            &SerializableAccountsDb::new(slot, account_storage_entries, bank_hash_stats),
-        )
+        serialize_into(stream, &SerializableAccountsDb::new(slot, bank_hash_stats))
     }
 
     /// Simulates the unpacking & storage reconstruction done during snapshot unpacking
@@ -163,8 +155,7 @@ mod serde_snapshot_tests {
         accounts_db_config: AccountsDbConfig,
     ) -> AccountsDb {
         let mut writer = Cursor::new(vec![]);
-        let snapshot_storages = accounts.get_storages(..=slot).0;
-        account_storages_to_stream(&mut writer, slot, &snapshot_storages).unwrap();
+        accounts_db_fields_to_stream(&mut writer, slot).unwrap();
 
         let buf = writer.into_inner();
         let mut reader = BufReader::new(&buf[..]);
@@ -221,12 +212,7 @@ mod serde_snapshot_tests {
 
         for (i, pubkey) in pubkeys.iter().enumerate() {
             let account = AccountSharedData::new(i as u64 + 1, 0, &Pubkey::default());
-            accounts.store_accounts_seq(
-                (slot, [(pubkey, &account)].as_slice()),
-                0,
-                None,
-                &ancestors,
-            );
+            accounts.store_accounts((slot, [(pubkey, &account)].as_slice()), 0, None, &ancestors);
         }
         check_accounts_local(&accounts, &pubkeys, 100);
         accounts.accounts_db.add_root_and_flush_write_cache(slot);
@@ -235,12 +221,7 @@ mod serde_snapshot_tests {
             .calculate_accounts_lt_hash_at_startup_from_index(&Ancestors::default());
 
         let mut writer = Cursor::new(vec![]);
-        account_storages_to_stream(
-            &mut writer,
-            slot,
-            &accounts.accounts_db.get_storages(..=slot).0,
-        )
-        .unwrap();
+        accounts_db_fields_to_stream(&mut writer, slot).unwrap();
 
         let copied_accounts = TempDir::new().unwrap();
 
@@ -431,7 +412,7 @@ mod serde_snapshot_tests {
 
         accounts.add_root_and_flush_write_cache(current_slot);
 
-        accounts.assert_load_account(current_slot, pubkey, zero_lamport);
+        accounts.assert_not_load_account(current_slot, pubkey);
 
         accounts.print_accounts_stats("accounts");
 
@@ -504,10 +485,13 @@ mod serde_snapshot_tests {
 
         accounts.print_accounts_stats("post_f");
 
+        // The live accounts survive the chained zero-lamport purges and snapshot round-trip.
         accounts.assert_load_account(current_slot, pubkey, some_lamport);
-        accounts.assert_load_account(current_slot, purged_pubkey1, 0);
-        accounts.assert_load_account(current_slot, purged_pubkey2, 0);
         accounts.assert_load_account(current_slot, dummy_pubkey, dummy_lamport);
+        // Both purged accounts were converted to tombstones at flush; with no full snapshot
+        // taken by then, their tombstone-only storages were purged and neither is in the index.
+        accounts.assert_not_load_account(current_slot, purged_pubkey1);
+        accounts.assert_not_load_account(current_slot, purged_pubkey2);
 
         let calculated_capitalization =
             accounts.calculate_capitalization_at_startup_from_index(&Ancestors::default());
@@ -620,8 +604,10 @@ mod serde_snapshot_tests {
         accounts.print_count_and_status("after purge zero");
 
         accounts.assert_load_account(current_slot, pubkey, old_lamport);
-        accounts.assert_load_account(current_slot, purged_pubkey1, 0);
-        accounts.assert_load_account(current_slot, purged_pubkey2, 0);
+        // Both purged accounts were converted to tombstones at flush; with no full snapshot
+        // taken by then, their tombstone-only storages were purged and neither is in the index.
+        accounts.assert_not_load_account(current_slot, purged_pubkey1);
+        accounts.assert_not_load_account(current_slot, purged_pubkey2);
     }
 
     #[test]
@@ -658,30 +644,30 @@ mod serde_snapshot_tests {
         current_slot += 1;
         assert_eq!(0, accounts.alive_account_count_in_slot(current_slot));
         accounts.add_root_and_flush_write_cache(current_slot - 1);
-        assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey1), 1);
+        assert!(accounts.contains(&pubkey1));
         accounts.store_for_tests((current_slot, [(&pubkey1, &account2)].as_slice()));
         accounts.store_for_tests((current_slot, [(&pubkey1, &account2)].as_slice()));
         accounts.add_root_and_flush_write_cache(current_slot);
         assert_eq!(1, accounts.alive_account_count_in_slot(current_slot));
-        // Ref count is 1 as the older version in the previous slot was marked obsolete
-        assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey1), 1);
+        // pubkey1 is still alive; the older version in the previous slot was marked obsolete
+        assert!(accounts.contains(&pubkey1));
 
         // C: Yet more update to trigger lazy clean of step A
         current_slot += 1;
-        assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey1), 1);
+        assert!(accounts.contains(&pubkey1));
         accounts.store_for_tests((current_slot, [(&pubkey1, &account3)].as_slice()));
         accounts.add_root_and_flush_write_cache(current_slot);
-        assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey1), 1);
+        assert!(accounts.contains(&pubkey1));
         accounts.add_root_and_flush_write_cache(current_slot);
 
         // D: Make pubkey1 0-lamport; also triggers clean of step B
         current_slot += 1;
-        assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey1), 1);
+        assert!(accounts.contains(&pubkey1));
         accounts.store_for_tests((current_slot, [(&pubkey1, &zero_lamport_account)].as_slice()));
         accounts.add_root_and_flush_write_cache(current_slot);
 
-        // Ref count is 1 as the older versions were marked obsolete
-        assert_eq!(accounts.accounts_index.ref_count_from_storage(&pubkey1), 1);
+        // The zero lamport account was converted to a tombstone, so pubkey1 is out of the index
+        assert!(!accounts.contains(&pubkey1));
         accounts.add_root(current_slot);
 
         // E: Avoid missing bank hash error
@@ -689,7 +675,7 @@ mod serde_snapshot_tests {
         accounts.store_for_tests((current_slot, [(&dummy_pubkey, &dummy_account)].as_slice()));
         accounts.add_root(current_slot);
 
-        accounts.assert_load_account(current_slot, pubkey1, zero_lamport);
+        accounts.assert_not_load_account(current_slot, pubkey1);
         accounts.assert_load_account(current_slot, pubkey2, old_lamport);
         accounts.assert_load_account(current_slot, dummy_pubkey, dummy_lamport);
 
@@ -699,38 +685,24 @@ mod serde_snapshot_tests {
         // So, prevent that from happening by introducing refcount
         ((current_slot - 1)..=current_slot).for_each(|slot| accounts.flush_root_write_cache(slot));
         accounts.clean_accounts_for_tests();
+
+        // Reconstruct the database from the snapshot to simulate a restore
         let accounts = reconstruct_accounts_db_via_serialization(
             &accounts,
             current_slot,
             ACCOUNTS_DB_CONFIG_FOR_TESTING,
         );
 
-        // Set snapshot to zero to avoid cleaning zero-lamport pubkey1
-        accounts.set_latest_full_snapshot_slot(0);
-        accounts.clean_accounts_for_tests();
-
-        info!("pubkey: {pubkey1}");
-        accounts.print_accounts_stats("pre_clean");
+        // At this point pubkey 1 has been restored as a zero lamport account
         accounts.assert_load_account(current_slot, pubkey1, zero_lamport);
         accounts.assert_load_account(current_slot, pubkey2, old_lamport);
         accounts.assert_load_account(current_slot, dummy_pubkey, dummy_lamport);
 
-        // F: Finally, make Step A cleanable
-        current_slot += 1;
-        accounts.store_for_tests((current_slot, [(&pubkey2, &account)].as_slice()));
-        accounts.add_root(current_slot);
-
-        // Do clean
-        accounts.flush_root_write_cache(current_slot);
-
-        // Make zero-lamport pubkey1 cleanable by setting the latest snapshot slot
-        accounts.set_latest_full_snapshot_slot(current_slot);
+        // Regardless of the snapshot slot the zero-lamport pubkey1 is turned into a tombstone
+        // by clean
+        accounts.set_latest_full_snapshot_slot(0);
         accounts.clean_accounts_for_tests();
 
-        // 2nd clean needed to clean-up pubkey1
-        accounts.clean_accounts_for_tests();
-
-        // Ensure pubkey2 is cleaned from the index finally
         accounts.assert_not_load_account(current_slot, pubkey1);
         accounts.assert_load_account(current_slot, pubkey2, old_lamport);
         accounts.assert_load_account(current_slot, dummy_pubkey, dummy_lamport);

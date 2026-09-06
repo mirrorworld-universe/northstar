@@ -378,7 +378,10 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
         signers: &[Pubkey],
     ) -> Result<(), InstructionError> {
         // We reference accounts by an u8 index, so we have a total of 256 accounts.
-        let mut transaction_callee_map: Vec<u16> = vec![u16::MAX; MAX_ACCOUNTS_PER_TRANSACTION];
+        let transaction_callee_map_len = (self.transaction_context.get_number_of_accounts()
+            as usize)
+            .min(MAX_ACCOUNTS_PER_TRANSACTION);
+        let mut transaction_callee_map: Vec<u16> = vec![u16::MAX; transaction_callee_map_len];
         let mut instruction_accounts: Vec<InstructionAccount> =
             Vec::with_capacity(instruction.accounts.len());
 
@@ -582,7 +585,11 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
         for (top_level_instruction_index, (_, instruction)) in
             message.program_instructions_iter().enumerate()
         {
-            let mut transaction_callee_map: Vec<u16> = vec![u16::MAX; MAX_ACCOUNTS_PER_TRANSACTION];
+            let transaction_callee_map_len = message
+                .account_keys()
+                .len()
+                .min(MAX_ACCOUNTS_PER_TRANSACTION);
+            let mut transaction_callee_map: Vec<u16> = vec![u16::MAX; transaction_callee_map_len];
 
             let mut instruction_accounts: Vec<InstructionAccount> =
                 Vec::with_capacity(instruction.accounts.len());
@@ -1069,7 +1076,7 @@ pub fn mock_process_instruction_with_feature_set<
         .any(|(key, _)| *key == sysvar::epoch_schedule::id())
     {
         let mut account = AccountSharedData::new(1, solana_epoch_schedule::SIZE, &sysvar::id());
-        bincode::serialize_into(account.data_as_mut_slice(), &EpochSchedule::default()).unwrap();
+        wincode::serialize_into(account.data_as_mut_slice(), &EpochSchedule::default()).unwrap();
         accounts.push((sysvar::epoch_schedule::id(), account));
     }
 
@@ -1101,7 +1108,7 @@ pub fn mock_process_instruction_with_feature_set<
         } else {
             program_owner
         },
-        Arc::new(ProgramCacheEntry::new_builtin(0, builtin)),
+        Arc::new(ProgramCacheEntry::new_builtin(builtin)),
     );
     program_cache_for_tx_batch.set_slot_for_tests(
         invoke_context
@@ -1191,7 +1198,7 @@ mod tests {
         solana_signer::Signer,
         solana_svm_feature_set::SVMFeatureSet,
         solana_transaction::{Transaction, sanitized::SanitizedTransaction},
-        solana_transaction_context::MAX_ACCOUNTS_PER_INSTRUCTION,
+        solana_transaction_context::{MAX_ACCOUNTS_PER_INSTRUCTION, MAX_ACCOUNTS_PER_TRANSACTION},
         test_case::test_case,
     };
 
@@ -1448,13 +1455,14 @@ mod tests {
             MAX_INSTRUCTIONS,
             2,
         );
+        let num_transaction_accounts = usize::from(transaction_context.get_number_of_accounts());
 
         transaction_context
             .configure_instruction_at_index(
                 0,
                 0,
                 vec![InstructionAccount::new(0, false, false)],
-                vec![u16::MAX; 256],
+                vec![u16::MAX; num_transaction_accounts],
                 Cow::Owned(Vec::new()),
                 None,
             )
@@ -1465,7 +1473,7 @@ mod tests {
                 1,
                 0,
                 vec![InstructionAccount::new(0, false, false)],
-                vec![u16::MAX; 256],
+                vec![u16::MAX; num_transaction_accounts],
                 Cow::Owned(Vec::new()),
                 None,
             )
@@ -1531,7 +1539,7 @@ mod tests {
         let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::default();
         program_cache_for_tx_batch.replenish(
             callee_program_id,
-            Arc::new(ProgramCacheEntry::new_builtin(0, MockBuiltin::register)),
+            Arc::new(ProgramCacheEntry::new_builtin(MockBuiltin::register)),
         );
         invoke_context.program_cache_for_tx_batch = &mut program_cache_for_tx_batch;
 
@@ -1586,7 +1594,7 @@ mod tests {
         let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::default();
         program_cache_for_tx_batch.replenish(
             callee_program_id,
-            Arc::new(ProgramCacheEntry::new_builtin(0, MockBuiltin::register)),
+            Arc::new(ProgramCacheEntry::new_builtin(MockBuiltin::register)),
         );
         invoke_context.program_cache_for_tx_batch = &mut program_cache_for_tx_batch;
 
@@ -1670,7 +1678,7 @@ mod tests {
         let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::default();
         program_cache_for_tx_batch.replenish(
             program_key,
-            Arc::new(ProgramCacheEntry::new_builtin(0, MockBuiltin::register)),
+            Arc::new(ProgramCacheEntry::new_builtin(MockBuiltin::register)),
         );
         invoke_context.program_cache_for_tx_batch = &mut program_cache_for_tx_batch;
 
@@ -1958,7 +1966,7 @@ mod tests {
         let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::default();
         program_cache_for_tx_batch.replenish(
             TEST_CALLEE_PROGRAM_ID,
-            Arc::new(ProgramCacheEntry::new_builtin(0, MockBuiltin::register)),
+            Arc::new(ProgramCacheEntry::new_builtin(MockBuiltin::register)),
         );
         invoke_context.program_cache_for_tx_batch = &mut program_cache_for_tx_batch;
 
@@ -2177,7 +2185,7 @@ mod tests {
         let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::default();
         program_cache_for_tx_batch.replenish(
             mock_system_program_id,
-            Arc::new(ProgramCacheEntry::new_builtin(0, MockBuiltin::register)),
+            Arc::new(ProgramCacheEntry::new_builtin(MockBuiltin::register)),
         );
         let account_keys = (0..transaction_context.get_number_of_accounts())
             .map(|index| {
@@ -2395,7 +2403,7 @@ mod tests {
         let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::default();
         program_cache_for_tx_batch.replenish(
             mock_program_id,
-            Arc::new(ProgramCacheEntry::new_builtin(0, MockBuiltin::register)),
+            Arc::new(ProgramCacheEntry::new_builtin(MockBuiltin::register)),
         );
         let account_metas = vec![
             AccountMeta::new(
@@ -2622,7 +2630,7 @@ mod tests {
         let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::default();
         program_cache_for_tx_batch.replenish(
             mock_program_id,
-            Arc::new(ProgramCacheEntry::new_builtin(0, MockBuiltin::register)),
+            Arc::new(ProgramCacheEntry::new_builtin(MockBuiltin::register)),
         );
 
         struct MockCallback {}

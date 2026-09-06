@@ -11,7 +11,9 @@ use {
     chrono_humanize::{Accuracy, HumanTime, Tense},
     log::*,
     serde::Serialize,
-    solana_account::{Account, AccountSharedData, ReadableAccount, state_traits::StateMut},
+    solana_account::{
+        Account, AccountSharedData, ReadableAccount, state_traits::StateMutWincode as _,
+    },
     solana_account_info::AccountInfo,
     solana_accounts_db::accounts_db::ACCOUNTS_DB_CONFIG_FOR_TESTING,
     solana_address::Address,
@@ -991,7 +993,7 @@ impl ProgramTest {
         self.builtin_programs.push((
             program_id,
             program_name,
-            ProgramCacheEntry::new_builtin(0, builtin),
+            ProgramCacheEntry::new_builtin(builtin),
         ));
     }
 
