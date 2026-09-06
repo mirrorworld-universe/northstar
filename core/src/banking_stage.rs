@@ -19,6 +19,7 @@ use {
         validator::BlockProductionMethod,
     },
     agave_banking_stage_ingress_types::{BankingPacketReceiver, SchedulerPriorityFloor},
+    agave_votor::slot_clock::SharedAlpenglowSlotClock,
     crossbeam_channel::{Receiver, Sender, bounded},
     futures::{StreamExt, stream::FuturesUnordered},
     histogram::Histogram,
@@ -49,6 +50,7 @@ use {
     tokio::sync::mpsc,
     tokio_util::sync::CancellationToken,
     transaction_scheduler::{
+        check_worker::spawn_check_workers,
         greedy_scheduler::{GreedyScheduler, GreedySchedulerConfig},
         receive_and_buffer::TransactionViewReceiveAndBuffer,
     },
@@ -64,6 +66,7 @@ mod decision_maker;
 mod latest_validator_vote_packet;
 mod leader_slot_metrics;
 mod leader_slot_timing_metrics;
+mod qos_service;
 mod scheduler_messages;
 mod vote_packet_receiver;
 mod vote_storage;
@@ -338,6 +341,8 @@ pub struct BankingStage {
     transaction_recorder: TransactionRecorder,
     poh_recorder: Arc<RwLock<PohRecorder>>,
     bank_forks: Arc<RwLock<BankForks>>,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    alpenglow_slot_clock: SharedAlpenglowSlotClock,
     committer: Committer,
     log_messages_bytes_limit: Option<usize>,
     filter_keys: Arc<HashSet<Pubkey>>,
@@ -361,6 +366,7 @@ impl BankingStage {
         replay_vote_sender: ReplayVoteSender,
         log_messages_bytes_limit: Option<usize>,
         bank_forks: Arc<RwLock<BankForks>>,
+        alpenglow_slot_clock: SharedAlpenglowSlotClock,
         prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
         filter_keys: Arc<HashSet<Pubkey>>,
         priority_floor: Arc<SchedulerPriorityFloor>,
@@ -383,6 +389,7 @@ impl BankingStage {
             transaction_recorder,
             poh_recorder,
             bank_forks,
+            alpenglow_slot_clock,
             committer,
             log_messages_bytes_limit,
             filter_keys,
@@ -507,24 +514,35 @@ impl BankingStage {
 
         assert!(num_workers <= BankingStage::max_num_workers());
         let num_workers = num_workers.get();
+        const NUM_CHECK_WORKERS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
+        const CHANNEL_CAPACITY: usize = 10_000;
 
         let exit = self.worker_exit_signal.clone();
 
         // Setup receive & buffer.
         let sharable_banks = self.bank_forks.read().unwrap().sharable_banks();
-        let receive_and_buffer = TransactionViewReceiveAndBuffer {
-            receiver: self.non_vote_receiver.clone(),
-            sharable_banks: sharable_banks.clone(),
-            filter_keys: self.filter_keys.clone(),
-        };
+        let priority_floor = self.priority_floor.clone();
+        let (check_work_sender, check_work_receiver) = bounded(CHANNEL_CAPACITY);
+        let (check_result_sender, check_result_receiver) = bounded(CHANNEL_CAPACITY);
+        let check_worker_handles = spawn_check_workers(
+            NUM_CHECK_WORKERS,
+            check_work_receiver,
+            check_result_sender,
+            sharable_banks.clone(),
+            self.filter_keys.clone(),
+        );
+        let receive_and_buffer = TransactionViewReceiveAndBuffer::new(
+            self.non_vote_receiver.clone(),
+            check_work_sender,
+            check_result_receiver,
+        );
 
         // Spawn vote worker.
-        let mut threads = Vec::with_capacity(num_workers + 2);
+        let mut threads = Vec::with_capacity(num_workers + NUM_CHECK_WORKERS.get() + 2);
+        threads.extend(check_worker_handles);
         threads.push(self.spawn_vote_worker());
 
         // Create channels for communication between scheduler and workers
-        const CHANNEL_CAPACITY: usize = 10_000; // unlikely we'll ever hit this given default configuration.
-
         let (work_senders, work_receivers): (Vec<Sender<_>>, Vec<Receiver<_>>) =
             (0..num_workers).map(|_| bounded(CHANNEL_CAPACITY)).unzip();
         let (finished_work_sender, finished_work_receiver) =
@@ -567,7 +585,6 @@ impl BankingStage {
             finished_work_receiver,
             GreedySchedulerConfig::default(),
         );
-        let priority_floor = self.priority_floor.clone();
         let exit = exit.clone();
         let shutdown_signal = self.banking_shutdown_signal.clone();
         threads.push(
@@ -659,8 +676,13 @@ impl BankingStage {
 mod external {
     use {
         super::*,
-        crate::banking_stage::consume_worker::external::ExternalWorker,
-        agave_scheduling_utils::handshake::{AgaveSession, AgaveWorkerSession},
+        crate::banking_stage::{
+            consume_worker::external::ExternalWorker,
+            transaction_scheduler::check_worker::external::ExternalCheckWorker,
+        },
+        agave_scheduling_utils::handshake::{
+            AgaveCheckWorkerSession, AgaveSession, AgaveWorkerSession,
+        },
         tpu_to_pack::BankingPacketReceivers,
     };
 
@@ -671,6 +693,7 @@ mod external {
                 flags: _,
                 tpu_to_pack,
                 progress_tracker,
+                check_workers,
                 workers,
             }: AgaveSession,
         ) -> Result<Vec<JoinHandle<()>>, ()> {
@@ -683,7 +706,7 @@ mod external {
             assert!(workers.len() <= BankingStage::max_num_workers().get());
 
             // Spawn the external consumer workers.
-            let mut threads = Vec::with_capacity(workers.len() + 2);
+            let mut threads = Vec::with_capacity(workers.len() + check_workers.len() + 2);
             let mut worker_metrics = Vec::with_capacity(workers.len());
             for (
                 index,
@@ -706,7 +729,6 @@ mod external {
                     worker_to_pack,
                     allocator,
                     self.poh_recorder.read().unwrap().shared_leader_state(),
-                    self.bank_forks.read().unwrap().sharable_banks(),
                 );
 
                 worker_metrics.push(consume_worker.metrics_handle());
@@ -716,6 +738,37 @@ mod external {
                         .spawn(move || {
                             if let Err(err) = consume_worker.run(pack_to_worker) {
                                 error!("External consume worker error; err={err}");
+                            }
+                        })
+                        .unwrap(),
+                );
+            }
+
+            for (
+                index,
+                AgaveCheckWorkerSession {
+                    allocator,
+                    pack_to_check_worker,
+                    check_worker_to_pack,
+                },
+            ) in check_workers.into_iter().enumerate()
+            {
+                let id = index as u32;
+                let check_worker = ExternalCheckWorker::new(
+                    self.worker_exit_signal.clone(),
+                    pack_to_check_worker,
+                    check_worker_to_pack,
+                    allocator,
+                    self.poh_recorder.read().unwrap().shared_leader_state(),
+                    self.bank_forks.read().unwrap().sharable_banks(),
+                );
+
+                threads.push(
+                    Builder::new()
+                        .name(format!("solEChWorker{id:02}"))
+                        .spawn(move || {
+                            if let Err(err) = check_worker.run() {
+                                error!("External check worker error; err={err}");
                             }
                         })
                         .unwrap(),
@@ -741,12 +794,15 @@ mod external {
 
                 (poh.shared_leader_state(), poh.ticks_per_slot())
             };
+            let migration_status = self.bank_forks.read().unwrap().migration_status();
             threads.push(progress_tracker::spawn(
                 self.worker_exit_signal.clone(),
                 progress_tracker,
                 shared_leader_state,
                 worker_metrics,
                 ticks_per_slot,
+                migration_status,
+                self.alpenglow_slot_clock.clone(),
             ));
 
             Ok(threads)
@@ -923,6 +979,7 @@ mod tests {
             replay_vote_sender,
             None,
             bank_forks,
+            SharedAlpenglowSlotClock::default(),
             None,
             Arc::default(),
             Arc::new(SchedulerPriorityFloor::new()),
@@ -985,6 +1042,7 @@ mod tests {
             replay_vote_sender,
             None,
             bank_forks, // keep a local-copy of bank-forks so worker threads do not lose weak access to bank-forks
+            SharedAlpenglowSlotClock::default(),
             None,
             Arc::default(),
             Arc::new(SchedulerPriorityFloor::new()),
@@ -1137,6 +1195,7 @@ mod tests {
                 replay_vote_sender,
                 None,
                 bank_forks,
+                SharedAlpenglowSlotClock::default(),
                 None,
                 Arc::default(),
                 Arc::new(SchedulerPriorityFloor::new()),
@@ -1292,6 +1351,7 @@ mod tests {
             replay_vote_sender,
             None,
             bank_forks,
+            SharedAlpenglowSlotClock::default(),
             None,
             Arc::default(),
             Arc::new(SchedulerPriorityFloor::new()),

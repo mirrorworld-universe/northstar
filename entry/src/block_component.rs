@@ -130,13 +130,14 @@
 /// └─────────────────────────────────────────┘
 /// ```
 use {
-    crate::entry::{Entry, MaxDataShredsLen},
+    crate::entry::{Entry, EntryView, MaxDataShredsLen},
     agave_votor_messages::{
         certificate::{CertSignature, CertificateType, GenesisCert},
         consensus_message::Block,
         reward_certificate::{NotarRewardCertificate, SkipRewardCertificate},
         unverified_vote_message::UnverifiedCertificate,
     },
+    bytes::Bytes,
     solana_bls_signatures::{
         BlsError, Signature as BLSSignature, SignatureCompressed as BLSSignatureCompressed,
         signature::AsSignatureAffine,
@@ -329,6 +330,30 @@ pub struct VotesAggregate {
 }
 
 impl VotesAggregate {
+    /// Creates a new `VotesAggregate` from a compressed signature and bitmap.
+    #[cfg(feature = "dev-context-only-utils")]
+    pub fn new(signature: BLSSignatureCompressed, bitmap: Vec<u8>) -> Self {
+        Self { signature, bitmap }
+    }
+
+    /// Returns a reference to the compressed signature.
+    pub fn signature(&self) -> &BLSSignatureCompressed {
+        &self.signature
+    }
+
+    /// Returns a reference to the bitmap.
+    pub fn bitmap(&self) -> &[u8] {
+        &self.bitmap
+    }
+
+    /// Returns every field of the aggregate. Callers that must not silently
+    /// ignore new fields (e.g. the geyser boundary conversion) bind this
+    /// tuple exhaustively, so growing it breaks them at compile time.
+    pub fn as_parts(&self) -> (&BLSSignatureCompressed, &[u8]) {
+        let Self { signature, bitmap } = self;
+        (signature, bitmap)
+    }
+
     /// Creates a VotesAggregate from a Certificate's signature and bitmap.
     ///
     /// # Panics
@@ -479,6 +504,25 @@ impl VersionedBlockMarker {
             Self::V1(_) => false,
         }
     }
+
+    pub fn is_parent_marker(&self) -> bool {
+        match self {
+            Self::V1(BlockMarkerV1::UpdateParent(_)) | Self::V1(BlockMarkerV1::BlockHeader(_)) => {
+                true
+            }
+            Self::V1(_) => false,
+        }
+    }
+
+    pub fn as_update_parent(&self) -> Option<&UpdateParentV1> {
+        match self {
+            Self::V1(BlockMarkerV1::UpdateParent(update_parent)) => {
+                let VersionedUpdateParent::V1(update_parent) = update_parent.inner();
+                Some(update_parent)
+            }
+            Self::V1(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -488,10 +532,17 @@ pub enum BlockComponent {
     BlockMarker(VersionedBlockMarker),
 }
 
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
+pub enum ParsedBlockComponent {
+    EntryBatch(Vec<EntryView<Bytes>>),
+    BlockMarker(VersionedBlockMarker),
+}
+
 impl BlockComponent {
-    const MAX_ENTRIES: usize = u32::MAX as usize;
-    const ENTRY_COUNT_SIZE: usize = 8;
-    const EMPTY_ENTRY_BATCH: [u8; Self::ENTRY_COUNT_SIZE] = 0u64.to_le_bytes();
+    pub(crate) const MAX_ENTRIES: usize = u32::MAX as usize;
+    pub(crate) const ENTRY_COUNT_SIZE: usize = 8;
+    pub(crate) const EMPTY_ENTRY_BATCH: [u8; Self::ENTRY_COUNT_SIZE] = 0u64.to_le_bytes();
 
     pub fn new_entry_batch(entries: Vec<Entry>) -> Result<Self, BlockComponentError> {
         if entries.is_empty() {

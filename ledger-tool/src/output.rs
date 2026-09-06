@@ -772,7 +772,7 @@ pub(crate) fn encode_confirmed_block(
         BlockEncodingOptions {
             transaction_details: TransactionDetails::Full,
             show_rewards: true,
-            max_supported_transaction_version: Some(0),
+            max_supported_transaction_version: Some(1),
         },
     )?;
 
@@ -890,7 +890,7 @@ pub fn output_slot(
             // entries and leave the metadata fields empty
             let (components, _, _) = blockstore.get_slot_components_with_shred_info(
                 slot,
-                /*shred_start_index:*/ 0,
+                u64::from(meta.replay_fec_set_index),
                 allow_dead_slots,
             )?;
 

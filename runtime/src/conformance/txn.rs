@@ -17,6 +17,7 @@
 //! SolFuzz-Agave.
 
 use {
+    super::new_accounts_for_tests_single_threaded,
     crate::{
         bank::{Bank, BankFieldsToDeserialize, BankRc},
         epoch_stakes::VersionedEpochStakes,
@@ -24,16 +25,15 @@ use {
         stakes::{DeserializableDelegationStakes, SerdeStakesToStakeFormat, Stakes},
     },
     agave_feature_set::FeatureSet,
+    agave_transaction_view::transaction_view::UnsanitizedTransactionView,
+    bytes::Bytes,
     solana_account::AccountSharedData,
-    solana_accounts_db::{
-        accounts::Accounts, accounts_db::AccountsDb, ancestors::Ancestors,
-        blockhash_queue::BlockhashQueue,
-    },
-    solana_clock::{BankId, Clock, Epoch, MAX_PROCESSING_AGE},
+    solana_accounts_db::{ancestors::Ancestors, blockhash_queue::BlockhashQueue},
+    solana_clock::{BankId, Clock, DEFAULT_TICKS_PER_SLOT, Epoch, MAX_PROCESSING_AGE},
     solana_epoch_schedule::EpochSchedule,
     solana_fee_calculator::FeeRateGovernor,
     solana_pubkey::Pubkey,
-    solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
+    solana_runtime_transaction::runtime_transaction::ReplayTransaction,
     solana_sdk_ids::sysvar,
     solana_stake_interface::state::Stake,
     solana_svm::{
@@ -43,40 +43,27 @@ use {
         transaction_processor::{ExecutionRecordingConfig, TransactionProcessingConfig},
     },
     solana_svm_timings::ExecuteTimings,
-    solana_transaction::{
-        TransactionVerificationMode, sanitized::SanitizedTransaction,
-        versioned::VersionedTransaction,
-    },
+    solana_transaction::{TransactionVerificationMode, versioned::VersionedTransaction},
     solana_transaction_error::TransactionError,
     solana_vote::vote_account::VoteAccounts,
-    std::{collections::HashMap, sync::Arc},
+    std::collections::HashMap,
 };
 #[cfg(feature = "conformance")]
 use {
+    super::{deserialize_accounts, fee_rate_governor_from_proto, restore_blockhash_queue},
     agave_feature_set::virtual_address_space_adjustments,
-    agave_precompiles::is_precompile,
     ahash::AHashSet,
-    protosol::protos::{
-        self, AcctState, FeeDetails as ProtoFeeDetails, TxnContext as ProtoTxnContext,
-        TxnResult as ProtoTxnResult,
-    },
-    solana_hash::Hash,
-    solana_instruction::error::InstructionError,
+    protosol::protos::{TxnContext as ProtoTxnContext, TxnResult as ProtoTxnResult},
+    solana_account::Account,
     solana_message::SanitizedMessage,
+    solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
     solana_signature::Signature,
     solana_svm::conformance::{
-        account_state::{account_from_proto, account_to_proto},
-        direct_mapping::direct_mapping_handle_cu_exhaustion,
-        err::serialized_error_code,
-        feature_set::feature_set_from_proto,
-        versioned_message::versioned_message_from_proto,
+        direct_mapping::direct_mapping_handle_cu_exhaustion, feature_set::feature_set_from_proto,
+        txn::effects::TxnEffects, versioned_transaction::versioned_transaction_from_proto,
     },
-    solana_svm::transaction_processing_result::{
-        ProcessedTransaction, TransactionProcessingResultExtensions,
-    },
-    solana_svm::{
-        account_loader::FeesOnlyTransaction, transaction_execution_result::ExecutedTransaction,
-    },
+    solana_svm::rollback_accounts::RollbackAccounts,
+    solana_svm::transaction_processing_result::ProcessedTransaction,
 };
 // Imports used only by the FFI entry point, which is excluded from `test` builds.
 #[cfg(all(feature = "conformance", not(test)))]
@@ -90,7 +77,7 @@ pub enum BankTxnProcessingResult {
     /// processing result and transaction for effect extraction.
     Processed {
         result: TransactionProcessingResult,
-        runtime_transaction: Box<RuntimeTransaction<SanitizedTransaction>>,
+        runtime_transaction: Box<ReplayTransaction>,
     },
 }
 
@@ -134,6 +121,7 @@ pub fn execute_txn(
     total_epoch_stake: u64,
     transaction: VersionedTransaction,
 ) -> BankTxnProcessingResult {
+<<<<<<< HEAD
     execute_txn_inner(
         accounts,
         feature_set,
@@ -159,6 +147,8 @@ fn execute_txn_inner(
 ) -> BankTxnProcessingResult {
     const TICKS_PER_SLOT: u64 = 64;
 
+=======
+>>>>>>> upstream/master
     // Slot and parent slot come from the clock sysvar.
     let clock: Clock = sysvar_from_accounts(accounts, &sysvar::clock::id());
     let slot = clock.slot;
@@ -169,9 +159,9 @@ fn execute_txn_inner(
     let epoch = epoch_schedule.get_epoch(slot);
 
     // Populate the accounts DB with the input accounts at the parent slot.
-    let bank_accounts = Accounts::new(Arc::new(AccountsDb::default_for_tests()));
+    let bank_accounts = new_accounts_for_tests_single_threaded();
     let ancestors = Ancestors::from(vec![parent_slot]);
-    bank_accounts.store_accounts_seq((parent_slot, accounts), BankId::default(), None, &ancestors);
+    bank_accounts.store_accounts((parent_slot, accounts), BankId::default(), None, &ancestors);
     bank_accounts.accounts_db.add_root(parent_slot);
     let bank_rc = BankRc::new(bank_accounts);
 
@@ -199,9 +189,9 @@ fn execute_txn_inner(
     let bank_fields = BankFieldsToDeserialize {
         blockhash_queue,
         parent_slot,
-        tick_height: TICKS_PER_SLOT.saturating_mul(slot),
-        max_tick_height: TICKS_PER_SLOT.saturating_mul(slot.saturating_add(1)),
-        ticks_per_slot: TICKS_PER_SLOT,
+        tick_height: DEFAULT_TICKS_PER_SLOT.saturating_mul(slot),
+        max_tick_height: DEFAULT_TICKS_PER_SLOT.saturating_mul(slot.saturating_add(1)),
+        ticks_per_slot: DEFAULT_TICKS_PER_SLOT,
         slot,
         block_height: slot,
         fee_rate_governor,
@@ -223,7 +213,20 @@ fn execute_txn_inner(
     debug_assert!(!enable_trace);
     let (bank, _bank_forks) = bank.wrap_with_bank_forks_for_tests();
 
+<<<<<<< HEAD
     let runtime_transaction = match bank.verify_transaction(transaction, verification_mode) {
+=======
+    let transaction_bytes = Bytes::from(wincode::serialize(&transaction).unwrap());
+    let Ok(transaction_view) = UnsanitizedTransactionView::try_new_unsanitized(transaction_bytes)
+    else {
+        return BankTxnProcessingResult::FailedVerification(TransactionError::SanitizeFailure);
+    };
+
+    let runtime_transaction = match bank.verify_transaction(
+        transaction_view,
+        TransactionVerificationMode::HashAndVerifyPrecompiles,
+    ) {
+>>>>>>> upstream/master
         Ok(tx) => tx,
         Err(err) => return BankTxnProcessingResult::FailedVerification(err),
     };
@@ -263,223 +266,77 @@ fn execute_txn_inner(
     }
 }
 
-/// Parse the input accounts into keyed `AccountSharedData`, dropping zero-lamport
-/// accounts (treated as nonexistent).
 #[cfg(feature = "conformance")]
-fn deserialize_accounts(accounts: &[AcctState]) -> Vec<(Pubkey, AccountSharedData)> {
-    accounts
+fn rollback_accounts_to_native(rollback_accounts: &RollbackAccounts) -> Vec<(Pubkey, Account)> {
+    rollback_accounts
         .iter()
-        .filter(|account| account.lamports > 0)
-        .map(|account| {
-            let (pubkey, account) = account_from_proto(account.clone());
-            (pubkey, account.into())
-        })
+        .map(|(pubkey, account)| (*pubkey, account.clone().into()))
         .collect()
 }
 
 #[cfg(feature = "conformance")]
-fn restore_blockhash_queue(entries: &[protos::BlockhashQueueEntry]) -> BlockhashQueue {
-    let mut blockhash_queue = BlockhashQueue::default();
-    for entry in entries {
-        let bytes = <[u8; 32]>::try_from(entry.blockhash.as_slice()).unwrap();
-        blockhash_queue.register_hash(&Hash::new_from_array(bytes), entry.lamports_per_signature);
-    }
-    blockhash_queue
-}
-
-/// Firedancer error numbers: the bincode-serialized enum discriminant `+ 1`.
-#[cfg(feature = "conformance")]
-#[derive(Default)]
-struct ProtoTxnErrorFields {
-    txn_error: u32,
-    instruction_error: u32,
-    custom_error: u32,
-    instruction_error_index: u32,
-}
-
-#[cfg(feature = "conformance")]
-impl ProtoTxnErrorFields {
-    fn from_processed_transaction(
-        txn: &ProcessedTransaction,
-        sanitized_message: &SanitizedMessage,
-    ) -> Self {
-        match txn.status() {
-            Ok(()) => Self::default(),
-            Err(transaction_error) => Self::from_transaction_error(&transaction_error)
-                .zero_precompile_custom_error(sanitized_message),
-        }
-    }
-
-    fn from_transaction_error(transaction_error: &TransactionError) -> Self {
-        let (instruction_error, custom_error, instruction_error_index) = match transaction_error {
-            TransactionError::InstructionError(instruction_error_index, instruction_error) => {
-                let custom_error = match instruction_error {
-                    InstructionError::Custom(custom_error) => *custom_error,
-                    _ => 0,
-                };
-                (
-                    serialized_error_code(instruction_error),
-                    custom_error,
-                    (*instruction_error_index).into(),
-                )
-            }
-            _ => (0, 0, 0),
-        };
-
-        Self {
-            txn_error: serialized_error_code(transaction_error),
-            instruction_error,
-            custom_error,
-            instruction_error_index,
-        }
-    }
-
-    /// Firedancer does not compare precompile custom error codes because minor
-    /// implementation differences can surface different custom values.
-    fn zero_precompile_custom_error(mut self, sanitized_message: &SanitizedMessage) -> Self {
-        // Custom error is zeroed when the failing instruction is a precompile.
-        if self.custom_error != 0
-            && instruction_is_precompile(self.instruction_error_index, sanitized_message)
-        {
-            self.custom_error = 0;
-        }
-        self
-    }
-}
-
-#[cfg(feature = "conformance")]
-fn instruction_is_precompile(
-    instruction_error_index: u32,
+fn processed_transaction_effects(
+    txn: &ProcessedTransaction,
     sanitized_message: &SanitizedMessage,
-) -> bool {
-    let Ok(instruction_error_index) = usize::try_from(instruction_error_index) else {
-        return false;
+) -> TxnEffects {
+    let (resulting_accounts, rollback_accounts, return_data, compute_unit_limit) = match txn {
+        ProcessedTransaction::Executed(executed_tx) => {
+            let loaded = &executed_tx.loaded_transaction;
+            let resulting_accounts = loaded
+                .accounts
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| sanitized_message.is_writable(*index))
+                .map(|(_, (pubkey, account))| (*pubkey, account.clone().into()))
+                .collect();
+            let rollback_accounts = if executed_tx.execution_details.status.is_err() {
+                rollback_accounts_to_native(&loaded.rollback_accounts)
+            } else {
+                vec![]
+            };
+            let return_data = executed_tx
+                .execution_details
+                .return_data
+                .as_ref()
+                .map(|info| info.data.clone())
+                .unwrap_or_default();
+            (
+                resulting_accounts,
+                rollback_accounts,
+                return_data,
+                loaded.compute_budget.compute_unit_limit,
+            )
+        }
+        ProcessedTransaction::FeesOnly(tx) => (
+            vec![],
+            rollback_accounts_to_native(&tx.rollback_accounts),
+            vec![],
+            0,
+        ),
+        ProcessedTransaction::NoOp(_) => (vec![], vec![], vec![], 0),
     };
 
-    sanitized_message
-        .program_instructions_iter()
-        .nth(instruction_error_index)
-        .is_some_and(|(program_id, _)| is_precompile(program_id, |_| true))
-}
-
-#[cfg(feature = "conformance")]
-struct ProtoTxnEffects {
-    modified_accounts: Vec<AcctState>,
-    rollback_accounts: Vec<AcctState>,
-    return_data: Vec<u8>,
-}
-
-#[cfg(feature = "conformance")]
-impl ProtoTxnEffects {
-    fn from_processed_transaction(
-        txn: &ProcessedTransaction,
-        sanitized_message: &SanitizedMessage,
-    ) -> Self {
-        match txn {
-            ProcessedTransaction::Executed(executed_tx) => {
-                executed_transaction_effects(executed_tx, sanitized_message)
-            }
-            ProcessedTransaction::FeesOnly(tx) => fees_only_transaction_effects(tx),
-            ProcessedTransaction::NoOp(_) => ProtoTxnEffects {
-                modified_accounts: vec![],
-                rollback_accounts: vec![],
-                return_data: vec![],
-            },
-        }
-    }
-}
-
-#[cfg(feature = "conformance")]
-fn executed_transaction_effects(
-    executed_tx: &ExecutedTransaction,
-    sanitized_message: &SanitizedMessage,
-) -> ProtoTxnEffects {
-    let loaded = &executed_tx.loaded_transaction;
-    let modified_accounts = loaded
-        .accounts
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| sanitized_message.is_writable(*index))
-        .map(|(_, (pubkey, account))| account_to_proto((*pubkey, account.clone().into())))
-        .collect();
-    let rollback_accounts = if executed_tx.execution_details.status.is_err() {
-        loaded
-            .rollback_accounts
-            .iter()
-            .map(|(pubkey, account)| account_to_proto((*pubkey, account.clone().into())))
-            .collect()
-    } else {
-        vec![]
-    };
-    let return_data = executed_tx
-        .execution_details
-        .return_data
-        .as_ref()
-        .map(|info| info.data.clone())
-        .unwrap_or_default();
-
-    ProtoTxnEffects {
-        modified_accounts,
+    let executed_units = txn.executed_units();
+    TxnEffects {
+        executed: true,
+        status: txn.status(),
+        resulting_accounts,
         rollback_accounts,
         return_data,
+        executed_units,
+        fee_details: txn.fee_details(),
+        loaded_accounts_data_size: u64::from(txn.loaded_accounts_data_size()),
+        // The bank records logs, but the fixture does not compare them.
+        logs: vec![],
+        cu_avail: compute_unit_limit.saturating_sub(executed_units),
     }
 }
 
 #[cfg(feature = "conformance")]
-fn fees_only_transaction_effects(tx: &FeesOnlyTransaction) -> ProtoTxnEffects {
-    ProtoTxnEffects {
-        modified_accounts: vec![],
-        rollback_accounts: tx
-            .rollback_accounts
-            .iter()
-            .map(|(pubkey, account)| account_to_proto((*pubkey, account.clone().into())))
-            .collect(),
-        return_data: vec![],
-    }
-}
-
-/// Map the processor's result for the single executed transaction into a
-/// `TxnResult`.
-#[cfg(feature = "conformance")]
-fn output_txn_result(
-    execution_result: &TransactionProcessingResult,
-    sanitized_message: &SanitizedMessage,
-) -> ProtoTxnResult {
-    let executed = execution_result.was_processed();
-    match execution_result {
-        Ok(txn) => {
-            let error = ProtoTxnErrorFields::from_processed_transaction(txn, sanitized_message);
-            let effects = ProtoTxnEffects::from_processed_transaction(txn, sanitized_message);
-            let fees = txn.fee_details();
-
-            ProtoTxnResult {
-                executed,
-                txn_error: error.txn_error,
-                instruction_error: error.instruction_error,
-                instruction_error_index: error.instruction_error_index,
-                custom_error: error.custom_error,
-                return_data: effects.return_data,
-                executed_units: txn.executed_units(),
-                fee_details: Some(ProtoFeeDetails {
-                    transaction_fee: fees.transaction_fee(),
-                    prioritization_fee: fees.prioritization_fee(),
-                }),
-                loaded_accounts_data_size: u64::from(txn.loaded_accounts_data_size()),
-                modified_accounts: effects.modified_accounts,
-                rollback_accounts: effects.rollback_accounts,
-            }
-        }
-        Err(transaction_error) => {
-            let error = ProtoTxnErrorFields::from_transaction_error(transaction_error);
-            ProtoTxnResult {
-                executed,
-                txn_error: error.txn_error,
-                instruction_error: error.instruction_error,
-                instruction_error_index: error.instruction_error_index,
-                custom_error: error.custom_error,
-                ..Default::default()
-            }
-        }
+fn unprocessed_txn_result(err: TransactionError) -> ProtoTxnResult {
+    ProtoTxnResult {
+        fee_details: None,
+        ..ProtoTxnResult::from(TxnEffects::from_unprocessed_error(err))
     }
 }
 
@@ -495,14 +352,10 @@ pub fn execute_txn_proto(context: &ProtoTxnContext) -> ProtoTxnResult {
     // On snapshot boot the fee rate governor's lamports_per_signature comes from
     // the manifest, so use the provided value directly.
     let input_fee_rate_governor = txn_bank.fee_rate_governor.as_ref().unwrap();
-    let fee_rate_governor = FeeRateGovernor {
-        lamports_per_signature: u64::from(txn_bank.rbh_lamports_per_signature),
-        target_lamports_per_signature: input_fee_rate_governor.target_lamports_per_signature,
-        target_signatures_per_slot: input_fee_rate_governor.target_signatures_per_slot,
-        min_lamports_per_signature: input_fee_rate_governor.min_lamports_per_signature,
-        max_lamports_per_signature: input_fee_rate_governor.max_lamports_per_signature,
-        burn_percent: input_fee_rate_governor.burn_percent as u8,
-    };
+    let fee_rate_governor = fee_rate_governor_from_proto(
+        input_fee_rate_governor,
+        u64::from(txn_bank.rbh_lamports_per_signature),
+    );
 
     let feature_set = txn_bank
         .features
@@ -514,20 +367,11 @@ pub fn execute_txn_proto(context: &ProtoTxnContext) -> ProtoTxnResult {
 
     let tx = context.tx.as_ref().unwrap();
     let proto_message = tx.message.as_ref().unwrap();
-    let message = versioned_message_from_proto(proto_message);
-    let mut signatures = tx
-        .signatures
-        .iter()
-        .map(|item| Signature::try_from(item.as_slice()).unwrap())
-        .collect::<Vec<Signature>>();
-    if signatures.is_empty() {
+    let mut transaction = versioned_transaction_from_proto(tx);
+    if transaction.signatures.is_empty() {
         // Default: a single empty signature (keeps simple cases valid).
-        signatures.push(Signature::default());
+        transaction.signatures.push(Signature::default());
     }
-    let transaction = VersionedTransaction {
-        signatures,
-        message,
-    };
 
     let (result, runtime_transaction) = match execute_txn(
         &accounts,
@@ -538,50 +382,31 @@ pub fn execute_txn_proto(context: &ProtoTxnContext) -> ProtoTxnResult {
         transaction,
     ) {
         BankTxnProcessingResult::FailedVerification(err) => {
-            let error = ProtoTxnErrorFields::from_transaction_error(&err);
-            return ProtoTxnResult {
-                executed: false,
-                txn_error: error.txn_error,
-                instruction_error: error.instruction_error,
-                instruction_error_index: error.instruction_error_index,
-                // Precompile error codes are not conformant, so they are ignored here.
-                custom_error: 0,
-                ..Default::default()
-            };
+            let mut txn_result = unprocessed_txn_result(err);
+            // Precompile error codes are not conformant, so they are ignored here.
+            txn_result.custom_error = 0;
+            return txn_result;
         }
         BankTxnProcessingResult::Processed {
             result,
             runtime_transaction,
         } => (result, runtime_transaction),
     };
-    let sanitized_message = runtime_transaction.message();
+    let sanitized_transaction = runtime_transaction.as_sanitized_transaction();
+    let sanitized_message = sanitized_transaction.message();
 
-    let mut txn_result = output_txn_result(&result, sanitized_message);
-
-    let cu_avail = match &result {
-        Ok(ProcessedTransaction::Executed(executed_tx)) => executed_tx
-            .loaded_transaction
-            .compute_budget
-            .compute_unit_limit
-            .saturating_sub(txn_result.executed_units),
-        _ => 0,
+    let mut effects = match &result {
+        Ok(txn) => processed_transaction_effects(txn, sanitized_message),
+        Err(err) => return unprocessed_txn_result(err.clone()),
     };
-    direct_mapping_handle_cu_exhaustion(
-        virtual_address_space_adjustments_active,
-        cu_avail,
-        txn_result.txn_error != 0,
-        txn_result
-            .modified_accounts
-            .iter_mut()
-            .map(|acc| &mut acc.data),
-    );
+    effects.zero_precompile_custom_error(sanitized_message);
 
     // Only keep modified accounts that were passed in as account keys or were
     // loaded via an address lookup table.
-    let account_keys = &proto_message.account_keys;
     let mut loaded_account_keys = AHashSet::<Pubkey>::new();
     loaded_account_keys.extend(
-        account_keys
+        proto_message
+            .account_keys
             .iter()
             .map(|key| Pubkey::try_from(key.as_slice()).unwrap()),
     );
@@ -589,11 +414,23 @@ pub fn execute_txn_proto(context: &ProtoTxnContext) -> ProtoTxnResult {
         loaded_account_keys.extend(message.loaded_addresses.writable.iter().copied());
         loaded_account_keys.extend(message.loaded_addresses.readonly.iter().copied());
     }
-    txn_result.modified_accounts.retain(|account| {
-        Pubkey::try_from(account.address.as_slice())
-            .map(|pubkey| loaded_account_keys.contains(&pubkey))
-            .unwrap()
-    });
+    effects
+        .resulting_accounts
+        .retain(|(pubkey, _)| loaded_account_keys.contains(pubkey));
+
+    let cu_avail = effects.cu_avail;
+    let has_err = effects.status.is_err();
+    let mut txn_result = ProtoTxnResult::from(effects);
+
+    direct_mapping_handle_cu_exhaustion(
+        virtual_address_space_adjustments_active,
+        cu_avail,
+        has_err,
+        txn_result
+            .modified_accounts
+            .iter_mut()
+            .map(|acc| &mut acc.data),
+    );
 
     txn_result
 }
@@ -642,6 +479,7 @@ pub unsafe extern "C" fn sol_compat_txn_execute_v1(
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "conformance")]
+<<<<<<< HEAD
     use {
         super::execute_txn_with_trace,
         crate::conformance::trace::{build_transaction_trace_v1, fixture_trace_header_v1},
@@ -660,6 +498,9 @@ mod tests {
         },
         std::collections::HashSet,
     };
+=======
+    use std::collections::HashSet;
+>>>>>>> upstream/master
     use {
         super::{BankTxnProcessingResult, execute_txn},
         agave_feature_set::{FeatureSet, disable_sbpf_v0_execution, set_exempt_rent_epoch_max},
@@ -678,6 +519,7 @@ mod tests {
             v0::{self, MessageAddressTableLookup},
         },
         solana_pubkey::Pubkey,
+        solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
         solana_sdk_ids::{bpf_loader_upgradeable, native_loader, sysvar},
         solana_sha256_hasher::hash,
         solana_signature::Signature,
@@ -865,14 +707,18 @@ mod tests {
             BankTxnProcessingResult::Processed {
                 result: Ok(ProcessedTransaction::Executed(executed_tx)),
                 runtime_transaction,
-            } => executed_tx
-                .loaded_transaction
-                .accounts
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| runtime_transaction.message().is_writable(*index))
-                .find(|(_, (key, _))| key == pubkey)
-                .map(|(_, (_, account))| account.lamports()),
+            } => {
+                let sanitized_transaction = runtime_transaction.as_sanitized_transaction();
+                let sanitized_message = sanitized_transaction.message();
+                executed_tx
+                    .loaded_transaction
+                    .accounts
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| sanitized_message.is_writable(*index))
+                    .find(|(_, (key, _))| key == pubkey)
+                    .map(|(_, (_, account))| account.lamports())
+            }
             _ => None,
         }
     }
@@ -949,55 +795,27 @@ mod tests {
 
     #[cfg(feature = "conformance")]
     #[test]
-    fn proto_txn_error_fields_zeroes_precompile_custom_error() {
-        let error = solana_transaction_error::TransactionError::InstructionError(
-            0,
-            InstructionError::Custom(7),
-        );
-        let fields = super::ProtoTxnErrorFields::from_transaction_error(&error)
-            .zero_precompile_custom_error(&sanitized_message_with_program(
-                solana_sdk_ids::secp256k1_program::id(),
-            ));
-
-        assert_eq!(fields.custom_error, 0);
-        assert_ne!(fields.instruction_error, 0);
-        assert_eq!(fields.instruction_error_index, 0);
-    }
-
-    #[cfg(feature = "conformance")]
-    #[test]
-    fn proto_txn_error_fields_keeps_non_precompile_custom_error() {
-        let error = solana_transaction_error::TransactionError::InstructionError(
-            0,
-            InstructionError::Custom(7),
-        );
-        let fields = super::ProtoTxnErrorFields::from_transaction_error(&error)
-            .zero_precompile_custom_error(&sanitized_message_with_program(Pubkey::new_unique()));
-
-        assert_eq!(fields.custom_error, 7);
-        assert_ne!(fields.instruction_error, 0);
-        assert_eq!(fields.instruction_error_index, 0);
-    }
-
-    #[cfg(feature = "conformance")]
-    #[test]
-    fn output_txn_result_handles_noop_transaction() {
+    fn noop_transaction_effects() {
         const COMPUTE_UNIT_LIMIT: u64 = 123_456;
         const LOADED_ACCOUNTS_BYTES_LIMIT: u32 = 654_321;
         let validation_error = solana_transaction_error::TransactionError::AccountNotFound;
-        let processing_result = Ok(ProcessedTransaction::NoOp(Box::new(
-            solana_svm::account_loader::NoOpTransaction {
+        let processed =
+            ProcessedTransaction::NoOp(Box::new(solana_svm::account_loader::NoOpTransaction {
                 validation_error: validation_error.clone(),
                 fee_payer_balance: Some(42),
                 compute_unit_limit: COMPUTE_UNIT_LIMIT,
                 loaded_accounts_bytes_limit: LOADED_ACCOUNTS_BYTES_LIMIT,
-            },
-        )));
+                nonce_address: None,
+            }));
 
-        let result = super::output_txn_result(
-            &processing_result,
+        let effects = super::processed_transaction_effects(
+            &processed,
             &sanitized_message_with_program(Pubkey::new_unique()),
         );
+        // A NoOp reports the full limit as consumed, so nothing is left over.
+        assert_eq!(effects.cu_avail, 0);
+
+        let result = super::ProtoTxnResult::from(effects);
 
         assert!(result.executed);
         assert_eq!(
