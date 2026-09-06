@@ -221,6 +221,6 @@ pub struct TimeoutChallenge {
 #[cfg(feature = "zk-verifier-prototype")]
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
 pub struct VerifyErStepProofV1 {
-    pub proof: [u8; 256],
+    pub proof: [u8; 356],
     pub public_inputs: [u8; 256],
 }
