@@ -1,7 +1,9 @@
 use {
     anyhow::{anyhow, bail, Result},
     serde_json::json,
-    sp1_sdk::{include_elf, Elf, ProveRequest, Prover, ProverClient, ProvingKey, SP1Stdin},
+    sp1_sdk::{
+        include_elf, Elf, HashableKey, ProveRequest, Prover, ProverClient, ProvingKey, SP1Stdin,
+    },
     std::{collections::BTreeMap, env, fs, time::Instant},
 };
 
@@ -11,15 +13,16 @@ const ELF: Elf = include_elf!("northstar-zkvm-replay-program");
 async fn main() -> Result<()> {
     let mut args = env::args().skip(1);
     let command = args.next().unwrap_or_else(|| "execute".to_string());
-    if !matches!(command.as_str(), "execute" | "core" | "groth16" | "all") {
+    if !matches!(
+        command.as_str(),
+        "key" | "execute" | "core" | "groth16" | "all"
+    ) {
         bail!(
-            "usage: northstar-zkvm-replay-script [execute|core|groth16|all] \
-             [fixture] [measurements] [profile]"
+            "usage: northstar-zkvm-replay-script [key|execute|core|groth16|all] [fixture] \
+             [measurements] [profile]"
         );
     }
-    let fixture_path = args
-        .next()
-        .unwrap_or_else(|| "fixture-v1.bin".to_string());
+    let fixture_path = args.next().unwrap_or_else(|| "fixture-v1.bin".to_string());
     let measurement_path = args
         .next()
         .unwrap_or_else(|| "sp1-measurements.json".to_string());
@@ -59,7 +62,7 @@ async fn main() -> Result<()> {
         }));
     }
 
-    let key = if matches!(command.as_str(), "core" | "groth16" | "all") {
+    let key = if matches!(command.as_str(), "key" | "core" | "groth16" | "all") {
         let started = Instant::now();
         let key = client.setup(ELF).await?;
         phases.push(json!({
@@ -70,6 +73,7 @@ async fn main() -> Result<()> {
     } else {
         None
     };
+    let program_vkey_hash = key.as_ref().map(|key| key.verifying_key().bytes32());
 
     if command == "core" || command == "all" {
         let key = key.as_ref().expect("proof command has setup key");
@@ -104,14 +108,24 @@ async fn main() -> Result<()> {
         client.verify(&proof, key.verifying_key(), None)?;
         let verify_ms = verify_started.elapsed().as_millis();
         let proof_path = "northstar-sp1-groth16.bin";
-        let proof_bytes = proof.bytes().len();
+        let proof_bytes = proof.bytes();
+        if proof_bytes.len() != 356 {
+            bail!("unexpected SP1 Groth16 proof length: {}", proof_bytes.len());
+        }
         proof.save(proof_path)?;
         phases.push(json!({
             "phase": "groth16",
             "prove_and_wrap_ms": prove_wrap_ms,
             "verify_ms": verify_ms,
-            "onchain_proof_bytes": proof_bytes,
+            "onchain_proof_bytes": proof_bytes.len(),
             "artifact_bytes": usize::try_from(fs::metadata(proof_path)?.len())?,
+            "proof_layout": {
+                "groth16_vkey_hash_prefix": hex::encode(&proof_bytes[..4]),
+                "exit_code": hex::encode(&proof_bytes[4..36]),
+                "verifier_root": hex::encode(&proof_bytes[36..68]),
+                "proof_nonce": hex::encode(&proof_bytes[68..100]),
+                "raw_groth16_bytes": proof_bytes[100..].len(),
+            },
         }));
     }
 
@@ -122,6 +136,10 @@ async fn main() -> Result<()> {
         "vm_rows": witness.vm_rows.len(),
         "executed_units": witness.result.executed_units,
         "public_inputs": hex::encode(expected),
+        "program_vkey_hash": program_vkey_hash,
+        "sp1_groth16_vkey_sha256":
+            "4388a21c687fdd5f218d7e3d13190cac4c5355818d3605fd5fb811df468ee696",
+        "sp1_verifier_root": hex::encode(*sp1_verifier::VK_ROOT_BYTES),
         "phases": phases,
     });
     fs::write(&measurement_path, serde_json::to_vec_pretty(&output)?)?;
