@@ -636,6 +636,44 @@ async fn get_lamports(banks: &mut BanksClient, pubkey: &Pubkey) -> u64 {
 }
 
 #[tokio::test]
+async fn session_rejects_checkpoint_cadence_over_limit() {
+    let context = setup().await;
+    let payer = context.payer.insecure_clone();
+    let payer_pubkey = payer.pubkey();
+    let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID);
+    let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID);
+    let instruction = Instruction {
+        program_id: PORTAL_PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(payer_pubkey, true),
+            AccountMeta::new(session_pda, false),
+            AccountMeta::new(fee_vault_pda, false),
+            AccountMeta::new_readonly(system_program::id(), false),
+        ],
+        data: borsh::to_vec(&PortalInstruction::OpenSession(OpenSession {
+            grid_id: 1,
+            ttl_slots: 100,
+            fee_cap: 1_000_000,
+            validator: payer_pubkey,
+            settlement_interval_slots: northstar_portal::MAX_CHECKPOINT_CADENCE_L1_SLOTS + 1,
+        }))
+        .unwrap(),
+    };
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let transaction = Transaction::new_signed_with_payer(
+        &[instruction],
+        Some(&payer_pubkey),
+        &[&payer],
+        blockhash,
+    );
+    assert!(context
+        .banks_client
+        .process_transaction(transaction)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
 async fn prefunded_portal_pdas_can_be_initialized() {
     let mut context = setup().await;
     let payer = context.payer.insecure_clone();

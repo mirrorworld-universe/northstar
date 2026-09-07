@@ -922,6 +922,11 @@ impl Manager {
                     .is_none_or(|plan| Self::token_withdrawals_complete(l1_bank, &plan)));
             if checkpoint.session == session_pda && can_remove {
                 self.remove_checkpoint_plan(session_pda, &checkpoint);
+                if checkpoint.status == CheckpointStatus::Settled {
+                    if let Some(runtime) = &self.runtime {
+                        runtime.consume_checkpoint_artifact_v1(checkpoint.er_slot);
+                    }
+                }
             }
         }
     }

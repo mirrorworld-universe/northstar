@@ -27,7 +27,7 @@ Trees pad to the next power of two with domain-separated, position-bound empty l
 
 State roots, per-step transaction/effect commitments, `readonly_l1_root`, and `effect_commitment` enter the BN254 proof ABI. Format v1 explicitly projects these SHA-256 digests into Fr by clearing the top three bits. This is a named 253-bit field projection, not implicit modulo reduction. `trace_root`, checkpoint `tx_effect_root`, and `da_commitment` retain their full SHA-256 values.
 
-The runtime captures successful committed transactions from SVM's pre-commit results without serializing batch execution. Each step records the exact wire transaction, executed units, sorted touched-account effects, readonly loaded-account values at the latest observed L1 slot, and state roots before and after applying the touched effects to the ER overlay. Failed or rejected transactions do not consume a checkpoint step. The first 16 successful steps seal one immutable artifact; later cadence logic must consume it before opening the next window.
+The runtime captures successful committed transactions from SVM's pre-commit results without serializing batch execution. Each step records the exact wire transaction, executed units, sorted touched-account effects, readonly loaded-account values at the latest observed L1 slot, and state roots before and after applying the touched effects to the ER overlay. Failed or rejected transactions do not consume a checkpoint step. The first 16 successful steps seal one immutable artifact. ER transaction admission then pauses until that artifact reaches `Settled`; consuming it opens a fresh 16-step window from the retained post-state map. Portal rejects session cadence above 75 L1 slots.
 
 ## One disputed step
 

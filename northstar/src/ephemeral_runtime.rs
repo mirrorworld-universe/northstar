@@ -1027,6 +1027,10 @@ impl EphemeralRuntime {
         self._tx_client.checkpoint_artifact_v1()
     }
 
+    pub fn consume_checkpoint_artifact_v1(&self, er_slot: Slot) -> bool {
+        self._tx_client.consume_checkpoint_artifact_v1(er_slot)
+    }
+
     #[cfg(test)]
     pub(crate) fn install_checkpoint_artifact_v1(&self, artifact: CheckpointArtifactV1) {
         self._tx_client.install_checkpoint_artifact_v1(artifact);

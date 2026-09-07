@@ -439,6 +439,20 @@ impl EphemeralTransactionClient {
         self.checkpoint_capture.read().unwrap().completed.clone()
     }
 
+    pub(crate) fn consume_checkpoint_artifact_v1(&self, er_slot: Slot) -> bool {
+        let mut capture = self.checkpoint_capture.write().unwrap();
+        if capture
+            .completed
+            .as_ref()
+            .is_none_or(|artifact| artifact.checkpoint.er_slot != er_slot)
+        {
+            return false;
+        }
+        capture.completed = None;
+        capture.steps.clear();
+        true
+    }
+
     #[cfg(test)]
     pub(crate) fn install_checkpoint_artifact_v1(&self, artifact: CheckpointArtifactV1) {
         let mut capture = self.checkpoint_capture.write().unwrap();
@@ -741,6 +755,10 @@ impl TransactionClient for EphemeralTransactionClient {
         }
 
         let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
+        if self.checkpoint_capture.read().unwrap().completed.is_some() {
+            warn!("ER transaction rejected: canonical checkpoint awaits settlement");
+            return;
+        }
         let bank = self.bank();
         let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
         let touched_accounts = self.touched_accounts.read().unwrap().clone();
@@ -2299,6 +2317,59 @@ mod tests {
             .pages
             .iter()
             .all(|page| !page.transaction.is_empty() && !page.transaction_effect.is_empty()));
+    }
+
+    #[test]
+    fn completed_checkpoint_blocks_execution_until_consumed() {
+        let source = keypair_from_seed(&[17; 32]).unwrap();
+        let recipient = Pubkey::new_from_array([18; 32]);
+        let bank = create_test_bank();
+        fund_account(&bank, &source.pubkey(), 100_000_000);
+        fund_account(&bank, &recipient, 1_000_000);
+        let blockhash = bank.last_blockhash();
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let bank = bank_forks.read().unwrap().root_bank();
+        let client = create_client_with_history(
+            bank_forks,
+            vec![source.pubkey(), recipient],
+            Arc::new(ErHistoryStore::default()),
+        );
+        *client.session_pda.write().unwrap() = Some(Pubkey::new_unique());
+
+        for index in 0..CANONICAL_CHECKPOINT_STEPS_V1 {
+            let transaction = create_transfer_tx_with_amount(
+                &source,
+                source.pubkey(),
+                recipient,
+                index as u64 + 1,
+                blockhash,
+            );
+            <EphemeralTransactionClient as TransactionClient>::send_transactions_in_batch(
+                &client,
+                vec![bincode::serialize(&transaction).unwrap()],
+                &SendTransactionServiceStats::default(),
+            );
+        }
+        assert_eq!(client.checkpoint_capture.read().unwrap().steps.len(), 16);
+        let artifact = client.checkpoint_artifact_v1().unwrap();
+        let balance_after_checkpoint = bank.get_balance(&recipient);
+        let next_transaction =
+            create_transfer_tx_with_amount(&source, source.pubkey(), recipient, 100, blockhash);
+        let next_wire = bincode::serialize(&next_transaction).unwrap();
+        <EphemeralTransactionClient as TransactionClient>::send_transactions_in_batch(
+            &client,
+            vec![next_wire.clone()],
+            &SendTransactionServiceStats::default(),
+        );
+        assert_eq!(bank.get_balance(&recipient), balance_after_checkpoint);
+
+        assert!(client.consume_checkpoint_artifact_v1(artifact.checkpoint.er_slot));
+        <EphemeralTransactionClient as TransactionClient>::send_transactions_in_batch(
+            &client,
+            vec![next_wire],
+            &SendTransactionServiceStats::default(),
+        );
+        assert_eq!(bank.get_balance(&recipient), balance_after_checkpoint + 100);
     }
 
     #[test]
