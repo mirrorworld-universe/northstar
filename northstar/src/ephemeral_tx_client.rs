@@ -58,7 +58,7 @@ pub(crate) trait TransactionClient {
     );
 }
 
-type TransactionAccountSnapshot = Vec<(Pubkey, AccountSharedData, bool)>;
+type TransactionAccountSnapshot = Vec<(Pubkey, AccountSharedData, AccountSharedData, bool)>;
 
 #[derive(Default)]
 struct CheckpointCaptureV1 {
@@ -520,6 +520,15 @@ impl EphemeralTransactionClient {
                 warn!("Failed to serialize committed ER transaction for checkpoint capture");
                 continue;
             };
+            for (key, pre_account, _, touched) in snapshot {
+                if *touched && !Self::is_infrastructure_account(key) && pre_account.lamports() != 0
+                {
+                    capture
+                        .state_accounts
+                        .entry(*key)
+                        .or_insert_with(|| Self::checkpoint_state_value(*key, pre_account));
+                }
+            }
             let Ok(pre_state_root) =
                 state_root_v1(&capture.state_accounts.values().copied().collect::<Vec<_>>())
             else {
@@ -530,11 +539,11 @@ impl EphemeralTransactionClient {
             let step_index = capture.steps.len() as u32;
             let mut account_effects = snapshot
                 .iter()
-                .filter(|(key, _, touched)| *touched && !Self::is_infrastructure_account(key))
-                .map(|(key, account, _)| CheckpointAccountEffectV1 {
+                .filter(|(key, _, _, touched)| *touched && !Self::is_infrastructure_account(key))
+                .map(|(key, _, post_account, _)| CheckpointAccountEffectV1 {
                     step_index,
-                    value: Self::checkpoint_state_value(*key, account),
-                    deleted: account.lamports() == 0,
+                    value: Self::checkpoint_state_value(*key, post_account),
+                    deleted: post_account.lamports() == 0,
                 })
                 .collect::<Vec<_>>();
             account_effects.sort_unstable_by_key(|effect| effect.value.account);
@@ -558,12 +567,12 @@ impl EphemeralTransactionClient {
 
             let mut readonly_l1_values = snapshot
                 .iter()
-                .filter(|(_, _, touched)| !*touched)
-                .map(|(key, account, _)| ReadonlyL1ValueV1 {
+                .filter(|(_, _, _, touched)| !*touched)
+                .map(|(key, _, post_account, _)| ReadonlyL1ValueV1 {
                     account: *key,
-                    owner: *account.owner(),
-                    lamports: account.lamports(),
-                    data_hash: hashv(&[account.data()]).to_bytes(),
+                    owner: *post_account.owner(),
+                    lamports: post_account.lamports(),
+                    data_hash: hashv(&[post_account.data()]).to_bytes(),
                     observed_l1_slot: self.sync_status.latest_l1_slot(),
                 })
                 .collect::<Vec<_>>();
@@ -1065,8 +1074,13 @@ impl EphemeralTransactionClient {
                                     .accounts
                                     .iter()
                                     .zip(executed.loaded_transaction.touched_flags.iter())
-                                    .map(|((key, account), touched)| {
-                                        (*key, account.clone(), *touched)
+                                    .map(|((key, post_account), touched)| {
+                                        (
+                                            *key,
+                                            bank.get_account(key).unwrap_or_default(),
+                                            post_account.clone(),
+                                            *touched,
+                                        )
                                     })
                                     .collect(),
                             )
@@ -2283,34 +2297,39 @@ mod tests {
 
     #[test]
     fn canonical_checkpoint_uses_sixteen_executed_er_transactions() {
-        let first_artifact = execute_canonical_checkpoint_fixture();
-        let second_artifact = execute_canonical_checkpoint_fixture();
-        let third_artifact = execute_canonical_checkpoint_fixture();
-        for artifact in [&second_artifact, &third_artifact] {
-            for (index, (left, right)) in first_artifact
-                .da
-                .pages
-                .iter()
-                .zip(&artifact.da.pages)
-                .enumerate()
-            {
-                if left.pre_state_root != right.pre_state_root
-                    || left.post_state_root != right.post_state_root
-                {
-                    eprintln!(
-                        "step {index}: {:?} -> {:?}, {:?} -> {:?}",
-                        left.pre_state_root,
-                        left.post_state_root,
-                        right.pre_state_root,
-                        right.post_state_root,
-                    );
-                }
-            }
-        }
-        let first = first_artifact.canonical_bytes().unwrap();
-        assert_eq!(first, second_artifact.canonical_bytes().unwrap());
-        assert_eq!(first, third_artifact.canonical_bytes().unwrap());
-        let artifact = CheckpointArtifactV1::decode_verified(&first).unwrap();
+        let artifact = execute_canonical_checkpoint_fixture();
+        let first = artifact.canonical_bytes().unwrap();
+        let second = artifact.canonical_bytes().unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            CheckpointArtifactV1::decode_verified(&first).unwrap(),
+            artifact,
+        );
+        let source = keypair_from_seed(&[7; 32]).unwrap().pubkey();
+        let recipient = Pubkey::new_from_array([8; 32]);
+        let mut initial_state = vec![
+            StateAccountValueV1 {
+                account: source,
+                owner: solana_system_interface::program::ID,
+                lamports: 100_000_000,
+                executable: false,
+                rent_epoch: 0,
+                data_hash: hashv(&[&[]]).to_bytes(),
+            },
+            StateAccountValueV1 {
+                account: recipient,
+                owner: solana_system_interface::program::ID,
+                lamports: 1_000_000,
+                executable: false,
+                rent_epoch: 0,
+                data_hash: hashv(&[&[]]).to_bytes(),
+            },
+        ];
+        initial_state.sort_unstable();
+        assert_eq!(
+            artifact.da.pages[0].pre_state_root,
+            state_root_v1(&initial_state).unwrap(),
+        );
         assert_eq!(artifact.da.pages.len(), CANONICAL_CHECKPOINT_STEPS_V1);
         assert!(artifact
             .da
