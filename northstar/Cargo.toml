@@ -66,6 +66,7 @@ spl-token-interface.workspace = true
 
 [dev-dependencies]
 agave-snapshots.workspace = true
+northstar-transaction-proof.workspace = true
 solana-address-lookup-table-interface.workspace = true
 solana-compute-budget-interface.workspace = true
 solana-rpc-client.workspace = true

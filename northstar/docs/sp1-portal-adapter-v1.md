@@ -79,11 +79,11 @@ SP1 6.1.0 has CPU and CUDA proving backends but no AMD XDNA NPU backend. A canon
 
 ## Remaining compatibility check
 
-Portal-side production challenge resolution now authenticates the isolated trace boundary and transaction/effect leaf, recomputes the canonical Poseidon `session_context`, reconstructs the eight public fields from the sealed account, and invokes the direct SP1 verifier. The replay relation still emits fixture-local Poseidon account-list commitments for state, readonly, transaction-effect, and settlement fields, while checkpoint v1 exposes projected SHA-256 state roots and global authenticated trees. A production proof therefore requires a checkpoint-binding witness revision before generating the final artifact.
+Portal-side production challenge resolution authenticates the isolated trace boundary and transaction/effect leaf, recomputes the canonical Poseidon `session_context`, reconstructs the eight public fields from the sealed account, and invokes the direct SP1 verifier. Replay witness encoding v2 now recomputes projected checkpoint state roots, validates the canonical transaction/effect record, and verifies readonly-L1 and settlement authentication paths. The remaining gate is generating and testing a real Groth16 artifact for this revised SP1 program.
 
 The final compatibility check must:
 
-- verify checkpoint trace, transaction-effect, readonly-L1, and settlement membership inside the replay relation;
+- authenticate trace and transaction-effect membership in Portal and readonly-L1/settlement membership in the replay relation;
 - accept the resulting unchanged 356-byte Northstar proof through `ResolveChallenge`;
 - reject changed raw proof bytes, paths, and each Portal public field;
 - confirm successful-verification CU remains at or below 130K.

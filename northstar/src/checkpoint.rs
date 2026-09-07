@@ -907,6 +907,46 @@ mod tests {
     }
 
     #[test]
+    fn zk_checkpoint_state_root_matches_validator_encoding() {
+        let account = StateAccountValueV1 {
+            account: Pubkey::new_from_array([1; 32]),
+            owner: Pubkey::new_from_array([2; 32]),
+            lamports: 3,
+            executable: true,
+            rent_epoch: 4,
+            data_hash: hashv(&[b"state-data"]).to_bytes(),
+        };
+        let zk_account = northstar_transaction_proof::checkpoint::StateAccountValueV1 {
+            account: account.account.to_bytes(),
+            owner: account.owner.to_bytes(),
+            lamports: account.lamports,
+            executable: account.executable,
+            rent_epoch: account.rent_epoch,
+            data_hash: account.data_hash,
+        };
+        assert_eq!(
+            state_root_v1(&[account]).unwrap(),
+            northstar_transaction_proof::checkpoint::state_root(&[zk_account]).unwrap(),
+        );
+    }
+
+    #[test]
+    fn zk_transaction_effect_matches_validator_encoding() {
+        let witness = northstar_transaction_proof::fixture::build_replay_witness_v1().unwrap();
+        let checkpoint =
+            northstar_transaction_proof::checkpoint::verify_checkpoint_binding(&witness).unwrap();
+        assert_eq!(
+            transaction_effect_leaf_hash(
+                witness.step_index as u32,
+                &witness.transaction_bytes,
+                &witness.checkpoint.transaction_effect,
+            )
+            .unwrap(),
+            checkpoint.transaction_effect_commitment,
+        );
+    }
+
+    #[test]
     fn sixteen_step_artifact_is_deterministic_and_authenticated() {
         let session = Pubkey::new_unique();
         let first = build_checkpoint_artifact_v1(session, 42, steps()).unwrap();

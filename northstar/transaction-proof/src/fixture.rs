@@ -1,8 +1,9 @@
 use {
     crate::{
+        checkpoint::{fixture_checkpoint_binding, CheckpointBindingV1},
         replay, session_context_bytes_v1, AccountWitnessV1, CallTargetV1, ProgramWordV1,
         ReplayError, ReplayWitnessV1, ResultWitnessV1, RuntimeWitnessV1, VmRowV1, SBPF_VERSION_V0,
-        TRACE_SCHEMA_VERSION_V1, WITNESS_MAGIC_V1, WITNESS_VERSION_V1,
+        TRACE_SCHEMA_VERSION_V1, WITNESS_MAGIC_V1, WITNESS_VERSION_V2,
     },
     northstar_zk_types::{ER_STEP_PROOF_KIND_FULL_TRANSACTION, ER_STEP_PROOF_VERSION_V1},
     solana_account::ReadableAccount,
@@ -216,7 +217,7 @@ pub fn assemble_replay_witness_v1(
     );
     let witness = ReplayWitnessV1 {
         magic: WITNESS_MAGIC_V1,
-        version: WITNESS_VERSION_V1,
+        version: WITNESS_VERSION_V2,
         proof_kind: ER_STEP_PROOF_KIND_FULL_TRANSACTION,
         proof_version: ER_STEP_PROOF_VERSION_V1,
         trace_schema_version: TRACE_SCHEMA_VERSION_V1,
@@ -238,6 +239,7 @@ pub fn assemble_replay_witness_v1(
         post_accounts,
         rollback_accounts: Vec::new(),
         readonly_accounts,
+        checkpoint: CheckpointBindingV1::default(),
         runtime: RuntimeWitnessV1 {
             agave_revision: REVISION,
             northstar_revision: REVISION,
@@ -280,6 +282,7 @@ pub fn assemble_replay_witness_v1(
         },
     };
     let mut witness = witness;
+    witness.checkpoint = fixture_checkpoint_binding(&witness)?;
     crate::set_trace_hash(&mut witness);
     Ok(witness)
 }
@@ -445,6 +448,23 @@ mod tests {
         });
         assert_rejected("units", witness.clone(), |value| {
             value.result.executed_units += 1
+        });
+        assert_rejected("checkpoint pre-state", witness.clone(), |value| {
+            value.checkpoint.pre_state_accounts[0].lamports += 1
+        });
+        assert_rejected("transaction effect", witness.clone(), |value| {
+            value.checkpoint.transaction_effect[0] ^= 1
+        });
+        assert_rejected("transaction effect path", witness.clone(), |value| {
+            value.checkpoint.transaction_effect_path.siblings[0][0] ^= 1
+        });
+        assert_rejected("readonly L1 value", witness.clone(), |value| {
+            value.checkpoint.readonly_l1_values[0]
+                .value
+                .observed_l1_slot += 1
+        });
+        assert_rejected("settlement effect path", witness.clone(), |value| {
+            value.checkpoint.settlement_effects[0].path.siblings[0][0] ^= 1
         });
         assert_rejected("blockhash", witness.clone(), |value| {
             value.runtime.recent_blockhashes.clear()

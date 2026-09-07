@@ -19,13 +19,15 @@ The eight canonical BN254 scalar inputs retain their existing order and encoding
 
 `session_context` commits exactly 149 bytes: `northstar-session-context-v1`, Portal program id, session PDA, little-endian `grid_id`, little-endian session `nonce`, validator pubkey, and settlement-policy version byte `1`. The bytes use the standard `BYTE_STRING_TAG` length-delimited 31-byte field chunking before the `SESSION_CONTEXT_TAG` Poseidon fold. Portal recomputes this field with the BN254 Poseidon syscall when the proof account is created.
 3. `slot_step`: big-endian packed `(er_slot, step_index)`.
-4. `pre_state_root`: root of all mutable ER accounts before the transaction.
-5. `post_state_root`: root after applying the selected commit or rollback effects.
-6. `tx_effect_root`: `Poseidon(TX_EFFECT_V1, transaction_commitment, runtime_commitment, result_commitment, trace_schema_commitment, settlement_effect_root)`.
-7. `readonly_l1_root`: root binding readonly L1 accounts and their observed slots/versions.
-8. `settlement_effect_root`: ordered commitment to committed account effects visible to settlement.
+4. `pre_state_root`: checkpoint-v1 projected SHA-256 state root over the canonical mutable ER account map before the transaction.
+5. `post_state_root`: checkpoint-v1 projected SHA-256 state root after applying the exact authenticated account effects.
+6. `tx_effect_root`: the checkpoint-v1 projected SHA-256 transaction/effect leaf. Portal authenticates this leaf against the checkpoint transaction-effect root.
+7. `readonly_l1_root`: checkpoint-v1 global readonly-L1 root. The witness carries the disputed page values and authentication paths.
+8. `settlement_effect_root`: checkpoint-v1 global settlement-effect root. The witness carries the exact account-effect encodings and authentication paths.
 
-All sub-commitments use typed domain tags and length-delimited field chunking. Byte strings are split into 31-byte big-endian chunks; the committed sequence includes byte length before chunks. Lists commit their element count and preserve the canonical order stated below. No digest is silently reduced modulo BN254 Fr.
+Replay witness encoding v2 adds the checkpoint pre/post account maps, canonical transaction-effect record, and readonly/settlement authentication paths. The relation recomputes every exposed checkpoint field and rejects changed paths or effects. The proof ABI remains proof kind `2`, version `1`; this is a witness-format revision only.
+
+`session_context` retains typed Poseidon length-delimited chunking. Checkpoint state, transaction-effect, readonly-L1, and settlement commitments retain their checkpoint-v1 domain-separated SHA-256 encodings and explicit 253-bit field projections. No digest is silently reduced modulo BN254 Fr.
 
 ### Transaction commitment
 
