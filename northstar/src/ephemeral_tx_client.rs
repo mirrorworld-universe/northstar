@@ -764,10 +764,14 @@ impl TransactionClient for EphemeralTransactionClient {
         }
 
         let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
-        if self.checkpoint_capture.read().unwrap().completed.is_some() {
+        let checkpoint_capture = self.checkpoint_capture.read().unwrap();
+        if checkpoint_capture.completed.is_some()
+            || checkpoint_capture.steps.len() == CANONICAL_CHECKPOINT_STEPS_V1
+        {
             warn!("ER transaction rejected: canonical checkpoint awaits settlement");
             return;
         }
+        drop(checkpoint_capture);
         let bank = self.bank();
         let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
         let touched_accounts = self.touched_accounts.read().unwrap().clone();
@@ -2381,6 +2385,20 @@ mod tests {
             &SendTransactionServiceStats::default(),
         );
         assert_eq!(bank.get_balance(&recipient), balance_after_checkpoint);
+        let sealed = client
+            .checkpoint_capture
+            .write()
+            .unwrap()
+            .completed
+            .take()
+            .unwrap();
+        <EphemeralTransactionClient as TransactionClient>::send_transactions_in_batch(
+            &client,
+            vec![next_wire.clone()],
+            &SendTransactionServiceStats::default(),
+        );
+        assert_eq!(bank.get_balance(&recipient), balance_after_checkpoint);
+        client.checkpoint_capture.write().unwrap().completed = Some(sealed);
 
         assert!(client.consume_checkpoint_artifact_v1(artifact.checkpoint.er_slot));
         <EphemeralTransactionClient as TransactionClient>::send_transactions_in_batch(
