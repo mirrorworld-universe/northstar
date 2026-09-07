@@ -1039,6 +1039,13 @@ pub fn process_timeout_challenge(
         checkpoint_state.challenge_resolved = true;
         challenge_state.status = ChallengeStatus::ValidatorWon;
     }
+    pinocchio_log::log!(
+        "Challenge timeout: er_slot={}, elapsed_slots={}, turn={}, outcome={}",
+        er_slot,
+        current_slot.saturating_sub(challenge_state.opened_at_l1_slot),
+        challenge_state.turn as u8,
+        challenge_state.status as u8,
+    );
     store_checkpoint(checkpoint, &checkpoint_state)?;
     store_challenge(challenge, &challenge_state)
 }
@@ -1489,12 +1496,26 @@ pub fn process_resolve_challenge(
         return Err(PortalError::StepProofPublicInputMismatch.into());
     }
 
-    match verify_step_proof(
+    let verification = verify_step_proof(
         verifier_mode,
         &checkpoint_state,
         &challenge_state,
         &proof_state,
-    ) {
+    );
+    let outcome = match &verification {
+        StepProofVerification::Unavailable => 0,
+        StepProofVerification::Invalid => 1,
+        StepProofVerification::Valid => 2,
+    };
+    pinocchio_log::log!(
+        "Challenge proof: er_slot={}, elapsed_slots={}, outcome={}",
+        er_slot,
+        Clock::get()?
+            .slot
+            .saturating_sub(challenge_state.opened_at_l1_slot),
+        outcome,
+    );
+    match verification {
         StepProofVerification::Unavailable => Err(PortalError::StepProofVerifierUnavailable.into()),
         StepProofVerification::Invalid => {
             if bond_recipient.address() != &challenge_state.challenger {
