@@ -756,6 +756,7 @@ fn build_create_step_proof_ix(
     }
 }
 
+#[allow(dead_code)]
 fn build_write_step_proof_ix(
     program_id: &Pubkey,
     authority: &Pubkey,
@@ -789,6 +790,7 @@ fn build_write_step_proof_ix(
     }
 }
 
+#[allow(dead_code)]
 fn build_seal_step_proof_ix(
     program_id: &Pubkey,
     authority: &Pubkey,
@@ -815,6 +817,7 @@ fn build_seal_step_proof_ix(
     }
 }
 
+#[allow(dead_code)]
 fn build_submit_step_proof_ix(
     program_id: &Pubkey,
     submitter: &Pubkey,

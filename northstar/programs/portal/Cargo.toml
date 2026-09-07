@@ -8,7 +8,7 @@ build = "build.rs"
 crate-type = ["cdylib", "lib"]
 
 [features]
-default = []
+default = ["zk-verifier-prototype"]
 no-entrypoint = []
 bpf-entrypoint = []
 test-verifier = []
