@@ -6,7 +6,7 @@ publish.workspace = true
 
 [features]
 default = []
-cuda = ["sp1-sdk/cuda"]
+cuda = ["sp1-sdk/cuda", "sp1-sdk/groth16-cuda"]
 profiling = ["sp1-sdk/profiling"]
 
 [dependencies]
