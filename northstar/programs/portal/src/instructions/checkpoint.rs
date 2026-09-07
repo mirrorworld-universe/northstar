@@ -21,6 +21,11 @@ use {
     pinocchio_system::instructions::Transfer,
     solana_sha256_hasher::hashv,
 };
+#[cfg(feature = "zk-verifier-prototype")]
+use {
+    super::verifier::verify_er_step_proof_v1,
+    northstar_zk_types::{ErStepPublicInputsV1, FrBytes},
+};
 
 fn load_session(program_id: &Pubkey, session: &AccountInfo) -> Result<Session, ProgramError> {
     let (expected_session_key, _) = find_session_pda(program_id);
@@ -374,6 +379,7 @@ fn step_proof_public_input_hash(
         &[proof_state.proof_version],
         &checkpoint_state.er_slot.to_le_bytes(),
         &challenge_state.start_step.to_le_bytes(),
+        &proof_state.session_context,
         &challenge_state.start_state_root,
         &challenge_state.end_state_root,
         &proof_state.tx_effect_root,
@@ -1048,6 +1054,7 @@ pub fn process_timeout_challenge(
         proof_kind: u8,
         proof_version: u8,
         step_index: u64,
+        session_context: Hash32,
         tx_effect_root: Hash32,
         readonly_l1_root: Hash32,
         settlement_effect_root: Hash32
@@ -1061,6 +1068,7 @@ pub fn process_create_step_proof(
         proof_kind,
         proof_version,
         step_index,
+        session_context,
         tx_effect_root,
         readonly_l1_root,
         settlement_effect_root,
@@ -1113,6 +1121,7 @@ pub fn process_create_step_proof(
         proof_kind,
         proof_version,
         step_index,
+        session_context,
         tx_effect_root,
         readonly_l1_root,
         settlement_effect_root,
@@ -1297,11 +1306,72 @@ enum StepProofVerification {
 
 fn verify_step_proof(
     verifier_mode: StepProofVerifierMode,
+    checkpoint_state: &Checkpoint,
+    challenge_state: &Challenge,
     proof_state: &StepProofAccount,
 ) -> StepProofVerification {
     match verifier_mode {
-        StepProofVerifierMode::Production => StepProofVerification::Unavailable,
+        StepProofVerifierMode::Production => {
+            verify_step_proof_production(checkpoint_state, challenge_state, proof_state)
+        }
         StepProofVerifierMode::TestOnly => verify_step_proof_test_only(proof_state),
+    }
+}
+
+fn verify_step_proof_production(
+    checkpoint_state: &Checkpoint,
+    challenge_state: &Challenge,
+    proof_state: &StepProofAccount,
+) -> StepProofVerification {
+    #[cfg(feature = "zk-verifier-prototype")]
+    {
+        let Ok(session_context) = FrBytes::new(proof_state.session_context) else {
+            return StepProofVerification::Invalid;
+        };
+        let Ok(pre_state_root) = FrBytes::new(challenge_state.start_state_root) else {
+            return StepProofVerification::Invalid;
+        };
+        let Ok(post_state_root) = FrBytes::new(challenge_state.end_state_root) else {
+            return StepProofVerification::Invalid;
+        };
+        let Ok(tx_effect_root) = FrBytes::new(proof_state.tx_effect_root) else {
+            return StepProofVerification::Invalid;
+        };
+        let Ok(readonly_l1_root) = FrBytes::new(proof_state.readonly_l1_root) else {
+            return StepProofVerification::Invalid;
+        };
+        let Ok(settlement_effect_root) = FrBytes::new(proof_state.settlement_effect_root) else {
+            return StepProofVerification::Invalid;
+        };
+        let public_inputs = ErStepPublicInputsV1 {
+            domain: FrBytes::er_step_domain_v1(proof_state.proof_kind, proof_state.proof_version),
+            session_context,
+            slot_step: FrBytes::from_u64_pair(checkpoint_state.er_slot, proof_state.step_index),
+            pre_state_root,
+            post_state_root,
+            tx_effect_root,
+            readonly_l1_root,
+            settlement_effect_root,
+        };
+        let mut public_input_bytes = [0; 256];
+        for (output, input) in public_input_bytes
+            .chunks_exact_mut(32)
+            .zip(public_inputs.to_array())
+        {
+            output.copy_from_slice(&input);
+        }
+        if proof_state.written_len as usize != MAX_STEP_PROOF_BYTES {
+            return StepProofVerification::Invalid;
+        }
+        match verify_er_step_proof_v1(&proof_state.data, &public_input_bytes) {
+            Ok(()) => StepProofVerification::Valid,
+            Err(_) => StepProofVerification::Invalid,
+        }
+    }
+    #[cfg(not(feature = "zk-verifier-prototype"))]
+    {
+        let _ = (checkpoint_state, challenge_state, proof_state);
+        StepProofVerification::Unavailable
     }
 }
 
@@ -1415,7 +1485,12 @@ pub fn process_resolve_challenge(
         return Err(PortalError::StepProofPublicInputMismatch.into());
     }
 
-    match verify_step_proof(verifier_mode, &proof_state) {
+    match verify_step_proof(
+        verifier_mode,
+        &checkpoint_state,
+        &challenge_state,
+        &proof_state,
+    ) {
         StepProofVerification::Unavailable => Err(PortalError::StepProofVerifierUnavailable.into()),
         StepProofVerification::Invalid => {
             if bond_recipient.address() != &challenge_state.challenger {
@@ -1496,6 +1571,7 @@ mod tests {
             proof_kind: 1,
             proof_version: 1,
             step_index: 7,
+            session_context: [9; 32],
             tx_effect_root: [6; 32],
             readonly_l1_root: [7; 32],
             settlement_effect_root: [8; 32],
@@ -1517,9 +1593,9 @@ mod tests {
                 &proof,
             ),
             [
-                0xd5, 0xf5, 0x13, 0x29, 0xde, 0x7a, 0x7f, 0x56, 0x66, 0x15, 0x20, 0xef, 0x99, 0xc7,
-                0x18, 0x91, 0x96, 0x87, 0x7b, 0xbc, 0xa4, 0x12, 0xea, 0x03, 0xdf, 0x79, 0x4a, 0x17,
-                0x92, 0x3c, 0x05, 0x44,
+                0xe8, 0xae, 0xb8, 0xf6, 0x67, 0xc3, 0x9b, 0x66, 0xd0, 0x50, 0xd5, 0x1f, 0xe9, 0x34,
+                0x73, 0x86, 0x06, 0x27, 0x17, 0x33, 0x8a, 0xd6, 0xe2, 0x05, 0xa0, 0x3b, 0x45, 0x2c,
+                0x01, 0x21, 0x1c, 0x5c,
             ]
         );
     }

@@ -447,6 +447,7 @@ fn build_create_step_proof_ix(
         proof_kind: 1,
         proof_version: 1,
         step_index: 0,
+        session_context: [4; 32],
         tx_effect_root: [5; 32],
         readonly_l1_root: [6; 32],
         settlement_effect_root: [3; 32],
@@ -2574,7 +2575,7 @@ async fn submit_step_proof_invalid_slashes_and_blocks_settlement() {
     );
     let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[submit_ix.clone()],
+        std::slice::from_ref(&submit_ix),
         Some(&payer_pubkey),
         &[&payer, &challenger],
         blockhash,

@@ -66,22 +66,23 @@ Measured on 2026-09-07 against the current Agave SBF runtime:
 | Portal instruction data | 613 bytes |
 | Signed standalone transaction | 783 bytes |
 | Feature-enabled Portal SBF ELF | 332,208 bytes |
-| Full five-input MSM + pairing path | 97,146 CU |
-| Invalid SP1 key prefix rejection | 416 CU |
-| Noncanonical Portal field rejection | 663 CU |
+| Full five-input MSM + pairing path | 97,156 CU |
+| Invalid SP1 key prefix rejection | 428 CU |
+| Noncanonical Portal field rejection | 675 CU |
+| Sealed step-proof capacity | 356 bytes |
 
-The 97,146-CU run uses curve-valid Groth16 points from the existing benchmark corpus against the pinned SP1 key. It intentionally reaches all five scalar multiplications and the pairing syscall, then fails because it is not an SP1 proof. This is a preliminary verifier-path measurement, not a successful Northstar proof verification. It is 32,854 CU below the 130K target and 52,854 CU below the 150K stop threshold.
+The 97,156-CU run uses curve-valid Groth16 points from the existing benchmark corpus against the pinned SP1 key. It intentionally reaches all five scalar multiplications and the pairing syscall, then fails because it is not an SP1 proof. This is a preliminary verifier-path measurement, not a successful Northstar proof verification. It is 32,844 CU below the 130K target and 52,844 CU below the 150K stop threshold.
 
 SP1 6.1.0 has CPU and CUDA proving backends but no AMD XDNA NPU backend. Local proof generation was therefore not repeated on the CPU-only development machine.
 
 ## Remaining compatibility check
 
-Before enabling this feature for production challenge resolution, capture the existing Northstar SP1 Groth16 proof artifact and add it as a test vector outside source-heavy build artifacts. The final check must:
+Production challenge resolution now reconstructs the eight public fields from the sealed account and invokes the direct SP1 verifier. Capture the existing Northstar SP1 Groth16 proof artifact and add it as a test vector outside source-heavy build artifacts. The final compatibility check must:
 
 - accept the unchanged 356-byte Northstar proof;
 - reject changed raw proof bytes and each changed Portal public field;
 - confirm successful-verification CU remains at or below 130K;
-- expand the account-backed `StepProofAccount` path beyond its current 256-byte cap as part of production challenge resolution.
+- bind `session_context` to the finalized canonical session-context derivation.
 
 ## Reproduction
 

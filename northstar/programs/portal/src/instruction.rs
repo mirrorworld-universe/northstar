@@ -138,6 +138,7 @@ pub struct CreateStepProof {
     pub proof_kind: u8,
     pub proof_version: u8,
     pub step_index: u64,
+    pub session_context: Hash32,
     pub tx_effect_root: Hash32,
     pub readonly_l1_root: Hash32,
     pub settlement_effect_root: Hash32,

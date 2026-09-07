@@ -41,21 +41,13 @@ fn sp1_public_inputs(
     ])
 }
 
-#[p_instruction(
-    id = 30,
-    data = [proof: [u8; 356], public_inputs: [u8; 256]]
-)]
-pub fn process_verify_er_step_proof_v1(
-    accounts: &mut [AccountInfo],
-    VerifyErStepProofV1 {
-        proof,
-        public_inputs,
-    }: VerifyErStepProofV1,
-) -> ProgramResult {
-    let _ = accounts;
-    let proof = Sp1Groth16ProofV1::from_bytes(&proof)
+pub(crate) fn verify_er_step_proof_v1(
+    proof: &[u8],
+    public_inputs: &[u8; 256],
+) -> Result<(), PortalError> {
+    let proof = Sp1Groth16ProofV1::from_bytes(proof)
         .map_err(|_| PortalError::StepProofVerificationFailed)?;
-    let groth16_inputs = sp1_public_inputs(&public_inputs, proof.proof_nonce)?;
+    let groth16_inputs = sp1_public_inputs(public_inputs, proof.proof_nonce)?;
     // SP1 emits Gnark's non-negated A; groth16-solana folds the standard
     // pairing equation with -A.
     let proof_a = negate_g1_be(&proof.proof.a);
@@ -69,7 +61,22 @@ pub fn process_verify_er_step_proof_v1(
     .map_err(|_| PortalError::StepProofVerificationFailed)?;
     verifier
         .verify()
-        .map_err(|_| PortalError::StepProofVerificationFailed.into())
+        .map_err(|_| PortalError::StepProofVerificationFailed)
+}
+
+#[p_instruction(
+    id = 30,
+    data = [proof: [u8; 356], public_inputs: [u8; 256]]
+)]
+pub fn process_verify_er_step_proof_v1(
+    accounts: &mut [AccountInfo],
+    VerifyErStepProofV1 {
+        proof,
+        public_inputs,
+    }: VerifyErStepProofV1,
+) -> ProgramResult {
+    let _ = accounts;
+    verify_er_step_proof_v1(&proof, &public_inputs).map_err(Into::into)
 }
 
 #[cfg(test)]
