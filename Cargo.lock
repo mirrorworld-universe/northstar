@@ -5227,6 +5227,7 @@ dependencies = [
  "borsh",
  "groth16-solana",
  "hex",
+ "northstar-transaction-proof",
  "northstar-zk-types",
  "pinocchio 0.11.2",
  "pinocchio-idl-macros",

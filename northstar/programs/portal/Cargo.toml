@@ -33,6 +33,7 @@ solana-poseidon = { workspace = true }
 
 [dev-dependencies]
 bincode = { workspace = true }
+northstar-transaction-proof.workspace = true
 hex = "0.4"
 serde_json = "1"
 solana-program-test = { workspace = true }

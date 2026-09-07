@@ -1824,6 +1824,73 @@ mod tests {
     }
 
     #[test]
+    fn replay_fixture_matches_portal_checkpoint_bindings() {
+        let witness = northstar_transaction_proof::fixture::build_replay_witness_v1().unwrap();
+        let public = northstar_transaction_proof::replay(&witness).unwrap();
+        let program = Pubkey::from(<[u8; 32]>::try_from(&witness.session_context[28..60]).unwrap());
+        let session_key =
+            Pubkey::from(<[u8; 32]>::try_from(&witness.session_context[60..92]).unwrap());
+        let validator =
+            Pubkey::from(<[u8; 32]>::try_from(&witness.session_context[116..148]).unwrap());
+        let session = Session {
+            discriminator: Session::DISCRIMINATOR,
+            grid_id: 1,
+            ttl_slots: 100,
+            fee_cap: 1_000,
+            created_at: 0,
+            nonce: 0,
+            authority: [3; 32].into(),
+            validator,
+            settlement_interval_slots: 10,
+            last_settled_l1_slot: 0,
+            last_settled_er_slot: 0,
+            settlement_status: crate::SettlementStatus::Idle,
+            settlement_er_slot: 0,
+            settlement_checksum: [0; 32],
+            settlement_accumulator: [0; 32],
+            settlement_started_l1_slot: 0,
+            bump: 1,
+        };
+        assert_eq!(
+            session_context_v1(&program, &session_key, &session).unwrap(),
+            public.session_context.to_bytes(),
+        );
+
+        let mut path = [[0; 32]; TX_EFFECT_AUTH_PATH_NODES];
+        path.copy_from_slice(&witness.checkpoint.transaction_effect_path.siblings);
+        let checkpoint = Checkpoint {
+            discriminator: Checkpoint::DISCRIMINATOR,
+            session: session_key,
+            er_slot: witness.er_slot,
+            step_count: CANONICAL_CHECKPOINT_STEPS,
+            previous_state_root: public.pre_state_root.to_bytes(),
+            new_state_root: public.post_state_root.to_bytes(),
+            trace_root: [0; 32],
+            tx_effect_root: witness.checkpoint.checkpoint_transaction_effect_root,
+            readonly_l1_root: public.readonly_l1_root.to_bytes(),
+            da_commitment: [0; 32],
+            effect_commitment: public.settlement_effect_root.to_bytes(),
+            proposer: validator,
+            proposed_at_l1_slot: 0,
+            challenge_deadline_l1_slot: 0,
+            status: CheckpointStatus::Challenged,
+            bond_lamports: 1,
+            bond_status: CheckpointBondStatus::Locked,
+            challenger: [0; 32].into(),
+            challenged_at_l1_slot: 0,
+            challenge_resolved: false,
+            bump: 0,
+        };
+        assert!(verify_tx_effect_authentication_path(
+            &checkpoint,
+            witness.step_index,
+            &public.tx_effect_root.to_bytes(),
+            witness.checkpoint.transaction_effect_path.siblings.len() as u8,
+            &path,
+        ));
+    }
+
+    #[test]
     fn step_proof_public_input_hash_v1_is_stable() {
         let checkpoint = Checkpoint {
             discriminator: Checkpoint::DISCRIMINATOR,
