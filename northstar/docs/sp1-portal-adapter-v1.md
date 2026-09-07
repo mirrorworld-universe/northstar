@@ -75,7 +75,7 @@ The 97,156-CU run uses curve-valid Groth16 points from the existing benchmark co
 
 The direct verifier remains behind `zk-verifier-prototype` until an unchanged real proof passes the full resolver test. Feature-enabled builds route production `ResolveChallenge` through it; default builds fail closed with `StepProofVerifierUnavailable`. The dummy verifier still requires its explicit guarded test feature.
 
-SP1 6.1.0 has CPU and CUDA proving backends but no AMD XDNA NPU backend. The revised program setup completed locally in 117,929 ms. A local Groth16 run on the Ryzen 7 7840U remains impractical: the earlier relation ran for 33 minutes without completing or emitting an artifact while using all cores and increasing memory pressure.
+SP1 6.1.0 has CPU and CUDA proving backends but no AMD XDNA NPU backend. The revised program setup completed locally in 117,929 ms. The checkpoint-bound Groth16 run was stopped after 61 minutes without completing or emitting an artifact; it used all cores, about 7 GiB of resident memory, and substantial existing swap pressure. Generating the compatibility artifact now requires a CUDA machine or SP1 proving service.
 
 ## Remaining compatibility check
 
