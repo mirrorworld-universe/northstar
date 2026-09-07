@@ -1558,13 +1558,18 @@ impl solana_rpc::rpc::ErTxExecutor for EphemeralTransactionClient {
 mod tests {
     use {
         super::*,
+        crate::checkpoint::{
+            build_checkpoint_artifact_v1, state_root_v1, CheckpointArtifactV1,
+            CheckpointStepInputV1, ReadonlyL1ValueV1, StateAccountValueV1,
+            CANONICAL_CHECKPOINT_STEPS_V1,
+        },
         solana_account::AccountSharedData,
         solana_address_lookup_table_interface::{
             self as address_lookup_table,
             state::{AddressLookupTable, LookupTableMeta},
         },
         solana_fee_structure::FeeDetails,
-        solana_keypair::{Keypair, Signer},
+        solana_keypair::{keypair_from_seed, Keypair, Signer},
         solana_leader_schedule::SlotLeader,
         solana_message::{
             v0::{self, MessageAddressTableLookup},
@@ -1888,6 +1893,119 @@ mod tests {
         VersionedTransaction::try_new(message, &[fee_payer]).unwrap()
     }
 
+    fn create_transfer_tx_with_amount(
+        fee_payer: &Keypair,
+        from: Pubkey,
+        to: Pubkey,
+        lamports: u64,
+        blockhash: solana_hash::Hash,
+    ) -> VersionedTransaction {
+        use {solana_message::VersionedMessage, solana_system_interface::instruction::transfer};
+        let instruction = transfer(&from, &to, lamports);
+        let message = VersionedMessage::Legacy(Message::new_with_blockhash(
+            &[instruction],
+            Some(&fee_payer.pubkey()),
+            &blockhash,
+        ));
+        VersionedTransaction::try_new(message, &[fee_payer]).unwrap()
+    }
+
+    fn checkpoint_state(bank: &Bank, accounts: &[Pubkey]) -> (Vec<StateAccountValueV1>, [u8; 32]) {
+        let mut values = accounts
+            .iter()
+            .map(|pubkey| {
+                let account = bank.get_account(pubkey).unwrap();
+                StateAccountValueV1 {
+                    account: *pubkey,
+                    owner: *account.owner(),
+                    lamports: account.lamports(),
+                    executable: account.executable(),
+                    rent_epoch: account.rent_epoch(),
+                    data_hash: solana_sha256_hasher::hashv(&[account.data()]).to_bytes(),
+                }
+            })
+            .collect::<Vec<_>>();
+        values.sort_unstable();
+        let root = state_root_v1(&values).unwrap();
+        (values, root)
+    }
+
+    fn execute_canonical_checkpoint_fixture() -> CheckpointArtifactV1 {
+        let source = keypair_from_seed(&[7; 32]).unwrap();
+        let recipient = Pubkey::new_from_array([8; 32]);
+        let session = Pubkey::new_from_array([9; 32]);
+        let bank = create_test_bank();
+        fund_account(&bank, &source.pubkey(), 100_000_000);
+        fund_account(&bank, &recipient, 1_000_000);
+        let blockhash = bank.last_blockhash();
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let bank = bank_forks.read().unwrap().root_bank();
+        let history = Arc::new(ErHistoryStore::default());
+        let client = create_client_with_history(
+            bank_forks,
+            vec![source.pubkey(), recipient],
+            history.clone(),
+        );
+        *client.session_pda.write().unwrap() = Some(session);
+
+        let system_account = bank.get_account(&system_program::id()).unwrap();
+        let readonly_system_program = ReadonlyL1ValueV1 {
+            account: system_program::id(),
+            owner: *system_account.owner(),
+            lamports: system_account.lamports(),
+            data_hash: solana_sha256_hasher::hashv(&[system_account.data()]).to_bytes(),
+            observed_l1_slot: bank.slot(),
+        };
+        let state_accounts = [source.pubkey(), recipient];
+        let mut steps = Vec::with_capacity(CANONICAL_CHECKPOINT_STEPS_V1);
+        for index in 0..CANONICAL_CHECKPOINT_STEPS_V1 {
+            let (_, pre_state_root) = checkpoint_state(&bank, &state_accounts);
+            let transaction = create_transfer_tx_with_amount(
+                &source,
+                source.pubkey(),
+                recipient,
+                index as u64 + 1_000,
+                blockhash,
+            );
+            let signature = transaction.signatures[0];
+            let transaction_bytes = bincode::serialize(&transaction).unwrap();
+            <EphemeralTransactionClient as TransactionClient>::send_transactions_in_batch(
+                &client,
+                vec![transaction_bytes.clone()],
+                &SendTransactionServiceStats::default(),
+            );
+            let recorded = history
+                .get_transaction(
+                    &signature,
+                    solana_rpc_client_types::config::CommitmentConfig::confirmed(),
+                )
+                .unwrap();
+            let meta = recorded.tx_with_meta.get_status_meta().unwrap();
+            assert!(meta.status.is_ok());
+            let transaction_effect = borsh::to_vec(&(
+                1u8,
+                meta.status.is_ok(),
+                meta.fee,
+                meta.pre_balances,
+                meta.post_balances,
+                meta.compute_units_consumed.unwrap_or_default(),
+            ))
+            .unwrap();
+            let (post_state, post_state_root) = checkpoint_state(&bank, &state_accounts);
+            steps.push(CheckpointStepInputV1 {
+                step_index: index as u32,
+                transaction: transaction_bytes,
+                transaction_effect,
+                pre_state_root,
+                post_state_root,
+                readonly_l1_values: vec![readonly_system_program],
+                settlement_effects: vec![borsh::to_vec(&post_state).unwrap()],
+            });
+        }
+
+        build_checkpoint_artifact_v1(session, bank.slot(), steps).unwrap()
+    }
+
     #[test]
     fn test_empty_session_cannot_spend_untouched_l1_balance() {
         let source = Keypair::new();
@@ -1999,6 +2117,28 @@ mod tests {
                 .is_some(),
             "second transaction should be recorded in ER history"
         );
+    }
+
+    #[test]
+    fn canonical_checkpoint_uses_sixteen_executed_er_transactions() {
+        let first = execute_canonical_checkpoint_fixture()
+            .canonical_bytes()
+            .unwrap();
+        let second = execute_canonical_checkpoint_fixture()
+            .canonical_bytes()
+            .unwrap();
+        let third = execute_canonical_checkpoint_fixture()
+            .canonical_bytes()
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first, third);
+        let artifact = CheckpointArtifactV1::decode_verified(&first).unwrap();
+        assert_eq!(artifact.da.pages.len(), CANONICAL_CHECKPOINT_STEPS_V1);
+        assert!(artifact
+            .da
+            .pages
+            .iter()
+            .all(|page| !page.transaction.is_empty() && !page.transaction_effect.is_empty()));
     }
 
     #[test]
