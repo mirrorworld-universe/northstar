@@ -65,7 +65,7 @@ Measured on 2026-09-07 against the current Agave SBF runtime:
 | Northstar SP1 setup on Ryzen 7 7840U | 55,524 ms |
 | Portal instruction data | 613 bytes |
 | Signed standalone transaction | 783 bytes |
-| Default production Portal SBF ELF | 359,080 bytes |
+| Feature-enabled Portal SBF ELF | 359,080 bytes |
 | Full five-input MSM + pairing path | 97,156 CU |
 | Invalid SP1 key prefix rejection | 428 CU |
 | Noncanonical Portal field rejection | 675 CU |
@@ -73,9 +73,9 @@ Measured on 2026-09-07 against the current Agave SBF runtime:
 
 The 97,156-CU run uses curve-valid Groth16 points from the existing benchmark corpus against the pinned SP1 key. It intentionally reaches all five scalar multiplications and the pairing syscall, then fails because it is not an SP1 proof. This is a preliminary verifier-path measurement, not a successful Northstar proof verification. It is 32,844 CU below the 130K target and 52,844 CU below the 150K stop threshold.
 
-The direct verifier is enabled in Portal's default feature set. A normal `cargo build-sbf` therefore includes production `ResolveChallenge` verification; the dummy verifier still requires its explicit guarded test feature.
+The direct verifier remains behind `zk-verifier-prototype` until an unchanged real proof passes the full resolver test. Feature-enabled builds route production `ResolveChallenge` through it; default builds fail closed with `StepProofVerifierUnavailable`. The dummy verifier still requires its explicit guarded test feature.
 
-SP1 6.1.0 has CPU and CUDA proving backends but no AMD XDNA NPU backend. Local proof generation was therefore not repeated on the CPU-only development machine.
+SP1 6.1.0 has CPU and CUDA proving backends but no AMD XDNA NPU backend. A canonical local Groth16 run on the Ryzen 7 7840U was stopped after 33 minutes without completing or emitting an artifact; it used all cores and increased memory pressure, so this machine is not a practical compatibility-proof source.
 
 ## Remaining compatibility check
 
