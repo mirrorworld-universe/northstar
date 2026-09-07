@@ -24,6 +24,7 @@ use {
     unsettled_state::{RecoveredUnsettledState, RecoveryDisposition, UnsettledSessionIdentity},
 };
 
+pub mod checkpoint;
 pub mod ephemeral_runtime;
 pub mod ephemeral_tpu;
 pub mod ephemeral_tx_client;

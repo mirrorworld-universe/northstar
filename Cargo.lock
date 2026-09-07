@@ -5164,6 +5164,7 @@ dependencies = [
  "log",
  "northstar-portal",
  "northstar-token-bridge",
+ "northstar-zk-types",
  "serde_json",
  "solana-account 4.3.1",
  "solana-accounts-db",

@@ -55,6 +55,7 @@ thiserror.workspace = true
 tokio.workspace = true
 
 northstar-portal.workspace = true
+northstar-zk-types.workspace = true
 northstar-token-bridge = { path = "programs/token-bridge", features = ["no-entrypoint"] }
 
 base64.workspace = true
