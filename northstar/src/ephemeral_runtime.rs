@@ -6219,7 +6219,6 @@ mod tests {
         agave_logger::setup();
 
         let (parent_bank, mut runtime) = create_runtime();
-        runtime.activate();
 
         let program_bytes = std::fs::read("../programs/bpf_loader/test_elfs/out/noop_aligned.so")
             .expect("noop ELF should exist");
