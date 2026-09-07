@@ -55,6 +55,103 @@ fn find_step_proof_pda(program_id: &Pubkey, checkpoint: &Pubkey) -> (Pubkey, u8)
     Pubkey::find_program_address(&[b"step_proof", checkpoint.as_ref()], program_id)
 }
 
+fn synthetic_state_root(index: u64) -> [u8; 32] {
+    if index == 0 {
+        return [0; 32];
+    }
+    if index == northstar_portal::CANONICAL_CHECKPOINT_STEPS {
+        return [2; 32];
+    }
+    let mut root = [0; 32];
+    root[24..].copy_from_slice(&(index + 1).to_be_bytes());
+    root
+}
+
+fn trace_leaf_hash(index: u32, state_root: &[u8; 32]) -> [u8; 32] {
+    hashv(&[
+        b"northstar-checkpoint-v1",
+        b"trace",
+        b"leaf",
+        &36u64.to_le_bytes(),
+        &index.to_le_bytes(),
+        state_root,
+    ])
+    .to_bytes()
+}
+
+fn trace_empty_leaf_hash(index: u32) -> [u8; 32] {
+    hashv(&[
+        b"northstar-checkpoint-v1",
+        b"trace",
+        b"empty-leaf",
+        &4u64.to_le_bytes(),
+        &index.to_le_bytes(),
+    ])
+    .to_bytes()
+}
+
+fn trace_node_hash(level: u32, left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    hashv(&[
+        b"northstar-checkpoint-v1",
+        b"trace",
+        b"node",
+        &level.to_le_bytes(),
+        left,
+        right,
+    ])
+    .to_bytes()
+}
+
+fn synthetic_trace_layers(step_count: u64) -> Vec<Vec<[u8; 32]>> {
+    let leaf_count = (step_count + 1) as usize;
+    let width = leaf_count.next_power_of_two();
+    let mut leaves = (0..leaf_count)
+        .map(|index| trace_leaf_hash(index as u32, &synthetic_state_root(index as u64)))
+        .collect::<Vec<_>>();
+    leaves.extend((leaf_count..width).map(|index| trace_empty_leaf_hash(index as u32)));
+    let mut layers = vec![leaves];
+    let mut level = 0;
+    while layers.last().unwrap().len() > 1 {
+        let next = layers
+            .last()
+            .unwrap()
+            .chunks_exact(2)
+            .map(|pair| trace_node_hash(level, &pair[0], &pair[1]))
+            .collect();
+        layers.push(next);
+        level += 1;
+    }
+    layers
+}
+
+fn synthetic_trace_root(step_count: u64) -> [u8; 32] {
+    let inner = synthetic_trace_layers(step_count)
+        .last()
+        .unwrap()
+        .first()
+        .copied()
+        .unwrap();
+    hashv(&[
+        b"northstar-checkpoint-v1",
+        b"trace",
+        b"root",
+        &((step_count + 1) as u32).to_le_bytes(),
+        &inner,
+    ])
+    .to_bytes()
+}
+
+fn synthetic_trace_path(step_count: u64, state_index: u64) -> (u8, [[u8; 32]; 5]) {
+    let layers = synthetic_trace_layers(step_count);
+    let mut path = [[0; 32]; 5];
+    let mut index = state_index as usize;
+    for (level, layer) in layers[..layers.len() - 1].iter().enumerate() {
+        path[level] = layer[index ^ 1];
+        index /= 2;
+    }
+    ((layers.len() - 1) as u8, path)
+}
+
 fn find_deposit_receipt_pda(
     program_id: &Pubkey,
     session: &Pubkey,
@@ -217,9 +314,9 @@ fn build_propose_multi_step_checkpoint_ix(
     instruction.data = borsh::to_vec(&PortalInstruction::ProposeCheckpoint(ProposeCheckpoint {
         er_slot,
         step_count,
-        previous_state_root: [0; 32],
-        new_state_root: [2; 32],
-        trace_root: [4; 32],
+        previous_state_root: synthetic_state_root(0),
+        new_state_root: synthetic_state_root(step_count),
+        trace_root: synthetic_trace_root(step_count),
         tx_effect_root: [5; 32],
         readonly_l1_root: [6; 32],
         da_commitment: [7; 32],
@@ -315,10 +412,14 @@ fn build_respond_challenge_ix(
     let (checkpoint_pda, _) = find_checkpoint_pda(program_id, session_pda, er_slot);
     let (challenge_pda, _) = find_challenge_pda(program_id, &checkpoint_pda);
     let (da_proof_pda, _) = find_da_proof_pda(program_id, &challenge_pda);
+    let (trace_path_len, trace_path) =
+        synthetic_trace_path(northstar_portal::CANONICAL_CHECKPOINT_STEPS, claimed_step);
     let ix = PortalInstruction::RespondChallenge(RespondChallenge {
         er_slot,
         claimed_step,
         claimed_state_root,
+        trace_path_len,
+        trace_path,
         da_payload_root: [7; 32],
         da_inclusion_proof_hash: [8; 32],
     });
@@ -358,6 +459,45 @@ fn build_bisect_challenge_ix(
         ],
         data: borsh::to_vec(&ix).unwrap(),
     }
+}
+
+async fn process_bisection_round(
+    context: &mut ProgramTestContext,
+    payer: &Keypair,
+    challenger: &Keypair,
+    session_pda: &Pubkey,
+    er_slot: u64,
+    midpoint: u64,
+    midpoint_root: [u8; 32],
+    dispute_upper: bool,
+) {
+    let respond = build_respond_challenge_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer.pubkey(),
+        session_pda,
+        er_slot,
+        midpoint,
+        midpoint_root,
+    );
+    let bisect = build_bisect_challenge_ix(
+        &PORTAL_PROGRAM_ID,
+        &challenger.pubkey(),
+        session_pda,
+        er_slot,
+        dispute_upper,
+    );
+    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let transaction = Transaction::new_signed_with_payer(
+        &[respond, bisect],
+        Some(&payer.pubkey()),
+        &[payer, challenger],
+        blockhash,
+    );
+    context
+        .banks_client
+        .process_transaction(transaction)
+        .await
+        .unwrap();
 }
 
 fn build_timeout_challenge_ix(
@@ -1805,7 +1945,7 @@ async fn challenge_bisects_to_one_step_and_challenger_timeout_restores_checkpoin
         &payer_pubkey,
         &session_pda,
         er_slot,
-        4,
+        16,
         challenge_window_slots,
     );
     let challenge_ix = build_challenge_checkpoint_ix(
@@ -1827,7 +1967,7 @@ async fn challenge_bisects_to_one_step_and_challenger_timeout_restores_checkpoin
         .await
         .unwrap();
     let challenge = Challenge::try_from_slice(&challenge_data).unwrap();
-    assert_eq!((challenge.start_step, challenge.end_step), (0, 4));
+    assert_eq!((challenge.start_step, challenge.end_step), (0, 16));
     assert_eq!(challenge.turn, ChallengeTurn::Respondent);
     let da_data = get_account_data(&mut context.banks_client, &da_proof_pda)
         .await
@@ -1847,11 +1987,14 @@ async fn challenge_bisects_to_one_step_and_challenger_timeout_restores_checkpoin
         2,
         [9; 32],
     );
+    let (trace_path_len, trace_path) = synthetic_trace_path(16, 8);
     bad_da_response_ix.data =
         borsh::to_vec(&PortalInstruction::RespondChallenge(RespondChallenge {
             er_slot,
-            claimed_step: 2,
-            claimed_state_root: [9; 32],
+            claimed_step: 8,
+            claimed_state_root: synthetic_state_root(8),
+            trace_path_len,
+            trace_path,
             da_payload_root: [99; 32],
             da_inclusion_proof_hash: [8; 32],
         }))
@@ -1868,22 +2011,50 @@ async fn challenge_bisects_to_one_step_and_challenger_timeout_restores_checkpoin
         "response must open the checkpoint DA commitment"
     );
 
-    let respond_ix = build_respond_challenge_ix(
+    let mut invalid_path = trace_path;
+    invalid_path[0][0] ^= 1;
+    let mut bad_path_response_ix = build_respond_challenge_ix(
         &PORTAL_PROGRAM_ID,
         &payer_pubkey,
         &session_pda,
         er_slot,
-        2,
-        [9; 32],
+        8,
+        synthetic_state_root(8),
     );
+    bad_path_response_ix.data =
+        borsh::to_vec(&PortalInstruction::RespondChallenge(RespondChallenge {
+            er_slot,
+            claimed_step: 8,
+            claimed_state_root: synthetic_state_root(8),
+            trace_path_len,
+            trace_path: invalid_path,
+            da_payload_root: [7; 32],
+            da_inclusion_proof_hash: [8; 32],
+        }))
+        .unwrap();
     let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
-        &[respond_ix],
+        &[bad_path_response_ix],
         Some(&payer_pubkey),
         &[&payer],
         blockhash,
     );
-    context.banks_client.process_transaction(tx).await.unwrap();
+    assert!(
+        context.banks_client.process_transaction(tx).await.is_err(),
+        "response must authenticate its midpoint against trace_root"
+    );
+
+    process_bisection_round(
+        &mut context,
+        &payer,
+        &challenger,
+        &session_pda,
+        er_slot,
+        8,
+        synthetic_state_root(8),
+        true,
+    )
+    .await;
     let da_data = get_account_data(&mut context.banks_client, &da_proof_pda)
         .await
         .unwrap();
@@ -1893,63 +2064,47 @@ async fn challenge_bisects_to_one_step_and_challenger_timeout_restores_checkpoin
             .status,
         DataAvailabilityStatus::Revealed
     );
-
-    let bisect_upper_ix = build_bisect_challenge_ix(
-        &PORTAL_PROGRAM_ID,
-        &challenger.pubkey(),
+    process_bisection_round(
+        &mut context,
+        &payer,
+        &challenger,
         &session_pda,
         er_slot,
-        true,
-    );
-    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
-    let tx = Transaction::new_signed_with_payer(
-        &[bisect_upper_ix],
-        Some(&payer_pubkey),
-        &[&payer, &challenger],
-        blockhash,
-    );
-    context.banks_client.process_transaction(tx).await.unwrap();
-
-    let respond_ix = build_respond_challenge_ix(
-        &PORTAL_PROGRAM_ID,
-        &payer_pubkey,
-        &session_pda,
-        er_slot,
-        3,
-        [10; 32],
-    );
-    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
-    let tx = Transaction::new_signed_with_payer(
-        &[respond_ix],
-        Some(&payer_pubkey),
-        &[&payer],
-        blockhash,
-    );
-    context.banks_client.process_transaction(tx).await.unwrap();
-
-    let bisect_lower_ix = build_bisect_challenge_ix(
-        &PORTAL_PROGRAM_ID,
-        &challenger.pubkey(),
-        &session_pda,
-        er_slot,
+        12,
+        synthetic_state_root(12),
         false,
-    );
-    let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
-    let tx = Transaction::new_signed_with_payer(
-        &[bisect_lower_ix],
-        Some(&payer_pubkey),
-        &[&payer, &challenger],
-        blockhash,
-    );
-    context.banks_client.process_transaction(tx).await.unwrap();
+    )
+    .await;
+    process_bisection_round(
+        &mut context,
+        &payer,
+        &challenger,
+        &session_pda,
+        er_slot,
+        10,
+        synthetic_state_root(10),
+        true,
+    )
+    .await;
+    process_bisection_round(
+        &mut context,
+        &payer,
+        &challenger,
+        &session_pda,
+        er_slot,
+        11,
+        synthetic_state_root(11),
+        false,
+    )
+    .await;
 
     let reveal_step_ix = build_respond_challenge_ix(
         &PORTAL_PROGRAM_ID,
         &payer_pubkey,
         &session_pda,
         er_slot,
-        2,
-        [10; 32],
+        10,
+        synthetic_state_root(11),
     );
     let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
@@ -1964,9 +2119,9 @@ async fn challenge_bisects_to_one_step_and_challenger_timeout_restores_checkpoin
         .await
         .unwrap();
     let challenge = Challenge::try_from_slice(&challenge_data).unwrap();
-    assert_eq!((challenge.start_step, challenge.end_step), (2, 3));
+    assert_eq!((challenge.start_step, challenge.end_step), (10, 11));
     assert_eq!(challenge.turn, ChallengeTurn::Prove);
-    assert_eq!(challenge.rounds, 2);
+    assert_eq!(challenge.rounds, 4);
 
     context
         .warp_to_slot(challenge.turn_deadline_l1_slot + 1)

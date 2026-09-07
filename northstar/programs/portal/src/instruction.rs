@@ -205,6 +205,8 @@ pub struct RespondChallenge {
     pub er_slot: u64,
     pub claimed_step: u64,
     pub claimed_state_root: Hash32,
+    pub trace_path_len: u8,
+    pub trace_path: [[u8; 32]; 5],
     pub da_payload_root: Hash32,
     pub da_inclusion_proof_hash: Hash32,
 }

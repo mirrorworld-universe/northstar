@@ -7,8 +7,9 @@ use {
         CheckpointStatus, CommitCheckpoint, CreateStepProof, DataAvailabilityProof,
         DataAvailabilityStatus, OpenChallenge, PortalError, ProposeCheckpoint, ResolveChallenge,
         RespondChallenge, SealStepProof, Session, StepProofAccount, StepProofVerifierMode,
-        TimeoutChallenge, WriteStepProof, CHALLENGE_TURN_WINDOW_SLOTS,
+        TimeoutChallenge, WriteStepProof, CANONICAL_CHECKPOINT_STEPS, CHALLENGE_TURN_WINDOW_SLOTS,
         CHECKPOINT_PROPOSER_BOND_LAMPORTS, MAX_CHALLENGE_WINDOW_SLOTS, MAX_STEP_PROOF_BYTES,
+        TRACE_AUTH_PATH_NODES,
     },
     borsh::{BorshDeserialize, BorshSerialize},
     pinocchio::{
@@ -389,6 +390,74 @@ fn step_proof_public_input_hash(
     .to_bytes()
 }
 
+fn verify_trace_authentication_path(
+    checkpoint: &Checkpoint,
+    state_index: u64,
+    state_root: &[u8; 32],
+    path_len: u8,
+    path: &[[u8; 32]; TRACE_AUTH_PATH_NODES],
+) -> bool {
+    let Ok(state_index_u32) = u32::try_from(state_index) else {
+        return false;
+    };
+    let Ok(leaf_count) = u32::try_from(checkpoint.step_count.saturating_add(1)) else {
+        return false;
+    };
+    let width = leaf_count.max(1).next_power_of_two();
+    let expected_depth = width.trailing_zeros() as usize;
+    if state_index >= u64::from(leaf_count)
+        || usize::from(path_len) != expected_depth
+        || path[expected_depth..].iter().any(|node| *node != [0; 32])
+    {
+        return false;
+    }
+    let leaf_length = 36u64.to_le_bytes();
+    let index_bytes = state_index_u32.to_le_bytes();
+    let mut current = hashv(&[
+        b"northstar-checkpoint-v1",
+        b"trace",
+        b"leaf",
+        &leaf_length,
+        &index_bytes,
+        state_root,
+    ])
+    .to_bytes();
+    let mut index = state_index as usize;
+    for (level, sibling) in path[..expected_depth].iter().enumerate() {
+        let level_bytes = (level as u32).to_le_bytes();
+        current = if index.is_multiple_of(2) {
+            hashv(&[
+                b"northstar-checkpoint-v1",
+                b"trace",
+                b"node",
+                &level_bytes,
+                &current,
+                sibling,
+            ])
+        } else {
+            hashv(&[
+                b"northstar-checkpoint-v1",
+                b"trace",
+                b"node",
+                &level_bytes,
+                sibling,
+                &current,
+            ])
+        }
+        .to_bytes();
+        index /= 2;
+    }
+    hashv(&[
+        b"northstar-checkpoint-v1",
+        b"trace",
+        b"root",
+        &leaf_count.to_le_bytes(),
+        &current,
+    ])
+    .to_bytes()
+        == checkpoint.trace_root
+}
+
 #[p_instruction(
     id = 14,
     accounts = [
@@ -429,7 +498,7 @@ pub fn process_propose_checkpoint(
 ) -> ProgramResult {
     pinocchio_log::log!("Instruction: ProposeCheckpoint, er_slot={}", er_slot);
 
-    if challenge_window_slots == 0 || step_count == 0 {
+    if challenge_window_slots == 0 || step_count == 0 || step_count > CANONICAL_CHECKPOINT_STEPS {
         return Err(ProgramError::InvalidInstructionData);
     }
     if challenge_window_slots > MAX_CHALLENGE_WINDOW_SLOTS {
@@ -819,6 +888,8 @@ pub fn process_open_challenge(
         er_slot: u64,
         claimed_step: u64,
         claimed_state_root: Hash32,
+        trace_path_len: u8,
+        trace_path: [[u8; 32]; 5],
         da_payload_root: Hash32,
         da_inclusion_proof_hash: Hash32
     ]
@@ -830,6 +901,8 @@ pub fn process_respond_challenge(
         er_slot,
         claimed_step,
         claimed_state_root,
+        trace_path_len,
+        trace_path,
         da_payload_root,
         da_inclusion_proof_hash,
     }: RespondChallenge,
@@ -900,7 +973,15 @@ pub fn process_respond_challenge(
             .start_step
             .checked_add(width / 2)
             .ok_or(PortalError::ArithmeticOverflow)?;
-        if claimed_step != midpoint {
+        if claimed_step != midpoint
+            || !verify_trace_authentication_path(
+                &checkpoint_state,
+                claimed_step,
+                &claimed_state_root,
+                trace_path_len,
+                &trace_path,
+            )
+        {
             return Err(PortalError::ChallengeResponseInvalid.into());
         }
         challenge_state.midpoint_step = midpoint;
