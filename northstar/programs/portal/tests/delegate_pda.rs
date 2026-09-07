@@ -14,7 +14,7 @@ use {
     solana_program_test::{BanksClient, ProgramTest, ProgramTestContext},
     solana_pubkey::Pubkey,
     solana_signer::Signer,
-    solana_system_interface::program as system_program,
+    solana_system_interface::{instruction::transfer, program as system_program},
     solana_transaction::Transaction,
 };
 
@@ -697,6 +697,57 @@ async fn undelegate_keypair_wallet_round_trip() {
         .unwrap()
         .expect("delegated_account still exists");
     assert_eq!(acct.owner, running.inner.owner_program);
+}
+
+#[tokio::test]
+async fn prefunded_undelegation_request_can_be_initialized() {
+    let mut scenario =
+        StagedScenario::new(DelegateScenario::new()).with_delegated(vec![], PORTAL_PROGRAM_ID);
+    let owner_program = scenario.inner.owner_program;
+    scenario = scenario.with_buffer(vec![], owner_program);
+
+    let mut running = scenario.start().await;
+    running.delegate().await.expect("delegate should succeed");
+
+    let request = northstar_portal::find_undelegation_request_pda(
+        &PORTAL_PROGRAM_ID,
+        &running.inner.delegated.pubkey(),
+    )
+    .0;
+    let prefund_lamports = running
+        .context
+        .banks_client
+        .get_rent()
+        .await
+        .unwrap()
+        .minimum_balance(0);
+    let blockhash = running
+        .context
+        .banks_client
+        .get_latest_blockhash()
+        .await
+        .unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &[transfer(
+            &running.inner.payer.pubkey(),
+            &request,
+            prefund_lamports,
+        )],
+        Some(&running.inner.payer.pubkey()),
+        &[&running.inner.payer],
+        blockhash,
+    );
+    running
+        .context
+        .banks_client
+        .process_transaction(tx)
+        .await
+        .expect("request PDA pre-funding should succeed");
+
+    running
+        .request_and_approve_undelegation(owner_program)
+        .await
+        .expect("pre-funded request PDA should initialize");
 }
 
 #[tokio::test]
