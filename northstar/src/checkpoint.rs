@@ -16,6 +16,7 @@ pub const MAX_TRANSACTION_EFFECT_BYTES_V1: usize = 1_048_576;
 pub const MAX_SETTLEMENT_EFFECT_BYTES_V1: usize = 16_384;
 pub const MAX_READONLY_L1_VALUES_PER_STEP_V1: usize = 256;
 pub const MAX_SETTLEMENT_EFFECTS_PER_STEP_V1: usize = 256;
+pub const MAX_STATE_ACCOUNTS_PER_STEP_V1: usize = 4_096;
 
 const CHECKPOINT_HASH_DOMAIN_V1: &[u8] = b"northstar-checkpoint-v1";
 
@@ -89,6 +90,8 @@ pub struct CheckpointStepInputV1 {
     pub step_index: u32,
     pub transaction: Vec<u8>,
     pub transaction_effect: Vec<u8>,
+    pub pre_state_accounts: Vec<StateAccountValueV1>,
+    pub post_state_accounts: Vec<StateAccountValueV1>,
     pub pre_state_root: CommitmentHash,
     pub post_state_root: CommitmentHash,
     pub readonly_l1_values: Vec<ReadonlyL1ValueV1>,
@@ -126,6 +129,8 @@ pub struct DaStepPageV1 {
     pub transaction: Vec<u8>,
     pub transaction_effect: Vec<u8>,
     pub transaction_effect_commitment: CommitmentHash,
+    pub pre_state_accounts: Vec<StateAccountValueV1>,
+    pub post_state_accounts: Vec<StateAccountValueV1>,
     pub pre_state_root: CommitmentHash,
     pub post_state_root: CommitmentHash,
     pub pre_state_path: MerkleAuthenticationPathV1,
@@ -318,6 +323,11 @@ impl MerkleAuthenticationPathV1 {
 impl DaStepPageV1 {
     pub fn verify_authentication_paths(&self, checkpoint: &CheckpointCommitmentV1) -> bool {
         if self.version != CHECKPOINT_FORMAT_VERSION_V1 || self.page_index != self.step_index {
+            return false;
+        }
+        if state_root_v1(&self.pre_state_accounts).ok() != Some(self.pre_state_root)
+            || state_root_v1(&self.post_state_accounts).ok() != Some(self.post_state_root)
+        {
             return false;
         }
         let Ok(pre_leaf) = trace_leaf_hash(self.step_index, &self.pre_state_root) else {
@@ -552,6 +562,8 @@ pub fn build_checkpoint_artifact_v1(
                 &step.transaction,
                 &step.transaction_effect,
             )?,
+            pre_state_accounts: step.pre_state_accounts.clone(),
+            post_state_accounts: step.post_state_accounts.clone(),
             pre_state_root: step.pre_state_root,
             post_state_root: step.post_state_root,
             pre_state_path: trace_tree.path(page_index)?,
@@ -637,6 +649,13 @@ fn validate_steps(steps: &[CheckpointStepInputV1]) -> Result<(), CheckpointArtif
         if step.step_index as usize != index {
             return Err(CheckpointArtifactError::InvalidStepIndex);
         }
+        if step.pre_state_accounts.len() > MAX_STATE_ACCOUNTS_PER_STEP_V1
+            || step.post_state_accounts.len() > MAX_STATE_ACCOUNTS_PER_STEP_V1
+            || state_root_v1(&step.pre_state_accounts).ok() != Some(step.pre_state_root)
+            || state_root_v1(&step.post_state_accounts).ok() != Some(step.post_state_root)
+        {
+            return Err(CheckpointArtifactError::InvalidStateAccounts);
+        }
         if step.pre_state_root == [0; 32]
             || step.post_state_root == [0; 32]
             || FrBytes::new(step.pre_state_root).is_err()
@@ -684,6 +703,8 @@ fn page_to_input(page: &DaStepPageV1) -> CheckpointStepInputV1 {
         step_index: page.step_index,
         transaction: page.transaction.clone(),
         transaction_effect: page.transaction_effect.clone(),
+        pre_state_accounts: page.pre_state_accounts.clone(),
+        post_state_accounts: page.post_state_accounts.clone(),
         pre_state_root: page.pre_state_root,
         post_state_root: page.post_state_root,
         readonly_l1_values: page
@@ -878,26 +899,38 @@ fn encode<T: BorshSerialize>(value: &T) -> Result<Vec<u8>, CheckpointArtifactErr
 mod tests {
     use super::*;
 
-    fn root(value: u64) -> CommitmentHash {
-        FrBytes::from_u64(value).to_bytes()
-    }
-
     fn steps() -> Vec<CheckpointStepInputV1> {
         (0..CANONICAL_CHECKPOINT_STEPS_V1)
-            .map(|index| CheckpointStepInputV1 {
-                step_index: index as u32,
-                transaction: vec![index as u8, 1, 2],
-                transaction_effect: vec![index as u8, 3],
-                pre_state_root: root(index as u64 + 1),
-                post_state_root: root(index as u64 + 2),
-                readonly_l1_values: vec![ReadonlyL1ValueV1 {
-                    account: Pubkey::new_from_array([index as u8 + 1; 32]),
-                    owner: Pubkey::new_from_array([index as u8 + 2; 32]),
-                    lamports: index as u64 + 10,
-                    data_hash: hashv(&[b"readonly", &[index as u8]]).to_bytes(),
-                    observed_l1_slot: index as u64 + 900,
-                }],
-                settlement_effects: vec![vec![index as u8, 4]],
+            .map(|index| {
+                let state = |lamports| {
+                    vec![StateAccountValueV1 {
+                        account: Pubkey::new_from_array([200; 32]),
+                        owner: Pubkey::new_from_array([201; 32]),
+                        lamports,
+                        executable: false,
+                        rent_epoch: 0,
+                        data_hash: hashv(&[b"state"]).to_bytes(),
+                    }]
+                };
+                let pre_state_accounts = state(index as u64 + 1);
+                let post_state_accounts = state(index as u64 + 2);
+                CheckpointStepInputV1 {
+                    step_index: index as u32,
+                    transaction: vec![index as u8, 1, 2],
+                    transaction_effect: vec![index as u8, 3],
+                    pre_state_root: state_root_v1(&pre_state_accounts).unwrap(),
+                    post_state_root: state_root_v1(&post_state_accounts).unwrap(),
+                    pre_state_accounts,
+                    post_state_accounts,
+                    readonly_l1_values: vec![ReadonlyL1ValueV1 {
+                        account: Pubkey::new_from_array([index as u8 + 1; 32]),
+                        owner: Pubkey::new_from_array([index as u8 + 2; 32]),
+                        lamports: index as u64 + 10,
+                        data_hash: hashv(&[b"readonly", &[index as u8]]).to_bytes(),
+                        observed_l1_slot: index as u64 + 900,
+                    }],
+                    settlement_effects: vec![vec![index as u8, 4]],
+                }
             })
             .collect()
     }
@@ -1029,7 +1062,9 @@ mod tests {
         );
 
         let mut broken_chain = steps();
-        broken_chain[8].pre_state_root = root(999);
+        broken_chain[8].pre_state_accounts[0].lamports = 999;
+        broken_chain[8].pre_state_root =
+            state_root_v1(&broken_chain[8].pre_state_accounts).unwrap();
         assert_eq!(
             build_checkpoint_artifact_v1(session, 42, broken_chain),
             Err(CheckpointArtifactError::InvalidStateRoot)
@@ -1045,6 +1080,11 @@ mod tests {
             CheckpointArtifactV1::decode_verified(&encoded),
             Err(CheckpointArtifactError::Encoding)
         );
+
+        let mut changed_state = artifact.clone();
+        changed_state.da.pages[4].pre_state_accounts[0].lamports += 1;
+        assert!(!changed_state.da.pages[4].verify_authentication_paths(&changed_state.checkpoint));
+        assert!(changed_state.verify().is_err());
 
         let mut changed = artifact;
         changed.da.pages[4].pre_state_path.siblings[0][0] ^= 1;

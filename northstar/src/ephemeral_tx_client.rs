@@ -529,9 +529,8 @@ impl EphemeralTransactionClient {
                         .or_insert_with(|| Self::checkpoint_state_value(*key, pre_account));
                 }
             }
-            let Ok(pre_state_root) =
-                state_root_v1(&capture.state_accounts.values().copied().collect::<Vec<_>>())
-            else {
+            let pre_state_accounts = capture.state_accounts.values().copied().collect::<Vec<_>>();
+            let Ok(pre_state_root) = state_root_v1(&pre_state_accounts) else {
                 warn!("Failed to build pre-state root for checkpoint capture");
                 return;
             };
@@ -558,9 +557,8 @@ impl EphemeralTransactionClient {
                         .insert(effect.value.account, effect.value);
                 }
             }
-            let Ok(post_state_root) =
-                state_root_v1(&capture.state_accounts.values().copied().collect::<Vec<_>>())
-            else {
+            let post_state_accounts = capture.state_accounts.values().copied().collect::<Vec<_>>();
+            let Ok(post_state_root) = state_root_v1(&post_state_accounts) else {
                 warn!("Failed to build post-state root for checkpoint capture");
                 return;
             };
@@ -598,6 +596,8 @@ impl EphemeralTransactionClient {
                 step_index,
                 transaction,
                 transaction_effect,
+                pre_state_accounts,
+                post_state_accounts,
                 pre_state_root,
                 post_state_root,
                 readonly_l1_values,

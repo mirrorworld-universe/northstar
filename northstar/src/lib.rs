@@ -3941,20 +3941,31 @@ mod portal_e2e_tests {
         session: Pubkey,
         er_slot: u64,
     ) -> checkpoint::CheckpointArtifactV1 {
-        let field = |value: u8| {
-            let mut field = [0; 32];
-            field[31] = value;
-            field
-        };
         let steps = (0..checkpoint::CANONICAL_CHECKPOINT_STEPS_V1)
-            .map(|index| checkpoint::CheckpointStepInputV1 {
-                step_index: index as u32,
-                transaction: vec![index as u8 + 1],
-                transaction_effect: vec![index as u8 + 33],
-                pre_state_root: field(index as u8 + 1),
-                post_state_root: field(index as u8 + 2),
-                readonly_l1_values: vec![],
-                settlement_effects: vec![vec![index as u8 + 65]],
+            .map(|index| {
+                let state = |lamports| {
+                    vec![checkpoint::StateAccountValueV1 {
+                        account: Pubkey::new_from_array([200; 32]),
+                        owner: Pubkey::new_from_array([201; 32]),
+                        lamports,
+                        executable: false,
+                        rent_epoch: 0,
+                        data_hash: [202; 32],
+                    }]
+                };
+                let pre_state_accounts = state(index as u64 + 1);
+                let post_state_accounts = state(index as u64 + 2);
+                checkpoint::CheckpointStepInputV1 {
+                    step_index: index as u32,
+                    transaction: vec![index as u8 + 1],
+                    transaction_effect: vec![index as u8 + 33],
+                    pre_state_root: checkpoint::state_root_v1(&pre_state_accounts).unwrap(),
+                    post_state_root: checkpoint::state_root_v1(&post_state_accounts).unwrap(),
+                    pre_state_accounts,
+                    post_state_accounts,
+                    readonly_l1_values: vec![],
+                    settlement_effects: vec![vec![index as u8 + 65]],
+                }
             })
             .collect();
         checkpoint::build_checkpoint_artifact_v1(session, er_slot, steps).unwrap()
