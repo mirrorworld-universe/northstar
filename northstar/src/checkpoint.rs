@@ -120,10 +120,18 @@ pub struct DaStepPageV1 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshDeserialize, BorshSerialize)]
+#[borsh(use_discriminant = true)]
+#[repr(u8)]
+pub enum DaCodecV1 {
+    Raw = 0,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshDeserialize, BorshSerialize)]
 pub struct DaPageDescriptorV1 {
     pub page_index: u32,
     pub step_index: u32,
-    pub payload_len: u32,
+    pub uncompressed_len: u32,
+    pub encoded_len: u32,
     pub payload_hash: CommitmentHash,
 }
 
@@ -133,6 +141,8 @@ pub struct DaManifestV1 {
     pub session: Pubkey,
     pub er_slot: u64,
     pub step_count: u32,
+    pub codec: DaCodecV1,
+    pub dictionary_hash: CommitmentHash,
     pub trace_root: CommitmentHash,
     pub transaction_effect_root: CommitmentHash,
     pub readonly_l1_root: CommitmentHash,
@@ -553,7 +563,9 @@ pub fn build_checkpoint_artifact_v1(
         descriptors.push(DaPageDescriptorV1 {
             page_index: page.page_index,
             step_index: page.step_index,
-            payload_len: u32::try_from(bytes.len())
+            uncompressed_len: u32::try_from(bytes.len())
+                .map_err(|_| CheckpointArtifactError::Encoding)?,
+            encoded_len: u32::try_from(bytes.len())
                 .map_err(|_| CheckpointArtifactError::Encoding)?,
             payload_hash,
         });
@@ -563,6 +575,8 @@ pub fn build_checkpoint_artifact_v1(
         session,
         er_slot,
         step_count: u32::try_from(steps.len()).map_err(|_| CheckpointArtifactError::Encoding)?,
+        codec: DaCodecV1::Raw,
+        dictionary_hash: typed_hash(TreeKind::DataAvailability, b"dictionary", &[]),
         trace_root,
         transaction_effect_root,
         readonly_l1_root,

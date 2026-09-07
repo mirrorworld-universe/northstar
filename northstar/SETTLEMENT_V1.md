@@ -17,6 +17,14 @@ A checkpoint binds one ordered ER execution trace:
 
 All hashes are 32 bytes. Hash trees use domain-separated SHA-256, ordered children, and explicit leaf indexes. Empty trees use a domain-specific empty root; zero is not an implicit empty-tree value.
 
+### Canonical checkpoint and DA encoding
+
+Checkpoint format v1 contains exactly 16 steps and 17 state roots. It uses Borsh encoding with explicit format, page, step, leaf, and list indexes. One immutable DA page contains each step's serialized transaction, canonical execution effect, per-step transaction/effect commitment, pre/post state roots, readonly L1 values, settlement effects, and authentication paths. The sealed manifest binds session, ER slot, all checkpoint roots, raw codec, empty dictionary hash, page indexes, encoded/uncompressed lengths, and page hashes. `da_commitment` is the count-bound Merkle root of the manifest followed by the 16 ordered page hashes.
+
+Trees pad to the next power of two with domain-separated, position-bound empty leaves; they never duplicate the final real leaf. Node hashes include tree kind and level. Final roots include the original leaf count, so missing or trailing leaves cannot share a root.
+
+State roots, per-step transaction/effect commitments, `readonly_l1_root`, and `effect_commitment` enter the BN254 proof ABI. Format v1 explicitly projects these SHA-256 digests into Fr by clearing the top three bits. This is a named 253-bit field projection, not implicit modulo reduction. `trace_root`, checkpoint `tx_effect_root`, and `da_commitment` retain their full SHA-256 values.
+
 ## One disputed step
 
 One disputed step is transition `i -> i + 1` for one serialized ER transaction/effect leaf. Its pre-state root is trace root `i`; its post-state root is trace root `i + 1`. It includes deterministic transaction sanitization, the declared writable account transition, readonly L1 inputs, execution result/effects, and the settlement effects attributed to that transaction.
@@ -37,6 +45,7 @@ The v1 proof does not prove a complete SVM implementation. It proves the ER-shap
 8. `effect_commitment`, including the disputed step's settlement-effect membership witness.
 
 Integers are unsigned little-endian. No variable-length value enters public inputs directly; it is length-delimited in the witness and represented publicly by a domain-separated hash.
+All SHA-256 commitments entering these fields use the explicit format-v1 field projection defined above. Verifiers reject noncanonical field encodings rather than reducing them modulo Fr.
 
 ## Required witness
 
