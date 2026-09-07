@@ -737,6 +737,74 @@ impl Manager {
         ))
     }
 
+    fn checkpoint_artifact_path(
+        &self,
+        session_pda: Pubkey,
+        proposer: Pubkey,
+        er_slot: u64,
+    ) -> PathBuf {
+        self.checkpoint_plan_path(session_pda, proposer, er_slot)
+            .with_extension("da-v1.borsh")
+    }
+
+    fn persist_checkpoint_artifact(
+        &self,
+        session_pda: Pubkey,
+        artifact: &checkpoint::CheckpointArtifactV1,
+    ) {
+        let path = self.checkpoint_artifact_path(
+            session_pda,
+            self.config.manager_account.pubkey(),
+            artifact.checkpoint.er_slot,
+        );
+        let Ok(bytes) = artifact.canonical_bytes() else {
+            warn!("Failed to encode checkpoint DA artifact");
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                warn!("Failed to create checkpoint artifact dir {parent:?}: {err}");
+                return;
+            }
+        }
+        let tmp_path = path.with_extension(format!("da-v1.borsh.tmp.{}", std::process::id()));
+        let write_result = std::fs::File::create(&tmp_path).and_then(|mut file| {
+            std::io::Write::write_all(&mut file, &bytes)?;
+            file.sync_all()
+        });
+        if let Err(err) = write_result {
+            warn!("Failed to persist checkpoint artifact {tmp_path:?}: {err}");
+            let _ = std::fs::remove_file(&tmp_path);
+            return;
+        }
+        if let Err(err) = std::fs::rename(&tmp_path, &path) {
+            warn!("Failed to install checkpoint artifact {path:?}: {err}");
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+    }
+
+    fn load_checkpoint_artifact(
+        &self,
+        session_pda: Pubkey,
+        er_slot: u64,
+    ) -> Option<checkpoint::CheckpointArtifactV1> {
+        let path = self.checkpoint_artifact_path(
+            session_pda,
+            self.config.manager_account.pubkey(),
+            er_slot,
+        );
+        let bytes = std::fs::read(&path).ok()?;
+        let artifact = match checkpoint::CheckpointArtifactV1::decode_verified(&bytes) {
+            Ok(artifact) => artifact,
+            Err(err) => {
+                warn!("Invalid checkpoint artifact {path:?}: {err}");
+                return None;
+            }
+        };
+        (artifact.checkpoint.session == session_pda && artifact.checkpoint.er_slot == er_slot)
+            .then_some(artifact)
+    }
+
     fn persist_checkpoint_plan(&self, session_pda: Pubkey, plan: &SettlementPlan) {
         let path = self.checkpoint_plan_path(
             session_pda,
@@ -812,6 +880,12 @@ impl Manager {
             .unwrap()
             .insert((session_pda, plan.er_slot), plan.clone());
         self.persist_checkpoint_plan(session_pda, plan);
+        if let Some(artifact) = self
+            .checkpoint_artifact_v1()
+            .filter(|artifact| artifact.checkpoint.er_slot == plan.er_slot)
+        {
+            self.persist_checkpoint_artifact(session_pda, &artifact);
+        }
     }
 
     fn cached_checkpoint_plan(&self, session_pda: Pubkey, er_slot: u64) -> Option<SettlementPlan> {
@@ -832,6 +906,15 @@ impl Manager {
         if let Err(err) = std::fs::remove_file(&path) {
             if err.kind() != std::io::ErrorKind::NotFound {
                 warn!("Failed to remove checkpoint plan {path:?}: {err}");
+            }
+        }
+        if checkpoint.status == CheckpointStatus::Settled {
+            let artifact_path =
+                self.checkpoint_artifact_path(session_pda, proposer, checkpoint.er_slot);
+            if let Err(err) = std::fs::remove_file(&artifact_path) {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    warn!("Failed to remove checkpoint artifact {artifact_path:?}: {err}");
+                }
             }
         }
     }
@@ -978,7 +1061,10 @@ impl Manager {
             );
         }
 
-        let artifact = self.checkpoint_artifact_v1()?;
+        let artifact = self
+            .checkpoint_artifact_v1()
+            .filter(|artifact| artifact.checkpoint.er_slot == plan.er_slot)
+            .or_else(|| self.load_checkpoint_artifact(session_pda, plan.er_slot))?;
         if artifact.checkpoint.session != session_pda || artifact.checkpoint.er_slot != plan.er_slot
         {
             warn!(
@@ -4004,6 +4090,15 @@ mod portal_e2e_tests {
             checkpoint_plan_path.exists(),
             "checkpoint proposal should persist durable settlement plan"
         );
+        let checkpoint_artifact_path = manager.checkpoint_artifact_path(
+            session_pda,
+            manager.config.manager_account.pubkey(),
+            er_slot,
+        );
+        assert!(
+            checkpoint_artifact_path.exists(),
+            "checkpoint proposal should persist canonical DA artifact"
+        );
 
         due_bank.freeze();
         let due_bank = Arc::new(due_bank);
@@ -4031,6 +4126,12 @@ mod portal_e2e_tests {
             "restarted manager should resume active session from L1"
         );
         manager = resumed_manager;
+        assert_eq!(
+            manager
+                .load_checkpoint_artifact(session_pda, er_slot)
+                .unwrap(),
+            artifact,
+        );
 
         let wait_bank = Bank::new_from_parent(
             due_bank,
