@@ -113,12 +113,18 @@ async fn main() -> Result<()> {
             bail!("unexpected SP1 Groth16 proof length: {}", proof_bytes.len());
         }
         proof.save(proof_path)?;
+        let onchain_proof_path = "northstar-sp1-groth16-onchain.bin";
+        let public_inputs_path = "northstar-sp1-public-inputs.bin";
+        fs::write(onchain_proof_path, &proof_bytes)?;
+        fs::write(public_inputs_path, expected)?;
         phases.push(json!({
             "phase": "groth16",
             "prove_and_wrap_ms": prove_wrap_ms,
             "verify_ms": verify_ms,
             "onchain_proof_bytes": proof_bytes.len(),
             "artifact_bytes": usize::try_from(fs::metadata(proof_path)?.len())?,
+            "onchain_proof_path": onchain_proof_path,
+            "public_inputs_path": public_inputs_path,
             "proof_layout": {
                 "groth16_vkey_hash_prefix": hex::encode(&proof_bytes[..4]),
                 "exit_code": hex::encode(&proof_bytes[4..36]),
