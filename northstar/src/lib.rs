@@ -459,6 +459,10 @@ impl Manager {
             .map(|runtime| runtime.state_diff_from_l1())
     }
 
+    pub fn checkpoint_artifact_v1(&self) -> Option<checkpoint::CheckpointArtifactV1> {
+        self.runtime.as_ref()?.checkpoint_artifact_v1()
+    }
+
     pub fn handle_undelegation_request(
         &self,
         delegated_account: &Pubkey,

@@ -1,5 +1,11 @@
 use {
     crate::{
+        checkpoint::{
+            build_checkpoint_artifact_v1, state_root_v1, CheckpointAccountEffectV1,
+            CheckpointArtifactV1, CheckpointStepInputV1, CheckpointTransactionEffectV1,
+            ReadonlyL1ValueV1, StateAccountValueV1, CANONICAL_CHECKPOINT_STEPS_V1,
+            CHECKPOINT_FORMAT_VERSION_V1,
+        },
         settlement::{TokenWithdrawalPayoutEvent, WithdrawalPayoutEvent},
         unsettled_state::UnsettledStateStore,
     },
@@ -10,7 +16,10 @@ use {
     solana_leader_schedule::SlotLeader,
     solana_message::{v0::LoadedAddresses, AddressLoader, VersionedMessage},
     solana_pubkey::Pubkey,
-    solana_rpc::{er_history::ErHistoryStore, rpc_subscriptions::RpcSubscriptions},
+    solana_rpc::{
+        er_history::ErHistoryStore, northstar::NorthStarSyncStatus,
+        rpc_subscriptions::RpcSubscriptions,
+    },
     solana_runtime::{
         bank::Bank,
         bank_forks::BankForks,
@@ -19,6 +28,7 @@ use {
     },
     solana_sdk_ids::{bpf_loader, bpf_loader_upgradeable, system_program, sysvar},
     solana_send_transaction_service::send_transaction_service_stats::SendTransactionServiceStats,
+    solana_sha256_hasher::hashv,
     solana_svm::{
         transaction_balances::BalanceCollector, transaction_commit_result::TransactionCommitResult,
         transaction_processor::ExecutionRecordingConfig,
@@ -30,7 +40,7 @@ use {
         map_inner_instructions, TransactionStatusMeta, VersionedTransactionWithStatusMeta,
     },
     std::{
-        collections::{HashMap, HashSet},
+        collections::{BTreeMap, HashMap, HashSet},
         error::Error,
         sync::{
             atomic::{AtomicBool, Ordering},
@@ -46,6 +56,16 @@ pub(crate) trait TransactionClient {
         wire_transactions: Vec<Vec<u8>>,
         stats: &SendTransactionServiceStats,
     );
+}
+
+type TransactionAccountSnapshot = Vec<(Pubkey, AccountSharedData, bool)>;
+
+#[derive(Default)]
+struct CheckpointCaptureV1 {
+    session: Option<Pubkey>,
+    state_accounts: BTreeMap<Pubkey, StateAccountValueV1>,
+    steps: Vec<CheckpointStepInputV1>,
+    completed: Option<CheckpointArtifactV1>,
 }
 
 pub struct EphemeralTransactionClient {
@@ -83,6 +103,8 @@ pub struct EphemeralTransactionClient {
     /// the L1 parent's status cache rather than the old ER bank's cache.
     processed_signatures: Arc<RwLock<HashMap<solana_signature::Signature, Slot>>>,
     unsettled_state_store: Arc<UnsettledStateStore>,
+    sync_status: Arc<NorthStarSyncStatus>,
+    checkpoint_capture: Arc<RwLock<CheckpointCaptureV1>>,
 }
 
 impl Clone for EphemeralTransactionClient {
@@ -105,6 +127,8 @@ impl Clone for EphemeralTransactionClient {
             token_withdrawal_payout_events: Arc::clone(&self.token_withdrawal_payout_events),
             processed_signatures: Arc::clone(&self.processed_signatures),
             unsettled_state_store: Arc::clone(&self.unsettled_state_store),
+            sync_status: Arc::clone(&self.sync_status),
+            checkpoint_capture: Arc::clone(&self.checkpoint_capture),
         }
     }
 }
@@ -120,6 +144,7 @@ pub(crate) struct EphemeralTransactionClientOptions {
     withdrawal_payout_events: Arc<RwLock<Vec<WithdrawalPayoutEvent>>>,
     unsettled_state_store: Arc<UnsettledStateStore>,
     token_withdrawal_payout_events: Arc<RwLock<Vec<TokenWithdrawalPayoutEvent>>>,
+    sync_status: Arc<NorthStarSyncStatus>,
 }
 
 impl EphemeralTransactionClientOptions {
@@ -139,6 +164,7 @@ impl EphemeralTransactionClientOptions {
             withdrawal_payout_events: Arc::new(RwLock::new(Vec::new())),
             unsettled_state_store: Arc::new(UnsettledStateStore::default()),
             token_withdrawal_payout_events: Arc::new(RwLock::new(Vec::new())),
+            sync_status: Arc::new(NorthStarSyncStatus::new(0)),
         }
     }
 
@@ -166,6 +192,11 @@ impl EphemeralTransactionClientOptions {
         unsettled_state_store: Arc<UnsettledStateStore>,
     ) -> Self {
         self.unsettled_state_store = unsettled_state_store;
+        self
+    }
+
+    pub(crate) fn with_sync_status(mut self, sync_status: Arc<NorthStarSyncStatus>) -> Self {
+        self.sync_status = sync_status;
         self
     }
 
@@ -327,6 +358,8 @@ impl EphemeralTransactionClient {
             token_withdrawal_payout_events: options.token_withdrawal_payout_events,
             processed_signatures: Arc::new(RwLock::new(HashMap::new())),
             unsettled_state_store: options.unsettled_state_store,
+            sync_status: options.sync_status,
+            checkpoint_capture: Arc::new(RwLock::new(CheckpointCaptureV1::default())),
         }
     }
 
@@ -400,6 +433,154 @@ impl EphemeralTransactionClient {
 
     pub fn bank(&self) -> Arc<Bank> {
         self.bank_forks.read().unwrap().working_bank()
+    }
+
+    pub(crate) fn checkpoint_artifact_v1(&self) -> Option<CheckpointArtifactV1> {
+        self.checkpoint_capture.read().unwrap().completed.clone()
+    }
+
+    fn checkpoint_state_value(account: Pubkey, value: &AccountSharedData) -> StateAccountValueV1 {
+        StateAccountValueV1 {
+            account,
+            owner: *value.owner(),
+            lamports: value.lamports(),
+            executable: value.executable(),
+            rent_epoch: value.rent_epoch(),
+            data_hash: hashv(&[value.data()]).to_bytes(),
+        }
+    }
+
+    fn record_checkpoint_steps(
+        &self,
+        bank: &Bank,
+        txs: &[VersionedTransaction],
+        commit_results: &[TransactionCommitResult],
+        account_snapshots: &[Option<TransactionAccountSnapshot>],
+    ) {
+        let Some(session) = *self.session_pda.read().unwrap() else {
+            return;
+        };
+        let mut capture = self.checkpoint_capture.write().unwrap();
+        if capture.session != Some(session) {
+            let state_accounts = self
+                .er_account_overlay
+                .read()
+                .unwrap()
+                .iter()
+                .filter(|(_, account)| account.lamports() > 0)
+                .map(|(key, account)| (*key, Self::checkpoint_state_value(*key, account)))
+                .collect();
+            *capture = CheckpointCaptureV1 {
+                session: Some(session),
+                state_accounts,
+                steps: Vec::with_capacity(CANONICAL_CHECKPOINT_STEPS_V1),
+                completed: None,
+            };
+        }
+        if capture.completed.is_some() {
+            return;
+        }
+
+        for ((tx, commit_result), snapshot) in txs.iter().zip(commit_results).zip(account_snapshots)
+        {
+            if capture.steps.len() == CANONICAL_CHECKPOINT_STEPS_V1 {
+                break;
+            }
+            let Ok(committed) = commit_result else {
+                continue;
+            };
+            if committed.status.is_err() {
+                continue;
+            }
+            let Some(snapshot) = snapshot else {
+                continue;
+            };
+            let Ok(transaction) = bincode::serialize(tx) else {
+                warn!("Failed to serialize committed ER transaction for checkpoint capture");
+                continue;
+            };
+            let Ok(pre_state_root) =
+                state_root_v1(&capture.state_accounts.values().copied().collect::<Vec<_>>())
+            else {
+                warn!("Failed to build pre-state root for checkpoint capture");
+                return;
+            };
+
+            let step_index = capture.steps.len() as u32;
+            let mut account_effects = snapshot
+                .iter()
+                .filter(|(key, _, touched)| *touched && !Self::is_infrastructure_account(key))
+                .map(|(key, account, _)| CheckpointAccountEffectV1 {
+                    step_index,
+                    value: Self::checkpoint_state_value(*key, account),
+                    deleted: account.lamports() == 0,
+                })
+                .collect::<Vec<_>>();
+            account_effects.sort_unstable_by_key(|effect| effect.value.account);
+            account_effects.dedup_by_key(|effect| effect.value.account);
+
+            for effect in &account_effects {
+                if effect.deleted {
+                    capture.state_accounts.remove(&effect.value.account);
+                } else {
+                    capture
+                        .state_accounts
+                        .insert(effect.value.account, effect.value);
+                }
+            }
+            let Ok(post_state_root) =
+                state_root_v1(&capture.state_accounts.values().copied().collect::<Vec<_>>())
+            else {
+                warn!("Failed to build post-state root for checkpoint capture");
+                return;
+            };
+
+            let mut readonly_l1_values = snapshot
+                .iter()
+                .filter(|(_, _, touched)| !*touched)
+                .map(|(key, account, _)| ReadonlyL1ValueV1 {
+                    account: *key,
+                    owner: *account.owner(),
+                    lamports: account.lamports(),
+                    data_hash: hashv(&[account.data()]).to_bytes(),
+                    observed_l1_slot: self.sync_status.latest_l1_slot(),
+                })
+                .collect::<Vec<_>>();
+            readonly_l1_values.sort_unstable_by_key(|value| value.account);
+            readonly_l1_values.dedup_by_key(|value| value.account);
+
+            let transaction_effect = CheckpointTransactionEffectV1 {
+                version: CHECKPOINT_FORMAT_VERSION_V1,
+                step_index,
+                transaction_hash: hashv(&[&transaction]).to_bytes(),
+                executed_units: committed.executed_units,
+                account_effects: account_effects.clone(),
+            };
+            let Ok(transaction_effect) = borsh::to_vec(&transaction_effect) else {
+                warn!("Failed to serialize ER transaction effect for checkpoint capture");
+                continue;
+            };
+            let settlement_effects = account_effects
+                .iter()
+                .filter_map(|effect| borsh::to_vec(effect).ok())
+                .collect();
+            capture.steps.push(CheckpointStepInputV1 {
+                step_index,
+                transaction,
+                transaction_effect,
+                pre_state_root,
+                post_state_root,
+                readonly_l1_values,
+                settlement_effects,
+            });
+        }
+
+        if capture.steps.len() == CANONICAL_CHECKPOINT_STEPS_V1 {
+            match build_checkpoint_artifact_v1(session, bank.slot(), capture.steps.clone()) {
+                Ok(artifact) => capture.completed = Some(artifact),
+                Err(err) => warn!("Failed to seal runtime checkpoint artifact: {err}"),
+            }
+        }
     }
 
     /// Check if a transaction only writes to allowed accounts.
@@ -841,13 +1022,36 @@ impl EphemeralTransactionClient {
                 return Err(e.into());
             }
         };
-        let (commit_results, balance_collector) = bank.load_execute_and_commit_transactions(
-            &batch,
-            Self::history_recording_config(),
-            &mut ExecuteTimings::default(),
-            None,
-        );
+        let mut account_snapshots = Vec::new();
+        let (commit_results, balance_collector) = bank
+            .load_execute_and_commit_transactions_with_pre_commit_callback(
+                &batch,
+                Self::history_recording_config(),
+                &mut ExecuteTimings::default(),
+                None,
+                |processing_results| {
+                    account_snapshots = processing_results
+                        .iter()
+                        .map(|result| {
+                            let executed = result.as_ref().ok()?.executed_transaction()?;
+                            Some(
+                                executed
+                                    .loaded_transaction
+                                    .accounts
+                                    .iter()
+                                    .zip(executed.loaded_transaction.touched_flags.iter())
+                                    .map(|((key, account), touched)| {
+                                        (*key, account.clone(), *touched)
+                                    })
+                                    .collect(),
+                            )
+                        })
+                        .collect();
+                    Ok(())
+                },
+            )?;
         self.record_processed_signatures(bank, &txs, &commit_results);
+        self.record_checkpoint_steps(bank, &txs, &commit_results, &account_snapshots);
 
         self.record_transaction_history_for_batch(bank, &txs, &commit_results, balance_collector);
         self.record_withdrawal_payout_events_for_batch(bank, &txs, &commit_results);
@@ -1558,11 +1762,6 @@ impl solana_rpc::rpc::ErTxExecutor for EphemeralTransactionClient {
 mod tests {
     use {
         super::*,
-        crate::checkpoint::{
-            build_checkpoint_artifact_v1, state_root_v1, CheckpointArtifactV1,
-            CheckpointStepInputV1, ReadonlyL1ValueV1, StateAccountValueV1,
-            CANONICAL_CHECKPOINT_STEPS_V1,
-        },
         solana_account::AccountSharedData,
         solana_address_lookup_table_interface::{
             self as address_lookup_table,
@@ -1910,26 +2109,6 @@ mod tests {
         VersionedTransaction::try_new(message, &[fee_payer]).unwrap()
     }
 
-    fn checkpoint_state(bank: &Bank, accounts: &[Pubkey]) -> (Vec<StateAccountValueV1>, [u8; 32]) {
-        let mut values = accounts
-            .iter()
-            .map(|pubkey| {
-                let account = bank.get_account(pubkey).unwrap();
-                StateAccountValueV1 {
-                    account: *pubkey,
-                    owner: *account.owner(),
-                    lamports: account.lamports(),
-                    executable: account.executable(),
-                    rent_epoch: account.rent_epoch(),
-                    data_hash: solana_sha256_hasher::hashv(&[account.data()]).to_bytes(),
-                }
-            })
-            .collect::<Vec<_>>();
-        values.sort_unstable();
-        let root = state_root_v1(&values).unwrap();
-        (values, root)
-    }
-
     fn execute_canonical_checkpoint_fixture() -> CheckpointArtifactV1 {
         let source = keypair_from_seed(&[7; 32]).unwrap();
         let recipient = Pubkey::new_from_array([8; 32]);
@@ -1939,27 +2118,14 @@ mod tests {
         fund_account(&bank, &recipient, 1_000_000);
         let blockhash = bank.last_blockhash();
         let bank_forks = BankForks::new_rw_arc(bank);
-        let bank = bank_forks.read().unwrap().root_bank();
-        let history = Arc::new(ErHistoryStore::default());
         let client = create_client_with_history(
             bank_forks,
             vec![source.pubkey(), recipient],
-            history.clone(),
+            Arc::new(ErHistoryStore::default()),
         );
         *client.session_pda.write().unwrap() = Some(session);
 
-        let system_account = bank.get_account(&system_program::id()).unwrap();
-        let readonly_system_program = ReadonlyL1ValueV1 {
-            account: system_program::id(),
-            owner: *system_account.owner(),
-            lamports: system_account.lamports(),
-            data_hash: solana_sha256_hasher::hashv(&[system_account.data()]).to_bytes(),
-            observed_l1_slot: bank.slot(),
-        };
-        let state_accounts = [source.pubkey(), recipient];
-        let mut steps = Vec::with_capacity(CANONICAL_CHECKPOINT_STEPS_V1);
         for index in 0..CANONICAL_CHECKPOINT_STEPS_V1 {
-            let (_, pre_state_root) = checkpoint_state(&bank, &state_accounts);
             let transaction = create_transfer_tx_with_amount(
                 &source,
                 source.pubkey(),
@@ -1967,43 +2133,14 @@ mod tests {
                 index as u64 + 1_000,
                 blockhash,
             );
-            let signature = transaction.signatures[0];
-            let transaction_bytes = bincode::serialize(&transaction).unwrap();
             <EphemeralTransactionClient as TransactionClient>::send_transactions_in_batch(
                 &client,
-                vec![transaction_bytes.clone()],
+                vec![bincode::serialize(&transaction).unwrap()],
                 &SendTransactionServiceStats::default(),
             );
-            let recorded = history
-                .get_transaction(
-                    &signature,
-                    solana_rpc_client_types::config::CommitmentConfig::confirmed(),
-                )
-                .unwrap();
-            let meta = recorded.tx_with_meta.get_status_meta().unwrap();
-            assert!(meta.status.is_ok());
-            let transaction_effect = borsh::to_vec(&(
-                1u8,
-                meta.status.is_ok(),
-                meta.fee,
-                meta.pre_balances,
-                meta.post_balances,
-                meta.compute_units_consumed.unwrap_or_default(),
-            ))
-            .unwrap();
-            let (post_state, post_state_root) = checkpoint_state(&bank, &state_accounts);
-            steps.push(CheckpointStepInputV1 {
-                step_index: index as u32,
-                transaction: transaction_bytes,
-                transaction_effect,
-                pre_state_root,
-                post_state_root,
-                readonly_l1_values: vec![readonly_system_program],
-                settlement_effects: vec![borsh::to_vec(&post_state).unwrap()],
-            });
         }
 
-        build_checkpoint_artifact_v1(session, bank.slot(), steps).unwrap()
+        client.checkpoint_artifact_v1().unwrap()
     }
 
     #[test]
@@ -2121,17 +2258,31 @@ mod tests {
 
     #[test]
     fn canonical_checkpoint_uses_sixteen_executed_er_transactions() {
-        let first = execute_canonical_checkpoint_fixture()
-            .canonical_bytes()
-            .unwrap();
-        let second = execute_canonical_checkpoint_fixture()
-            .canonical_bytes()
-            .unwrap();
-        let third = execute_canonical_checkpoint_fixture()
-            .canonical_bytes()
-            .unwrap();
-        assert_eq!(first, second);
-        assert_eq!(first, third);
+        let first_artifact = execute_canonical_checkpoint_fixture();
+        let second_artifact = execute_canonical_checkpoint_fixture();
+        let third_artifact = execute_canonical_checkpoint_fixture();
+        for (index, (left, right)) in first_artifact
+            .da
+            .pages
+            .iter()
+            .zip(&second_artifact.da.pages)
+            .enumerate()
+        {
+            if left.pre_state_root != right.pre_state_root
+                || left.post_state_root != right.post_state_root
+            {
+                eprintln!(
+                    "step {index}: {:?} -> {:?}, {:?} -> {:?}",
+                    left.pre_state_root,
+                    left.post_state_root,
+                    right.pre_state_root,
+                    right.post_state_root,
+                );
+            }
+        }
+        let first = first_artifact.canonical_bytes().unwrap();
+        assert_eq!(first, second_artifact.canonical_bytes().unwrap());
+        assert_eq!(first, third_artifact.canonical_bytes().unwrap());
         let artifact = CheckpointArtifactV1::decode_verified(&first).unwrap();
         assert_eq!(artifact.da.pages.len(), CANONICAL_CHECKPOINT_STEPS_V1);
         assert!(artifact

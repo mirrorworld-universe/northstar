@@ -1,5 +1,6 @@
 use {
     crate::{
+        checkpoint::CheckpointArtifactV1,
         ephemeral_tpu::EphemeralTpu,
         ephemeral_tx_client::{EphemeralTransactionClient, EphemeralTransactionClientOptions},
         settlement::{
@@ -653,7 +654,8 @@ impl EphemeralRuntime {
                 withdrawal_payout_events.clone(),
                 token_withdrawal_payout_events.clone(),
             )
-            .with_unsettled_state_store(unsettled_state_store.clone()),
+            .with_unsettled_state_store(unsettled_state_store.clone())
+            .with_sync_status(sync_status.clone()),
         );
 
         let optimistically_confirmed_bank = Arc::new(RwLock::new(OptimisticallyConfirmedBank {
@@ -1019,6 +1021,10 @@ impl EphemeralRuntime {
 
     pub fn bank(&self) -> Arc<Bank> {
         self.bank_forks.read().unwrap().working_bank()
+    }
+
+    pub fn checkpoint_artifact_v1(&self) -> Option<CheckpointArtifactV1> {
+        self._tx_client.checkpoint_artifact_v1()
     }
 
     pub fn shutdown(&mut self) {

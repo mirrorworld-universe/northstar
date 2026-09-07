@@ -68,6 +68,22 @@ pub struct StateAccountValueV1 {
     pub data_hash: CommitmentHash,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshDeserialize, BorshSerialize)]
+pub struct CheckpointAccountEffectV1 {
+    pub step_index: u32,
+    pub value: StateAccountValueV1,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, BorshDeserialize, BorshSerialize)]
+pub struct CheckpointTransactionEffectV1 {
+    pub version: u8,
+    pub step_index: u32,
+    pub transaction_hash: CommitmentHash,
+    pub executed_units: u64,
+    pub account_effects: Vec<CheckpointAccountEffectV1>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckpointStepInputV1 {
     pub step_index: u32,

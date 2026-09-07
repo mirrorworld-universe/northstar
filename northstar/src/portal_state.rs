@@ -15,7 +15,7 @@ pub enum PortalAccount {
     CheckpointCursor(CheckpointCursor),
     Challenge(Challenge),
     DataAvailabilityProof(DataAvailabilityProof),
-    StepProofAccount(StepProofAccount),
+    StepProofAccount(Box<StepProofAccount>),
     SessionBridge(SessionBridge),
     TokenWithdrawalAuthorization(TokenWithdrawalAuthorization),
     UndelegationRequest(UndelegationRequest),
@@ -57,6 +57,7 @@ pub fn try_parse_raw_portal_account(data: &[u8]) -> Option<PortalAccount> {
     } else if data.starts_with(&StepProofAccount::DISCRIMINATOR) {
         borsh::from_slice::<StepProofAccount>(data)
             .ok()
+            .map(Box::new)
             .map(PortalAccount::StepProofAccount)
     } else if data.starts_with(&SessionBridge::DISCRIMINATOR) {
         borsh::from_slice::<SessionBridge>(data)
