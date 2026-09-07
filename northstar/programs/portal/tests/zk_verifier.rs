@@ -162,3 +162,49 @@ async fn sbf_verifier_rejects_noncanonical_portal_input() {
         PortalError::StepProofVerificationFailed as u32
     )));
 }
+
+#[tokio::test]
+#[ignore = "requires checkpoint-bound SP1 Groth16 artifact"]
+async fn sbf_verifier_accepts_checkpoint_bound_sp1_proof() {
+    let proof: [u8; SP1_GROTH16_PROOF_V1_LEN] =
+        std::fs::read(std::env::var("NORTHSTAR_SP1_PROOF").expect("NORTHSTAR_SP1_PROOF path"))
+            .unwrap()
+            .try_into()
+            .unwrap();
+    let public_inputs: [u8; 256] = std::fs::read(
+        std::env::var("NORTHSTAR_SP1_PUBLIC_INPUTS").expect("NORTHSTAR_SP1_PUBLIC_INPUTS path"),
+    )
+    .unwrap()
+    .try_into()
+    .unwrap();
+    let instruction = Instruction {
+        program_id: PORTAL_PROGRAM_ID,
+        accounts: vec![],
+        data: borsh::to_vec(&PortalInstruction::VerifyErStepProofV1(
+            VerifyErStepProofV1 {
+                proof,
+                public_inputs,
+            },
+        ))
+        .unwrap(),
+    };
+    let context = setup().await;
+    let result = context
+        .banks_client
+        .simulate_transaction(transaction(&context, instruction.clone()))
+        .await
+        .unwrap();
+    assert_eq!(result.result.unwrap(), Ok(()));
+    let compute_units = result.simulation_details.unwrap().units_consumed;
+    println!("checkpoint-bound SP1 verifier CU: {compute_units}");
+    assert!(compute_units <= 130_000);
+
+    let mut changed_proof = instruction;
+    changed_proof.data[101] ^= 1;
+    let result = context
+        .banks_client
+        .simulate_transaction(transaction(&context, changed_proof))
+        .await
+        .unwrap();
+    assert!(result.result.unwrap().is_err());
+}
