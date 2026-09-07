@@ -73,7 +73,7 @@ pub fn process_request_undelegation(
     if request.address() != &expected_request {
         return Err(PortalError::InvalidPdaSeeds.into());
     }
-    if request.lamports() != 0 || !request.is_data_empty() {
+    if !request.is_data_empty() {
         return Err(PortalError::UndelegationRequestAlreadyInitialized.into());
     }
 
