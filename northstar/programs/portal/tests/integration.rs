@@ -224,6 +224,56 @@ fn synthetic_tx_effect_path(step_count: u64, step_index: u64) -> (u8, [[u8; 32];
     ((layers.len() - 1) as u8, path)
 }
 
+fn synthetic_session_context(
+    program_id: &Pubkey,
+    session: &Pubkey,
+    validator: &Pubkey,
+) -> [u8; 32] {
+    const DOMAIN: &[u8] = b"northstar-session-context-v1";
+    const CONTEXT_LEN: usize = DOMAIN.len() + 32 + 32 + 8 + 16 + 32 + 1;
+    let mut context = [0; CONTEXT_LEN];
+    let grid_id = 1u64.to_le_bytes();
+    let nonce = 0u128.to_le_bytes();
+    let mut offset = 0usize;
+    for bytes in [
+        DOMAIN,
+        program_id.as_ref(),
+        session.as_ref(),
+        grid_id.as_slice(),
+        nonce.as_slice(),
+        validator.as_ref(),
+        &[1],
+    ] {
+        let end = offset + bytes.len();
+        context[offset..end].copy_from_slice(bytes);
+        offset = end;
+    }
+    let mut fields = [[0; 32]; 8];
+    fields[0][24..].copy_from_slice(&0x100u64.to_be_bytes());
+    fields[1][24..].copy_from_slice(&0x10au64.to_be_bytes());
+    fields[2][24..].copy_from_slice(&(CONTEXT_LEN as u64).to_be_bytes());
+    for (field, chunk) in fields[3..].iter_mut().zip(context.chunks(31)) {
+        field[32 - chunk.len()..].copy_from_slice(chunk);
+    }
+    let inputs = [
+        fields[0].as_slice(),
+        fields[1].as_slice(),
+        fields[2].as_slice(),
+        fields[3].as_slice(),
+        fields[4].as_slice(),
+        fields[5].as_slice(),
+        fields[6].as_slice(),
+        fields[7].as_slice(),
+    ];
+    solana_poseidon::hashv(
+        solana_poseidon::Parameters::Bn254X5,
+        solana_poseidon::Endianness::BigEndian,
+        &inputs,
+    )
+    .unwrap()
+    .to_bytes()
+}
+
 fn find_deposit_receipt_pda(
     program_id: &Pubkey,
     session: &Pubkey,
@@ -670,6 +720,7 @@ fn build_finish_settlement_ix(
 fn build_create_step_proof_ix(
     program_id: &Pubkey,
     authority: &Pubkey,
+    validator: &Pubkey,
     session_pda: &Pubkey,
     er_slot: u64,
 ) -> Instruction {
@@ -682,7 +733,7 @@ fn build_create_step_proof_ix(
         proof_kind: 1,
         proof_version: 1,
         step_index: 0,
-        session_context: [4; 32],
+        session_context: synthetic_session_context(program_id, session_pda, validator),
         tx_effect_root: [5; 32],
         tx_effect_path_len,
         tx_effect_path,
@@ -980,6 +1031,7 @@ async fn prefunded_portal_pdas_can_be_initialized() {
     let create_proof_ix = build_create_step_proof_ix(
         &PORTAL_PROGRAM_ID,
         &challenger.pubkey(),
+        &payer_pubkey,
         &session_pda,
         er_slot,
     );
@@ -2558,6 +2610,7 @@ async fn checkpoint_da_timeout_slashes_and_allows_recovery() {
         .unwrap();
 }
 
+#[cfg(not(feature = "zk-verifier-prototype"))]
 #[tokio::test]
 async fn submit_step_proof_default_verifier_is_safe() {
     let mut context = setup().await;
@@ -2621,8 +2674,13 @@ async fn submit_step_proof_default_verifier_is_safe() {
     );
     context.banks_client.process_transaction(tx).await.unwrap();
 
-    let wrong_creator_ix =
-        build_create_step_proof_ix(&PORTAL_PROGRAM_ID, &payer_pubkey, &session_pda, er_slot);
+    let wrong_creator_ix = build_create_step_proof_ix(
+        &PORTAL_PROGRAM_ID,
+        &payer_pubkey,
+        &payer_pubkey,
+        &session_pda,
+        er_slot,
+    );
     let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
         &[wrong_creator_ix],
@@ -2638,6 +2696,7 @@ async fn submit_step_proof_default_verifier_is_safe() {
     let create_proof_ix = build_create_step_proof_ix(
         &PORTAL_PROGRAM_ID,
         &challenger.pubkey(),
+        &payer_pubkey,
         &session_pda,
         er_slot,
     );
@@ -2785,6 +2844,7 @@ async fn submit_step_proof_invalid_slashes_and_blocks_settlement() {
     let create_proof_ix = build_create_step_proof_ix(
         &PORTAL_PROGRAM_ID,
         &challenger.pubkey(),
+        &payer_pubkey,
         &session_pda,
         er_slot,
     );
@@ -2982,6 +3042,7 @@ async fn valid_step_proof_prevents_second_challenge() {
     let create_proof_ix = build_create_step_proof_ix(
         &PORTAL_PROGRAM_ID,
         &challenger.pubkey(),
+        &payer_pubkey,
         &session_pda,
         er_slot,
     );

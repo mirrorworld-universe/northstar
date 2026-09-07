@@ -5240,6 +5240,7 @@ dependencies = [
  "solana-hash 4.5.0",
  "solana-instruction",
  "solana-keypair",
+ "solana-poseidon",
  "solana-program-test",
  "solana-pubkey 4.2.0",
  "solana-rpc-client",

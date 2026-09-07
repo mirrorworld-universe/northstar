@@ -40,7 +40,7 @@ The v1 proof does not prove a complete SVM implementation. It proves the ER-shap
 `northstar-er-step-v1` uses this canonical ordered ABI. Portal hashes the same ordered byte values into `StepProofAccount.public_input_hash`; the Groth16 adapter may pack them into eight field elements without changing their meaning.
 
 1. Protocol domain: `northstar-er-step-v1`, `proof_kind`, and `proof_version`.
-2. Session context: Portal program, session pubkey, and checkpoint identity.
+2. Session context: Poseidon commitment to Portal program, session pubkey, grid id, session nonce, validator, and settlement-policy version.
 3. Position: `er_slot` and `step_index`.
 4. `pre_state_root`.
 5. `post_state_root`.

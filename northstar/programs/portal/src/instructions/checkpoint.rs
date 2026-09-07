@@ -28,6 +28,17 @@ use {
     northstar_zk_types::{ErStepPublicInputsV1, FrBytes},
 };
 
+#[cfg(target_os = "solana")]
+extern "C" {
+    fn sol_poseidon(
+        parameters: u64,
+        endianness: u64,
+        vals: *const u8,
+        vals_len: u64,
+        hash_result: *mut u8,
+    ) -> u64;
+}
+
 fn load_session(program_id: &Pubkey, session: &AccountInfo) -> Result<Session, ProgramError> {
     let (expected_session_key, _) = find_session_pda(program_id);
     if session.address() != &expected_session_key {
@@ -513,6 +524,77 @@ fn verify_tx_effect_authentication_path(
     ])
     .to_bytes()
         == checkpoint.tx_effect_root
+}
+
+fn poseidon_fields(inputs: &[&[u8]]) -> Option<[u8; 32]> {
+    #[cfg(not(target_os = "solana"))]
+    {
+        solana_poseidon::hashv(
+            solana_poseidon::Parameters::Bn254X5,
+            solana_poseidon::Endianness::BigEndian,
+            inputs,
+        )
+        .ok()
+        .map(|hash| hash.to_bytes())
+    }
+    #[cfg(target_os = "solana")]
+    {
+        let mut result = [0; 32];
+        let status = unsafe {
+            sol_poseidon(
+                0,
+                0,
+                inputs.as_ptr().cast(),
+                inputs.len() as u64,
+                result.as_mut_ptr(),
+            )
+        };
+        (status == 0).then_some(result)
+    }
+}
+
+fn session_context_v1(
+    program_id: &Pubkey,
+    session_key: &Pubkey,
+    session: &Session,
+) -> Option<[u8; 32]> {
+    const DOMAIN: &[u8] = b"northstar-session-context-v1";
+    const CONTEXT_LEN: usize = DOMAIN.len() + 32 + 32 + 8 + 16 + 32 + 1;
+    let mut context = [0; CONTEXT_LEN];
+    let mut offset: usize = 0;
+    for bytes in [
+        DOMAIN,
+        program_id.as_ref(),
+        session_key.as_ref(),
+        &session.grid_id.to_le_bytes(),
+        &session.nonce.to_le_bytes(),
+        session.validator.as_ref(),
+        &[1],
+    ] {
+        let end = offset.checked_add(bytes.len())?;
+        context.get_mut(offset..end)?.copy_from_slice(bytes);
+        offset = end;
+    }
+
+    let mut fields = [[0; 32]; 8];
+    fields[0][24..].copy_from_slice(&0x100u64.to_be_bytes());
+    fields[1][24..].copy_from_slice(&0x10au64.to_be_bytes());
+    fields[2][24..].copy_from_slice(&(CONTEXT_LEN as u64).to_be_bytes());
+    for (field, chunk) in fields[3..].iter_mut().zip(context.chunks(31)) {
+        let start = field.len().checked_sub(chunk.len())?;
+        field[start..].copy_from_slice(chunk);
+    }
+    let inputs = [
+        fields[0].as_slice(),
+        fields[1].as_slice(),
+        fields[2].as_slice(),
+        fields[3].as_slice(),
+        fields[4].as_slice(),
+        fields[5].as_slice(),
+        fields[6].as_slice(),
+        fields[7].as_slice(),
+    ];
+    poseidon_fields(&inputs)
 }
 
 #[p_instruction(
@@ -1237,7 +1319,7 @@ pub fn process_create_step_proof(
         return Err(PortalError::Unauthorized.into());
     }
 
-    load_session(program_id, session)?;
+    let session_state = load_session(program_id, session)?;
     let session_key = session.address();
     let checkpoint_state = load_checkpoint(program_id, session_key, er_slot, checkpoint)?;
     if checkpoint_state.status != CheckpointStatus::Challenged {
@@ -1253,6 +1335,9 @@ pub fn process_create_step_proof(
     }
     if proof_kind == 0 || proof_version == 0 {
         return Err(ProgramError::InvalidInstructionData);
+    }
+    if session_context_v1(program_id, session_key, &session_state) != Some(session_context) {
+        return Err(PortalError::StepProofPublicInputMismatch.into());
     }
     if authority.address() != &challenge_state.challenger
         || readonly_l1_root != checkpoint_state.readonly_l1_root
@@ -1694,6 +1779,49 @@ pub fn process_resolve_challenge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_context_binds_portal_session_policy() {
+        let session = Session {
+            discriminator: Session::DISCRIMINATOR,
+            grid_id: 7,
+            ttl_slots: 100,
+            fee_cap: 1_000,
+            created_at: 9,
+            nonce: 11,
+            authority: [3; 32].into(),
+            validator: [4; 32].into(),
+            settlement_interval_slots: 10,
+            last_settled_l1_slot: 0,
+            last_settled_er_slot: 0,
+            settlement_status: crate::SettlementStatus::Idle,
+            settlement_er_slot: 0,
+            settlement_checksum: [0; 32],
+            settlement_accumulator: [0; 32],
+            settlement_started_l1_slot: 0,
+            bump: 1,
+        };
+        let program = Pubkey::from([1; 32]);
+        let session_key = Pubkey::from([2; 32]);
+        let context = session_context_v1(&program, &session_key, &session).unwrap();
+        assert_ne!(context, [0; 32]);
+        assert_ne!(
+            context,
+            session_context_v1(&Pubkey::from([9; 32]), &session_key, &session).unwrap()
+        );
+        let mut changed = session;
+        changed.grid_id += 1;
+        assert_ne!(
+            context,
+            session_context_v1(&program, &session_key, &changed).unwrap()
+        );
+        changed = session;
+        changed.nonce += 1;
+        assert_ne!(
+            context,
+            session_context_v1(&program, &session_key, &changed).unwrap()
+        );
+    }
 
     #[test]
     fn step_proof_public_input_hash_v1_is_stable() {

@@ -29,6 +29,7 @@ solana-address = { version = "=2.6.1", default-features = false, features = ["bo
 
 [target.'cfg(not(target_os = "solana"))'.dependencies]
 solana-pubkey = { workspace = true, features = ["curve25519"] }
+solana-poseidon = { workspace = true }
 
 [dev-dependencies]
 bincode = { workspace = true }

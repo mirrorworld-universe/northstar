@@ -30,6 +30,28 @@ pub const MM_STACK_START: u64 = 0x2_0000_0000;
 pub const MM_HEAP_START: u64 = 0x3_0000_0000;
 pub const MM_INPUT_START: u64 = 0x4_0000_0000;
 
+pub const SESSION_CONTEXT_DOMAIN_V1: &[u8] = b"northstar-session-context-v1";
+pub const SETTLEMENT_POLICY_VERSION_V1: u8 = 1;
+
+pub fn session_context_bytes_v1(
+    portal_program: [u8; 32],
+    session: [u8; 32],
+    grid_id: u64,
+    nonce: u128,
+    validator: [u8; 32],
+) -> Vec<u8> {
+    let mut context = Vec::with_capacity(149);
+    context.extend_from_slice(SESSION_CONTEXT_DOMAIN_V1);
+    context.extend_from_slice(&portal_program);
+    context.extend_from_slice(&session);
+    context.extend_from_slice(&grid_id.to_le_bytes());
+    context.extend_from_slice(&nonce.to_le_bytes());
+    context.extend_from_slice(&validator);
+    context.push(SETTLEMENT_POLICY_VERSION_V1);
+    debug_assert_eq!(context.len(), 149);
+    context
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, BorshDeserialize, BorshSerialize)]
 pub struct AccountWitnessV1 {
     pub key: [u8; 32],
@@ -916,6 +938,21 @@ fn take_array<const N: usize>(bytes: &[u8], cursor: &mut usize) -> Result<[u8; N
 #[cfg(all(test, feature = "host"))]
 mod tests {
     use {super::*, crate::fixture::build_replay_witness_v1, ed25519_dalek::Verifier as _};
+
+    #[test]
+    fn canonical_session_context_is_length_delimited() {
+        let context = session_context_bytes_v1([1; 32], [2; 32], 3, 4, [5; 32]);
+        assert_eq!(context.len(), 149);
+        assert!(context.starts_with(SESSION_CONTEXT_DOMAIN_V1));
+        assert_ne!(
+            context,
+            session_context_bytes_v1([1; 32], [2; 32], 4, 4, [5; 32])
+        );
+        assert_ne!(
+            context,
+            session_context_bytes_v1([1; 32], [2; 32], 3, 5, [5; 32])
+        );
+    }
 
     fn row(opcode: u8, pc: u64) -> VmRowV1 {
         let mut registers = [0; 12];

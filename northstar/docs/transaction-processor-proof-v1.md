@@ -16,6 +16,8 @@ The eight canonical BN254 scalar inputs retain their existing order and encoding
 
 1. `domain`: `FrBytes::er_step_domain_v1(2, 1)`.
 2. `session_context`: Poseidon commitment to chain identity, Portal session, ER identity, and settlement policy version.
+
+`session_context` commits exactly 149 bytes: `northstar-session-context-v1`, Portal program id, session PDA, little-endian `grid_id`, little-endian session `nonce`, validator pubkey, and settlement-policy version byte `1`. The bytes use the standard `BYTE_STRING_TAG` length-delimited 31-byte field chunking before the `SESSION_CONTEXT_TAG` Poseidon fold. Portal recomputes this field with the BN254 Poseidon syscall when the proof account is created.
 3. `slot_step`: big-endian packed `(er_slot, step_index)`.
 4. `pre_state_root`: root of all mutable ER accounts before the transaction.
 5. `post_state_root`: root after applying the selected commit or rollback effects.

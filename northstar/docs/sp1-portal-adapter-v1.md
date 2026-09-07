@@ -77,12 +77,11 @@ SP1 6.1.0 has CPU and CUDA proving backends but no AMD XDNA NPU backend. Local p
 
 ## Remaining compatibility check
 
-Production challenge resolution now reconstructs the eight public fields from the sealed account and invokes the direct SP1 verifier. Capture the existing Northstar SP1 Groth16 proof artifact and add it as a test vector outside source-heavy build artifacts. The final compatibility check must:
+Production challenge resolution now authenticates the isolated trace boundary and transaction/effect leaf, recomputes the canonical Poseidon `session_context`, reconstructs the eight public fields from the sealed account, and invokes the direct SP1 verifier. Capture the existing Northstar SP1 Groth16 proof artifact and add it as a test vector outside source-heavy build artifacts. The final compatibility check must:
 
 - accept the unchanged 356-byte Northstar proof;
 - reject changed raw proof bytes and each changed Portal public field;
-- confirm successful-verification CU remains at or below 130K;
-- bind `session_context` to the finalized canonical session-context derivation.
+- confirm successful-verification CU remains at or below 130K.
 
 ## Reproduction
 
