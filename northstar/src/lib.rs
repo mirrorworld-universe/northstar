@@ -521,7 +521,10 @@ impl Manager {
         let runtime = self.runtime.as_ref()?;
         let session_pda = (*runtime.session_pda().read().unwrap())?;
         let diff = runtime.state_diff_from_l1();
-        let er_slot = runtime.bank().slot();
+        let er_slot = runtime.checkpoint_artifact_v1().map_or_else(
+            || runtime.bank().slot(),
+            |artifact| artifact.checkpoint.er_slot,
+        );
         let receipt_balances = runtime.settlement_receipt_balances(session_pda);
         let token_withdrawals = runtime.settlement_token_withdrawals(er_slot);
         let mut plan = build_settlement_plan(
@@ -679,10 +682,14 @@ impl Manager {
                     );
                     return None;
                 }
+                let effect_commitment = self
+                    .active_checkpoint_for_session(l1_bank, session_pda)
+                    .map(|(_, checkpoint)| checkpoint.effect_commitment)?;
                 let transactions = self.settlement_transactions_for_plan(
                     &plan,
                     session_pda,
                     recent_blockhash,
+                    effect_commitment,
                     false,
                 );
                 (plan, transactions)
@@ -787,9 +794,7 @@ impl Manager {
         };
         let plan: SettlementPlan = durable.into();
         let recomputed_checksum = plan.recomputed_checksum();
-        if recomputed_checksum != plan.checksum
-            || recomputed_checksum != checkpoint.effect_commitment
-        {
+        if recomputed_checksum != plan.checksum {
             warn!(
                 "Checkpoint plan checksum mismatch for {path:?}: stored={:?} recomputed={:?} \
                  checkpoint={:?}",
@@ -877,7 +882,6 @@ impl Manager {
                             if checkpoint.is_valid()
                                 && checkpoint.session == session_pda
                                 && checkpoint.er_slot == plan.er_slot
-                                && checkpoint.effect_commitment == plan.checksum
                                 && checkpoint.status == CheckpointStatus::Settled
                     )
                 })
@@ -937,14 +941,6 @@ impl Manager {
             );
             return None;
         };
-        if plan.checksum != checkpoint.effect_commitment {
-            warn!(
-                "Portal cached checkpoint plan mismatch: er_slot={} plan_checksum={:?} \
-                 checkpoint_effect={:?}",
-                checkpoint.er_slot, plan.checksum, checkpoint.effect_commitment,
-            );
-            return None;
-        }
         self.checkpoint_plans
             .write()
             .unwrap()
@@ -977,6 +973,16 @@ impl Manager {
             );
         }
 
+        let artifact = self.checkpoint_artifact_v1()?;
+        if artifact.checkpoint.session != session_pda || artifact.checkpoint.er_slot != plan.er_slot
+        {
+            warn!(
+                "Runtime checkpoint artifact mismatch: session={} plan_er_slot={} \
+                 artifact_session={} artifact_er_slot={}",
+                session_pda, plan.er_slot, artifact.checkpoint.session, artifact.checkpoint.er_slot,
+            );
+            return None;
+        }
         let (checkpoint_pda, _) =
             find_checkpoint_pda(&self.config.portal_program_id, &session_pda, plan.er_slot);
         let Some(checkpoint_account) = l1_bank.get_account(&checkpoint_pda) else {
@@ -990,7 +996,7 @@ impl Manager {
                 self.config.manager_account.as_ref(),
                 recent_blockhash,
                 challenge_window_slots,
-                self.latest_finalized_checkpoint_state_root(l1_bank, session_pda),
+                &artifact.checkpoint,
             )?;
             self.cache_checkpoint_plan(session_pda, plan);
             return Some(vec![transaction]);
@@ -1009,8 +1015,6 @@ impl Manager {
             checkpoint.status,
             CheckpointStatus::Settled | CheckpointStatus::Cancelled | CheckpointStatus::Invalid
         ) {
-            let previous_state_root =
-                self.latest_finalized_checkpoint_state_root(l1_bank, session_pda);
             info!(
                 "Portal checkpoint re-propose over terminal account: er_slot={} checksum={:?}",
                 plan.er_slot, plan.checksum,
@@ -1021,7 +1025,7 @@ impl Manager {
                 self.config.manager_account.as_ref(),
                 recent_blockhash,
                 challenge_window_slots,
-                previous_state_root,
+                &artifact.checkpoint,
             )?;
             self.cache_checkpoint_plan(session_pda, plan);
             return Some(vec![transaction]);
@@ -1034,29 +1038,6 @@ impl Manager {
             checkpoint,
             recent_blockhash,
         )
-    }
-
-    fn latest_finalized_checkpoint_state_root(
-        &self,
-        l1_bank: &Bank,
-        session_pda: Pubkey,
-    ) -> [u8; 32] {
-        let (cursor_pda, _) =
-            find_checkpoint_cursor_pda(&self.config.portal_program_id, &session_pda);
-        let Some(cursor_account) = l1_bank.get_account(&cursor_pda) else {
-            return [0; 32];
-        };
-        let Some(PortalAccount::CheckpointCursor(cursor)) =
-            try_parse_raw_portal_account(cursor_account.data())
-        else {
-            warn!("Portal checkpoint cursor {cursor_pda} has invalid account data");
-            return [0; 32];
-        };
-        if cursor.session != session_pda {
-            warn!("Portal checkpoint cursor {cursor_pda} session mismatch");
-            return [0; 32];
-        }
-        cursor.latest_finalized_state_root
     }
 
     fn active_checkpoint_for_session(
@@ -1107,23 +1088,17 @@ impl Manager {
         plan: &SettlementPlan,
         session_pda: Pubkey,
         recent_blockhash: Hash,
+        effect_commitment: [u8; 32],
         include_begin: bool,
     ) -> Vec<Transaction> {
-        let mut transactions = if include_begin {
-            plan.portal_transactions(
-                self.config.portal_program_id,
-                session_pda,
-                self.config.manager_account.as_ref(),
-                recent_blockhash,
-            )
-        } else {
-            plan.portal_retry_transactions_after_begin(
-                self.config.portal_program_id,
-                session_pda,
-                self.config.manager_account.as_ref(),
-                recent_blockhash,
-            )
-        };
+        let mut transactions = plan.portal_transactions_with_effect_commitment(
+            self.config.portal_program_id,
+            session_pda,
+            self.config.manager_account.as_ref(),
+            recent_blockhash,
+            effect_commitment,
+            include_begin,
+        );
         let Some(finish_transaction) = transactions.pop() else {
             return vec![];
         };
@@ -1168,14 +1143,6 @@ impl Manager {
             );
             return None;
         }
-        if checkpoint.effect_commitment != plan.checksum {
-            warn!(
-                "Portal checkpoint/live diff mismatch for er_slot={}: checkpoint_effect={:?} \
-                 live_checksum={:?}; refusing settlement",
-                plan.er_slot, checkpoint.effect_commitment, plan.checksum,
-            );
-            return None;
-        }
 
         match checkpoint.status {
             CheckpointStatus::Pending => {
@@ -1202,6 +1169,7 @@ impl Manager {
                     plan,
                     session_pda,
                     recent_blockhash,
+                    checkpoint.effect_commitment,
                     true,
                 ));
                 Some(transactions)
@@ -1215,6 +1183,7 @@ impl Manager {
                     plan,
                     session_pda,
                     recent_blockhash,
+                    checkpoint.effect_commitment,
                     true,
                 ))
             }
@@ -3877,6 +3846,29 @@ mod portal_e2e_tests {
         borsh::from_slice(&transaction.message.instructions[0].data).unwrap()
     }
 
+    fn checkpoint_artifact_fixture(
+        session: Pubkey,
+        er_slot: u64,
+    ) -> checkpoint::CheckpointArtifactV1 {
+        let field = |value: u8| {
+            let mut field = [0; 32];
+            field[31] = value;
+            field
+        };
+        let steps = (0..checkpoint::CANONICAL_CHECKPOINT_STEPS_V1)
+            .map(|index| checkpoint::CheckpointStepInputV1 {
+                step_index: index as u32,
+                transaction: vec![index as u8 + 1],
+                transaction_effect: vec![index as u8 + 33],
+                pre_state_root: field(index as u8 + 1),
+                post_state_root: field(index as u8 + 2),
+                readonly_l1_values: vec![],
+                settlement_effects: vec![vec![index as u8 + 65]],
+            })
+            .collect();
+        checkpoint::build_checkpoint_artifact_v1(session, er_slot, steps).unwrap()
+    }
+
     #[test]
     fn token_withdrawal_release_follows_finish_settlement() {
         let portal_program = Pubkey::new_unique();
@@ -3914,6 +3906,7 @@ mod portal_e2e_tests {
             &plan,
             Pubkey::new_unique(),
             Hash::new_unique(),
+            plan.checksum,
             true,
         );
         let program_id = |transaction: &Transaction| {
@@ -3940,6 +3933,9 @@ mod portal_e2e_tests {
             l1_data,
             _er_data,
         ) = setup_checkpoint_flow_fixture();
+        let runtime = manager.runtime.as_ref().unwrap();
+        let artifact = checkpoint_artifact_fixture(session_pda, runtime.bank().slot());
+        runtime.install_checkpoint_artifact_v1(artifact.clone());
         let due_slot = bank.slot() + 10;
         let due_bank = Bank::new_from_parent(bank, SlotLeader::default(), due_slot);
 
@@ -3966,6 +3962,34 @@ mod portal_e2e_tests {
             panic!("checkpoint should deserialize");
         };
         assert_eq!(checkpoint.status, CheckpointStatus::Pending);
+        assert_eq!(
+            checkpoint.step_count,
+            u64::from(artifact.checkpoint.step_count)
+        );
+        assert_eq!(
+            checkpoint.previous_state_root,
+            artifact.checkpoint.previous_state_root
+        );
+        assert_eq!(
+            checkpoint.new_state_root,
+            artifact.checkpoint.new_state_root
+        );
+        assert_eq!(checkpoint.trace_root, artifact.checkpoint.trace_root);
+        assert_eq!(
+            checkpoint.tx_effect_root,
+            artifact.checkpoint.transaction_effect_root
+        );
+        assert_eq!(
+            checkpoint.readonly_l1_root,
+            artifact.checkpoint.readonly_l1_root
+        );
+        assert_eq!(checkpoint.da_commitment, artifact.checkpoint.da_commitment);
+        assert_eq!(
+            checkpoint.effect_commitment,
+            artifact.checkpoint.effect_commitment
+        );
+        assert_ne!(checkpoint.trace_root, checkpoint.tx_effect_root);
+        assert_ne!(checkpoint.readonly_l1_root, [0; 32]);
         let checkpoint_plan_path = manager.checkpoint_plan_path(
             session_pda,
             manager.config.manager_account.pubkey(),
@@ -4079,6 +4103,11 @@ mod portal_e2e_tests {
             mismatch_l1_data,
             mismatch_er_data,
         ) = setup_checkpoint_flow_fixture();
+        let mismatch_runtime = mismatch_manager.runtime.as_ref().unwrap();
+        mismatch_runtime.install_checkpoint_artifact_v1(checkpoint_artifact_fixture(
+            mismatch_session_pda,
+            mismatch_runtime.bank().slot(),
+        ));
         let mismatch_due_slot = mismatch_bank.slot() + 10;
         let mismatch_due_bank =
             Bank::new_from_parent(mismatch_bank, SlotLeader::default(), mismatch_due_slot);
@@ -4157,6 +4186,11 @@ mod portal_e2e_tests {
             tamper_l1_data,
             _tamper_er_data,
         ) = setup_checkpoint_flow_fixture();
+        let tamper_runtime = tamper_manager.runtime.as_ref().unwrap();
+        tamper_runtime.install_checkpoint_artifact_v1(checkpoint_artifact_fixture(
+            tamper_session_pda,
+            tamper_runtime.bank().slot(),
+        ));
         let tamper_due_bank = Bank::new_from_parent(
             tamper_bank,
             SlotLeader::default(),

@@ -169,7 +169,6 @@ fn load_checkpoint_for_settlement(
     program_id: &Pubkey,
     session_key: &Pubkey,
     er_slot: u64,
-    checksum: [u8; 32],
     checkpoint: &AccountInfo,
 ) -> Result<Checkpoint, ProgramError> {
     let (expected_checkpoint_key, _) = find_checkpoint_pda(program_id, session_key, er_slot);
@@ -196,9 +195,6 @@ fn load_checkpoint_for_settlement(
     }
     if checkpoint_state.status != CheckpointStatus::Committed {
         return Err(PortalError::CheckpointStateInvalid.into());
-    }
-    if checkpoint_state.effect_commitment != checksum {
-        return Err(PortalError::SettlementChecksumMismatch.into());
     }
 
     Ok(checkpoint_state)
@@ -283,12 +279,16 @@ fn load_delegation_record(
 #[p_instruction(
     id = 5,
     accounts = [validator(signer), session(mut, state = Session), checkpoint(state = Checkpoint)],
-    data = [er_slot: u64, checksum: Hash32]
+    data = [er_slot: u64, checksum: Hash32, effect_commitment: Hash32]
 )]
 pub fn process_begin_settlement(
     program_id: &Pubkey,
     accounts: &mut [AccountInfo],
-    BeginSettlement { er_slot, checksum }: BeginSettlement,
+    BeginSettlement {
+        er_slot,
+        checksum,
+        effect_commitment,
+    }: BeginSettlement,
 ) -> ProgramResult {
     pinocchio_log::log!("Instruction: BeginSettlement, er_slot={}", er_slot);
 
@@ -314,7 +314,11 @@ pub fn process_begin_settlement(
         return Err(PortalError::SettlementErSlotNotAdvanced.into());
     }
 
-    load_checkpoint_for_settlement(program_id, session.address(), er_slot, checksum, checkpoint)?;
+    let checkpoint_state =
+        load_checkpoint_for_settlement(program_id, session.address(), er_slot, checkpoint)?;
+    if checkpoint_state.effect_commitment != effect_commitment {
+        return Err(PortalError::SettlementChecksumMismatch.into());
+    }
 
     session_state.settlement_status = SettlementStatus::InProgress;
     session_state.settlement_er_slot = er_slot;
@@ -581,7 +585,7 @@ pub fn process_finish_settlement(
 
     let session_key = session.address();
     let mut checkpoint_state =
-        load_checkpoint_for_settlement(program_id, session_key, er_slot, checksum, checkpoint)?;
+        load_checkpoint_for_settlement(program_id, session_key, er_slot, checkpoint)?;
     let mut cursor_state = load_cursor(program_id, session_key, cursor)?;
     require_active_checkpoint(&cursor_state, checkpoint.address(), er_slot)?;
 

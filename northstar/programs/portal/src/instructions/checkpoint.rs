@@ -458,7 +458,9 @@ pub fn process_propose_checkpoint(
     let mut cursor_state = load_or_create_cursor(program_id, proposer, session_key, cursor)?;
     require_no_active_checkpoint(&cursor_state)?;
     require_advancing_checkpoint(&session_state, &cursor_state, er_slot)?;
-    if previous_state_root != cursor_state.latest_finalized_state_root {
+    if cursor_state.latest_finalized_checkpoint != Pubkey::default()
+        && previous_state_root != cursor_state.latest_finalized_state_root
+    {
         return Err(PortalError::CheckpointPreviousRootMismatch.into());
     }
 
@@ -594,7 +596,9 @@ pub fn process_commit_checkpoint(
 
     require_advancing_checkpoint(&session_state, &cursor_state, er_slot)?;
     require_active_checkpoint(&cursor_state, checkpoint.address(), er_slot)?;
-    if checkpoint_state.previous_state_root != cursor_state.latest_finalized_state_root {
+    if cursor_state.latest_finalized_checkpoint != Pubkey::default()
+        && checkpoint_state.previous_state_root != cursor_state.latest_finalized_state_root
+    {
         return Err(PortalError::CheckpointPreviousRootMismatch.into());
     }
 

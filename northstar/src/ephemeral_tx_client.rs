@@ -439,6 +439,13 @@ impl EphemeralTransactionClient {
         self.checkpoint_capture.read().unwrap().completed.clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn install_checkpoint_artifact_v1(&self, artifact: CheckpointArtifactV1) {
+        let mut capture = self.checkpoint_capture.write().unwrap();
+        capture.session = Some(artifact.checkpoint.session);
+        capture.completed = Some(artifact);
+    }
+
     fn checkpoint_state_value(account: Pubkey, value: &AccountSharedData) -> StateAccountValueV1 {
         StateAccountValueV1 {
             account,
@@ -2261,23 +2268,25 @@ mod tests {
         let first_artifact = execute_canonical_checkpoint_fixture();
         let second_artifact = execute_canonical_checkpoint_fixture();
         let third_artifact = execute_canonical_checkpoint_fixture();
-        for (index, (left, right)) in first_artifact
-            .da
-            .pages
-            .iter()
-            .zip(&second_artifact.da.pages)
-            .enumerate()
-        {
-            if left.pre_state_root != right.pre_state_root
-                || left.post_state_root != right.post_state_root
+        for artifact in [&second_artifact, &third_artifact] {
+            for (index, (left, right)) in first_artifact
+                .da
+                .pages
+                .iter()
+                .zip(&artifact.da.pages)
+                .enumerate()
             {
-                eprintln!(
-                    "step {index}: {:?} -> {:?}, {:?} -> {:?}",
-                    left.pre_state_root,
-                    left.post_state_root,
-                    right.pre_state_root,
-                    right.post_state_root,
-                );
+                if left.pre_state_root != right.pre_state_root
+                    || left.post_state_root != right.post_state_root
+                {
+                    eprintln!(
+                        "step {index}: {:?} -> {:?}, {:?} -> {:?}",
+                        left.pre_state_root,
+                        left.post_state_root,
+                        right.pre_state_root,
+                        right.post_state_root,
+                    );
+                }
             }
         }
         let first = first_artifact.canonical_bytes().unwrap();

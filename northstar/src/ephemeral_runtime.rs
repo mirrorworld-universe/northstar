@@ -1027,6 +1027,11 @@ impl EphemeralRuntime {
         self._tx_client.checkpoint_artifact_v1()
     }
 
+    #[cfg(test)]
+    pub(crate) fn install_checkpoint_artifact_v1(&self, artifact: CheckpointArtifactV1) {
+        self._tx_client.install_checkpoint_artifact_v1(artifact);
+    }
+
     pub fn shutdown(&mut self) {
         info!("Shutting down EphemeralRuntime at {}", self.rpc_addr);
         // Stop slot advancer first

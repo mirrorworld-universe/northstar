@@ -59,6 +59,7 @@ pub struct OpenSession {
 pub struct BeginSettlement {
     pub er_slot: u64,
     pub checksum: Hash32,
+    pub effect_commitment: Hash32,
 }
 
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]

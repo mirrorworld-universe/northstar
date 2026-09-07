@@ -17,6 +17,8 @@ A checkpoint binds one ordered ER execution trace:
 
 All hashes are 32 bytes. Hash trees use domain-separated SHA-256, ordered children, and explicit leaf indexes. Empty trees use a domain-specific empty root; zero is not an implicit empty-tree value.
 
+The first finalized checkpoint establishes the session's initial authenticated ER state root. Every later checkpoint must start at the cursor's latest finalized state root. Portal's settlement checksum remains a separate incremental transcript-integrity value; `BeginSettlement` binds both that checksum and the checkpoint's `effect_commitment`, so the Portal write protocol does not force unrelated checkpoint roots to reuse the settlement checksum.
+
 ### Canonical checkpoint and DA encoding
 
 Checkpoint format v1 contains exactly 16 steps and 17 state roots. It uses Borsh encoding with explicit format, page, step, leaf, and list indexes. One immutable DA page contains each step's serialized transaction, canonical execution effect, per-step transaction/effect commitment, pre/post state roots, readonly L1 values, settlement effects, and authentication paths. The sealed manifest binds session, ER slot, all checkpoint roots, raw codec, empty dictionary hash, page indexes, encoded/uncompressed lengths, and page hashes. `da_commitment` is the count-bound Merkle root of the manifest followed by the 16 ordered page hashes.

@@ -394,8 +394,30 @@ fn build_begin_settlement_ix(
     er_slot: u64,
     checksum: [u8; 32],
 ) -> Instruction {
+    build_begin_settlement_with_effect_ix(
+        program_id,
+        validator,
+        session_pda,
+        er_slot,
+        checksum,
+        checksum,
+    )
+}
+
+fn build_begin_settlement_with_effect_ix(
+    program_id: &Pubkey,
+    validator: &Pubkey,
+    session_pda: &Pubkey,
+    er_slot: u64,
+    checksum: [u8; 32],
+    effect_commitment: [u8; 32],
+) -> Instruction {
     let (checkpoint_pda, _) = find_checkpoint_pda(program_id, session_pda, er_slot);
-    let ix = PortalInstruction::BeginSettlement(BeginSettlement { er_slot, checksum });
+    let ix = PortalInstruction::BeginSettlement(BeginSettlement {
+        er_slot,
+        checksum,
+        effect_commitment,
+    });
     let data = borsh::to_vec(&ix).unwrap();
 
     Instruction {
@@ -784,7 +806,7 @@ async fn checkpoint_proposal_commit_deadline_flow() {
         challenge_window_slots,
         [0; 32],
         [2; 32],
-        settlement_checksum,
+        [8; 32],
     );
     let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
     let tx = Transaction::new_signed_with_payer(
@@ -884,12 +906,13 @@ async fn checkpoint_proposal_commit_deadline_flow() {
 
     let current_slot = context.banks_client.get_root_slot().await.unwrap();
     context.warp_to_slot(current_slot + 10).unwrap();
-    let begin_ix = build_begin_settlement_ix(
+    let begin_ix = build_begin_settlement_with_effect_ix(
         &PORTAL_PROGRAM_ID,
         &payer_pubkey,
         &session_pda,
         er_slot,
         settlement_checksum,
+        [8; 32],
     );
     let finish_ix = build_finish_settlement_ix(
         &PORTAL_PROGRAM_ID,
