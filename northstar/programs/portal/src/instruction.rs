@@ -141,6 +141,8 @@ pub struct CreateStepProof {
     pub step_index: u64,
     pub session_context: Hash32,
     pub tx_effect_root: Hash32,
+    pub tx_effect_path_len: u8,
+    pub tx_effect_path: [[u8; 32]; 4],
     pub readonly_l1_root: Hash32,
     pub settlement_effect_root: Hash32,
 }

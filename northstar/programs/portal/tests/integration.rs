@@ -152,6 +152,78 @@ fn synthetic_trace_path(step_count: u64, state_index: u64) -> (u8, [[u8; 32]; 5]
     ((layers.len() - 1) as u8, path)
 }
 
+fn synthetic_tx_effect_leaf(index: usize) -> [u8; 32] {
+    if index == 0 {
+        return [5; 32];
+    }
+    let mut leaf = [0; 32];
+    leaf[24..].copy_from_slice(&(index as u64 + 1).to_be_bytes());
+    leaf
+}
+
+fn synthetic_tx_effect_layers(step_count: u64) -> Vec<Vec<[u8; 32]>> {
+    let count = step_count as usize;
+    let width = count.max(1).next_power_of_two();
+    let mut leaves = (0..count).map(synthetic_tx_effect_leaf).collect::<Vec<_>>();
+    leaves.extend((count..width).map(|index| {
+        hashv(&[
+            b"northstar-checkpoint-v1",
+            b"transaction-effect",
+            b"empty-leaf",
+            &4u64.to_le_bytes(),
+            &(index as u32).to_le_bytes(),
+        ])
+        .to_bytes()
+    }));
+    let mut layers = vec![leaves];
+    let mut level = 0u32;
+    while layers.last().unwrap().len() > 1 {
+        let next = layers
+            .last()
+            .unwrap()
+            .chunks_exact(2)
+            .map(|pair| {
+                hashv(&[
+                    b"northstar-checkpoint-v1",
+                    b"transaction-effect",
+                    b"node",
+                    &level.to_le_bytes(),
+                    &pair[0],
+                    &pair[1],
+                ])
+                .to_bytes()
+            })
+            .collect();
+        layers.push(next);
+        level += 1;
+    }
+    layers
+}
+
+fn synthetic_tx_effect_root(step_count: u64) -> [u8; 32] {
+    let layers = synthetic_tx_effect_layers(step_count);
+    let inner = layers.last().unwrap()[0];
+    hashv(&[
+        b"northstar-checkpoint-v1",
+        b"transaction-effect",
+        b"root",
+        &(step_count as u32).to_le_bytes(),
+        &inner,
+    ])
+    .to_bytes()
+}
+
+fn synthetic_tx_effect_path(step_count: u64, step_index: u64) -> (u8, [[u8; 32]; 4]) {
+    let layers = synthetic_tx_effect_layers(step_count);
+    let mut path = [[0; 32]; 4];
+    let mut index = step_index as usize;
+    for (level, layer) in layers[..layers.len() - 1].iter().enumerate() {
+        path[level] = layer[index ^ 1];
+        index /= 2;
+    }
+    ((layers.len() - 1) as u8, path)
+}
+
 fn find_deposit_receipt_pda(
     program_id: &Pubkey,
     session: &Pubkey,
@@ -275,7 +347,7 @@ fn build_propose_checkpoint_with_roots_ix(
         previous_state_root,
         new_state_root,
         trace_root: [4; 32],
-        tx_effect_root: [5; 32],
+        tx_effect_root: synthetic_tx_effect_root(1),
         readonly_l1_root: [6; 32],
         da_commitment: [7; 32],
         effect_commitment,
@@ -317,7 +389,7 @@ fn build_propose_multi_step_checkpoint_ix(
         previous_state_root: synthetic_state_root(0),
         new_state_root: synthetic_state_root(step_count),
         trace_root: synthetic_trace_root(step_count),
-        tx_effect_root: [5; 32],
+        tx_effect_root: synthetic_tx_effect_root(step_count),
         readonly_l1_root: [6; 32],
         da_commitment: [7; 32],
         effect_commitment: [3; 32],
@@ -604,6 +676,7 @@ fn build_create_step_proof_ix(
     let (checkpoint_pda, _) = find_checkpoint_pda(program_id, session_pda, er_slot);
     let (challenge_pda, _) = find_challenge_pda(program_id, &checkpoint_pda);
     let (proof_pda, _) = find_step_proof_pda(program_id, &checkpoint_pda);
+    let (tx_effect_path_len, tx_effect_path) = synthetic_tx_effect_path(1, 0);
     let ix = PortalInstruction::CreateStepProof(CreateStepProof {
         er_slot,
         proof_kind: 1,
@@ -611,6 +684,8 @@ fn build_create_step_proof_ix(
         step_index: 0,
         session_context: [4; 32],
         tx_effect_root: [5; 32],
+        tx_effect_path_len,
+        tx_effect_path,
         readonly_l1_root: [6; 32],
         settlement_effect_root: [3; 32],
     });

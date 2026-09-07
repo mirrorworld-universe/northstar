@@ -9,7 +9,7 @@ use {
         RespondChallenge, SealStepProof, Session, StepProofAccount, StepProofVerifierMode,
         TimeoutChallenge, WriteStepProof, CANONICAL_CHECKPOINT_STEPS, CHALLENGE_TURN_WINDOW_SLOTS,
         CHECKPOINT_PROPOSER_BOND_LAMPORTS, MAX_CHALLENGE_WINDOW_SLOTS, MAX_STEP_PROOF_BYTES,
-        TRACE_AUTH_PATH_NODES,
+        TRACE_AUTH_PATH_NODES, TX_EFFECT_AUTH_PATH_NODES,
     },
     borsh::{BorshDeserialize, BorshSerialize},
     pinocchio::{
@@ -456,6 +456,63 @@ fn verify_trace_authentication_path(
     ])
     .to_bytes()
         == checkpoint.trace_root
+}
+
+fn verify_tx_effect_authentication_path(
+    checkpoint: &Checkpoint,
+    step_index: u64,
+    leaf: &[u8; 32],
+    path_len: u8,
+    path: &[[u8; 32]; TX_EFFECT_AUTH_PATH_NODES],
+) -> bool {
+    if step_index >= checkpoint.step_count {
+        return false;
+    }
+    let Ok(leaf_count) = u32::try_from(checkpoint.step_count) else {
+        return false;
+    };
+    let width = leaf_count.max(1).next_power_of_two();
+    let expected_depth = width.trailing_zeros() as usize;
+    if usize::from(path_len) != expected_depth
+        || path[expected_depth..].iter().any(|node| *node != [0; 32])
+    {
+        return false;
+    }
+    let mut current = *leaf;
+    let mut index = step_index as usize;
+    for (level, sibling) in path[..expected_depth].iter().enumerate() {
+        let level_bytes = (level as u32).to_le_bytes();
+        current = if index.is_multiple_of(2) {
+            hashv(&[
+                b"northstar-checkpoint-v1",
+                b"transaction-effect",
+                b"node",
+                &level_bytes,
+                &current,
+                sibling,
+            ])
+        } else {
+            hashv(&[
+                b"northstar-checkpoint-v1",
+                b"transaction-effect",
+                b"node",
+                &level_bytes,
+                sibling,
+                &current,
+            ])
+        }
+        .to_bytes();
+        index /= 2;
+    }
+    hashv(&[
+        b"northstar-checkpoint-v1",
+        b"transaction-effect",
+        b"root",
+        &leaf_count.to_le_bytes(),
+        &current,
+    ])
+    .to_bytes()
+        == checkpoint.tx_effect_root
 }
 
 #[p_instruction(
@@ -1148,6 +1205,8 @@ pub fn process_timeout_challenge(
         step_index: u64,
         session_context: Hash32,
         tx_effect_root: Hash32,
+        tx_effect_path_len: u8,
+        tx_effect_path: [[u8; 32]; 4],
         readonly_l1_root: Hash32,
         settlement_effect_root: Hash32
     ]
@@ -1162,6 +1221,8 @@ pub fn process_create_step_proof(
         step_index,
         session_context,
         tx_effect_root,
+        tx_effect_path_len,
+        tx_effect_path,
         readonly_l1_root,
         settlement_effect_root,
     }: CreateStepProof,
@@ -1200,6 +1261,15 @@ pub fn process_create_step_proof(
         return Err(PortalError::Unauthorized.into());
     }
 
+    if !verify_tx_effect_authentication_path(
+        &checkpoint_state,
+        step_index,
+        &tx_effect_root,
+        tx_effect_path_len,
+        &tx_effect_path,
+    ) {
+        return Err(PortalError::StepProofPublicInputMismatch.into());
+    }
     let (expected_proof_key, proof_bump) = find_step_proof_pda(program_id, checkpoint.address());
     if proof.address() != &expected_proof_key {
         return Err(PortalError::InvalidPdaSeeds.into());

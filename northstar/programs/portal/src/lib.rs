@@ -33,6 +33,7 @@ pub const CHECKPOINT_PROPOSER_BOND_LAMPORTS: u64 = 1_000_000;
 pub const MAX_CHECKPOINT_CADENCE_L1_SLOTS: u64 = 75;
 pub const CANONICAL_CHECKPOINT_STEPS: u64 = 16;
 pub const TRACE_AUTH_PATH_NODES: usize = 5;
+pub const TX_EFFECT_AUTH_PATH_NODES: usize = 4;
 /// About one hour at Solana's target 400ms slot time.
 pub const MAX_CHALLENGE_WINDOW_SLOTS: u64 = 9_000;
 /// Five-minute response budget, capped by checkpoint's hard deadline.
