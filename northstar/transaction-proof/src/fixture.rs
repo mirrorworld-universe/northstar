@@ -1,8 +1,8 @@
 use {
     crate::{
-        replay, AccountWitnessV1, CallTargetV1, ProgramWordV1, ReplayError, ReplayWitnessV1,
-        ResultWitnessV1, RuntimeWitnessV1, VmRowV1, SBPF_VERSION_V0, TRACE_SCHEMA_VERSION_V1,
-        WITNESS_MAGIC_V1, WITNESS_VERSION_V1,
+        replay, session_context_bytes_v1, AccountWitnessV1, CallTargetV1, ProgramWordV1,
+        ReplayError, ReplayWitnessV1, ResultWitnessV1, RuntimeWitnessV1, VmRowV1, SBPF_VERSION_V0,
+        TRACE_SCHEMA_VERSION_V1, WITNESS_MAGIC_V1, WITNESS_VERSION_V1,
     },
     northstar_zk_types::{ER_STEP_PROOF_KIND_FULL_TRANSACTION, ER_STEP_PROOF_VERSION_V1},
     solana_account::ReadableAccount,
@@ -202,13 +202,25 @@ pub fn assemble_replay_witness_v1(
     let entry_pc = vm_rows.first().ok_or(ReplayError::Trace)?.registers[11];
     let call_targets = call_targets(&vm_rows)?;
 
+    let portal_program = solana_pubkey::pubkey!("GikCSCpYUq7QR7esoK6GM4UbJzKgdKNvS5bR1rBYH5E4");
+    let session = solana_pubkey::Pubkey::find_program_address(&[b"session"], &portal_program).0;
+    let validator = ed25519_dalek::SigningKey::from_bytes(&[42; 32])
+        .verifying_key()
+        .to_bytes();
+    let session_context = session_context_bytes_v1(
+        portal_program.to_bytes(),
+        session.to_bytes(),
+        1,
+        0,
+        validator,
+    );
     let witness = ReplayWitnessV1 {
         magic: WITNESS_MAGIC_V1,
         version: WITNESS_VERSION_V1,
         proof_kind: ER_STEP_PROOF_KIND_FULL_TRANSACTION,
         proof_version: ER_STEP_PROOF_VERSION_V1,
         trace_schema_version: TRACE_SCHEMA_VERSION_V1,
-        session_context: b"northstar-proof-spike-session-v1".to_vec(),
+        session_context,
         er_slot: 20,
         step_index: 1,
         transaction_bytes: executed.fixture.transaction_bytes,
