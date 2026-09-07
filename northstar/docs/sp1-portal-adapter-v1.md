@@ -29,7 +29,7 @@ The adapter binds both layers of SP1 verification:
 - SP1 6.1.0 Groth16 key SHA-256: `4388a21c687fdd5f218d7e3d13190cac4c5355818d3605fd5fb811df468ee696`.
 - Required proof prefix: `4388a21c`.
 - SP1 recursion key root: `002f850ee998974d6cc00e50cd0814b098c05bfade466d28573240d057f25352`.
-- Northstar replay program key hash: `0x0096a4f4437019c7c9c851edd1daa60cd5ce751b36ee0e2ab0fe280a88a38693`.
+- Northstar replay program key hash: `0x00566483d6fa2d3e348b61ce6acca85960a7e0152748ab20770add0b7d8c953f`.
 
 The compressed 492-byte SP1 key is retained in `programs/portal/keys/`. Portal embeds its converted 832-byte Solana verifier points in executable read-only data. Proof key prefix, exit code, recursion root, and all scalar encodings fail closed before pairing.
 
@@ -62,7 +62,7 @@ Measured on 2026-09-07 against the current Agave SBF runtime:
 
 | Item | Result |
 |---|---:|
-| Northstar SP1 setup on Ryzen 7 7840U | 55,524 ms |
+| Checkpoint-bound Northstar SP1 setup on Ryzen 7 7840U | 117,929 ms |
 | Portal instruction data | 613 bytes |
 | Signed standalone transaction | 783 bytes |
 | Feature-enabled Portal SBF ELF | 359,080 bytes |
@@ -75,7 +75,7 @@ The 97,156-CU run uses curve-valid Groth16 points from the existing benchmark co
 
 The direct verifier remains behind `zk-verifier-prototype` until an unchanged real proof passes the full resolver test. Feature-enabled builds route production `ResolveChallenge` through it; default builds fail closed with `StepProofVerifierUnavailable`. The dummy verifier still requires its explicit guarded test feature.
 
-SP1 6.1.0 has CPU and CUDA proving backends but no AMD XDNA NPU backend. A canonical local Groth16 run on the Ryzen 7 7840U was stopped after 33 minutes without completing or emitting an artifact; it used all cores and increased memory pressure, so this machine is not a practical compatibility-proof source.
+SP1 6.1.0 has CPU and CUDA proving backends but no AMD XDNA NPU backend. The revised program setup completed locally in 117,929 ms. A local Groth16 run on the Ryzen 7 7840U remains impractical: the earlier relation ran for 33 minutes without completing or emitting an artifact while using all cores and increasing memory pressure.
 
 ## Remaining compatibility check
 
