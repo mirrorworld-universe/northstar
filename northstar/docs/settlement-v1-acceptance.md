@@ -29,11 +29,11 @@ Do not modify the replay fixture before producing the compatibility artifact. A 
 | Canonical page paths and roots reject missing, reordered, or changed data | Pass | `checkpoint` unit tests and live checkpoint mutation simulations |
 | Real captured checkpoint reaches one disputed transaction after four bisection rounds | Pass with scope limit | `real_checkpoint_bisects_to_captured_transaction`; ER executes in a local Bank/client while Portal executes on `solana-test-validator` |
 | Replay account values can be recovered from ER history | Partial | `ErHistoryStore` retains up to 256 immutable in-memory pre/post account captures for checkpoint transactions; captures follow RPC commitment and slot-retention rules |
-| Supported SBF transactions can seal a real ER-client checkpoint with replay captures | Pass with scope limit | `supported_sbf_checkpoint_retains_replay_account_values` executes the supported account-write program with the relation's 5,000-lamport fee model |
-| Live bisection fixture transactions are supported by the current replay relation | Missing | Live checkpoint fixture uses System Program transfers; checked-in proof fixture uses the supported SBF account-write program |
-| Default gasless ER fee policy is supported by the current replay relation | Missing | Replay v2 currently requires a 5,000-lamport signature fee while devnet/demo ER settings are explicitly zero-fee |
-| Complete supported `ReplayWitnessV1` is extracted from ER history | Missing | Program ELF/loader state, committed runtime inputs, and canonical VM trace are not yet persisted or deterministically reconstructed from history |
-| Extracted witness reproduces all eight checkpoint public inputs | Missing | Existing checkpoint-bound fixture reproduces the fields, but it is not yet built from an ER-history extraction pipeline |
+| Supported SBF transactions can seal a real ER-client checkpoint with replay captures | Pass with scope limit | Paid and gasless `sbf_checkpoint` tests execute the supported account-write program |
+| Live bisection fixture transactions are supported by the current replay relation | Pass | Live harness now executes 16 gasless SBF account-write transactions, isolates step 10 through Portal, then extracts its witness from finalized ER history |
+| Default gasless ER fee policy is supported by the current replay relation | Pass | `gasless_execution_replays_without_changing_the_relation`; replay v2 checks the configured fee, not a fixed 5,000-lamport fee |
+| Complete supported `ReplayWitnessV1` is extracted from ER history | Pass with scope limit | Feature `replay` exposes `extract_replay_witness_v1`; reconstructs VM traces from bounded runtime snapshots and checks committed accounts, units, loaded-data size, and fees. L1 context and build provenance are caller-supplied |
+| Extracted witness reproduces all eight checkpoint public inputs | Pass with scope limit | Paid and gasless ER-client tests reject mutations to every field. Live Portal bisection checks all 256 bytes using on-chain session/challenge state and authenticated checkpoint data |
 | Portal authenticates trace, transaction effect, readonly L1, settlement effects, and session context | Pass in implementation/tests | Portal integration and replay mutation tests |
 | Real unchanged SP1 Groth16 proof passes direct Portal SBF verification | Blocked | No checkpoint-bound 356-byte proof artifact has been generated |
 | Successful direct verification uses at most 130K CU | Blocked | 97,156 CU is only a full-path failing-proof measurement, not successful verification |
@@ -118,3 +118,32 @@ L1 cadence is enforced as an earliest proposal slot. Runtime sealing still requi
 - Independent maintainer/reviewer: reproduce the live bisection and GPU proof checks from a clean checkout.
 - Protocol owner: decide the low-traffic partial-checkpoint policy and approve any production-verifier default enablement.
 - Infrastructure owner: authorize paid CUDA or proving-service use. No paid run is implied by this document.
+
+## History-derived replay (GPU-free)
+
+Build the host extraction API with `cargo check -p northstar --features replay`.
+Run `cargo test -p northstar sbf_checkpoint_` and
+`cargo test -p northstar-transaction-proof --test gasless_replay`.
+
+Supported legacy account-write transactions retain a versioned runtime snapshot before execution:
+account/program/loader/sysvar values, active/inactive features, blockhash queue, signature-fee
+policy, processing age, and total epoch stake. Snapshot size is capped at 128 KiB; snapshots
+share the existing 256-entry, commitment-aware in-memory capture retention. Oversized or
+unsupported inputs do not gain a replay snapshot. This is not restart-durable proof storage.
+
+Extraction requires finalized history, a verified checkpoint artifact, authenticated expected
+public inputs, and caller-supplied L1 session context/build provenance. It re-executes using
+the captured fee policy, compares committed results, replaces fixture checkpoint bindings
+with the actual DA paths, and runs the unchanged replay relation. Missing/corrupt snapshots,
+changed account values or fees, and public-input mismatches return errors.
+
+The original checked-in GPU compatibility fixture remains unchanged. Its synthetic surrounding
+checkpoint leaves are not used as the extracted witness's final checkpoint binding.
+
+## Remaining September delivery sequence
+
+1. Completed GPU-free O1 integration: supported-workload extraction follows four live Portal bisection rounds. The local run passed in 8.91 seconds; this is not an end-to-end proof-resolution timing.
+2. Prepare independent maintainer reproduction and measure GPU-free timeout/recovery phases.
+3. When CUDA is authorized and available, run the unchanged real-proof compatibility route,
+   then production-resolution acceptance and three end-to-end timings.
+4. Keep low-traffic partial checkpoints explicitly deferred; do not mark that cadence criterion complete.

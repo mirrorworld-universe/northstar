@@ -50,6 +50,7 @@ pub struct ErReplayAccountSnapshot {
 // Sonic: Checkpoint-scoped execution material omitted from standard RPC metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ErReplayCapture {
+    pub reexecution_snapshot: Option<Vec<u8>>,
     pub accounts: Vec<ErReplayAccountSnapshot>,
     pub loaded_accounts_data_size: u64,
     pub transaction_fee: u64,
@@ -166,6 +167,11 @@ impl ErHistoryStore {
     // Sonic: Replay captures are immutable, bounded, and only accepted for
     // successful transactions already present in ER history.
     pub fn record_replay_capture(&self, signature: Signature, capture: ErReplayCapture) -> bool {
+        if capture.reexecution_snapshot.as_ref().is_some_and(|bytes| {
+            bytes.len() > solana_runtime::bank::er_replay::MAX_ER_REPLAY_SNAPSHOT_BYTES
+        }) {
+            return false;
+        }
         let mut inner = self.inner.write().unwrap();
         let Some(transaction) = inner.transactions.get(&signature) else {
             return false;
@@ -810,6 +816,7 @@ mod tests {
 
         let account = AccountSharedData::new(10, 4, &Pubkey::new_unique());
         let first_capture = ErReplayCapture {
+            reexecution_snapshot: None,
             accounts: vec![ErReplayAccountSnapshot {
                 transaction_index: 0,
                 key: payer.pubkey(),
@@ -821,10 +828,20 @@ mod tests {
             transaction_fee: 5_000,
             prioritization_fee: 0,
         };
+        let mut oversized = first_capture.clone();
+        oversized.reexecution_snapshot = Some(vec![
+            0;
+            solana_runtime::bank::er_replay::MAX_ER_REPLAY_SNAPSHOT_BYTES
+                + 1
+        ]);
+        assert!(!store.record_replay_capture(first_signature, oversized));
         assert!(store.record_replay_capture(first_signature, first_capture.clone()));
         assert!(store.record_replay_capture(first_signature, first_capture.clone()));
         let mut changed = first_capture.clone();
         changed.loaded_accounts_data_size = 1;
+        assert!(!store.record_replay_capture(first_signature, changed));
+        let mut changed = first_capture.clone();
+        changed.reexecution_snapshot = Some(vec![1]);
         assert!(!store.record_replay_capture(first_signature, changed));
         assert_eq!(
             store.get_replay_capture(&first_signature, CommitmentConfig::confirmed()),
@@ -847,6 +864,7 @@ mod tests {
         let second_signature = second.transaction.signatures[0];
         assert_eq!(store.record_transaction(&bank, second), Some(1));
         let second_capture = ErReplayCapture {
+            reexecution_snapshot: None,
             accounts: vec![],
             loaded_accounts_data_size: 0,
             transaction_fee: 5_000,

@@ -119,6 +119,33 @@ pub fn execute_txn_with_trace(
         } else {
             TransactionVerificationMode::HashAndVerifyPrecompiles
         },
+        None,
+    )
+}
+
+// Sonic: Reconstruct ER fee policy instead of silently using L1 defaults.
+#[allow(clippy::too_many_arguments)]
+#[cfg(feature = "conformance")]
+pub fn execute_er_txn_with_trace(
+    accounts: &[(Pubkey, AccountSharedData)],
+    feature_set: FeatureSet,
+    blockhash_queue: BlockhashQueue,
+    fee_rate_governor: FeeRateGovernor,
+    total_epoch_stake: u64,
+    transaction: VersionedTransaction,
+    fee_structure: &solana_fee_structure::FeeStructure,
+    max_processing_age: usize,
+) -> BankTxnProcessingResult {
+    execute_txn_inner(
+        accounts,
+        feature_set,
+        blockhash_queue,
+        fee_rate_governor,
+        total_epoch_stake,
+        transaction,
+        true,
+        TransactionVerificationMode::FullVerification,
+        Some((fee_structure, max_processing_age)),
     )
 }
 
@@ -143,6 +170,7 @@ pub fn execute_txn(
         transaction,
         false,
         TransactionVerificationMode::HashAndVerifyPrecompiles,
+        None,
     )
 }
 
@@ -156,6 +184,7 @@ fn execute_txn_inner(
     transaction: VersionedTransaction,
     enable_trace: bool,
     verification_mode: TransactionVerificationMode,
+    er_config: Option<(&solana_fee_structure::FeeStructure, usize)>,
 ) -> BankTxnProcessingResult {
     const TICKS_PER_SLOT: u64 = 64;
 
@@ -212,9 +241,11 @@ fn execute_txn_inner(
 
     // The bank must be wrapped in `BankForks` so the program cache has a fork graph;
     // `_bank_forks` is kept alive for the duration of execution.
-    let bank = Bank::new_for_txn_tests(bank_rc, bank_fields, feature_set, epoch_stakes);
-    #[cfg(feature = "conformance")]
-    let mut bank = bank;
+    let mut bank = Bank::new_for_txn_tests(bank_rc, bank_fields, feature_set, epoch_stakes);
+    // Sonic: Apply the captured ER policy before verification and execution.
+    if let Some((fee_structure, max_processing_age)) = er_config {
+        bank.configure_er(fee_structure, max_processing_age);
+    }
     #[cfg(feature = "conformance")]
     if enable_trace {
         bank.enable_transaction_tracing();

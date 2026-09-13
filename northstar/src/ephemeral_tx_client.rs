@@ -481,6 +481,7 @@ impl EphemeralTransactionClient {
         txs: &[VersionedTransaction],
         commit_results: &[TransactionCommitResult],
         account_snapshots: &[Option<TransactionAccountSnapshot>],
+        replay_snapshots: &[Option<Vec<u8>>],
     ) {
         let Some(session) = *self.session_pda.read().unwrap() else {
             return;
@@ -506,7 +507,11 @@ impl EphemeralTransactionClient {
             return;
         }
 
-        for ((tx, commit_result), snapshot) in txs.iter().zip(commit_results).zip(account_snapshots)
+        for (((tx, commit_result), snapshot), replay_snapshot) in txs
+            .iter()
+            .zip(commit_results)
+            .zip(account_snapshots)
+            .zip(replay_snapshots)
         {
             if capture.steps.len() == CANONICAL_CHECKPOINT_STEPS_V1 {
                 break;
@@ -612,6 +617,7 @@ impl EphemeralTransactionClient {
                 )
                 .collect();
             let replay_capture = ErReplayCapture {
+                reexecution_snapshot: replay_snapshot.clone(),
                 accounts: replay_accounts,
                 loaded_accounts_data_size: u64::from(
                     committed.loaded_account_stats.loaded_accounts_data_size,
@@ -1095,6 +1101,15 @@ impl EphemeralTransactionClient {
                 return Err(e.into());
             }
         };
+        let replay_snapshots = txs
+            .iter()
+            .map(|tx| {
+                self.session_pda
+                    .read()
+                    .unwrap()
+                    .and_then(|_| bank.er_replay_snapshot(tx))
+            })
+            .collect::<Vec<_>>();
         let mut account_snapshots = Vec::new();
         let (commit_results, balance_collector) = bank
             .load_execute_and_commit_transactions_with_pre_commit_callback(
@@ -1130,7 +1145,13 @@ impl EphemeralTransactionClient {
             )?;
         self.record_processed_signatures(bank, &txs, &commit_results);
         self.record_transaction_history_for_batch(bank, &txs, &commit_results, balance_collector);
-        self.record_checkpoint_steps(bank, &txs, &commit_results, &account_snapshots);
+        self.record_checkpoint_steps(
+            bank,
+            &txs,
+            &commit_results,
+            &account_snapshots,
+            &replay_snapshots,
+        );
         self.record_withdrawal_payout_events_for_batch(bank, &txs, &commit_results);
         self.record_token_withdrawal_payout_events_for_batch(bank, &txs, &commit_results);
         self.notify_transaction_subscribers(bank, &txs);
@@ -2373,6 +2394,18 @@ mod tests {
 
     #[test]
     fn supported_sbf_checkpoint_retains_replay_account_values() {
+        supported_sbf_checkpoint_with_fee(5_000, Pubkey::new_from_array([9; 32]));
+    }
+
+    #[test]
+    fn gasless_sbf_checkpoint_retains_replay_account_values() {
+        supported_sbf_checkpoint_with_fee(0, Pubkey::new_from_array([9; 32]));
+    }
+
+    pub(super) fn supported_sbf_checkpoint_with_fee(
+        lamports_per_signature: u64,
+        session: Pubkey,
+    ) -> (CheckpointArtifactV1, Arc<ErHistoryStore>) {
         use {
             agave_feature_set::disable_sbpf_v0_execution,
             solana_fee_structure::FeeStructure,
@@ -2386,7 +2419,7 @@ mod tests {
         bank.deactivate_feature(&disable_sbpf_v0_execution::id());
         bank.configure_er(
             &FeeStructure {
-                lamports_per_signature: 5_000,
+                lamports_per_signature,
                 lamports_per_write_lock: 0,
                 compute_fee_bins: vec![],
             },
@@ -2422,7 +2455,7 @@ mod tests {
                 .iter()
                 .map(|key| (*key, bank.get_account(key).unwrap())),
         );
-        *client.session_pda.write().unwrap() = Some(Pubkey::new_from_array([9; 32]));
+        *client.session_pda.write().unwrap() = Some(session);
 
         let mut signatures = Vec::new();
         for target in &targets {
@@ -2471,11 +2504,127 @@ mod tests {
             assert_eq!(target.pre_account.data()[0], 0);
             assert_eq!(target.post_account.data()[0], 100);
             assert!(target.touched);
-            assert_eq!(replay.transaction_fee, 5_000);
+            assert_eq!(replay.transaction_fee, lamports_per_signature);
             let transaction: VersionedTransaction =
                 bincode::deserialize(&page.transaction).unwrap();
             assert_eq!(transaction.signatures[0], *signature);
+            let snapshot: solana_runtime::bank::er_replay::ErReplaySnapshot = bincode::deserialize(
+                replay
+                    .reexecution_snapshot
+                    .as_ref()
+                    .expect("snapshot retained"),
+            )
+            .unwrap();
+            let execution = snapshot.reexecute(transaction);
+            let solana_runtime::conformance::txn::BankTxnProcessingResult::Processed {
+                result:
+                    Ok(solana_svm::transaction_processing_result::ProcessedTransaction::Executed(
+                        executed,
+                    )),
+                ..
+            } = execution
+            else {
+                panic!("snapshot must execute");
+            };
+            assert!(executed.execution_details.status.is_ok());
+            for captured in &replay.accounts {
+                let (_, account) = executed
+                    .loaded_transaction
+                    .accounts
+                    .iter()
+                    .find(|(key, _)| *key == captured.key)
+                    .unwrap();
+                assert_eq!(account, &captured.post_account);
+            }
+            assert!(!executed.execution_details.vm_traces.is_empty());
         }
+        use {
+            northstar_transaction_proof::{fixture::build_replay_witness_v1, public_inputs_bytes},
+            northstar_zk_types::{ErStepPublicInputsV1, FrBytes},
+        };
+        let mut reference = build_replay_witness_v1().unwrap();
+        reference.session_context = northstar_transaction_proof::session_context_bytes_v1(
+            [1; 32],
+            artifact.checkpoint.session.to_bytes(),
+            1,
+            0,
+            signer.pubkey().to_bytes(),
+        );
+        let session_public = northstar_transaction_proof::replay(&reference).unwrap();
+        let page = &artifact.da.pages[7];
+        let expected = public_inputs_bytes(ErStepPublicInputsV1 {
+            domain: session_public.domain,
+            session_context: session_public.session_context,
+            slot_step: FrBytes::from_u64_pair(artifact.checkpoint.er_slot, 7),
+            pre_state_root: FrBytes::new(page.pre_state_root).unwrap(),
+            post_state_root: FrBytes::new(page.post_state_root).unwrap(),
+            tx_effect_root: FrBytes::new(page.transaction_effect_commitment).unwrap(),
+            readonly_l1_root: FrBytes::new(artifact.checkpoint.readonly_l1_root).unwrap(),
+            settlement_effect_root: FrBytes::new(artifact.checkpoint.effect_commitment).unwrap(),
+        });
+        let context = || crate::replay::ReplayContextV1 {
+            session_context: reference.session_context.clone(),
+            agave_revision: reference.runtime.agave_revision,
+            northstar_revision: reference.runtime.northstar_revision,
+            vm_config_hash: reference.runtime.vm_config_hash,
+            syscall_registry_hash: reference.runtime.syscall_registry_hash,
+        };
+        let witness =
+            crate::replay::extract_replay_witness_v1(&history, &artifact, 7, context(), &expected)
+                .unwrap();
+        assert_eq!(
+            public_inputs_bytes(northstar_transaction_proof::replay(&witness).unwrap()),
+            expected
+        );
+        for field in 0..8 {
+            let mut changed = expected;
+            changed[field * 32 + 31] ^= 1;
+            assert!(crate::replay::extract_replay_witness_v1(
+                &history,
+                &artifact,
+                7,
+                context(),
+                &changed
+            )
+            .is_err());
+        }
+        let signature = signatures[7];
+        let commitment = solana_rpc_client_types::config::CommitmentConfig::finalized();
+        let transaction = history.get_transaction(&signature, commitment).unwrap();
+        let solana_transaction_status::TransactionWithStatusMeta::Complete(transaction) =
+            transaction.tx_with_meta
+        else {
+            panic!("complete transaction required");
+        };
+        for case in 0..6 {
+            let changed_history = ErHistoryStore::default();
+            changed_history
+                .record_transaction(&bank, transaction.clone())
+                .unwrap();
+            let mut capture = history.get_replay_capture(&signature, commitment).unwrap();
+            match case {
+                0 => capture.reexecution_snapshot = None,
+                1 => capture.reexecution_snapshot = Some(vec![0]),
+                2 => capture.accounts[1].post_account.data_as_mut_slice()[0] ^= 1,
+                3 => capture.accounts[1].pre_account.data_as_mut_slice()[0] ^= 1,
+                4 => capture.loaded_accounts_data_size += 1,
+                _ => capture.transaction_fee += 1,
+            }
+            assert!(changed_history.record_replay_capture(signature, capture));
+            changed_history.finalize_slot(&bank);
+            assert!(
+                crate::replay::extract_replay_witness_v1(
+                    &changed_history,
+                    &artifact,
+                    7,
+                    context(),
+                    &expected
+                )
+                .is_err(),
+                "case {case}"
+            );
+        }
+        (artifact, history)
     }
 
     #[test]

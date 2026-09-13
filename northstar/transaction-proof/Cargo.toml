@@ -40,6 +40,7 @@ solana-svm-transaction = { workspace = true, optional = true }
 
 [dev-dependencies]
 hex = "0.4"
+solana-fee-structure = { workspace = true }
 
 [lints]
 workspace = true

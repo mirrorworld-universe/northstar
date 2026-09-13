@@ -3,7 +3,11 @@ name = "northstar"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+replay = ["dep:northstar-transaction-proof"]
+
 [dependencies]
+northstar-transaction-proof = { workspace = true, optional = true }
 solana-account.workspace = true
 solana-accounts-db.workspace = true
 solana-clock.workspace = true

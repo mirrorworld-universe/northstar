@@ -1,5 +1,5 @@
 use {
-    super::tests::execute_checkpoint_for_session,
+    super::tests::supported_sbf_checkpoint_with_fee,
     borsh::BorshDeserialize,
     northstar_portal::{
         BisectChallenge, Challenge, ChallengeTurn, DataAvailabilityProof, DataAvailabilityStatus,
@@ -54,7 +54,7 @@ fn real_checkpoint_bisects_to_captured_transaction() {
     rpc.get_health().unwrap();
     let session = northstar_portal::find_session_pda(&PORTAL).0;
     let fee_vault = northstar_portal::find_fee_vault_pda(&PORTAL).0;
-    let artifact = execute_checkpoint_for_session(session);
+    let (artifact, history) = supported_sbf_checkpoint_with_fee(0, session);
     artifact.verify().unwrap();
     let commitment = artifact.checkpoint;
     let er_slot = commitment.er_slot;
@@ -224,4 +224,51 @@ fn real_checkpoint_bisects_to_captured_transaction() {
         DataAvailabilityProof::try_from_slice(&rpc.get_account(&da).unwrap().data).unwrap();
     assert_eq!(da_state.status, DataAvailabilityStatus::Revealed);
     assert_eq!(da_state.payload_root, commitment.da_commitment);
+
+    use {
+        northstar_transaction_proof::{fixture::build_replay_witness_v1, public_inputs_bytes},
+        northstar_zk_types::{ErStepPublicInputsV1, FrBytes},
+    };
+    let session_state =
+        northstar_portal::Session::try_from_slice(&rpc.get_account(&session).unwrap().data)
+            .unwrap();
+    let mut reference = build_replay_witness_v1().unwrap();
+    reference.session_context = northstar_transaction_proof::session_context_bytes_v1(
+        PORTAL.to_bytes(),
+        session.to_bytes(),
+        session_state.grid_id,
+        session_state.nonce,
+        session_state.validator.to_bytes(),
+    );
+    let session_public = northstar_transaction_proof::replay(&reference).unwrap();
+    let page = &artifact.da.pages[state.start_step as usize];
+    let expected = public_inputs_bytes(ErStepPublicInputsV1 {
+        domain: session_public.domain,
+        session_context: session_public.session_context,
+        slot_step: FrBytes::from_u64_pair(er_slot, state.start_step),
+        pre_state_root: FrBytes::new(state.start_state_root).unwrap(),
+        post_state_root: FrBytes::new(state.end_state_root).unwrap(),
+        tx_effect_root: FrBytes::new(page.transaction_effect_commitment).unwrap(),
+        readonly_l1_root: FrBytes::new(commitment.readonly_l1_root).unwrap(),
+        settlement_effect_root: FrBytes::new(commitment.effect_commitment).unwrap(),
+    });
+    let witness = crate::replay::extract_replay_witness_v1(
+        &history,
+        &artifact,
+        state.start_step as usize,
+        crate::replay::ReplayContextV1 {
+            session_context: reference.session_context,
+            agave_revision: reference.runtime.agave_revision,
+            northstar_revision: reference.runtime.northstar_revision,
+            vm_config_hash: reference.runtime.vm_config_hash,
+            syscall_registry_hash: reference.runtime.syscall_registry_hash,
+        },
+        &expected,
+    )
+    .unwrap();
+    assert_eq!(witness.transaction_bytes, page.transaction);
+    assert_eq!(
+        public_inputs_bytes(northstar_transaction_proof::replay(&witness).unwrap()),
+        expected
+    );
 }

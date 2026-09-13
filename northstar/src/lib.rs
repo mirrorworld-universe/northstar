@@ -29,6 +29,8 @@ pub mod ephemeral_runtime;
 pub mod ephemeral_tpu;
 pub mod ephemeral_tx_client;
 pub mod portal_state;
+#[cfg(any(test, feature = "replay"))]
+pub mod replay;
 pub mod settlement;
 pub mod slot_advancer;
 pub mod unsettled_state;
