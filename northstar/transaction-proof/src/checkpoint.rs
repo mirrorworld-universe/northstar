@@ -614,6 +614,7 @@ pub fn fixture_checkpoint_binding(
     fixture_checkpoint_binding_for_steps(witness, CANONICAL_CHECKPOINT_STEPS_V1)
 }
 
+#[cfg(feature = "host")]
 fn fixture_checkpoint_binding_for_steps(
     witness: &ReplayWitnessV1,
     step_count: u32,

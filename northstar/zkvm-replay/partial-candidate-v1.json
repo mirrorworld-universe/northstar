@@ -1,0 +1,21 @@
+{
+  "schema": "northstar-replay-candidate-v1",
+  "candidate": "partial-checkpoints-1-through-16",
+  "sp1_sdk": "6.1.0",
+  "guest_rustc": "1.93.0-dev (succinct)",
+  "checkpoint_relation_sha256": "b19c3f1cce38b75a5f5e8639baf03b6d66face9dc9cba5eaa337efe866dfd2ff",
+  "elf_sha256": "23f1520bf46ab8852770c0f4802005c8cb88b7fa6657f99f2d7c4a948d1551c5",
+  "program_vkey_hash": "0x0050535e1d6450ca9f99ea6ac433acc14e0defb4795ee36f3e8fb375155f9e6c",
+  "baseline_fixture": "fixture-v1.bin",
+  "baseline_fixture_sha256": "952f20bfa1d3e3f7eae8e5b2d05bd7a623e9fb12d67ab6667a42c26af3dc8a80",
+  "proof_kind": 2,
+  "proof_version": 1,
+  "public_input_bytes": 256,
+  "cpu_setup_ms": 1949,
+  "cpu_execute_ms": 1221,
+  "cpu_execute_cycles": 23797920,
+  "baseline_public_inputs_match": true,
+  "groth16_proof_generated": false,
+  "successful_portal_verification_cu": null,
+  "production_acceptance": false
+}

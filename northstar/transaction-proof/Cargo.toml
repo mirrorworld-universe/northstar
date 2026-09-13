@@ -3,6 +3,11 @@ name = "northstar-transaction-proof"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "generate_fixture"
+path = "src/bin/generate_fixture.rs"
+required-features = ["host"]
+
 [features]
 default = ["host"]
 cycle-tracking = []

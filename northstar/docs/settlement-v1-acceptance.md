@@ -159,9 +159,17 @@ and recovery timing fields remain explicitly missing; O3 finality acceptance is 
 The replay guest relation now accepts authenticated step counts 1–16. The eight-field
 ABI and checked-in fixture bytes are preserved, but the guest source has changed.
 The baseline program key above must not be treated as the updated candidate's key.
-Rebuild and fingerprint the guest, update the candidate's verifier binding, and repeat
-compatibility acceptance before production enablement. No new program key or
-real-proof compatibility result is claimed by the partial-checkpoint tests.
+The candidate was rebuilt with SP1 6.1.0; CPU setup and execution against the
+unchanged baseline fixture passed. The prototype verifier now binds candidate key
+`0x0050535e1d6450ca9f99ea6ac433acc14e0defb4795ee36f3e8fb375155f9e6c`.
+ELF/source hashes, setup time, and execution cycles are recorded in
+[`partial-candidate-v1.json`](../zkvm-replay/partial-candidate-v1.json).
+Successful Groth16 verification and production compatibility remain unverified.
+
+Run `cargo check -p northstar-transaction-proof --no-default-features` in addition
+to host tests: host feature unification can hide accidental guest dependencies.
+Reproduce setup/execution with the script's `key` and `execute` commands under
+`SP1_PROVER=cpu`; neither command generates a proof.
 
 ## Manager restart and quarantine coverage
 
