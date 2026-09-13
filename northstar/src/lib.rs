@@ -650,6 +650,9 @@ impl Manager {
                     )?;
                     (plan, transactions)
                 } else {
+                    if !runtime.seal_checkpoint_if_nonempty() {
+                        return None;
+                    }
                     let plan = self.settlement_plan()?;
                     let transactions = self.checkpoint_or_settlement_transactions(
                         l1_bank,

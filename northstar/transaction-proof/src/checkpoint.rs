@@ -151,7 +151,9 @@ pub fn verify_checkpoint_binding(
 ) -> Result<CheckpointPublicInputsV1, ReplayError> {
     let binding = &witness.checkpoint;
     let step_index = u32::try_from(witness.step_index).map_err(|_| ReplayError::Commitment)?;
-    if step_index >= CANONICAL_CHECKPOINT_STEPS_V1
+    let step_count = binding.transaction_effect_path.leaf_count;
+    if !(1..=CANONICAL_CHECKPOINT_STEPS_V1).contains(&step_count)
+        || step_index >= step_count
         || !state_accounts_are_canonical(&binding.pre_state_accounts)
         || !state_accounts_are_canonical(&binding.post_state_accounts)
     {
@@ -199,7 +201,6 @@ pub fn verify_checkpoint_binding(
         &binding.transaction_effect,
     )?;
     if binding.transaction_effect_path.leaf_index != step_index
-        || binding.transaction_effect_path.leaf_count != CANONICAL_CHECKPOINT_STEPS_V1
         || !verify_path(
             TreeKind::TransactionEffect,
             &binding.transaction_effect_path,
@@ -610,6 +611,13 @@ impl MerkleTree {
 pub fn fixture_checkpoint_binding(
     witness: &ReplayWitnessV1,
 ) -> Result<CheckpointBindingV1, ReplayError> {
+    fixture_checkpoint_binding_for_steps(witness, CANONICAL_CHECKPOINT_STEPS_V1)
+}
+
+fn fixture_checkpoint_binding_for_steps(
+    witness: &ReplayWitnessV1,
+    step_count: u32,
+) -> Result<CheckpointBindingV1, ReplayError> {
     let step_index = u32::try_from(witness.step_index).map_err(|_| ReplayError::Commitment)?;
     let mut pre_state_accounts = witness
         .pre_accounts
@@ -643,7 +651,7 @@ pub fn fixture_checkpoint_binding(
     })
     .map_err(|_| ReplayError::Commitment)?;
 
-    let transaction_leaves = (0..CANONICAL_CHECKPOINT_STEPS_V1)
+    let transaction_leaves = (0..step_count)
         .map(|index| {
             if index == step_index {
                 transaction_effect_leaf_hash(index, &witness.transaction_bytes, &transaction_effect)
@@ -727,4 +735,26 @@ pub fn fixture_checkpoint_binding(
         settlement_effects,
         settlement_effect_root: settlement_tree.root(),
     })
+}
+
+#[cfg(all(test, feature = "host"))]
+mod partial_tests {
+    use super::*;
+
+    #[test]
+    fn replay_authenticates_nonempty_partial_checkpoint_paths() {
+        let reference = crate::fixture::build_replay_witness_v1().unwrap();
+        for count in [1, 2, 3, 15, 16] {
+            let mut witness = reference.clone();
+            witness.step_index = u64::from(count - 1);
+            witness.checkpoint = fixture_checkpoint_binding_for_steps(&witness, count).unwrap();
+            crate::set_trace_hash(&mut witness);
+            crate::replay(&witness).unwrap();
+            for invalid_count in [0, count - 1, 17] {
+                let mut changed = witness.clone();
+                changed.checkpoint.transaction_effect_path.leaf_count = invalid_count;
+                assert!(crate::replay(&changed).is_err());
+            }
+        }
+    }
 }

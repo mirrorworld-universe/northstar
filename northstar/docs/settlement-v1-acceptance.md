@@ -14,7 +14,7 @@ This runbook separates reproducible CPU/SBF checks from proof-generation checks 
 | SP1 SDK | 6.1.0 |
 | Replay fixture | `northstar/zkvm-replay/fixture-v1.bin` |
 | Replay fixture SHA-256 | `952f20bfa1d3e3f7eae8e5b2d05bd7a623e9fb12d67ab6667a42c26af3dc8a80` |
-| Expected replay program key | `0x00566483d6fa2d3e348b61ce6acca85960a7e0152748ab20770add0b7d8c953f` |
+| Preserved baseline replay program key (not validated for the partial-checkpoint guest) | `0x00566483d6fa2d3e348b61ce6acca85960a7e0152748ab20770add0b7d8c953f` |
 | Portal proof envelope | 356 bytes |
 | Portal public inputs | 256 bytes, eight canonical BN254 fields |
 
@@ -108,9 +108,11 @@ Required outputs:
 
 Then build Portal with `zk-verifier-prototype` and run the ignored real-proof compatibility test three times. Each unchanged proof must pass at or below 130K CU. Changed proof bytes must fail. Next, commit immutable test vectors and run the production `ResolveChallenge` flow three times before considering default feature enablement.
 
-## Known protocol gap: low traffic
+## Low-traffic checkpoint policy
 
-L1 cadence is enforced as an earliest proposal slot. Runtime sealing still requires exactly 16 successful ER transactions and pauses admission after sealing. Therefore a session with fewer than 16 successful transactions does **not** produce a time-driven checkpoint merely because the L1 interval elapsed. Tests must not manufacture transactions or redefine the canonical 16-step checkpoint to hide this gap. Product/protocol policy must explicitly choose how partial low-traffic intervals are handled.
+When settlement is due and no checkpoint is active, the runtime seals 1–16 actual successful transactions. Empty intervals are skipped; full batches still seal at 16. Admission stays blocked after sealing until settlement consumes the artifact. Existing forced-undelegation scheduling is preserved. Outstanding challenges do not permit overlapping proposals.
+
+Artifact and replay regression tests cover sizes 1, 2, 3, 15, and 16. Real ER-history extraction covers partial SBF batches; admission tests verify empty-skip, immutable sealing, and resumption. The canonical 16-step/four-round benchmark is unchanged. Full live partial-count bisection and restart/recovery acceptance remain outstanding.
 
 ## Acceptance ownership
 
@@ -146,8 +148,17 @@ checkpoint leaves are not used as the extracted witness's final checkpoint bindi
 2. Prepare independent maintainer reproduction and measure GPU-free timeout/recovery phases.
 3. When CUDA is authorized and available, run the unchanged real-proof compatibility route,
    then production-resolution acceptance and three end-to-end timings.
-4. Keep low-traffic partial checkpoints explicitly deferred; do not mark that cadence criterion complete.
+4. Complete live partial-checkpoint bisection and restart/recovery acceptance; the runtime/artifact/replay implementation is present, but those integration gates remain.
 
 Measured GPU-free phase timings and terminal timeout retry invariants are recorded in
 [checkpoint CPU timing evidence](checkpoint-cpu-timings-v1.md). Proof, verification,
 and recovery timing fields remain explicitly missing; O3 finality acceptance is not complete.
+
+## Partial-checkpoint candidate compatibility gate
+
+The replay guest relation now accepts authenticated step counts 1–16. The eight-field
+ABI and checked-in fixture bytes are preserved, but the guest source has changed.
+The baseline program key above must not be treated as the updated candidate's key.
+Rebuild and fingerprint the guest, update the candidate's verifier binding, and repeat
+compatibility acceptance before production enablement. No new program key or
+real-proof compatibility result is claimed by the partial-checkpoint tests.

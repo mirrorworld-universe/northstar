@@ -1027,6 +1027,10 @@ impl EphemeralRuntime {
         self._tx_client.checkpoint_artifact_v1()
     }
 
+    pub fn seal_checkpoint_if_nonempty(&self) -> bool {
+        self._tx_client.seal_checkpoint_if_nonempty()
+    }
+
     pub fn consume_checkpoint_artifact_v1(&self, er_slot: Slot) -> bool {
         self._tx_client.consume_checkpoint_artifact_v1(er_slot)
     }

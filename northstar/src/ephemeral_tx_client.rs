@@ -443,6 +443,31 @@ impl EphemeralTransactionClient {
         self.checkpoint_capture.read().unwrap().completed.clone()
     }
 
+    pub(crate) fn seal_checkpoint_if_nonempty(&self) -> bool {
+        let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
+        let mut capture = self.checkpoint_capture.write().unwrap();
+        if capture.completed.is_some() {
+            return true;
+        }
+        let Some(session) = capture.session else {
+            return false;
+        };
+        if capture.steps.is_empty() {
+            return false;
+        }
+        match build_checkpoint_artifact_v1(session, self.bank().slot(), capture.steps.clone()) {
+            Ok(artifact) => {
+                capture.completed = Some(artifact);
+                true
+            }
+            Err(error) => {
+                warn!("Failed to seal partial checkpoint; ER deactivated: {error}");
+                self.active.store(false, Ordering::Relaxed);
+                false
+            }
+        }
+    }
+
     pub(crate) fn consume_checkpoint_artifact_v1(&self, er_slot: Slot) -> bool {
         let mut capture = self.checkpoint_capture.write().unwrap();
         if capture
@@ -2393,6 +2418,60 @@ mod tests {
     }
 
     #[test]
+    fn partial_checkpoint_sealing_preserves_admission_backpressure() {
+        let bank = create_test_bank();
+        let payer = Keypair::new();
+        let recipient = Pubkey::new_unique();
+        fund_account(&bank, &payer.pubkey(), 10_000_000);
+        let blockhash = bank.last_blockhash();
+        let history = Arc::new(ErHistoryStore::default());
+        let client =
+            create_client_with_history(BankForks::new_rw_arc(bank), vec![payer.pubkey()], history);
+        *client.session_pda.write().unwrap() = Some(Pubkey::new_unique());
+        assert!(!client.seal_checkpoint_if_nonempty());
+        let send = |amount| {
+            let transaction = VersionedTransaction::from(Transaction::new_signed_with_payer(
+                &[solana_system_interface::instruction::transfer(
+                    &payer.pubkey(),
+                    &recipient,
+                    amount,
+                )],
+                Some(&payer.pubkey()),
+                &[&payer],
+                blockhash,
+            ));
+            <EphemeralTransactionClient as TransactionClient>::send_transactions_in_batch(
+                &client,
+                vec![bincode::serialize(&transaction).unwrap()],
+                &SendTransactionServiceStats::default(),
+            );
+        };
+        send(1_000_000);
+        assert!(client.checkpoint_artifact_v1().is_none());
+        assert!(client.seal_checkpoint_if_nonempty());
+        let artifact = client.checkpoint_artifact_v1().unwrap();
+        assert_eq!(artifact.checkpoint.step_count, 1);
+        artifact.verify().unwrap();
+        send(2_000_000);
+        assert_eq!(client.bank().get_balance(&recipient), 1_000_000);
+        assert!(client.seal_checkpoint_if_nonempty());
+        assert_eq!(client.checkpoint_artifact_v1().unwrap(), artifact);
+        assert!(client.consume_checkpoint_artifact_v1(artifact.checkpoint.er_slot));
+        assert!(!client.seal_checkpoint_if_nonempty());
+        send(2_000_000);
+        assert_eq!(client.bank().get_balance(&recipient), 3_000_000);
+        assert!(client.seal_checkpoint_if_nonempty());
+        assert_eq!(
+            client
+                .checkpoint_artifact_v1()
+                .unwrap()
+                .checkpoint
+                .step_count,
+            1
+        );
+    }
+
+    #[test]
     fn supported_sbf_checkpoint_retains_replay_account_values() {
         supported_sbf_checkpoint_with_fee(5_000, Pubkey::new_from_array([9; 32]));
     }
@@ -2402,9 +2481,24 @@ mod tests {
         supported_sbf_checkpoint_with_fee(0, Pubkey::new_from_array([9; 32]));
     }
 
+    #[test]
+    fn partial_sbf_checkpoints_reproduce_history_public_inputs() {
+        for count in [1, 2, 3, 15] {
+            supported_sbf_checkpoint_with_steps(0, Pubkey::new_unique(), count);
+        }
+    }
+
     pub(super) fn supported_sbf_checkpoint_with_fee(
         lamports_per_signature: u64,
         session: Pubkey,
+    ) -> (CheckpointArtifactV1, Arc<ErHistoryStore>) {
+        supported_sbf_checkpoint_with_steps(lamports_per_signature, session, 16)
+    }
+
+    fn supported_sbf_checkpoint_with_steps(
+        lamports_per_signature: u64,
+        session: Pubkey,
+        step_count: usize,
     ) -> (CheckpointArtifactV1, Arc<ErHistoryStore>) {
         use {
             agave_feature_set::disable_sbpf_v0_execution,
@@ -2434,7 +2528,7 @@ mod tests {
             bank.store_account(&key, &account.1);
         }
         fund_account(&bank, &signer.pubkey(), 10_000_000);
-        let targets = (0..CANONICAL_CHECKPOINT_STEPS_V1)
+        let targets = (0..step_count)
             .map(|index| Pubkey::new_from_array([index as u8 + 64; 32]))
             .collect::<Vec<_>>();
         for target in &targets {
@@ -2484,9 +2578,11 @@ mod tests {
                 "supported transaction failed: {status:?}"
             );
         }
+        assert!(client.seal_checkpoint_if_nonempty());
         let artifact = client
             .checkpoint_artifact_v1()
             .expect("supported transactions should seal a checkpoint");
+        assert_eq!(artifact.checkpoint.step_count as usize, step_count);
         artifact.verify().unwrap();
         history.finalize_slot(&bank);
         for ((signature, target), page) in signatures.iter().zip(&targets).zip(&artifact.da.pages) {
@@ -2551,11 +2647,12 @@ mod tests {
             signer.pubkey().to_bytes(),
         );
         let session_public = northstar_transaction_proof::replay(&reference).unwrap();
-        let page = &artifact.da.pages[7];
+        let selected_step = (step_count - 1).min(7);
+        let page = &artifact.da.pages[selected_step];
         let expected = public_inputs_bytes(ErStepPublicInputsV1 {
             domain: session_public.domain,
             session_context: session_public.session_context,
-            slot_step: FrBytes::from_u64_pair(artifact.checkpoint.er_slot, 7),
+            slot_step: FrBytes::from_u64_pair(artifact.checkpoint.er_slot, selected_step as u64),
             pre_state_root: FrBytes::new(page.pre_state_root).unwrap(),
             post_state_root: FrBytes::new(page.post_state_root).unwrap(),
             tx_effect_root: FrBytes::new(page.transaction_effect_commitment).unwrap(),
@@ -2569,9 +2666,14 @@ mod tests {
             vm_config_hash: reference.runtime.vm_config_hash,
             syscall_registry_hash: reference.runtime.syscall_registry_hash,
         };
-        let witness =
-            crate::replay::extract_replay_witness_v1(&history, &artifact, 7, context(), &expected)
-                .unwrap();
+        let witness = crate::replay::extract_replay_witness_v1(
+            &history,
+            &artifact,
+            selected_step,
+            context(),
+            &expected,
+        )
+        .unwrap();
         assert_eq!(
             public_inputs_bytes(northstar_transaction_proof::replay(&witness).unwrap()),
             expected
@@ -2582,13 +2684,13 @@ mod tests {
             assert!(crate::replay::extract_replay_witness_v1(
                 &history,
                 &artifact,
-                7,
+                selected_step,
                 context(),
                 &changed
             )
             .is_err());
         }
-        let signature = signatures[7];
+        let signature = signatures[selected_step];
         let commitment = solana_rpc_client_types::config::CommitmentConfig::finalized();
         let transaction = history.get_transaction(&signature, commitment).unwrap();
         let solana_transaction_status::TransactionWithStatusMeta::Complete(transaction) =
@@ -2616,7 +2718,7 @@ mod tests {
                 crate::replay::extract_replay_witness_v1(
                     &changed_history,
                     &artifact,
-                    7,
+                    selected_step,
                     context(),
                     &expected
                 )

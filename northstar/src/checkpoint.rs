@@ -426,8 +426,8 @@ impl CheckpointArtifactV1 {
         {
             return Err(CheckpointArtifactError::UnsupportedVersion);
         }
-        if self.da.pages.len() != CANONICAL_CHECKPOINT_STEPS_V1
-            || self.da.manifest.pages.len() != CANONICAL_CHECKPOINT_STEPS_V1
+        if !(1..=CANONICAL_CHECKPOINT_STEPS_V1).contains(&self.da.pages.len())
+            || self.da.manifest.pages.len() != self.da.pages.len()
         {
             return Err(CheckpointArtifactError::InvalidStepCount);
         }
@@ -640,7 +640,7 @@ pub fn build_checkpoint_artifact_v1(
 }
 
 fn validate_steps(steps: &[CheckpointStepInputV1]) -> Result<(), CheckpointArtifactError> {
-    if steps.len() != CANONICAL_CHECKPOINT_STEPS_V1 {
+    if !(1..=CANONICAL_CHECKPOINT_STEPS_V1).contains(&steps.len()) {
         return Err(CheckpointArtifactError::InvalidStepCount);
     }
     let mut transactions = HashSet::with_capacity(steps.len());
@@ -937,6 +937,34 @@ mod tests {
 
     fn artifact() -> CheckpointArtifactV1 {
         build_checkpoint_artifact_v1(Pubkey::new_unique(), 42, steps()).unwrap()
+    }
+
+    #[test]
+    fn nonempty_partial_checkpoints_authenticate_actual_step_count() {
+        let session = Pubkey::new_unique();
+        for count in [1, 2, 3, 15, 16] {
+            let inputs = steps().into_iter().take(count).collect();
+            let artifact = build_checkpoint_artifact_v1(session, 42, inputs).unwrap();
+            assert_eq!(artifact.checkpoint.step_count as usize, count);
+            assert_eq!(artifact.da.pages.len(), count);
+            artifact.verify().unwrap();
+            for page in &artifact.da.pages {
+                assert_eq!(page.transaction_effect_path.leaf_count as usize, count);
+                assert_eq!(page.pre_state_path.leaf_count as usize, count + 1);
+            }
+            let bytes = artifact.canonical_bytes().unwrap();
+            assert_eq!(
+                CheckpointArtifactV1::decode_verified(&bytes).unwrap(),
+                artifact
+            );
+            let mut changed = artifact.clone();
+            changed.checkpoint.step_count += 1;
+            assert!(changed.verify().is_err());
+        }
+        assert!(build_checkpoint_artifact_v1(session, 42, Vec::new()).is_err());
+        let mut oversized = steps();
+        oversized.push(oversized.last().unwrap().clone());
+        assert!(build_checkpoint_artifact_v1(session, 42, oversized).is_err());
     }
 
     #[test]
