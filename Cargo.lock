@@ -5171,6 +5171,7 @@ dependencies = [
  "solana-accounts-db",
  "solana-address-lookup-table-interface",
  "solana-clock",
+ "solana-commitment-config",
  "solana-compute-budget-interface",
  "solana-fee-structure",
  "solana-genesis-config",

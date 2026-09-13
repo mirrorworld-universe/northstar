@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod live_checkpoint;
+
 use {
     crate::{
         checkpoint::{
@@ -2153,10 +2156,17 @@ mod tests {
     }
 
     fn execute_canonical_checkpoint_fixture() -> CheckpointArtifactV1 {
+        execute_checkpoint_for_session(Pubkey::new_from_array([9; 32]))
+    }
+
+    pub(super) fn execute_checkpoint_for_session(session: Pubkey) -> CheckpointArtifactV1 {
         let source = keypair_from_seed(&[7; 32]).unwrap();
         let recipient = Pubkey::new_from_array([8; 32]);
-        let session = Pubkey::new_from_array([9; 32]);
-        let bank = create_test_bank();
+        let bank = solana_runtime::bank::Bank::new_from_parent(
+            Arc::new(create_test_bank()),
+            SlotLeader::default(),
+            1,
+        );
         fund_account(&bank, &source.pubkey(), 100_000_000);
         fund_account(&bank, &recipient, 1_000_000);
         let blockhash = bank.last_blockhash();
