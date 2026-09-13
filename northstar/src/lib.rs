@@ -4039,6 +4039,17 @@ mod portal_e2e_tests {
         let artifact = checkpoint_artifact_fixture(session_pda, runtime.bank().slot());
         runtime.install_checkpoint_artifact_v1(artifact.clone());
         let due_slot = bank.slot() + 10;
+        let early_bank = Bank::new_from_parent(
+            bank.clone(),
+            SlotLeader::default(),
+            due_slot.saturating_sub(1),
+        );
+        assert!(
+            manager
+                .settlement_transactions_if_due(&early_bank, early_bank.last_blockhash())
+                .is_none(),
+            "checkpoint must not be proposed before configured cadence"
+        );
         let due_bank = Bank::new_from_parent(bank, SlotLeader::default(), due_slot);
 
         let (er_slot, _checksum, transactions) = manager
@@ -4276,6 +4287,15 @@ mod portal_e2e_tests {
                 .process_transaction(transaction)
                 .unwrap();
         }
+        assert!(
+            mismatch_manager
+                .settlement_transactions_if_due(
+                    &mismatch_expired_bank,
+                    mismatch_expired_bank.last_blockhash(),
+                )
+                .is_none(),
+            "completed settlement must not emit duplicate effects"
+        );
         assert_eq!(
             mismatch_expired_bank
                 .get_account(&mismatch_delegated)

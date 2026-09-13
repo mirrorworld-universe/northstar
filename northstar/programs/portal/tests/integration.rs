@@ -1621,6 +1621,8 @@ async fn checkpoint_rejects_second_active_proposal() {
     let (session_pda, _) = find_session_pda(&PORTAL_PROGRAM_ID);
     let (fee_vault_pda, _) = find_fee_vault_pda(&PORTAL_PROGRAM_ID);
     let (cursor_pda, _) = find_checkpoint_cursor_pda(&PORTAL_PROGRAM_ID, &session_pda);
+    let (first_checkpoint_pda, _) = find_checkpoint_pda(&PORTAL_PROGRAM_ID, &session_pda, 10);
+    let (second_checkpoint_pda, _) = find_checkpoint_pda(&PORTAL_PROGRAM_ID, &session_pda, 20);
 
     let open_ix = build_open_session_ix(
         &PORTAL_PROGRAM_ID,
@@ -1654,6 +1656,14 @@ async fn checkpoint_rejects_second_active_proposal() {
         blockhash,
     );
     context.banks_client.process_transaction(tx).await.unwrap();
+    let first_checkpoint_lamports =
+        get_lamports(&mut context.banks_client, &first_checkpoint_pda).await;
+    assert!(context
+        .banks_client
+        .get_account(second_checkpoint_pda)
+        .await
+        .unwrap()
+        .is_none());
 
     let second_propose_ix = build_propose_checkpoint_with_roots_ix(
         &PORTAL_PROGRAM_ID,
@@ -1677,6 +1687,17 @@ async fn checkpoint_rejects_second_active_proposal() {
         "second checkpoint proposal must fail while first is active"
     );
 
+    assert_eq!(
+        get_lamports(&mut context.banks_client, &first_checkpoint_pda).await,
+        first_checkpoint_lamports,
+        "retry must not lock a second proposer bond"
+    );
+    assert!(context
+        .banks_client
+        .get_account(second_checkpoint_pda)
+        .await
+        .unwrap()
+        .is_none());
     let cursor_data = get_account_data(&mut context.banks_client, &cursor_pda)
         .await
         .unwrap();
