@@ -2162,8 +2162,13 @@ mod tests {
     pub(super) fn execute_checkpoint_for_session(session: Pubkey) -> CheckpointArtifactV1 {
         let source = keypair_from_seed(&[7; 32]).unwrap();
         let recipient = Pubkey::new_from_array([8; 32]);
+        // Genesis time enters the blockhash and therefore the signed transaction bytes.
+        let genesis = solana_genesis_config::GenesisConfig {
+            creation_time: 1_700_000_000,
+            ..solana_genesis_config::GenesisConfig::new(&[], &[])
+        };
         let bank = solana_runtime::bank::Bank::new_from_parent(
-            Arc::new(create_test_bank()),
+            Arc::new(solana_runtime::bank::Bank::new_for_tests(&genesis)),
             SlotLeader::default(),
             1,
         );
@@ -2313,8 +2318,11 @@ mod tests {
     fn canonical_checkpoint_uses_sixteen_executed_er_transactions() {
         let artifact = execute_canonical_checkpoint_fixture();
         let first = artifact.canonical_bytes().unwrap();
-        let second = artifact.canonical_bytes().unwrap();
-        assert_eq!(first, second);
+        for _ in 0..2 {
+            let repeated = execute_canonical_checkpoint_fixture();
+            assert_eq!(artifact.checkpoint, repeated.checkpoint);
+            assert_eq!(first, repeated.canonical_bytes().unwrap());
+        }
         assert_eq!(
             CheckpointArtifactV1::decode_verified(&first).unwrap(),
             artifact,
