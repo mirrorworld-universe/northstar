@@ -2372,6 +2372,113 @@ mod tests {
     }
 
     #[test]
+    fn supported_sbf_checkpoint_retains_replay_account_values() {
+        use {
+            agave_feature_set::disable_sbpf_v0_execution,
+            solana_fee_structure::FeeStructure,
+            solana_instruction::{AccountMeta, Instruction},
+            solana_runtime::conformance::proof_fixture::full_transaction_fixture_v1,
+        };
+
+        let fixture = full_transaction_fixture_v1();
+        let signer = keypair_from_seed(&[42; 32]).unwrap();
+        let mut bank = create_test_bank();
+        bank.deactivate_feature(&disable_sbpf_v0_execution::id());
+        bank.configure_er(
+            &FeeStructure {
+                lamports_per_signature: 5_000,
+                lamports_per_write_lock: 0,
+                compute_fee_bins: vec![],
+            },
+            crate::DEFAULT_ER_TRANSACTION_MAX_AGE,
+        );
+        for key in [fixture.program_id, fixture.programdata_id] {
+            let account = fixture
+                .accounts
+                .iter()
+                .find(|(candidate, _)| candidate == &key)
+                .unwrap();
+            bank.store_account(&key, &account.1);
+        }
+        fund_account(&bank, &signer.pubkey(), 10_000_000);
+        let targets = (0..CANONICAL_CHECKPOINT_STEPS_V1)
+            .map(|index| Pubkey::new_from_array([index as u8 + 64; 32]))
+            .collect::<Vec<_>>();
+        for target in &targets {
+            let account = AccountSharedData::new(1_000_000, 8, &fixture.program_id);
+            bank.store_account(target, &account);
+        }
+        let bank = Bank::new_from_parent(Arc::new(bank), SlotLeader::default(), 1);
+        let blockhash = bank.last_blockhash();
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let bank = bank_forks.read().unwrap().root_bank();
+        let history = Arc::new(ErHistoryStore::default());
+        let mut delegated = vec![signer.pubkey()];
+        delegated.extend(targets.iter().copied());
+        let client =
+            create_client_with_history(bank_forks, delegated.clone(), Arc::clone(&history));
+        client.er_account_overlay.write().unwrap().extend(
+            delegated
+                .iter()
+                .map(|key| (*key, bank.get_account(key).unwrap())),
+        );
+        *client.session_pda.write().unwrap() = Some(Pubkey::new_from_array([9; 32]));
+
+        let mut signatures = Vec::new();
+        for target in &targets {
+            let transaction = VersionedTransaction::from(Transaction::new_signed_with_payer(
+                &[Instruction::new_with_bytes(
+                    fixture.program_id,
+                    &[1],
+                    vec![AccountMeta::new(*target, false)],
+                )],
+                Some(&signer.pubkey()),
+                &[&signer],
+                blockhash,
+            ));
+            signatures.push(transaction.signatures[0]);
+            <EphemeralTransactionClient as TransactionClient>::send_transactions_in_batch(
+                &client,
+                vec![bincode::serialize(&transaction).unwrap()],
+                &SendTransactionServiceStats::default(),
+            );
+        }
+
+        for signature in &signatures {
+            let status = history.get_signature_status(signature).unwrap();
+            assert!(
+                status.status.is_ok(),
+                "supported transaction failed: {status:?}"
+            );
+        }
+        let artifact = client
+            .checkpoint_artifact_v1()
+            .expect("supported transactions should seal a checkpoint");
+        artifact.verify().unwrap();
+        history.finalize_slot(&bank);
+        for ((signature, target), page) in signatures.iter().zip(&targets).zip(&artifact.da.pages) {
+            let replay = history
+                .get_replay_capture(
+                    signature,
+                    solana_rpc_client_types::config::CommitmentConfig::finalized(),
+                )
+                .unwrap();
+            let target = replay
+                .accounts
+                .iter()
+                .find(|account| account.key == *target)
+                .unwrap();
+            assert_eq!(target.pre_account.data()[0], 0);
+            assert_eq!(target.post_account.data()[0], 100);
+            assert!(target.touched);
+            assert_eq!(replay.transaction_fee, 5_000);
+            let transaction: VersionedTransaction =
+                bincode::deserialize(&page.transaction).unwrap();
+            assert_eq!(transaction.signatures[0], *signature);
+        }
+    }
+
+    #[test]
     fn canonical_checkpoint_uses_sixteen_executed_er_transactions() {
         let artifact = execute_canonical_checkpoint_fixture();
         let first = artifact.canonical_bytes().unwrap();

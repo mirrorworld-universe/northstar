@@ -65,6 +65,7 @@ spl-memo-interface.workspace = true
 spl-token-interface.workspace = true
 
 [dev-dependencies]
+agave-feature-set.workspace = true
 agave-snapshots.workspace = true
 northstar-transaction-proof.workspace = true
 solana-address-lookup-table-interface.workspace = true
