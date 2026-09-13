@@ -112,7 +112,7 @@ Then build Portal with `zk-verifier-prototype` and run the ignored real-proof co
 
 When settlement is due and no checkpoint is active, the runtime seals 1–16 actual successful transactions. Empty intervals are skipped; full batches still seal at 16. Admission stays blocked after sealing until settlement consumes the artifact. Existing forced-undelegation scheduling is preserved. Outstanding challenges do not permit overlapping proposals.
 
-Artifact and replay regression tests cover sizes 1, 2, 3, 15, and 16. Real ER-history extraction covers partial SBF batches; admission tests verify empty-skip, immutable sealing, and resumption. Seven fresh-ledger live Portal runs cover singleton, lower/upper partial intervals, and the canonical 16-step/four-round benchmark. Each extracts the selected transaction's witness and matches all eight public inputs. Restart/recovery acceptance remains outstanding.
+Artifact and replay regression tests cover sizes 1, 2, 3, 15, and 16. Real ER-history extraction covers partial SBF batches; admission tests verify empty-skip, immutable sealing, and resumption. Seven fresh-ledger live Portal runs cover singleton, lower/upper partial intervals, and the canonical 16-step/four-round benchmark. Each extracts the selected transaction's witness and matches all eight public inputs. The live service withdrawal/cadence and rooted-pending-checkpoint process-restart drills now pass, with limitations below.
 
 ## Acceptance ownership
 
@@ -145,15 +145,15 @@ checkpoint leaves are not used as the extracted witness's final checkpoint bindi
 ## Remaining September delivery sequence
 
 1. Completed GPU-free O1 integration: supported-workload extraction follows four live Portal bisection rounds. The local run passed in 8.91 seconds; this is not an end-to-end proof-resolution timing.
-2. Prepare independent maintainer reproduction and process-crash/low-traffic cadence drills. Real-clock respondent timeout/replacement and challenger timeout passed; measured outcomes are linked below.
+2. Prepare independent maintainer reproduction and expand crash coverage beyond rooted Pending checkpoints. Live withdrawal cadence, rooted-Pending process recovery, respondent timeout/replacement, and challenger timeout have measured implementer evidence.
 3. When CUDA is authorized and available, run the unchanged real-proof compatibility route,
    then production-resolution acceptance and three end-to-end timings.
-4. Complete restart/recovery acceptance. Live partial-checkpoint bisection and history-derived witness extraction now pass for the documented seven-case matrix.
+4. Complete zero-effect checkpoint progress and remaining crash-point acceptance. Live partial-checkpoint bisection and history-derived witness extraction pass for the documented seven-case matrix.
 
 Measured GPU-free phase timings and terminal timeout retry invariants are recorded in
-[checkpoint CPU timing evidence](checkpoint-cpu-timings-v1.md). Proof, verification,
-and process-crash recovery timings remain missing. Real-clock timeout/replacement
-timings are now recorded separately; O3 finality acceptance is not complete.
+[checkpoint CPU timing evidence](checkpoint-cpu-timings-v1.md). Proof and verification
+timings remain missing. Real-clock timeout/replacement and rooted-Pending process
+recovery timings are recorded separately; O3 finality acceptance is not complete.
 
 ## Partial-checkpoint candidate compatibility gate
 
@@ -189,3 +189,45 @@ These are in-process manager/runtime recreation tests against a retained L1 Bank
 and actual persisted files. They do not establish OS-process crash recovery, disk
 durability under power loss, or restart-durable replay-snapshot retention. Those
 must not be inferred from this passing coverage.
+
+## Live service cadence and process recovery
+
+From the repository root, build the current `solana-test-validator`, then run:
+
+```bash
+bash northstar/scripts/live-cadence-recovery.sh cadence
+bash northstar/scripts/live-cadence-recovery.sh crash
+```
+
+The driver requires `tmux`, `curl`, Cargo, and free L1/ER RPC ports 18999/8910.
+It creates a fresh ledger, retains diagnostic files, and stops its own sessions
+on exit. Crash mode validates the process executable before sending SIGKILL and
+restarts the same binary on the same ledger; it never resets that ledger.
+
+`live_service_seals_and_settles_one_transaction` assigns the session to the actual
+validator identity, injects a deposit, observes an empty 75-slot interval, and sends
+one real Portal ER withdrawal. The service—not the test—must propose and settle
+the one-step checkpoint. Assertions bind proposal latency to at most 75 L1 slots,
+verify the released bond, exactly 1,000,000 lamports withdrawn, the remaining
+3,000,000-lamport ER balance, and unchanged receipt state across subsequent polls.
+
+Crash mode waits for the checkpoint account itself at finalized commitment, confirms
+it is Pending, then pauses for the external process kill/restart. `getHealth` alone
+is insufficient after restart: the test waits for checkpoint state to reappear.
+Recovered roots and effect commitment must match before automatic settlement.
+
+Measured implementer runs: ordinary proposal in 2 L1 slots / 795ms; proposal through
+settlement and observation in 37.195s. Two SIGKILL runs passed; the latest proposed
+in 2 slots / 790ms and reached settled-state assertions in 50.466s (83.80s full test).
+No slot warps or manual checkpoint proposals/finalization are used.
+
+Limits: this covers a rooted Pending checkpoint with a persisted withdrawal plan.
+Crashes before persistence, while challenged, or during individual settlement
+operations, filesystem power-loss durability, and replay-snapshot persistence are
+not established by this drill. Independent maintainer reproduction remains required.
+
+A separate limitation was observed while building the fixture: a plain System
+Program transfer to the withdrawal sink is not a Portal withdrawal request. It
+seals a checkpoint but yields no settlement plan, so automatic proposal stalls.
+Zero-effect checkpoint progress therefore remains incomplete; do not generalize
+the passing Portal-withdrawal run to all accepted ER transactions.

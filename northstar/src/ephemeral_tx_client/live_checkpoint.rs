@@ -17,9 +17,10 @@ use {
     std::{env, path::PathBuf},
 };
 
-const PORTAL: Pubkey = solana_pubkey::pubkey!("5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf");
+pub(super) const PORTAL: Pubkey =
+    solana_pubkey::pubkey!("5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf");
 
-fn instruction(accounts: Vec<AccountMeta>, data: PortalInstruction) -> Instruction {
+pub(super) fn instruction(accounts: Vec<AccountMeta>, data: PortalInstruction) -> Instruction {
     Instruction {
         program_id: PORTAL,
         accounts,
@@ -27,7 +28,12 @@ fn instruction(accounts: Vec<AccountMeta>, data: PortalInstruction) -> Instructi
     }
 }
 
-fn send(rpc: &RpcClient, payer: &Keypair, signers: &[&Keypair], instructions: &[Instruction]) {
+pub(super) fn send(
+    rpc: &RpcClient,
+    payer: &Keypair,
+    signers: &[&Keypair],
+    instructions: &[Instruction],
+) {
     let started = std::time::Instant::now();
     let transaction = Transaction::new_signed_with_payer(
         instructions,
