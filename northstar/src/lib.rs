@@ -4193,8 +4193,51 @@ mod portal_e2e_tests {
         assert_eq!(challenged_checkpoint.status, CheckpointStatus::Challenged);
 
         wait_bank.freeze();
+        let wait_bank = Arc::new(wait_bank);
+        let durable_before = std::fs::read(&checkpoint_plan_path).unwrap();
+        let checkpoint_before = wait_bank.get_account(&checkpoint_pda).unwrap();
+        let config = manager.config.clone();
+        manager.shutdown_runtime();
+        let mut challenged_manager = Manager::new(config);
+        challenged_manager
+            .create_ephemeral_runtime(
+                wait_bank.clone(),
+                create_test_cluster_info(),
+                EphemeralRollupSettings {
+                    session_pda,
+                    grid_id: 0,
+                    ttl_slots: 0,
+                    fee_cap: 0,
+                    er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+                    delegated_accounts: vec![],
+                },
+                find_free_addr(),
+            )
+            .expect("challenged runtime should restart");
+        challenged_manager.deactivate_session();
+        assert!(challenged_manager.resume_active_session_from_l1(wait_bank.clone()));
+        manager = challenged_manager;
+        for _ in 0..3 {
+            assert!(manager
+                .settlement_transactions_if_due(&wait_bank, wait_bank.last_blockhash())
+                .is_none());
+            assert_eq!(
+                std::fs::read(&checkpoint_plan_path).unwrap(),
+                durable_before
+            );
+            assert_eq!(
+                wait_bank.get_account(&checkpoint_pda).unwrap(),
+                checkpoint_before
+            );
+        }
+        assert_eq!(
+            manager
+                .load_checkpoint_artifact(session_pda, er_slot)
+                .unwrap(),
+            artifact
+        );
         let original_deadline_bank = Bank::new_from_parent(
-            Arc::new(wait_bank),
+            wait_bank,
             SlotLeader::default(),
             checkpoint.challenge_deadline_l1_slot,
         );
@@ -4411,6 +4454,25 @@ mod portal_e2e_tests {
             !tamper_plan_path.exists(),
             "tampered durable plan should be quarantined by deletion"
         );
+        for _ in 0..3 {
+            assert!(tamper_resumed_manager
+                .settlement_transactions_if_due(
+                    &tamper_expired_bank,
+                    tamper_expired_bank.last_blockhash(),
+                )
+                .is_none());
+            assert!(
+                !tamper_plan_path.exists(),
+                "quarantined plans must not be regenerated from live state"
+            );
+            assert_eq!(
+                tamper_expired_bank
+                    .get_account(&tamper_delegated)
+                    .unwrap()
+                    .data(),
+                tamper_l1_data.as_slice()
+            );
+        }
         tamper_resumed_manager.shutdown_runtime();
     }
 

@@ -162,3 +162,21 @@ The baseline program key above must not be treated as the updated candidate's ke
 Rebuild and fingerprint the guest, update the candidate's verifier binding, and repeat
 compatibility acceptance before production enablement. No new program key or
 real-proof compatibility result is claimed by the partial-checkpoint tests.
+
+## Manager restart and quarantine coverage
+
+`validator_checkpoint_flow_waits_then_settles` recreates the manager/runtime both
+after proposal and while challenged, using the persisted settlement plan and DA
+artifact. After the challenged restart, three scheduler polls must emit no transactions,
+preserve the durable plan bytes, and leave the checkpoint account unchanged. The
+restored checkpoint remains blocked through its deadline until explicit resolution.
+
+The corrupt-plan restart case additionally polls three times after quarantine: the
+plan must remain absent, no settlement transactions may be produced, and delegated
+L1 state must remain unchanged. This prevents a retry from silently replacing the
+checkpoint-bound plan with a fresh plan derived from live state.
+
+These are in-process manager/runtime recreation tests against a retained L1 Bank
+and actual persisted files. They do not establish OS-process crash recovery, disk
+durability under power loss, or restart-durable replay-snapshot retention. Those
+must not be inferred from this passing coverage.
