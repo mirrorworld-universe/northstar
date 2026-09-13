@@ -110,19 +110,17 @@ fn live_service_seals_and_settles_one_transaction() {
             .is_none(),
         "empty interval must not propose a checkpoint"
     );
+    let initial_receipt = rpc.get_account(&receipt).unwrap();
     let submitted_slot = rpc.get_slot().unwrap();
     let started = Instant::now();
-    send(
-        &er,
-        &payer,
-        &[&payer],
-        &[crate::er_withdrawal_instruction(
-            &PORTAL,
-            &payer.pubkey(),
-            &payer.pubkey(),
-            1_000_000,
-        )],
-    );
+    let no_effects = env::var_os("NORTHSTAR_LIVE_NO_EFFECTS").is_some();
+    let recipient = solana_pubkey::Pubkey::new_unique();
+    let transaction_instruction = if no_effects {
+        transfer(&payer.pubkey(), &recipient, 1_000_000)
+    } else {
+        crate::er_withdrawal_instruction(&PORTAL, &payer.pubkey(), &payer.pubkey(), 1_000_000)
+    };
+    send(&er, &payer, &[&payer], &[transaction_instruction]);
     let active = poll("automatic partial checkpoint", 45, || {
         let account = rpc.get_account(&cursor).ok()?;
         let state = CheckpointCursor::try_from_slice(&account.data).ok()?;
@@ -182,14 +180,32 @@ fn live_service_seals_and_settles_one_transaction() {
     assert_eq!(er.get_balance(&payer.pubkey()).unwrap(), 3_000_000);
     let receipt_before = rpc.get_account(&receipt).unwrap();
     let receipt_state = DepositReceipt::try_from_slice(&receipt_before.data).unwrap();
-    assert_eq!(receipt_state.withdrawn, 1_000_000);
+    assert_eq!(
+        receipt_state.withdrawn,
+        if no_effects { 0 } else { 1_000_000 }
+    );
+    if no_effects {
+        assert_eq!(er.get_balance(&recipient).unwrap(), 1_000_000);
+        assert_eq!(receipt_before, initial_receipt);
+    }
     let settled_slot = rpc.get_slot().unwrap();
     poll("post-settlement retry observation", 30, || {
         (rpc.get_slot().ok()? >= settled_slot + 10).then_some(())
     });
     assert_eq!(rpc.get_account(&receipt).unwrap(), receipt_before);
+    if no_effects {
+        send(
+            &er,
+            &payer,
+            &[&payer],
+            &[transfer(&payer.pubkey(), &recipient, 500_000)],
+        );
+        assert_eq!(er.get_balance(&payer.pubkey()).unwrap(), 2_500_000);
+        assert_eq!(er.get_balance(&recipient).unwrap(), 1_500_000);
+        assert_eq!(rpc.get_account(&receipt).unwrap(), initial_receipt);
+    }
     eprintln!(
         "NORTHSTAR_TIMING {}",
-        serde_json::json!({"phase":"live_low_traffic_settled", "wall_ms":started.elapsed().as_millis(), "restart_requested":env::var_os("NORTHSTAR_LIVE_RESTART_READY").is_some(), "slot_warps":false})
+        serde_json::json!({"phase":"live_low_traffic_settled", "wall_ms":started.elapsed().as_millis(), "restart_requested":env::var_os("NORTHSTAR_LIVE_RESTART_READY").is_some(), "slot_warps":false, "no_settlement_effects": no_effects, "admission_resumed": no_effects})
     );
 }

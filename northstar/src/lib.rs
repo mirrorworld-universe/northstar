@@ -523,7 +523,8 @@ impl Manager {
         let runtime = self.runtime.as_ref()?;
         let session_pda = (*runtime.session_pda().read().unwrap())?;
         let diff = runtime.state_diff_from_l1();
-        let er_slot = runtime.checkpoint_artifact_v1().map_or_else(
+        let checkpoint = runtime.checkpoint_artifact_v1();
+        let er_slot = checkpoint.as_ref().map_or_else(
             || runtime.bank().slot(),
             |artifact| artifact.checkpoint.er_slot,
         );
@@ -536,7 +537,7 @@ impl Manager {
             receipt_balances,
         )
         .or_else(|| {
-            (!token_withdrawals.is_empty()).then(|| SettlementPlan {
+            (!token_withdrawals.is_empty() || checkpoint.is_some()).then(|| SettlementPlan {
                 er_slot,
                 checksum: [0; 32],
                 chunks: vec![],

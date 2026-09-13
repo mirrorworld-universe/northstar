@@ -2,7 +2,7 @@
 set -euo pipefail
 
 mode=${1:-cadence}
-[[ $mode == cadence || $mode == crash ]] || { echo 'usage: live-cadence-recovery.sh [cadence|crash]' >&2; exit 2; }
+[[ $mode == cadence || $mode == crash || $mode == no-effects ]] || { echo 'usage: live-cadence-recovery.sh [cadence|crash|no-effects]' >&2; exit 2; }
 root=$(cd "$(dirname "$0")/../.." && pwd)
 validator="$root/target/debug/solana-test-validator"
 [[ -x $validator ]] || { echo 'Build solana-test-validator first.' >&2; exit 2; }
@@ -45,6 +45,9 @@ start_validator
 args=(env "NORTHSTAR_LIVE_RPC_URL=$url" "BPF_OUT_DIR=$root/target/deploy")
 if [[ $mode == crash ]]; then
     args+=("NORTHSTAR_LIVE_RESTART_READY=$work/ready" "NORTHSTAR_LIVE_RESTART_RESUME=$work/resume")
+fi
+if [[ $mode == no-effects ]]; then
+    args+=(NORTHSTAR_LIVE_NO_EFFECTS=1)
 fi
 printf -v test_command '%q ' "${args[@]}" cargo test -p northstar live_service_seals_and_settles_one_transaction -- --ignored --nocapture
 tmux new-session -d -s "$test_session" "cd '$root'; $test_command > '$work/test.log' 2>&1; echo \$? > '$work/result'"

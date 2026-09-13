@@ -216,6 +216,9 @@ impl SettlementPlan {
         validator: &Keypair,
         recent_blockhash: Hash,
     ) -> Vec<Transaction> {
+        if self.is_empty() {
+            return vec![];
+        }
         self.portal_transactions_inner(
             portal_program_id,
             session_pda,
@@ -233,6 +236,9 @@ impl SettlementPlan {
         validator: &Keypair,
         recent_blockhash: Hash,
     ) -> Vec<Transaction> {
+        if self.is_empty() {
+            return vec![];
+        }
         self.portal_transactions_inner(
             portal_program_id,
             session_pda,
@@ -290,6 +296,9 @@ impl SettlementPlan {
         validator: &Keypair,
         include_begin: bool,
     ) -> Vec<Vec<Instruction>> {
+        if self.is_empty() {
+            return vec![];
+        }
         self.portal_instruction_batches_inner(
             portal_program_id,
             session_pda,
@@ -335,6 +344,9 @@ impl SettlementPlan {
         session_pda: Pubkey,
         validator: Pubkey,
     ) -> Vec<Instruction> {
+        if self.is_empty() {
+            return vec![];
+        }
         self.portal_instructions_inner(
             portal_program_id,
             session_pda,
@@ -417,7 +429,8 @@ impl SettlementPlan {
                 self.unsupported_changes
             );
         }
-        if self.is_empty() {
+        // A bound zero-effect checkpoint still needs Begin/Finish to release admission.
+        if self.is_empty() && self.has_unsupported_changes() {
             return vec![];
         }
 
@@ -1720,5 +1733,76 @@ mod tests {
             PortalInstruction::try_from_slice(&instructions[4].data).unwrap(),
             PortalInstruction::FinishSettlement(_)
         ));
+    }
+
+    #[test]
+    fn checkpoint_bound_empty_plan_finishes_without_effects() {
+        use borsh::BorshDeserialize;
+        let mut plan = SettlementPlan {
+            er_slot: 9,
+            checksum: [0; 32],
+            chunks: vec![],
+            owner_changes: vec![],
+            lamport_changes: vec![],
+            receipt_balances: vec![],
+            token_withdrawals: vec![],
+            unsupported_changes: vec![],
+        };
+        plan.checksum = plan.recomputed_checksum();
+        let validator = Keypair::new();
+        let portal = Pubkey::new_unique();
+        let session = Pubkey::new_unique();
+        assert!(plan
+            .portal_instructions(portal, session, validator.pubkey())
+            .is_empty());
+        assert!(plan
+            .portal_transactions(portal, session, &validator, Hash::new_unique())
+            .is_empty());
+        assert!(plan
+            .portal_retry_transactions_after_begin(portal, session, &validator, Hash::new_unique())
+            .is_empty());
+        assert!(plan
+            .portal_instruction_batches(portal, session, &validator, true)
+            .is_empty());
+        for include_begin in [true, false] {
+            let transactions = plan.portal_transactions_with_effect_commitment(
+                portal,
+                session,
+                &validator,
+                Hash::new_unique(),
+                [7; 32],
+                include_begin,
+            );
+            let instructions: Vec<_> = transactions
+                .iter()
+                .flat_map(|tx| &tx.message.instructions)
+                .map(|ix| PortalInstruction::try_from_slice(&ix.data).unwrap())
+                .collect();
+            assert_eq!(instructions.len(), if include_begin { 2 } else { 1 });
+            if include_begin {
+                assert!(
+                    matches!(&instructions[0], PortalInstruction::BeginSettlement(value) if value.effect_commitment == [7; 32])
+                );
+            }
+            assert!(matches!(
+                instructions.last().unwrap(),
+                PortalInstruction::FinishSettlement(_)
+            ));
+        }
+        plan.unsupported_changes
+            .push(SettlementUnsupportedChange::TooManyLamportChanges {
+                count: MAX_SETTLEMENT_LAMPORT_ACCOUNTS + 1,
+                max: MAX_SETTLEMENT_LAMPORT_ACCOUNTS,
+            });
+        assert!(plan
+            .portal_transactions_with_effect_commitment(
+                portal,
+                session,
+                &validator,
+                Hash::new_unique(),
+                [7; 32],
+                true,
+            )
+            .is_empty());
     }
 }

@@ -148,7 +148,7 @@ checkpoint leaves are not used as the extracted witness's final checkpoint bindi
 2. Prepare independent maintainer reproduction and expand crash coverage beyond rooted Pending checkpoints. Live withdrawal cadence, rooted-Pending process recovery, respondent timeout/replacement, and challenger timeout have measured implementer evidence.
 3. When CUDA is authorized and available, run the unchanged real-proof compatibility route,
    then production-resolution acceptance and three end-to-end timings.
-4. Complete zero-effect checkpoint progress and remaining crash-point acceptance. Live partial-checkpoint bisection and history-derived witness extraction pass for the documented seven-case matrix.
+4. Complete remaining crash-point acceptance, including zero-effect checkpoints. Ordinary zero-effect progress now passes the live regression; partial-checkpoint bisection and history-derived witness extraction pass for the documented seven-case matrix.
 
 Measured GPU-free phase timings and terminal timeout retry invariants are recorded in
 [checkpoint CPU timing evidence](checkpoint-cpu-timings-v1.md). Proof and verification
@@ -226,8 +226,23 @@ Crashes before persistence, while challenged, or during individual settlement
 operations, filesystem power-loss durability, and replay-snapshot persistence are
 not established by this drill. Independent maintainer reproduction remains required.
 
-A separate limitation was observed while building the fixture: a plain System
-Program transfer to the withdrawal sink is not a Portal withdrawal request. It
-seals a checkpoint but yields no settlement plan, so automatic proposal stalls.
-Zero-effect checkpoint progress therefore remains incomplete; do not generalize
-the passing Portal-withdrawal run to all accepted ER transactions.
+### Zero-settlement-effect checkpoint progress
+
+A non-empty checkpoint may contain no L1 settlement effects. The manager now retains
+an empty checkpoint-bound plan and emits Begin/Finish after checkpoint commitment.
+No receipt payout or balance operation is fabricated. Empty intervals still produce
+no checkpoint; ordinary unbound empty-plan APIs still emit nothing, and unsupported
+changes are not reclassified as a valid empty plan.
+
+Reproduce with `bash northstar/scripts/live-cadence-recovery.sh no-effects`. The
+regression failed before the fix because no proposal appeared. It now transfers
+between ER accounts, proposes in 2 L1 slots / 927ms, settles and accepts a subsequent
+ER transfer in 37.861s (71.22s full test). The L1 deposit receipt remains byte-for-byte
+and lamport-for-lamport unchanged. The normal Portal-withdrawal drill also passed
+after the fix (70.51s full test).
+
+The unit regression `checkpoint_bound_empty_plan_finishes_without_effects` also
+failed before the fix: it received zero instructions instead of Begin/Finish. It
+now covers both initial submission and retry without Begin, legacy empty APIs,
+and rejection of an unsupported-only plan. Zero-effect crash recovery is not
+claimed by these runs.
