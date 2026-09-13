@@ -20,7 +20,8 @@ use {
     solana_message::{v0::LoadedAddresses, AddressLoader, VersionedMessage},
     solana_pubkey::Pubkey,
     solana_rpc::{
-        er_history::ErHistoryStore, northstar::NorthStarSyncStatus,
+        er_history::{ErHistoryStore, ErReplayAccountSnapshot, ErReplayCapture},
+        northstar::NorthStarSyncStatus,
         rpc_subscriptions::RpcSubscriptions,
     },
     solana_runtime::{
@@ -595,6 +596,37 @@ impl EphemeralTransactionClient {
                 .iter()
                 .filter_map(|effect| borsh::to_vec(effect).ok())
                 .collect();
+            let replay_accounts = snapshot
+                .iter()
+                .enumerate()
+                .filter_map(
+                    |(transaction_index, (key, pre_account, post_account, touched))| {
+                        Some(ErReplayAccountSnapshot {
+                            transaction_index: u32::try_from(transaction_index).ok()?,
+                            key: *key,
+                            pre_account: pre_account.clone(),
+                            post_account: post_account.clone(),
+                            touched: *touched,
+                        })
+                    },
+                )
+                .collect();
+            let replay_capture = ErReplayCapture {
+                accounts: replay_accounts,
+                loaded_accounts_data_size: u64::from(
+                    committed.loaded_account_stats.loaded_accounts_data_size,
+                ),
+                transaction_fee: committed.fee_details.transaction_fee(),
+                prioritization_fee: committed.fee_details.prioritization_fee(),
+            };
+            if tx.signatures.first().is_none_or(|signature| {
+                !self
+                    .er_history_store
+                    .record_replay_capture(*signature, replay_capture)
+            }) {
+                warn!("Failed to retain committed ER replay capture");
+            }
+
             capture.steps.push(CheckpointStepInputV1 {
                 step_index,
                 transaction,
@@ -1097,9 +1129,8 @@ impl EphemeralTransactionClient {
                 },
             )?;
         self.record_processed_signatures(bank, &txs, &commit_results);
-        self.record_checkpoint_steps(bank, &txs, &commit_results, &account_snapshots);
-
         self.record_transaction_history_for_batch(bank, &txs, &commit_results, balance_collector);
+        self.record_checkpoint_steps(bank, &txs, &commit_results, &account_snapshots);
         self.record_withdrawal_payout_events_for_batch(bank, &txs, &commit_results);
         self.record_token_withdrawal_payout_events_for_batch(bank, &txs, &commit_results);
         self.notify_transaction_subscribers(bank, &txs);
@@ -2275,6 +2306,7 @@ mod tests {
             vec![fee_payer_a.pubkey(), fee_payer_b.pubkey()],
             er_history_store.clone(),
         );
+        *client.session_pda.write().unwrap() = Some(Pubkey::new_unique());
 
         let tx_a = create_transfer_tx(&fee_payer_a, fee_payer_a.pubkey(), recipient_a, blockhash);
         let signature_a = tx_a.signatures[0];
@@ -2312,6 +2344,31 @@ mod tests {
                 .is_some(),
             "second transaction should be recorded in ER history"
         );
+        for (signature, recipient) in [(signature_a, recipient_a), (signature_b, recipient_b)] {
+            let replay = er_history_store
+                .get_replay_capture(
+                    &signature,
+                    solana_rpc_client_types::config::CommitmentConfig::finalized(),
+                )
+                .expect("checkpoint transaction should retain replay account values");
+            assert_eq!(
+                replay
+                    .accounts
+                    .iter()
+                    .map(|account| account.transaction_index)
+                    .collect::<Vec<_>>(),
+                (0..replay.accounts.len() as u32).collect::<Vec<_>>()
+            );
+            let recipient = replay
+                .accounts
+                .iter()
+                .find(|account| account.key == recipient)
+                .expect("recipient account should be captured");
+            assert_eq!(recipient.pre_account.lamports(), 0);
+            assert_eq!(recipient.post_account.lamports(), 1_000_000);
+            assert!(recipient.touched);
+            assert_eq!(replay.prioritization_fee, 0);
+        }
     }
 
     #[test]
