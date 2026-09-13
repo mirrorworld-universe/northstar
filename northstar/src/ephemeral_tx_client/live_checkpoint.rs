@@ -194,6 +194,106 @@ fn real_checkpoint_bisects_to_captured_transaction() {
         )
     };
 
+    if let Ok(outcome) = env::var("NORTHSTAR_LIVE_OUTCOME") {
+        use northstar_portal::{Checkpoint, CheckpointStatus, TimeoutChallenge};
+        assert!(matches!(
+            outcome.as_str(),
+            "respondent-timeout" | "challenger-timeout"
+        ));
+        if outcome == "challenger-timeout" {
+            assert!(step_count > 1);
+            send(&rpc, &payer, &[&payer], &[response(step_count / 2, false)]);
+        }
+        let state = Challenge::try_from_slice(&rpc.get_account(&challenge).unwrap().data).unwrap();
+        let before =
+            Checkpoint::try_from_slice(&rpc.get_account(&checkpoint).unwrap().data).unwrap();
+        let balance_before = rpc.get_balance(&challenger.pubkey()).unwrap();
+        let started = std::time::Instant::now();
+        let deadline = state.turn_deadline_l1_slot.min(state.hard_deadline_l1_slot);
+        while rpc.get_slot().unwrap() < deadline {
+            assert!(
+                started.elapsed().as_secs() < 900,
+                "real-clock deadline did not advance"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        send(
+            &rpc,
+            &payer,
+            &[&payer],
+            &[instruction(
+                vec![
+                    AccountMeta::new_readonly(payer.pubkey(), true),
+                    AccountMeta::new_readonly(session, false),
+                    AccountMeta::new(checkpoint, false),
+                    AccountMeta::new(challenge, false),
+                    AccountMeta::new(da, false),
+                    AccountMeta::new(challenger.pubkey(), false),
+                    AccountMeta::new(cursor, false),
+                ],
+                PortalInstruction::TimeoutChallenge(TimeoutChallenge { er_slot }),
+            )],
+        );
+        let after =
+            Checkpoint::try_from_slice(&rpc.get_account(&checkpoint).unwrap().data).unwrap();
+        if outcome == "respondent-timeout" {
+            assert_eq!(after.status, CheckpointStatus::Invalid);
+            assert_eq!(
+                rpc.get_balance(&challenger.pubkey()).unwrap(),
+                balance_before + before.bond_lamports
+            );
+            send(
+                &rpc,
+                &payer,
+                &[&payer],
+                &[instruction(
+                    vec![
+                        AccountMeta::new(payer.pubkey(), true),
+                        AccountMeta::new_readonly(session, false),
+                        AccountMeta::new(checkpoint, false),
+                        AccountMeta::new(cursor, false),
+                        AccountMeta::new_readonly(system_program::id(), false),
+                    ],
+                    PortalInstruction::ProposeCheckpoint(ProposeCheckpoint {
+                        er_slot,
+                        step_count: u64::from(commitment.step_count),
+                        previous_state_root: commitment.previous_state_root,
+                        new_state_root: commitment.new_state_root,
+                        trace_root: commitment.trace_root,
+                        tx_effect_root: commitment.transaction_effect_root,
+                        readonly_l1_root: commitment.readonly_l1_root,
+                        da_commitment: commitment.da_commitment,
+                        effect_commitment: commitment.effect_commitment,
+                        challenge_window_slots: 750,
+                    }),
+                )],
+            );
+            let replacement =
+                Checkpoint::try_from_slice(&rpc.get_account(&checkpoint).unwrap().data).unwrap();
+            assert_eq!(replacement.status, CheckpointStatus::Pending);
+            assert_eq!(replacement.er_slot, er_slot);
+            assert_eq!(replacement.previous_state_root, before.previous_state_root);
+            assert_eq!(replacement.bond_lamports, before.bond_lamports);
+        } else {
+            assert_eq!(after.status, CheckpointStatus::Pending);
+            assert_eq!(after.bond_status, before.bond_status);
+            assert_eq!(
+                rpc.get_balance(&challenger.pubkey()).unwrap(),
+                balance_before
+            );
+        }
+        eprintln!(
+            "NORTHSTAR_TIMING {}",
+            serde_json::json!({
+                "schema_version": 1, "phase": outcome, "wall_ms": started.elapsed().as_millis(),
+                "deadline_l1_slot": deadline, "observed_l1_slot": rpc.get_slot().unwrap(),
+                "includes_rpc_confirmation": true, "slot_warps": false,
+                "replacement_proposed": outcome == "respondent-timeout",
+            })
+        );
+        return;
+    }
+
     let original_challenge = rpc.get_account(&challenge).unwrap().data;
     for mutation in 0..3 {
         let mut invalid = response(step_count / 2, step_count == 1);

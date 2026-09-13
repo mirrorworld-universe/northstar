@@ -145,14 +145,15 @@ checkpoint leaves are not used as the extracted witness's final checkpoint bindi
 ## Remaining September delivery sequence
 
 1. Completed GPU-free O1 integration: supported-workload extraction follows four live Portal bisection rounds. The local run passed in 8.91 seconds; this is not an end-to-end proof-resolution timing.
-2. Prepare independent maintainer reproduction and measure GPU-free timeout/recovery phases.
+2. Prepare independent maintainer reproduction and process-crash/low-traffic cadence drills. Real-clock respondent timeout/replacement and challenger timeout passed; measured outcomes are linked below.
 3. When CUDA is authorized and available, run the unchanged real-proof compatibility route,
    then production-resolution acceptance and three end-to-end timings.
 4. Complete restart/recovery acceptance. Live partial-checkpoint bisection and history-derived witness extraction now pass for the documented seven-case matrix.
 
 Measured GPU-free phase timings and terminal timeout retry invariants are recorded in
 [checkpoint CPU timing evidence](checkpoint-cpu-timings-v1.md). Proof, verification,
-and recovery timing fields remain explicitly missing; O3 finality acceptance is not complete.
+and process-crash recovery timings remain missing. Real-clock timeout/replacement
+timings are now recorded separately; O3 finality acceptance is not complete.
 
 ## Partial-checkpoint candidate compatibility gate
 

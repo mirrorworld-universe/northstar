@@ -86,3 +86,27 @@ endpoint root, DA payload root, and required nonzero reveal hash instead.
 
 These are implementer runs. They do not include independent acceptance, restart
 recovery, or production proof verification.
+
+## Real-clock timeout and replacement drills
+
+Two fresh-ledger local validator runs used the unchanged 750-slot challenge window
+and polled actual RPC slots; neither used slot warps or shortened deadlines.
+
+| Outcome | Deadline / observed L1 slot | Wait + timeout + optional replacement | Full test |
+|---|---|---|---|
+| Respondent timeout | 758 / 760 | 314.753s | 318.50s |
+| Challenger timeout | 759 / 760 | 314.038s | 318.30s |
+
+Set `NORTHSTAR_LIVE_OUTCOME=respondent-timeout` or `challenger-timeout` on the
+live-test command, using a fresh ledger for each. Omit it for normal bisection.
+The timeout modes return after their outcome checks rather than extracting a witness.
+
+Respondent timeout asserts Invalid, exact proposer-bond payout to the challenger,
+and a successful Pending replacement at the same ER slot from the same previous
+state root with the expected bond amount. Challenger timeout first reveals a
+midpoint, then asserts Pending, retained bond status, and no challenger payout.
+
+The reported duration includes natural deadline waiting and RPC confirmation.
+This is not an OS-process restart drill or a proof-backed finality measurement.
+Three end-to-end proof resolutions and low-traffic runtime cadence remain separate
+acceptance requirements.
