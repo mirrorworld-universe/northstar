@@ -147,3 +147,7 @@ checkpoint leaves are not used as the extracted witness's final checkpoint bindi
 3. When CUDA is authorized and available, run the unchanged real-proof compatibility route,
    then production-resolution acceptance and three end-to-end timings.
 4. Keep low-traffic partial checkpoints explicitly deferred; do not mark that cadence criterion complete.
+
+Measured GPU-free phase timings and terminal timeout retry invariants are recorded in
+[checkpoint CPU timing evidence](checkpoint-cpu-timings-v1.md). Proof, verification,
+and recovery timing fields remain explicitly missing; O3 finality acceptance is not complete.

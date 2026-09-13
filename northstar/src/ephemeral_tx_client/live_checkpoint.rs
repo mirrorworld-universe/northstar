@@ -28,6 +28,7 @@ fn instruction(accounts: Vec<AccountMeta>, data: PortalInstruction) -> Instructi
 }
 
 fn send(rpc: &RpcClient, payer: &Keypair, signers: &[&Keypair], instructions: &[Instruction]) {
+    let started = std::time::Instant::now();
     let transaction = Transaction::new_signed_with_payer(
         instructions,
         Some(&payer.pubkey()),
@@ -35,6 +36,30 @@ fn send(rpc: &RpcClient, payer: &Keypair, signers: &[&Keypair], instructions: &[
         rpc.get_latest_blockhash().unwrap(),
     );
     rpc.send_and_confirm_transaction(&transaction).unwrap();
+    for instruction in instructions
+        .iter()
+        .filter(|instruction| instruction.program_id == PORTAL)
+    {
+        let (phase, step) = match PortalInstruction::try_from_slice(&instruction.data).unwrap() {
+            PortalInstruction::OpenSession(_) => ("open_session", None),
+            PortalInstruction::ProposeCheckpoint(_) => ("propose_checkpoint", None),
+            PortalInstruction::OpenChallenge(_) => ("open_challenge", None),
+            PortalInstruction::RespondChallenge(value) => {
+                ("respond_or_reveal", Some(value.claimed_step))
+            }
+            PortalInstruction::BisectChallenge(_) => ("select_half", None),
+            _ => ("other", None),
+        };
+        println!(
+            "NORTHSTAR_TIMING {}",
+            serde_json::json!({
+                "schema_version": 1, "clock": "wall", "phase": phase,
+                "step": step, "transaction_ms": started.elapsed().as_secs_f64() * 1000.0,
+                "signature": transaction.signatures[0].to_string(),
+                "includes_rpc_confirmation": true,
+            })
+        );
+    }
 }
 
 #[test]
@@ -252,6 +277,7 @@ fn real_checkpoint_bisects_to_captured_transaction() {
         readonly_l1_root: FrBytes::new(commitment.readonly_l1_root).unwrap(),
         settlement_effect_root: FrBytes::new(commitment.effect_commitment).unwrap(),
     });
+    let extraction_started = std::time::Instant::now();
     let witness = crate::replay::extract_replay_witness_v1(
         &history,
         &artifact,
@@ -266,6 +292,16 @@ fn real_checkpoint_bisects_to_captured_transaction() {
         &expected,
     )
     .unwrap();
+    println!(
+        "NORTHSTAR_TIMING {}",
+        serde_json::json!({
+            "schema_version": 1, "clock": "wall", "phase": "witness_extraction",
+            "step": state.start_step,
+            "elapsed_ms": extraction_started.elapsed().as_secs_f64() * 1000.0,
+            "proving_ms": null, "verification_ms": null, "recovery_ms": null,
+            "resolved": false,
+        })
+    );
     assert_eq!(witness.transaction_bytes, page.transaction);
     assert_eq!(
         public_inputs_bytes(northstar_transaction_proof::replay(&witness).unwrap()),

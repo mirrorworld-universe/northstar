@@ -881,6 +881,65 @@ fn build_deposit_fee_ix(
 const PORTAL_PROGRAM_ID: Pubkey =
     Pubkey::from_str_const("GikCSCpYUq7QR7esoK6GM4UbJzKgdKNvS5bR1rBYH5E4");
 
+async fn assert_terminal_timeout_retries_preserve_state(
+    context: &mut ProgramTestContext,
+    payer: &Keypair,
+    session: &Pubkey,
+    er_slot: u64,
+    recipient: &Pubkey,
+) {
+    let checkpoint = find_checkpoint_pda(&PORTAL_PROGRAM_ID, session, er_slot).0;
+    let challenge = find_challenge_pda(&PORTAL_PROGRAM_ID, &checkpoint).0;
+    let keys = [
+        *session,
+        checkpoint,
+        find_checkpoint_cursor_pda(&PORTAL_PROGRAM_ID, session).0,
+        challenge,
+        find_da_proof_pda(&PORTAL_PROGRAM_ID, &challenge).0,
+        *recipient,
+    ];
+    let mut before = Vec::new();
+    for key in keys {
+        before.push(context.banks_client.get_account(key).await.unwrap());
+    }
+    for amount in 1..=3 {
+        let timeout = build_timeout_challenge_ix(
+            &PORTAL_PROGRAM_ID,
+            &payer.pubkey(),
+            recipient,
+            session,
+            er_slot,
+        );
+        // Distinct signed messages force program execution rather than duplicate-signature rejection.
+        let transaction = Transaction::new_signed_with_payer(
+            &[transfer(&payer.pubkey(), recipient, amount), timeout],
+            Some(&payer.pubkey()),
+            &[payer],
+            context.banks_client.get_latest_blockhash().await.unwrap(),
+        );
+        let error = context
+            .banks_client
+            .process_transaction(transaction)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.unwrap(),
+            solana_transaction::TransactionError::InstructionError(
+                1,
+                solana_instruction::error::InstructionError::Custom(
+                    northstar_portal::PortalError::CheckpointStateInvalid as u32,
+                ),
+            ),
+        );
+        for (key, expected) in keys.iter().zip(&before) {
+            assert_eq!(
+                &context.banks_client.get_account(*key).await.unwrap(),
+                expected
+            );
+        }
+    }
+}
+
 async fn setup() -> ProgramTestContext {
     let mut program_test = ProgramTest::default();
     program_test.prefer_bpf(true);
@@ -2307,6 +2366,14 @@ async fn challenge_bisects_to_one_step_and_challenger_timeout_restores_checkpoin
         Challenge::try_from_slice(&challenge_data).unwrap().status,
         ChallengeStatus::ValidatorWon
     );
+    assert_terminal_timeout_retries_preserve_state(
+        &mut context,
+        &payer,
+        &session_pda,
+        er_slot,
+        &challenger.pubkey(),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -2488,6 +2555,14 @@ async fn checkpoint_da_timeout_slashes_and_allows_recovery() {
         .unwrap();
     let da_proof = DataAvailabilityProof::try_from_slice(&da_data).unwrap();
     assert_eq!(da_proof.status, DataAvailabilityStatus::Defaulted);
+    assert_terminal_timeout_retries_preserve_state(
+        &mut context,
+        &payer,
+        &session_pda,
+        er_slot,
+        &challenger.pubkey(),
+    )
+    .await;
 
     let replacement_ix = build_propose_checkpoint_ix(
         &PORTAL_PROGRAM_ID,
