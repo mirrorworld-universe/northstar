@@ -1601,6 +1601,9 @@ impl EphemeralRuntime {
         &self,
         session_pda: Pubkey,
     ) -> Vec<ReceiptBalanceSettlement> {
+        // Payout events are recorded before the account overlay is updated after execution.
+        // Keep settlement from classifying that transient combination as stale.
+        let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
         let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
         let overlay = self.er_account_overlay.read().unwrap();
         let receipts = overlay
@@ -3227,6 +3230,95 @@ mod tests {
         );
         assert_eq!(receipt_balances[0].withdrawn, withdraw_amount);
         assert_eq!(receipt_balances[0].payout_lamports, withdraw_amount);
+
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_settlement_waits_for_atomic_withdrawal_snapshot() {
+        let parent_bank = create_test_bank();
+        let portal_program_id = PORTAL_PROGRAM_ID;
+        let session_pda = Pubkey::new_unique();
+        let er_source = Pubkey::new_unique();
+        let deposit_amount = 1_000u64;
+        store_deposit_receipt(
+            &parent_bank,
+            &portal_program_id,
+            &session_pda,
+            &er_source,
+            deposit_amount,
+            0,
+        );
+        parent_bank.freeze();
+
+        let settings = EphemeralRollupSettings {
+            session_pda,
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1_000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            Arc::new(parent_bank),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            portal_program_id,
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        runtime.set_session_pda(session_pda);
+        runtime.credit_deposit(&er_source, deposit_amount);
+
+        let bank_operation_lock = Arc::clone(&runtime.bank_operation_lock);
+        let bank_operation_guard = bank_operation_lock.lock().unwrap();
+        runtime
+            .withdrawal_payout_events
+            .write()
+            .unwrap()
+            .push(WithdrawalPayoutEvent {
+                er_source,
+                l1_recipient: er_source,
+                lamports: deposit_amount,
+                cumulative_withdrawn: deposit_amount,
+                signature: solana_signature::Signature::default(),
+                er_slot: runtime.bank().slot(),
+            });
+
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (completed_sender, completed_receiver) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let task = scope.spawn(|| {
+                started_sender.send(()).unwrap();
+                completed_sender
+                    .send(runtime.settlement_receipt_balances(session_pda))
+                    .unwrap();
+            });
+            started_receiver.recv().unwrap();
+            assert!(
+                matches!(
+                    completed_receiver.recv_timeout(Duration::from_secs(1)),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ),
+                "settlement must not observe an in-flight withdrawal snapshot"
+            );
+
+            runtime.er_account_overlay.write().unwrap().insert(
+                er_source,
+                AccountSharedData::new(0, 0, &system_program::id()),
+            );
+            drop(bank_operation_guard);
+
+            let receipt_balances = completed_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap();
+            task.join().unwrap();
+            assert_eq!(receipt_balances.len(), 1);
+            assert_eq!(receipt_balances[0].payout_lamports, deposit_amount);
+        });
 
         runtime.shutdown();
     }
