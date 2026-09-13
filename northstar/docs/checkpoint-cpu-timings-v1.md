@@ -57,3 +57,32 @@ Each retry prepends a distinct transfer that must roll back, avoiding cached
 signature rejection as false evidence. The transaction fee payer is deliberately
 excluded from unchanged-balance assertions. These tests use slot warps to test
 protocol deadlines and provide no wall-clock finality evidence.
+
+## Live partial-checkpoint matrix
+
+Each row passed on its own fresh local validator ledger. Durations are full test
+wall times, not proof-resolution times. Selected step is zero-based.
+
+| Actual transactions | Selected step | Bisection rounds | Test seconds |
+|---|---|---|---|
+| 1 | 0 | 0 | 3.47 |
+| 2 | 0 | 1 | 4.56 |
+| 2 | 1 | 1 | 4.53 |
+| 3 | 0 | 1 | 4.55 |
+| 3 | 2 | 2 | 5.64 |
+| 15 | 10 | 4 | 8.52 |
+| 16 | 10 | 4 | 8.81 |
+
+Use `NORTHSTAR_LIVE_STEP_COUNT` and `NORTHSTAR_LIVE_SELECTED_STEP` to select a row;
+defaults remain 16 and 10. Supply these alongside `NORTHSTAR_LIVE_RPC_URL` in the
+live-test command above. Restart with a fresh ledger for every row.
+
+Every run checks the on-chain singleton interval, endpoint roots, Prove turn, DA
+status, and all 256 public-input bytes of the witness extracted from ER history.
+Midpoint negative tests reject changed/reordered/missing paths where applicable.
+For a one-transaction checkpoint, the endpoint is already bound by checkpoint state;
+Portal ignores midpoint-path fields. Singleton negative tests therefore change the
+endpoint root, DA payload root, and required nonzero reveal hash instead.
+
+These are implementer runs. They do not include independent acceptance, restart
+recovery, or production proof verification.

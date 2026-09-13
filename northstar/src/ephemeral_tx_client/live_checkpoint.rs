@@ -1,5 +1,5 @@
 use {
-    super::tests::supported_sbf_checkpoint_with_fee,
+    super::tests::supported_sbf_checkpoint_with_steps,
     borsh::BorshDeserialize,
     northstar_portal::{
         BisectChallenge, Challenge, ChallengeTurn, DataAvailabilityProof, DataAvailabilityStatus,
@@ -79,7 +79,15 @@ fn real_checkpoint_bisects_to_captured_transaction() {
     rpc.get_health().unwrap();
     let session = northstar_portal::find_session_pda(&PORTAL).0;
     let fee_vault = northstar_portal::find_fee_vault_pda(&PORTAL).0;
-    let (artifact, history) = supported_sbf_checkpoint_with_fee(0, session);
+    let step_count = env::var("NORTHSTAR_LIVE_STEP_COUNT")
+        .map(|value| value.parse::<usize>().expect("integer step count"))
+        .unwrap_or(16);
+    assert!((1..=16).contains(&step_count));
+    let selected_step = env::var("NORTHSTAR_LIVE_SELECTED_STEP")
+        .map(|value| value.parse::<usize>().expect("integer selected step"))
+        .unwrap_or(10.min(step_count - 1));
+    assert!(selected_step < step_count);
+    let (artifact, history) = supported_sbf_checkpoint_with_steps(0, session, step_count);
     artifact.verify().unwrap();
     let commitment = artifact.checkpoint;
     let er_slot = commitment.er_slot;
@@ -188,16 +196,20 @@ fn real_checkpoint_bisects_to_captured_transaction() {
 
     let original_challenge = rpc.get_account(&challenge).unwrap().data;
     for mutation in 0..3 {
-        let mut invalid = response(8, false);
+        let mut invalid = response(step_count / 2, step_count == 1);
         let PortalInstruction::RespondChallenge(mut data) =
             PortalInstruction::try_from_slice(&invalid.data).unwrap()
         else {
             unreachable!();
         };
-        match mutation {
-            0 => data.trace_path[0][0] ^= 1,
-            1 => data.trace_path.swap(0, 1),
-            2 => data.trace_path_len -= 1,
+        match (step_count, mutation) {
+            (1, 0) => data.claimed_state_root[0] ^= 1,
+            (1, 1) => data.da_payload_root[0] ^= 1,
+            (1, 2) => data.da_inclusion_proof_hash = [0; 32],
+            (_, 0) => data.trace_path[0][0] ^= 1,
+            (_, 1) if data.trace_path_len >= 2 => data.trace_path.swap(0, 1),
+            (_, 1) => continue,
+            (_, 2) => data.trace_path_len -= 1,
             _ => unreachable!(),
         }
         invalid.data = borsh::to_vec(&PortalInstruction::RespondChallenge(data)).unwrap();
@@ -219,7 +231,11 @@ fn real_checkpoint_bisects_to_captured_transaction() {
         );
     }
 
-    for (step, dispute_upper) in [(8, true), (12, false), (10, true), (11, false)] {
+    let (mut start, mut end) = (0, step_count);
+    let mut rounds = 0;
+    while end - start > 1 {
+        let step = start + (end - start) / 2;
+        let dispute_upper = selected_step >= step;
         send(&rpc, &payer, &[&payer], &[response(step, false)]);
         send(
             &rpc,
@@ -238,13 +254,33 @@ fn real_checkpoint_bisects_to_captured_transaction() {
                 }),
             )],
         );
+        if dispute_upper {
+            start = step;
+        } else {
+            end = step;
+        }
+        rounds += 1;
     }
-    send(&rpc, &payer, &[&payer], &[response(10, true)]);
+    send(&rpc, &payer, &[&payer], &[response(selected_step, true)]);
     let state = Challenge::try_from_slice(&rpc.get_account(&challenge).unwrap().data).unwrap();
-    assert_eq!((state.start_step, state.end_step), (10, 11));
+    assert_eq!(
+        (state.start_step, state.end_step),
+        (selected_step as u64, selected_step as u64 + 1)
+    );
     assert_eq!(state.turn, ChallengeTurn::Prove);
-    assert_eq!(state.start_state_root, artifact.da.pages[10].pre_state_root);
-    assert_eq!(state.end_state_root, artifact.da.pages[10].post_state_root);
+    assert_eq!(u32::from(state.rounds), rounds);
+    assert!(rounds <= usize::BITS - (step_count - 1).leading_zeros());
+    if step_count == 16 {
+        assert_eq!(rounds, 4);
+    }
+    assert_eq!(
+        state.start_state_root,
+        artifact.da.pages[selected_step].pre_state_root
+    );
+    assert_eq!(
+        state.end_state_root,
+        artifact.da.pages[selected_step].post_state_root
+    );
     let da_state =
         DataAvailabilityProof::try_from_slice(&rpc.get_account(&da).unwrap().data).unwrap();
     assert_eq!(da_state.status, DataAvailabilityStatus::Revealed);

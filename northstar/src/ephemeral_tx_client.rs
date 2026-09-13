@@ -2495,7 +2495,7 @@ mod tests {
         supported_sbf_checkpoint_with_steps(lamports_per_signature, session, 16)
     }
 
-    fn supported_sbf_checkpoint_with_steps(
+    pub(super) fn supported_sbf_checkpoint_with_steps(
         lamports_per_signature: u64,
         session: Pubkey,
         step_count: usize,

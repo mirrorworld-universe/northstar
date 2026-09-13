@@ -112,7 +112,7 @@ Then build Portal with `zk-verifier-prototype` and run the ignored real-proof co
 
 When settlement is due and no checkpoint is active, the runtime seals 1–16 actual successful transactions. Empty intervals are skipped; full batches still seal at 16. Admission stays blocked after sealing until settlement consumes the artifact. Existing forced-undelegation scheduling is preserved. Outstanding challenges do not permit overlapping proposals.
 
-Artifact and replay regression tests cover sizes 1, 2, 3, 15, and 16. Real ER-history extraction covers partial SBF batches; admission tests verify empty-skip, immutable sealing, and resumption. The canonical 16-step/four-round benchmark is unchanged. Full live partial-count bisection and restart/recovery acceptance remain outstanding.
+Artifact and replay regression tests cover sizes 1, 2, 3, 15, and 16. Real ER-history extraction covers partial SBF batches; admission tests verify empty-skip, immutable sealing, and resumption. Seven fresh-ledger live Portal runs cover singleton, lower/upper partial intervals, and the canonical 16-step/four-round benchmark. Each extracts the selected transaction's witness and matches all eight public inputs. Restart/recovery acceptance remains outstanding.
 
 ## Acceptance ownership
 
@@ -148,7 +148,7 @@ checkpoint leaves are not used as the extracted witness's final checkpoint bindi
 2. Prepare independent maintainer reproduction and measure GPU-free timeout/recovery phases.
 3. When CUDA is authorized and available, run the unchanged real-proof compatibility route,
    then production-resolution acceptance and three end-to-end timings.
-4. Complete live partial-checkpoint bisection and restart/recovery acceptance; the runtime/artifact/replay implementation is present, but those integration gates remain.
+4. Complete restart/recovery acceptance. Live partial-checkpoint bisection and history-derived witness extraction now pass for the documented seven-case matrix.
 
 Measured GPU-free phase timings and terminal timeout retry invariants are recorded in
 [checkpoint CPU timing evidence](checkpoint-cpu-timings-v1.md). Proof, verification,
