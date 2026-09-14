@@ -3,7 +3,11 @@ name = "northstar"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+replay = ["dep:northstar-transaction-proof"]
+
 [dependencies]
+northstar-transaction-proof = { workspace = true, optional = true }
 solana-account.workspace = true
 solana-accounts-db.workspace = true
 solana-clock.workspace = true
@@ -55,6 +59,7 @@ thiserror.workspace = true
 tokio.workspace = true
 
 northstar-portal.workspace = true
+northstar-zk-types.workspace = true
 northstar-token-bridge = { path = "programs/token-bridge", features = ["no-entrypoint"] }
 
 base64.workspace = true
@@ -64,8 +69,11 @@ spl-memo-interface.workspace = true
 spl-token-interface.workspace = true
 
 [dev-dependencies]
+agave-feature-set.workspace = true
 agave-snapshots.workspace = true
+northstar-transaction-proof.workspace = true
 solana-address-lookup-table-interface.workspace = true
+solana-commitment-config.workspace = true
 solana-compute-budget-interface.workspace = true
 solana-rpc-client.workspace = true
 serde_json = { workspace = true }

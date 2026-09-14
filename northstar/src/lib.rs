@@ -24,10 +24,13 @@ use {
     unsettled_state::{RecoveredUnsettledState, RecoveryDisposition, UnsettledSessionIdentity},
 };
 
+pub mod checkpoint;
 pub mod ephemeral_runtime;
 pub mod ephemeral_tpu;
 pub mod ephemeral_tx_client;
 pub mod portal_state;
+#[cfg(any(test, feature = "replay"))]
+pub mod replay;
 pub mod settlement;
 pub mod slot_advancer;
 pub mod unsettled_state;
@@ -458,6 +461,10 @@ impl Manager {
             .map(|runtime| runtime.state_diff_from_l1())
     }
 
+    pub fn checkpoint_artifact_v1(&self) -> Option<checkpoint::CheckpointArtifactV1> {
+        self.runtime.as_ref()?.checkpoint_artifact_v1()
+    }
+
     pub fn handle_undelegation_request(
         &self,
         delegated_account: &Pubkey,
@@ -516,7 +523,11 @@ impl Manager {
         let runtime = self.runtime.as_ref()?;
         let session_pda = (*runtime.session_pda().read().unwrap())?;
         let diff = runtime.state_diff_from_l1();
-        let er_slot = runtime.bank().slot();
+        let checkpoint = runtime.checkpoint_artifact_v1();
+        let er_slot = checkpoint.as_ref().map_or_else(
+            || runtime.bank().slot(),
+            |artifact| artifact.checkpoint.er_slot,
+        );
         let receipt_balances = runtime.settlement_receipt_balances(session_pda);
         let token_withdrawals = runtime.settlement_token_withdrawals(er_slot);
         let mut plan = build_settlement_plan(
@@ -526,7 +537,7 @@ impl Manager {
             receipt_balances,
         )
         .or_else(|| {
-            (!token_withdrawals.is_empty()).then(|| SettlementPlan {
+            (!token_withdrawals.is_empty() || checkpoint.is_some()).then(|| SettlementPlan {
                 er_slot,
                 checksum: [0; 32],
                 chunks: vec![],
@@ -578,6 +589,7 @@ impl Manager {
         recent_blockhash: Hash,
     ) -> Option<(u64, [u8; 32], Vec<Transaction>)> {
         let runtime = self.runtime.as_ref()?;
+        runtime.process_token_deposits();
         let session_pda = (*runtime.session_pda().read().unwrap())?;
         let session_account = l1_bank.get_account(&session_pda)?;
         if session_account.owner() != &self.config.portal_program_id {
@@ -593,13 +605,15 @@ impl Manager {
         }
         let force_settlement = runtime.has_unapproved_undelegations();
         self.cleanup_terminal_checkpoint_plans(l1_bank, session_pda);
-        if let Some(plan) = self.pending_token_release_plan(l1_bank, session_pda) {
+        if let Some((plan, effect_commitment)) =
+            self.pending_token_release_plan(l1_bank, session_pda)
+        {
             let transactions = settlement::token_withdrawal_transactions(
                 &plan.token_withdrawals,
                 self.config.portal_program_id,
                 session_pda,
                 plan.er_slot,
-                plan.checksum,
+                effect_commitment,
                 self.config.manager_account.as_ref(),
                 recent_blockhash,
             );
@@ -640,6 +654,9 @@ impl Manager {
                     )?;
                     (plan, transactions)
                 } else {
+                    if !runtime.seal_checkpoint_if_nonempty() {
+                        return None;
+                    }
                     let plan = self.settlement_plan()?;
                     let transactions = self.checkpoint_or_settlement_transactions(
                         l1_bank,
@@ -674,10 +691,14 @@ impl Manager {
                     );
                     return None;
                 }
+                let effect_commitment = self
+                    .active_checkpoint_for_session(l1_bank, session_pda)
+                    .map(|(_, checkpoint)| checkpoint.effect_commitment)?;
                 let transactions = self.settlement_transactions_for_plan(
                     &plan,
                     session_pda,
                     recent_blockhash,
+                    effect_commitment,
                     false,
                 );
                 (plan, transactions)
@@ -723,6 +744,74 @@ impl Manager {
             "{}-{}-{}-{}.borsh",
             self.config.portal_program_id, session_pda, proposer, er_slot
         ))
+    }
+
+    fn checkpoint_artifact_path(
+        &self,
+        session_pda: Pubkey,
+        proposer: Pubkey,
+        er_slot: u64,
+    ) -> PathBuf {
+        self.checkpoint_plan_path(session_pda, proposer, er_slot)
+            .with_extension("da-v1.borsh")
+    }
+
+    fn persist_checkpoint_artifact(
+        &self,
+        session_pda: Pubkey,
+        artifact: &checkpoint::CheckpointArtifactV1,
+    ) {
+        let path = self.checkpoint_artifact_path(
+            session_pda,
+            self.config.manager_account.pubkey(),
+            artifact.checkpoint.er_slot,
+        );
+        let Ok(bytes) = artifact.canonical_bytes() else {
+            warn!("Failed to encode checkpoint DA artifact");
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                warn!("Failed to create checkpoint artifact dir {parent:?}: {err}");
+                return;
+            }
+        }
+        let tmp_path = path.with_extension(format!("da-v1.borsh.tmp.{}", std::process::id()));
+        let write_result = std::fs::File::create(&tmp_path).and_then(|mut file| {
+            std::io::Write::write_all(&mut file, &bytes)?;
+            file.sync_all()
+        });
+        if let Err(err) = write_result {
+            warn!("Failed to persist checkpoint artifact {tmp_path:?}: {err}");
+            let _ = std::fs::remove_file(&tmp_path);
+            return;
+        }
+        if let Err(err) = std::fs::rename(&tmp_path, &path) {
+            warn!("Failed to install checkpoint artifact {path:?}: {err}");
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+    }
+
+    fn load_checkpoint_artifact(
+        &self,
+        session_pda: Pubkey,
+        er_slot: u64,
+    ) -> Option<checkpoint::CheckpointArtifactV1> {
+        let path = self.checkpoint_artifact_path(
+            session_pda,
+            self.config.manager_account.pubkey(),
+            er_slot,
+        );
+        let bytes = std::fs::read(&path).ok()?;
+        let artifact = match checkpoint::CheckpointArtifactV1::decode_verified(&bytes) {
+            Ok(artifact) => artifact,
+            Err(err) => {
+                warn!("Invalid checkpoint artifact {path:?}: {err}");
+                return None;
+            }
+        };
+        (artifact.checkpoint.session == session_pda && artifact.checkpoint.er_slot == er_slot)
+            .then_some(artifact)
     }
 
     fn persist_checkpoint_plan(&self, session_pda: Pubkey, plan: &SettlementPlan) {
@@ -782,9 +871,7 @@ impl Manager {
         };
         let plan: SettlementPlan = durable.into();
         let recomputed_checksum = plan.recomputed_checksum();
-        if recomputed_checksum != plan.checksum
-            || recomputed_checksum != checkpoint.effect_commitment
-        {
+        if recomputed_checksum != plan.checksum {
             warn!(
                 "Checkpoint plan checksum mismatch for {path:?}: stored={:?} recomputed={:?} \
                  checkpoint={:?}",
@@ -802,6 +889,12 @@ impl Manager {
             .unwrap()
             .insert((session_pda, plan.er_slot), plan.clone());
         self.persist_checkpoint_plan(session_pda, plan);
+        if let Some(artifact) = self
+            .checkpoint_artifact_v1()
+            .filter(|artifact| artifact.checkpoint.er_slot == plan.er_slot)
+        {
+            self.persist_checkpoint_artifact(session_pda, &artifact);
+        }
     }
 
     fn cached_checkpoint_plan(&self, session_pda: Pubkey, er_slot: u64) -> Option<SettlementPlan> {
@@ -824,6 +917,15 @@ impl Manager {
                 warn!("Failed to remove checkpoint plan {path:?}: {err}");
             }
         }
+        if checkpoint.status == CheckpointStatus::Settled {
+            let artifact_path =
+                self.checkpoint_artifact_path(session_pda, proposer, checkpoint.er_slot);
+            if let Err(err) = std::fs::remove_file(&artifact_path) {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    warn!("Failed to remove checkpoint artifact {artifact_path:?}: {err}");
+                }
+            }
+        }
     }
 
     fn token_withdrawals_complete(l1_bank: &Bank, plan: &SettlementPlan) -> bool {
@@ -843,7 +945,7 @@ impl Manager {
         &self,
         l1_bank: &Bank,
         session_pda: Pubkey,
-    ) -> Option<SettlementPlan> {
+    ) -> Option<(SettlementPlan, [u8; 32])> {
         let plans = self
             .checkpoint_plans
             .read()
@@ -854,28 +956,27 @@ impl Manager {
             })
             .collect::<Vec<_>>();
 
-        plans.into_iter().find(|plan| {
-            if plan.token_withdrawals.is_empty() || Self::token_withdrawals_complete(l1_bank, plan)
+        plans.into_iter().find_map(|plan| {
+            if plan.token_withdrawals.is_empty() || Self::token_withdrawals_complete(l1_bank, &plan)
             {
-                return false;
+                return None;
             }
-            let checkpoint =
+            let address =
                 find_checkpoint_pda(&self.config.portal_program_id, &session_pda, plan.er_slot).0;
-            l1_bank
-                .get_account(&checkpoint)
-                .filter(|account| account.owner() == &self.config.portal_program_id)
-                .and_then(|account| try_parse_raw_portal_account(account.data()))
-                .is_some_and(|account| {
-                    matches!(
-                        account,
-                        PortalAccount::Checkpoint(checkpoint)
-                            if checkpoint.is_valid()
-                                && checkpoint.session == session_pda
-                                && checkpoint.er_slot == plan.er_slot
-                                && checkpoint.effect_commitment == plan.checksum
-                                && checkpoint.status == CheckpointStatus::Settled
-                    )
-                })
+            let account = l1_bank.get_account(&address)?;
+            if account.owner() != &self.config.portal_program_id {
+                return None;
+            }
+            let PortalAccount::Checkpoint(checkpoint) =
+                try_parse_raw_portal_account(account.data())?
+            else {
+                return None;
+            };
+            (checkpoint.is_valid()
+                && checkpoint.session == session_pda
+                && checkpoint.er_slot == plan.er_slot
+                && checkpoint.status == CheckpointStatus::Settled)
+                .then_some((plan, checkpoint.effect_commitment))
         })
     }
 
@@ -913,6 +1014,11 @@ impl Manager {
                     .is_none_or(|plan| Self::token_withdrawals_complete(l1_bank, &plan)));
             if checkpoint.session == session_pda && can_remove {
                 self.remove_checkpoint_plan(session_pda, &checkpoint);
+                if checkpoint.status == CheckpointStatus::Settled {
+                    if let Some(runtime) = &self.runtime {
+                        runtime.consume_checkpoint_artifact_v1(checkpoint.er_slot);
+                    }
+                }
             }
         }
     }
@@ -932,14 +1038,6 @@ impl Manager {
             );
             return None;
         };
-        if plan.checksum != checkpoint.effect_commitment {
-            warn!(
-                "Portal cached checkpoint plan mismatch: er_slot={} plan_checksum={:?} \
-                 checkpoint_effect={:?}",
-                checkpoint.er_slot, plan.checksum, checkpoint.effect_commitment,
-            );
-            return None;
-        }
         self.checkpoint_plans
             .write()
             .unwrap()
@@ -972,6 +1070,19 @@ impl Manager {
             );
         }
 
+        let artifact = self
+            .checkpoint_artifact_v1()
+            .filter(|artifact| artifact.checkpoint.er_slot == plan.er_slot)
+            .or_else(|| self.load_checkpoint_artifact(session_pda, plan.er_slot))?;
+        if artifact.checkpoint.session != session_pda || artifact.checkpoint.er_slot != plan.er_slot
+        {
+            warn!(
+                "Runtime checkpoint artifact mismatch: session={} plan_er_slot={} \
+                 artifact_session={} artifact_er_slot={}",
+                session_pda, plan.er_slot, artifact.checkpoint.session, artifact.checkpoint.er_slot,
+            );
+            return None;
+        }
         let (checkpoint_pda, _) =
             find_checkpoint_pda(&self.config.portal_program_id, &session_pda, plan.er_slot);
         let Some(checkpoint_account) = l1_bank.get_account(&checkpoint_pda) else {
@@ -985,7 +1096,7 @@ impl Manager {
                 self.config.manager_account.as_ref(),
                 recent_blockhash,
                 challenge_window_slots,
-                self.latest_finalized_checkpoint_state_root(l1_bank, session_pda),
+                &artifact.checkpoint,
             )?;
             self.cache_checkpoint_plan(session_pda, plan);
             return Some(vec![transaction]);
@@ -1004,8 +1115,6 @@ impl Manager {
             checkpoint.status,
             CheckpointStatus::Settled | CheckpointStatus::Cancelled | CheckpointStatus::Invalid
         ) {
-            let previous_state_root =
-                self.latest_finalized_checkpoint_state_root(l1_bank, session_pda);
             info!(
                 "Portal checkpoint re-propose over terminal account: er_slot={} checksum={:?}",
                 plan.er_slot, plan.checksum,
@@ -1016,7 +1125,7 @@ impl Manager {
                 self.config.manager_account.as_ref(),
                 recent_blockhash,
                 challenge_window_slots,
-                previous_state_root,
+                &artifact.checkpoint,
             )?;
             self.cache_checkpoint_plan(session_pda, plan);
             return Some(vec![transaction]);
@@ -1029,29 +1138,6 @@ impl Manager {
             checkpoint,
             recent_blockhash,
         )
-    }
-
-    fn latest_finalized_checkpoint_state_root(
-        &self,
-        l1_bank: &Bank,
-        session_pda: Pubkey,
-    ) -> [u8; 32] {
-        let (cursor_pda, _) =
-            find_checkpoint_cursor_pda(&self.config.portal_program_id, &session_pda);
-        let Some(cursor_account) = l1_bank.get_account(&cursor_pda) else {
-            return [0; 32];
-        };
-        let Some(PortalAccount::CheckpointCursor(cursor)) =
-            try_parse_raw_portal_account(cursor_account.data())
-        else {
-            warn!("Portal checkpoint cursor {cursor_pda} has invalid account data");
-            return [0; 32];
-        };
-        if cursor.session != session_pda {
-            warn!("Portal checkpoint cursor {cursor_pda} session mismatch");
-            return [0; 32];
-        }
-        cursor.latest_finalized_state_root
     }
 
     fn active_checkpoint_for_session(
@@ -1102,23 +1188,17 @@ impl Manager {
         plan: &SettlementPlan,
         session_pda: Pubkey,
         recent_blockhash: Hash,
+        effect_commitment: [u8; 32],
         include_begin: bool,
     ) -> Vec<Transaction> {
-        let mut transactions = if include_begin {
-            plan.portal_transactions(
-                self.config.portal_program_id,
-                session_pda,
-                self.config.manager_account.as_ref(),
-                recent_blockhash,
-            )
-        } else {
-            plan.portal_retry_transactions_after_begin(
-                self.config.portal_program_id,
-                session_pda,
-                self.config.manager_account.as_ref(),
-                recent_blockhash,
-            )
-        };
+        let mut transactions = plan.portal_transactions_with_effect_commitment(
+            self.config.portal_program_id,
+            session_pda,
+            self.config.manager_account.as_ref(),
+            recent_blockhash,
+            effect_commitment,
+            include_begin,
+        );
         let Some(finish_transaction) = transactions.pop() else {
             return vec![];
         };
@@ -1137,7 +1217,7 @@ impl Manager {
             self.config.portal_program_id,
             session_pda,
             plan.er_slot,
-            plan.checksum,
+            effect_commitment,
             self.config.manager_account.as_ref(),
             recent_blockhash,
         ));
@@ -1160,14 +1240,6 @@ impl Manager {
             warn!(
                 "Portal checkpoint mismatch: checkpoint={} plan_er_slot={}",
                 checkpoint_pda, plan.er_slot,
-            );
-            return None;
-        }
-        if checkpoint.effect_commitment != plan.checksum {
-            warn!(
-                "Portal checkpoint/live diff mismatch for er_slot={}: checkpoint_effect={:?} \
-                 live_checksum={:?}; refusing settlement",
-                plan.er_slot, checkpoint.effect_commitment, plan.checksum,
             );
             return None;
         }
@@ -1197,6 +1269,7 @@ impl Manager {
                     plan,
                     session_pda,
                     recent_blockhash,
+                    checkpoint.effect_commitment,
                     true,
                 ));
                 Some(transactions)
@@ -1210,6 +1283,7 @@ impl Manager {
                     plan,
                     session_pda,
                     recent_blockhash,
+                    checkpoint.effect_commitment,
                     true,
                 ))
             }
@@ -1242,7 +1316,7 @@ impl Manager {
                         self.config.portal_program_id,
                         session_pda,
                         plan.er_slot,
-                        plan.checksum,
+                        checkpoint.effect_commitment,
                         self.config.manager_account.as_ref(),
                         recent_blockhash,
                     ))
@@ -3872,6 +3946,40 @@ mod portal_e2e_tests {
         borsh::from_slice(&transaction.message.instructions[0].data).unwrap()
     }
 
+    fn checkpoint_artifact_fixture(
+        session: Pubkey,
+        er_slot: u64,
+    ) -> checkpoint::CheckpointArtifactV1 {
+        let steps = (0..checkpoint::CANONICAL_CHECKPOINT_STEPS_V1)
+            .map(|index| {
+                let state = |lamports| {
+                    vec![checkpoint::StateAccountValueV1 {
+                        account: Pubkey::new_from_array([200; 32]),
+                        owner: Pubkey::new_from_array([201; 32]),
+                        lamports,
+                        executable: false,
+                        rent_epoch: 0,
+                        data_hash: [202; 32],
+                    }]
+                };
+                let pre_state_accounts = state(index as u64 + 1);
+                let post_state_accounts = state(index as u64 + 2);
+                checkpoint::CheckpointStepInputV1 {
+                    step_index: index as u32,
+                    transaction: vec![index as u8 + 1],
+                    transaction_effect: vec![index as u8 + 33],
+                    pre_state_root: checkpoint::state_root_v1(&pre_state_accounts).unwrap(),
+                    post_state_root: checkpoint::state_root_v1(&post_state_accounts).unwrap(),
+                    pre_state_accounts,
+                    post_state_accounts,
+                    readonly_l1_values: vec![],
+                    settlement_effects: vec![vec![index as u8 + 65]],
+                }
+            })
+            .collect();
+        checkpoint::build_checkpoint_artifact_v1(session, er_slot, steps).unwrap()
+    }
+
     #[test]
     fn token_withdrawal_release_follows_finish_settlement() {
         let portal_program = Pubkey::new_unique();
@@ -3909,6 +4017,7 @@ mod portal_e2e_tests {
             &plan,
             Pubkey::new_unique(),
             Hash::new_unique(),
+            [8; 32],
             true,
         );
         let program_id = |transaction: &Transaction| {
@@ -3919,6 +4028,19 @@ mod portal_e2e_tests {
         assert_eq!(transactions.len(), 4);
         assert_eq!(program_id(&transactions[2]), portal_program);
         assert_eq!(program_id(&transactions[3]), bridge_program);
+        let release: northstar_token_bridge::instruction::TokenBridgeInstruction =
+            borsh::from_slice(&transactions[3].message.instructions[0].data).unwrap();
+        let northstar_token_bridge::instruction::TokenBridgeInstruction::SettleWithdrawal {
+            checksum,
+            ..
+        } = release
+        else {
+            panic!("expected withdrawal release");
+        };
+        assert_eq!(
+            checksum, [8; 32],
+            "release must bind the checkpoint effect commitment, not the plan checksum"
+        );
     }
 
     #[test]
@@ -3935,7 +4057,21 @@ mod portal_e2e_tests {
             l1_data,
             _er_data,
         ) = setup_checkpoint_flow_fixture();
+        let runtime = manager.runtime.as_ref().unwrap();
+        let artifact = checkpoint_artifact_fixture(session_pda, runtime.bank().slot());
+        runtime.install_checkpoint_artifact_v1(artifact.clone());
         let due_slot = bank.slot() + 10;
+        let early_bank = Bank::new_from_parent(
+            bank.clone(),
+            SlotLeader::default(),
+            due_slot.saturating_sub(1),
+        );
+        assert!(
+            manager
+                .settlement_transactions_if_due(&early_bank, early_bank.last_blockhash())
+                .is_none(),
+            "checkpoint must not be proposed before configured cadence"
+        );
         let due_bank = Bank::new_from_parent(bank, SlotLeader::default(), due_slot);
 
         let (er_slot, _checksum, transactions) = manager
@@ -3961,6 +4097,34 @@ mod portal_e2e_tests {
             panic!("checkpoint should deserialize");
         };
         assert_eq!(checkpoint.status, CheckpointStatus::Pending);
+        assert_eq!(
+            checkpoint.step_count,
+            u64::from(artifact.checkpoint.step_count)
+        );
+        assert_eq!(
+            checkpoint.previous_state_root,
+            artifact.checkpoint.previous_state_root
+        );
+        assert_eq!(
+            checkpoint.new_state_root,
+            artifact.checkpoint.new_state_root
+        );
+        assert_eq!(checkpoint.trace_root, artifact.checkpoint.trace_root);
+        assert_eq!(
+            checkpoint.tx_effect_root,
+            artifact.checkpoint.transaction_effect_root
+        );
+        assert_eq!(
+            checkpoint.readonly_l1_root,
+            artifact.checkpoint.readonly_l1_root
+        );
+        assert_eq!(checkpoint.da_commitment, artifact.checkpoint.da_commitment);
+        assert_eq!(
+            checkpoint.effect_commitment,
+            artifact.checkpoint.effect_commitment
+        );
+        assert_ne!(checkpoint.trace_root, checkpoint.tx_effect_root);
+        assert_ne!(checkpoint.readonly_l1_root, [0; 32]);
         let checkpoint_plan_path = manager.checkpoint_plan_path(
             session_pda,
             manager.config.manager_account.pubkey(),
@@ -3969,6 +4133,15 @@ mod portal_e2e_tests {
         assert!(
             checkpoint_plan_path.exists(),
             "checkpoint proposal should persist durable settlement plan"
+        );
+        let checkpoint_artifact_path = manager.checkpoint_artifact_path(
+            session_pda,
+            manager.config.manager_account.pubkey(),
+            er_slot,
+        );
+        assert!(
+            checkpoint_artifact_path.exists(),
+            "checkpoint proposal should persist canonical DA artifact"
         );
 
         due_bank.freeze();
@@ -3997,6 +4170,12 @@ mod portal_e2e_tests {
             "restarted manager should resume active session from L1"
         );
         manager = resumed_manager;
+        assert_eq!(
+            manager
+                .load_checkpoint_artifact(session_pda, er_slot)
+                .unwrap(),
+            artifact,
+        );
 
         let wait_bank = Bank::new_from_parent(
             due_bank,
@@ -4031,8 +4210,51 @@ mod portal_e2e_tests {
         assert_eq!(challenged_checkpoint.status, CheckpointStatus::Challenged);
 
         wait_bank.freeze();
+        let wait_bank = Arc::new(wait_bank);
+        let durable_before = std::fs::read(&checkpoint_plan_path).unwrap();
+        let checkpoint_before = wait_bank.get_account(&checkpoint_pda).unwrap();
+        let config = manager.config.clone();
+        manager.shutdown_runtime();
+        let mut challenged_manager = Manager::new(config);
+        challenged_manager
+            .create_ephemeral_runtime(
+                wait_bank.clone(),
+                create_test_cluster_info(),
+                EphemeralRollupSettings {
+                    session_pda,
+                    grid_id: 0,
+                    ttl_slots: 0,
+                    fee_cap: 0,
+                    er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+                    delegated_accounts: vec![],
+                },
+                find_free_addr(),
+            )
+            .expect("challenged runtime should restart");
+        challenged_manager.deactivate_session();
+        assert!(challenged_manager.resume_active_session_from_l1(wait_bank.clone()));
+        manager = challenged_manager;
+        for _ in 0..3 {
+            assert!(manager
+                .settlement_transactions_if_due(&wait_bank, wait_bank.last_blockhash())
+                .is_none());
+            assert_eq!(
+                std::fs::read(&checkpoint_plan_path).unwrap(),
+                durable_before
+            );
+            assert_eq!(
+                wait_bank.get_account(&checkpoint_pda).unwrap(),
+                checkpoint_before
+            );
+        }
+        assert_eq!(
+            manager
+                .load_checkpoint_artifact(session_pda, er_slot)
+                .unwrap(),
+            artifact
+        );
         let original_deadline_bank = Bank::new_from_parent(
-            Arc::new(wait_bank),
+            wait_bank,
             SlotLeader::default(),
             checkpoint.challenge_deadline_l1_slot,
         );
@@ -4074,6 +4296,11 @@ mod portal_e2e_tests {
             mismatch_l1_data,
             mismatch_er_data,
         ) = setup_checkpoint_flow_fixture();
+        let mismatch_runtime = mismatch_manager.runtime.as_ref().unwrap();
+        mismatch_runtime.install_checkpoint_artifact_v1(checkpoint_artifact_fixture(
+            mismatch_session_pda,
+            mismatch_runtime.bank().slot(),
+        ));
         let mismatch_due_slot = mismatch_bank.slot() + 10;
         let mismatch_due_bank =
             Bank::new_from_parent(mismatch_bank, SlotLeader::default(), mismatch_due_slot);
@@ -4125,6 +4352,15 @@ mod portal_e2e_tests {
                 .process_transaction(transaction)
                 .unwrap();
         }
+        assert!(
+            mismatch_manager
+                .settlement_transactions_if_due(
+                    &mismatch_expired_bank,
+                    mismatch_expired_bank.last_blockhash(),
+                )
+                .is_none(),
+            "completed settlement must not emit duplicate effects"
+        );
         assert_eq!(
             mismatch_expired_bank
                 .get_account(&mismatch_delegated)
@@ -4152,6 +4388,11 @@ mod portal_e2e_tests {
             tamper_l1_data,
             _tamper_er_data,
         ) = setup_checkpoint_flow_fixture();
+        let tamper_runtime = tamper_manager.runtime.as_ref().unwrap();
+        tamper_runtime.install_checkpoint_artifact_v1(checkpoint_artifact_fixture(
+            tamper_session_pda,
+            tamper_runtime.bank().slot(),
+        ));
         let tamper_due_bank = Bank::new_from_parent(
             tamper_bank,
             SlotLeader::default(),
@@ -4230,6 +4471,25 @@ mod portal_e2e_tests {
             !tamper_plan_path.exists(),
             "tampered durable plan should be quarantined by deletion"
         );
+        for _ in 0..3 {
+            assert!(tamper_resumed_manager
+                .settlement_transactions_if_due(
+                    &tamper_expired_bank,
+                    tamper_expired_bank.last_blockhash(),
+                )
+                .is_none());
+            assert!(
+                !tamper_plan_path.exists(),
+                "quarantined plans must not be regenerated from live state"
+            );
+            assert_eq!(
+                tamper_expired_bank
+                    .get_account(&tamper_delegated)
+                    .unwrap()
+                    .data(),
+                tamper_l1_data.as_slice()
+            );
+        }
         tamper_resumed_manager.shutdown_runtime();
     }
 

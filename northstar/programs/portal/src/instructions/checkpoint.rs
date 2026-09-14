@@ -7,8 +7,9 @@ use {
         CheckpointStatus, CommitCheckpoint, CreateStepProof, DataAvailabilityProof,
         DataAvailabilityStatus, OpenChallenge, PortalError, ProposeCheckpoint, ResolveChallenge,
         RespondChallenge, SealStepProof, Session, StepProofAccount, StepProofVerifierMode,
-        TimeoutChallenge, WriteStepProof, CHALLENGE_TURN_WINDOW_SLOTS,
+        TimeoutChallenge, WriteStepProof, CANONICAL_CHECKPOINT_STEPS, CHALLENGE_TURN_WINDOW_SLOTS,
         CHECKPOINT_PROPOSER_BOND_LAMPORTS, MAX_CHALLENGE_WINDOW_SLOTS, MAX_STEP_PROOF_BYTES,
+        TRACE_AUTH_PATH_NODES, TX_EFFECT_AUTH_PATH_NODES,
     },
     borsh::{BorshDeserialize, BorshSerialize},
     pinocchio::{
@@ -21,6 +22,22 @@ use {
     pinocchio_system::instructions::Transfer,
     solana_sha256_hasher::hashv,
 };
+#[cfg(feature = "zk-verifier-prototype")]
+use {
+    super::verifier::verify_er_step_proof_v1,
+    northstar_zk_types::{ErStepPublicInputsV1, FrBytes},
+};
+
+#[cfg(target_os = "solana")]
+extern "C" {
+    fn sol_poseidon(
+        parameters: u64,
+        endianness: u64,
+        vals: *const u8,
+        vals_len: u64,
+        hash_result: *mut u8,
+    ) -> u64;
+}
 
 fn load_session(program_id: &Pubkey, session: &AccountInfo) -> Result<Session, ProgramError> {
     let (expected_session_key, _) = find_session_pda(program_id);
@@ -374,6 +391,7 @@ fn step_proof_public_input_hash(
         &[proof_state.proof_version],
         &checkpoint_state.er_slot.to_le_bytes(),
         &challenge_state.start_step.to_le_bytes(),
+        &proof_state.session_context,
         &challenge_state.start_state_root,
         &challenge_state.end_state_root,
         &proof_state.tx_effect_root,
@@ -381,6 +399,202 @@ fn step_proof_public_input_hash(
         &proof_state.settlement_effect_root,
     ])
     .to_bytes()
+}
+
+fn verify_trace_authentication_path(
+    checkpoint: &Checkpoint,
+    state_index: u64,
+    state_root: &[u8; 32],
+    path_len: u8,
+    path: &[[u8; 32]; TRACE_AUTH_PATH_NODES],
+) -> bool {
+    let Ok(state_index_u32) = u32::try_from(state_index) else {
+        return false;
+    };
+    let Ok(leaf_count) = u32::try_from(checkpoint.step_count.saturating_add(1)) else {
+        return false;
+    };
+    let width = leaf_count.max(1).next_power_of_two();
+    let expected_depth = width.trailing_zeros() as usize;
+    if state_index >= u64::from(leaf_count)
+        || usize::from(path_len) != expected_depth
+        || path[expected_depth..].iter().any(|node| *node != [0; 32])
+    {
+        return false;
+    }
+    let leaf_length = 36u64.to_le_bytes();
+    let index_bytes = state_index_u32.to_le_bytes();
+    let mut current = hashv(&[
+        b"northstar-checkpoint-v1",
+        b"trace",
+        b"leaf",
+        &leaf_length,
+        &index_bytes,
+        state_root,
+    ])
+    .to_bytes();
+    let mut index = state_index as usize;
+    for (level, sibling) in path[..expected_depth].iter().enumerate() {
+        let level_bytes = (level as u32).to_le_bytes();
+        current = if index.is_multiple_of(2) {
+            hashv(&[
+                b"northstar-checkpoint-v1",
+                b"trace",
+                b"node",
+                &level_bytes,
+                &current,
+                sibling,
+            ])
+        } else {
+            hashv(&[
+                b"northstar-checkpoint-v1",
+                b"trace",
+                b"node",
+                &level_bytes,
+                sibling,
+                &current,
+            ])
+        }
+        .to_bytes();
+        index /= 2;
+    }
+    hashv(&[
+        b"northstar-checkpoint-v1",
+        b"trace",
+        b"root",
+        &leaf_count.to_le_bytes(),
+        &current,
+    ])
+    .to_bytes()
+        == checkpoint.trace_root
+}
+
+fn verify_tx_effect_authentication_path(
+    checkpoint: &Checkpoint,
+    step_index: u64,
+    leaf: &[u8; 32],
+    path_len: u8,
+    path: &[[u8; 32]; TX_EFFECT_AUTH_PATH_NODES],
+) -> bool {
+    if step_index >= checkpoint.step_count {
+        return false;
+    }
+    let Ok(leaf_count) = u32::try_from(checkpoint.step_count) else {
+        return false;
+    };
+    let width = leaf_count.max(1).next_power_of_two();
+    let expected_depth = width.trailing_zeros() as usize;
+    if usize::from(path_len) != expected_depth
+        || path[expected_depth..].iter().any(|node| *node != [0; 32])
+    {
+        return false;
+    }
+    let mut current = *leaf;
+    let mut index = step_index as usize;
+    for (level, sibling) in path[..expected_depth].iter().enumerate() {
+        let level_bytes = (level as u32).to_le_bytes();
+        current = if index.is_multiple_of(2) {
+            hashv(&[
+                b"northstar-checkpoint-v1",
+                b"transaction-effect",
+                b"node",
+                &level_bytes,
+                &current,
+                sibling,
+            ])
+        } else {
+            hashv(&[
+                b"northstar-checkpoint-v1",
+                b"transaction-effect",
+                b"node",
+                &level_bytes,
+                sibling,
+                &current,
+            ])
+        }
+        .to_bytes();
+        index /= 2;
+    }
+    hashv(&[
+        b"northstar-checkpoint-v1",
+        b"transaction-effect",
+        b"root",
+        &leaf_count.to_le_bytes(),
+        &current,
+    ])
+    .to_bytes()
+        == checkpoint.tx_effect_root
+}
+
+fn poseidon_fields(inputs: &[&[u8]]) -> Option<[u8; 32]> {
+    #[cfg(not(target_os = "solana"))]
+    {
+        solana_poseidon::hashv(
+            solana_poseidon::Parameters::Bn254X5,
+            solana_poseidon::Endianness::BigEndian,
+            inputs,
+        )
+        .ok()
+        .map(|hash| hash.to_bytes())
+    }
+    #[cfg(target_os = "solana")]
+    {
+        let mut result = [0; 32];
+        let status = unsafe {
+            sol_poseidon(
+                0,
+                0,
+                inputs.as_ptr().cast(),
+                inputs.len() as u64,
+                result.as_mut_ptr(),
+            )
+        };
+        (status == 0).then_some(result)
+    }
+}
+
+fn session_context_v1(
+    program_id: &Pubkey,
+    session_key: &Pubkey,
+    session: &Session,
+) -> Option<[u8; 32]> {
+    const DOMAIN: &[u8] = b"northstar-session-context-v1";
+    const CONTEXT_LEN: usize = DOMAIN.len() + 32 + 32 + 8 + 16 + 32 + 1;
+    let mut context = [0; CONTEXT_LEN];
+    let mut offset: usize = 0;
+    for bytes in [
+        DOMAIN,
+        program_id.as_ref(),
+        session_key.as_ref(),
+        &session.grid_id.to_le_bytes(),
+        &session.nonce.to_le_bytes(),
+        session.validator.as_ref(),
+        &[1],
+    ] {
+        let end = offset.checked_add(bytes.len())?;
+        context.get_mut(offset..end)?.copy_from_slice(bytes);
+        offset = end;
+    }
+
+    let mut fields = [[0; 32]; 8];
+    fields[0][24..].copy_from_slice(&0x100u64.to_be_bytes());
+    fields[1][24..].copy_from_slice(&0x10au64.to_be_bytes());
+    fields[2][24..].copy_from_slice(&(CONTEXT_LEN as u64).to_be_bytes());
+    for (field, chunk) in fields[3..].iter_mut().zip(context.chunks(31)) {
+        let start = field.len().checked_sub(chunk.len())?;
+        field[start..].copy_from_slice(chunk);
+    }
+    let inputs = [
+        fields[0].as_slice(),
+        fields[1].as_slice(),
+        fields[2].as_slice(),
+        fields[3].as_slice(),
+        fields[4].as_slice(),
+        fields[5].as_slice(),
+        fields[6].as_slice(),
+        fields[7].as_slice(),
+    ];
+    poseidon_fields(&inputs)
 }
 
 #[p_instruction(
@@ -423,7 +637,7 @@ pub fn process_propose_checkpoint(
 ) -> ProgramResult {
     pinocchio_log::log!("Instruction: ProposeCheckpoint, er_slot={}", er_slot);
 
-    if challenge_window_slots == 0 || step_count == 0 {
+    if challenge_window_slots == 0 || step_count == 0 || step_count > CANONICAL_CHECKPOINT_STEPS {
         return Err(ProgramError::InvalidInstructionData);
     }
     if challenge_window_slots > MAX_CHALLENGE_WINDOW_SLOTS {
@@ -452,7 +666,9 @@ pub fn process_propose_checkpoint(
     let mut cursor_state = load_or_create_cursor(program_id, proposer, session_key, cursor)?;
     require_no_active_checkpoint(&cursor_state)?;
     require_advancing_checkpoint(&session_state, &cursor_state, er_slot)?;
-    if previous_state_root != cursor_state.latest_finalized_state_root {
+    if cursor_state.latest_finalized_checkpoint != Pubkey::default()
+        && previous_state_root != cursor_state.latest_finalized_state_root
+    {
         return Err(PortalError::CheckpointPreviousRootMismatch.into());
     }
 
@@ -588,7 +804,9 @@ pub fn process_commit_checkpoint(
 
     require_advancing_checkpoint(&session_state, &cursor_state, er_slot)?;
     require_active_checkpoint(&cursor_state, checkpoint.address(), er_slot)?;
-    if checkpoint_state.previous_state_root != cursor_state.latest_finalized_state_root {
+    if cursor_state.latest_finalized_checkpoint != Pubkey::default()
+        && checkpoint_state.previous_state_root != cursor_state.latest_finalized_state_root
+    {
         return Err(PortalError::CheckpointPreviousRootMismatch.into());
     }
 
@@ -809,6 +1027,8 @@ pub fn process_open_challenge(
         er_slot: u64,
         claimed_step: u64,
         claimed_state_root: Hash32,
+        trace_path_len: u8,
+        trace_path: [[u8; 32]; 5],
         da_payload_root: Hash32,
         da_inclusion_proof_hash: Hash32
     ]
@@ -820,6 +1040,8 @@ pub fn process_respond_challenge(
         er_slot,
         claimed_step,
         claimed_state_root,
+        trace_path_len,
+        trace_path,
         da_payload_root,
         da_inclusion_proof_hash,
     }: RespondChallenge,
@@ -890,7 +1112,15 @@ pub fn process_respond_challenge(
             .start_step
             .checked_add(width / 2)
             .ok_or(PortalError::ArithmeticOverflow)?;
-        if claimed_step != midpoint {
+        if claimed_step != midpoint
+            || !verify_trace_authentication_path(
+                &checkpoint_state,
+                claimed_step,
+                &claimed_state_root,
+                trace_path_len,
+                &trace_path,
+            )
+        {
             return Err(PortalError::ChallengeResponseInvalid.into());
         }
         challenge_state.midpoint_step = midpoint;
@@ -1029,6 +1259,13 @@ pub fn process_timeout_challenge(
         checkpoint_state.challenge_resolved = true;
         challenge_state.status = ChallengeStatus::ValidatorWon;
     }
+    pinocchio_log::log!(
+        "Challenge timeout: er_slot={}, elapsed_slots={}, turn={}, outcome={}",
+        er_slot,
+        current_slot.saturating_sub(challenge_state.opened_at_l1_slot),
+        challenge_state.turn as u8,
+        challenge_state.status as u8,
+    );
     store_checkpoint(checkpoint, &checkpoint_state)?;
     store_challenge(challenge, &challenge_state)
 }
@@ -1048,7 +1285,10 @@ pub fn process_timeout_challenge(
         proof_kind: u8,
         proof_version: u8,
         step_index: u64,
+        session_context: Hash32,
         tx_effect_root: Hash32,
+        tx_effect_path_len: u8,
+        tx_effect_path: [[u8; 32]; 4],
         readonly_l1_root: Hash32,
         settlement_effect_root: Hash32
     ]
@@ -1061,7 +1301,10 @@ pub fn process_create_step_proof(
         proof_kind,
         proof_version,
         step_index,
+        session_context,
         tx_effect_root,
+        tx_effect_path_len,
+        tx_effect_path,
         readonly_l1_root,
         settlement_effect_root,
     }: CreateStepProof,
@@ -1076,7 +1319,7 @@ pub fn process_create_step_proof(
         return Err(PortalError::Unauthorized.into());
     }
 
-    load_session(program_id, session)?;
+    let session_state = load_session(program_id, session)?;
     let session_key = session.address();
     let checkpoint_state = load_checkpoint(program_id, session_key, er_slot, checkpoint)?;
     if checkpoint_state.status != CheckpointStatus::Challenged {
@@ -1093,6 +1336,9 @@ pub fn process_create_step_proof(
     if proof_kind == 0 || proof_version == 0 {
         return Err(ProgramError::InvalidInstructionData);
     }
+    if session_context_v1(program_id, session_key, &session_state) != Some(session_context) {
+        return Err(PortalError::StepProofPublicInputMismatch.into());
+    }
     if authority.address() != &challenge_state.challenger
         || readonly_l1_root != checkpoint_state.readonly_l1_root
         || settlement_effect_root != checkpoint_state.effect_commitment
@@ -1100,6 +1346,15 @@ pub fn process_create_step_proof(
         return Err(PortalError::Unauthorized.into());
     }
 
+    if !verify_tx_effect_authentication_path(
+        &checkpoint_state,
+        step_index,
+        &tx_effect_root,
+        tx_effect_path_len,
+        &tx_effect_path,
+    ) {
+        return Err(PortalError::StepProofPublicInputMismatch.into());
+    }
     let (expected_proof_key, proof_bump) = find_step_proof_pda(program_id, checkpoint.address());
     if proof.address() != &expected_proof_key {
         return Err(PortalError::InvalidPdaSeeds.into());
@@ -1113,6 +1368,7 @@ pub fn process_create_step_proof(
         proof_kind,
         proof_version,
         step_index,
+        session_context,
         tx_effect_root,
         readonly_l1_root,
         settlement_effect_root,
@@ -1297,11 +1553,72 @@ enum StepProofVerification {
 
 fn verify_step_proof(
     verifier_mode: StepProofVerifierMode,
+    checkpoint_state: &Checkpoint,
+    challenge_state: &Challenge,
     proof_state: &StepProofAccount,
 ) -> StepProofVerification {
     match verifier_mode {
-        StepProofVerifierMode::Production => StepProofVerification::Unavailable,
+        StepProofVerifierMode::Production => {
+            verify_step_proof_production(checkpoint_state, challenge_state, proof_state)
+        }
         StepProofVerifierMode::TestOnly => verify_step_proof_test_only(proof_state),
+    }
+}
+
+fn verify_step_proof_production(
+    checkpoint_state: &Checkpoint,
+    challenge_state: &Challenge,
+    proof_state: &StepProofAccount,
+) -> StepProofVerification {
+    #[cfg(feature = "zk-verifier-prototype")]
+    {
+        let Ok(session_context) = FrBytes::new(proof_state.session_context) else {
+            return StepProofVerification::Invalid;
+        };
+        let Ok(pre_state_root) = FrBytes::new(challenge_state.start_state_root) else {
+            return StepProofVerification::Invalid;
+        };
+        let Ok(post_state_root) = FrBytes::new(challenge_state.end_state_root) else {
+            return StepProofVerification::Invalid;
+        };
+        let Ok(tx_effect_root) = FrBytes::new(proof_state.tx_effect_root) else {
+            return StepProofVerification::Invalid;
+        };
+        let Ok(readonly_l1_root) = FrBytes::new(proof_state.readonly_l1_root) else {
+            return StepProofVerification::Invalid;
+        };
+        let Ok(settlement_effect_root) = FrBytes::new(proof_state.settlement_effect_root) else {
+            return StepProofVerification::Invalid;
+        };
+        let public_inputs = ErStepPublicInputsV1 {
+            domain: FrBytes::er_step_domain_v1(proof_state.proof_kind, proof_state.proof_version),
+            session_context,
+            slot_step: FrBytes::from_u64_pair(checkpoint_state.er_slot, proof_state.step_index),
+            pre_state_root,
+            post_state_root,
+            tx_effect_root,
+            readonly_l1_root,
+            settlement_effect_root,
+        };
+        let mut public_input_bytes = [0; 256];
+        for (output, input) in public_input_bytes
+            .chunks_exact_mut(32)
+            .zip(public_inputs.to_array())
+        {
+            output.copy_from_slice(&input);
+        }
+        if proof_state.written_len as usize != MAX_STEP_PROOF_BYTES {
+            return StepProofVerification::Invalid;
+        }
+        match verify_er_step_proof_v1(&proof_state.data, &public_input_bytes) {
+            Ok(()) => StepProofVerification::Valid,
+            Err(_) => StepProofVerification::Invalid,
+        }
+    }
+    #[cfg(not(feature = "zk-verifier-prototype"))]
+    {
+        let _ = (checkpoint_state, challenge_state, proof_state);
+        StepProofVerification::Unavailable
     }
 }
 
@@ -1415,7 +1732,26 @@ pub fn process_resolve_challenge(
         return Err(PortalError::StepProofPublicInputMismatch.into());
     }
 
-    match verify_step_proof(verifier_mode, &proof_state) {
+    let verification = verify_step_proof(
+        verifier_mode,
+        &checkpoint_state,
+        &challenge_state,
+        &proof_state,
+    );
+    let outcome = match &verification {
+        StepProofVerification::Unavailable => 0,
+        StepProofVerification::Invalid => 1,
+        StepProofVerification::Valid => 2,
+    };
+    pinocchio_log::log!(
+        "Challenge proof: er_slot={}, elapsed_slots={}, outcome={}",
+        er_slot,
+        Clock::get()?
+            .slot
+            .saturating_sub(challenge_state.opened_at_l1_slot),
+        outcome,
+    );
+    match verification {
         StepProofVerification::Unavailable => Err(PortalError::StepProofVerifierUnavailable.into()),
         StepProofVerification::Invalid => {
             if bond_recipient.address() != &challenge_state.challenger {
@@ -1443,6 +1779,116 @@ pub fn process_resolve_challenge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_context_binds_portal_session_policy() {
+        let session = Session {
+            discriminator: Session::DISCRIMINATOR,
+            grid_id: 7,
+            ttl_slots: 100,
+            fee_cap: 1_000,
+            created_at: 9,
+            nonce: 11,
+            authority: [3; 32].into(),
+            validator: [4; 32].into(),
+            settlement_interval_slots: 10,
+            last_settled_l1_slot: 0,
+            last_settled_er_slot: 0,
+            settlement_status: crate::SettlementStatus::Idle,
+            settlement_er_slot: 0,
+            settlement_checksum: [0; 32],
+            settlement_accumulator: [0; 32],
+            settlement_started_l1_slot: 0,
+            bump: 1,
+        };
+        let program = Pubkey::from([1; 32]);
+        let session_key = Pubkey::from([2; 32]);
+        let context = session_context_v1(&program, &session_key, &session).unwrap();
+        assert_ne!(context, [0; 32]);
+        assert_ne!(
+            context,
+            session_context_v1(&Pubkey::from([9; 32]), &session_key, &session).unwrap()
+        );
+        let mut changed = session;
+        changed.grid_id += 1;
+        assert_ne!(
+            context,
+            session_context_v1(&program, &session_key, &changed).unwrap()
+        );
+        changed = session;
+        changed.nonce += 1;
+        assert_ne!(
+            context,
+            session_context_v1(&program, &session_key, &changed).unwrap()
+        );
+    }
+
+    #[test]
+    fn replay_fixture_matches_portal_checkpoint_bindings() {
+        let witness = northstar_transaction_proof::fixture::build_replay_witness_v1().unwrap();
+        let public = northstar_transaction_proof::replay(&witness).unwrap();
+        let program = Pubkey::from(<[u8; 32]>::try_from(&witness.session_context[28..60]).unwrap());
+        let session_key =
+            Pubkey::from(<[u8; 32]>::try_from(&witness.session_context[60..92]).unwrap());
+        let validator =
+            Pubkey::from(<[u8; 32]>::try_from(&witness.session_context[116..148]).unwrap());
+        let session = Session {
+            discriminator: Session::DISCRIMINATOR,
+            grid_id: 1,
+            ttl_slots: 100,
+            fee_cap: 1_000,
+            created_at: 0,
+            nonce: 0,
+            authority: [3; 32].into(),
+            validator,
+            settlement_interval_slots: 10,
+            last_settled_l1_slot: 0,
+            last_settled_er_slot: 0,
+            settlement_status: crate::SettlementStatus::Idle,
+            settlement_er_slot: 0,
+            settlement_checksum: [0; 32],
+            settlement_accumulator: [0; 32],
+            settlement_started_l1_slot: 0,
+            bump: 1,
+        };
+        assert_eq!(
+            session_context_v1(&program, &session_key, &session).unwrap(),
+            public.session_context.to_bytes(),
+        );
+
+        let mut path = [[0; 32]; TX_EFFECT_AUTH_PATH_NODES];
+        path.copy_from_slice(&witness.checkpoint.transaction_effect_path.siblings);
+        let checkpoint = Checkpoint {
+            discriminator: Checkpoint::DISCRIMINATOR,
+            session: session_key,
+            er_slot: witness.er_slot,
+            step_count: CANONICAL_CHECKPOINT_STEPS,
+            previous_state_root: public.pre_state_root.to_bytes(),
+            new_state_root: public.post_state_root.to_bytes(),
+            trace_root: [0; 32],
+            tx_effect_root: witness.checkpoint.checkpoint_transaction_effect_root,
+            readonly_l1_root: public.readonly_l1_root.to_bytes(),
+            da_commitment: [0; 32],
+            effect_commitment: public.settlement_effect_root.to_bytes(),
+            proposer: validator,
+            proposed_at_l1_slot: 0,
+            challenge_deadline_l1_slot: 0,
+            status: CheckpointStatus::Challenged,
+            bond_lamports: 1,
+            bond_status: CheckpointBondStatus::Locked,
+            challenger: [0; 32].into(),
+            challenged_at_l1_slot: 0,
+            challenge_resolved: false,
+            bump: 0,
+        };
+        assert!(verify_tx_effect_authentication_path(
+            &checkpoint,
+            witness.step_index,
+            &public.tx_effect_root.to_bytes(),
+            witness.checkpoint.transaction_effect_path.siblings.len() as u8,
+            &path,
+        ));
+    }
 
     #[test]
     fn step_proof_public_input_hash_v1_is_stable() {
@@ -1496,6 +1942,7 @@ mod tests {
             proof_kind: 1,
             proof_version: 1,
             step_index: 7,
+            session_context: [9; 32],
             tx_effect_root: [6; 32],
             readonly_l1_root: [7; 32],
             settlement_effect_root: [8; 32],
@@ -1517,9 +1964,9 @@ mod tests {
                 &proof,
             ),
             [
-                0xd5, 0xf5, 0x13, 0x29, 0xde, 0x7a, 0x7f, 0x56, 0x66, 0x15, 0x20, 0xef, 0x99, 0xc7,
-                0x18, 0x91, 0x96, 0x87, 0x7b, 0xbc, 0xa4, 0x12, 0xea, 0x03, 0xdf, 0x79, 0x4a, 0x17,
-                0x92, 0x3c, 0x05, 0x44,
+                0xe8, 0xae, 0xb8, 0xf6, 0x67, 0xc3, 0x9b, 0x66, 0xd0, 0x50, 0xd5, 0x1f, 0xe9, 0x34,
+                0x73, 0x86, 0x06, 0x27, 0x17, 0x33, 0x8a, 0xd6, 0xe2, 0x05, 0xa0, 0x3b, 0x45, 0x2c,
+                0x01, 0x21, 0x1c, 0x5c,
             ]
         );
     }

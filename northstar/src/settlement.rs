@@ -1,5 +1,5 @@
 use {
-    crate::{ErStateDiff, ErStateDiffAccount},
+    crate::{checkpoint::CheckpointCommitmentV1, ErStateDiff, ErStateDiffAccount},
     log::warn,
     northstar_portal::{
         find_checkpoint_cursor_pda, find_checkpoint_pda, find_delegation_record_pda,
@@ -171,21 +171,24 @@ impl SettlementPlan {
         validator: &Keypair,
         recent_blockhash: Hash,
         challenge_window_slots: u64,
-        previous_state_root: [u8; 32],
+        commitment: &CheckpointCommitmentV1,
     ) -> Option<Transaction> {
-        (!self.has_unsupported_changes()).then(|| {
-            sign_settlement_transaction(
-                &[self.checkpoint_proposal_instruction(
-                    portal_program_id,
-                    session_pda,
-                    validator.pubkey(),
-                    challenge_window_slots,
-                    previous_state_root,
-                )],
-                validator,
-                recent_blockhash,
-            )
-        })
+        (!self.has_unsupported_changes()
+            && commitment.session == session_pda
+            && commitment.er_slot == self.er_slot)
+            .then(|| {
+                sign_settlement_transaction(
+                    &[self.checkpoint_proposal_instruction(
+                        portal_program_id,
+                        session_pda,
+                        validator.pubkey(),
+                        challenge_window_slots,
+                        commitment,
+                    )],
+                    validator,
+                    recent_blockhash,
+                )
+            })
     }
 
     pub fn checkpoint_commit_transaction(
@@ -213,11 +216,15 @@ impl SettlementPlan {
         validator: &Keypair,
         recent_blockhash: Hash,
     ) -> Vec<Transaction> {
+        if self.is_empty() {
+            return vec![];
+        }
         self.portal_transactions_inner(
             portal_program_id,
             session_pda,
             validator,
             recent_blockhash,
+            self.checksum,
             true,
         )
     }
@@ -229,12 +236,35 @@ impl SettlementPlan {
         validator: &Keypair,
         recent_blockhash: Hash,
     ) -> Vec<Transaction> {
+        if self.is_empty() {
+            return vec![];
+        }
         self.portal_transactions_inner(
             portal_program_id,
             session_pda,
             validator,
             recent_blockhash,
+            self.checksum,
             false,
+        )
+    }
+
+    pub(crate) fn portal_transactions_with_effect_commitment(
+        &self,
+        portal_program_id: Pubkey,
+        session_pda: Pubkey,
+        validator: &Keypair,
+        recent_blockhash: Hash,
+        effect_commitment: [u8; 32],
+        include_begin: bool,
+    ) -> Vec<Transaction> {
+        self.portal_transactions_inner(
+            portal_program_id,
+            session_pda,
+            validator,
+            recent_blockhash,
+            effect_commitment,
+            include_begin,
         )
     }
 
@@ -244,14 +274,19 @@ impl SettlementPlan {
         session_pda: Pubkey,
         validator: &Keypair,
         recent_blockhash: Hash,
+        effect_commitment: [u8; 32],
         include_begin: bool,
     ) -> Vec<Transaction> {
-        self.portal_instruction_batches(portal_program_id, session_pda, validator, include_begin)
-            .into_iter()
-            .map(|instructions| {
-                sign_settlement_transaction(&instructions, validator, recent_blockhash)
-            })
-            .collect()
+        self.portal_instruction_batches_inner(
+            portal_program_id,
+            session_pda,
+            validator,
+            include_begin,
+            effect_commitment,
+        )
+        .into_iter()
+        .map(|instructions| sign_settlement_transaction(&instructions, validator, recent_blockhash))
+        .collect()
     }
 
     pub fn portal_instruction_batches(
@@ -261,11 +296,32 @@ impl SettlementPlan {
         validator: &Keypair,
         include_begin: bool,
     ) -> Vec<Vec<Instruction>> {
+        if self.is_empty() {
+            return vec![];
+        }
+        self.portal_instruction_batches_inner(
+            portal_program_id,
+            session_pda,
+            validator,
+            include_begin,
+            self.checksum,
+        )
+    }
+
+    fn portal_instruction_batches_inner(
+        &self,
+        portal_program_id: Pubkey,
+        session_pda: Pubkey,
+        validator: &Keypair,
+        include_begin: bool,
+        effect_commitment: [u8; 32],
+    ) -> Vec<Vec<Instruction>> {
         let mut instructions = self.portal_instructions_inner(
             portal_program_id,
             session_pda,
             validator.pubkey(),
             include_begin,
+            effect_commitment,
         );
         if self.token_withdrawals.is_empty() {
             return split_settlement_instruction_batches(instructions, validator);
@@ -288,7 +344,16 @@ impl SettlementPlan {
         session_pda: Pubkey,
         validator: Pubkey,
     ) -> Vec<Instruction> {
-        self.portal_instructions_inner(portal_program_id, session_pda, validator, true)
+        if self.is_empty() {
+            return vec![];
+        }
+        self.portal_instructions_inner(
+            portal_program_id,
+            session_pda,
+            validator,
+            true,
+            self.checksum,
+        )
     }
 
     pub fn checkpoint_proposal_instruction(
@@ -297,7 +362,7 @@ impl SettlementPlan {
         session_pda: Pubkey,
         validator: Pubkey,
         challenge_window_slots: u64,
-        previous_state_root: [u8; 32],
+        commitment: &CheckpointCommitmentV1,
     ) -> Instruction {
         let (checkpoint, _) = find_checkpoint_pda(&portal_program_id, &session_pda, self.er_slot);
         let (cursor, _) = find_checkpoint_cursor_pda(&portal_program_id, &session_pda);
@@ -312,14 +377,14 @@ impl SettlementPlan {
             ],
             data: borsh::to_vec(&PortalInstruction::ProposeCheckpoint(ProposeCheckpoint {
                 er_slot: self.er_slot,
-                step_count: 1,
-                previous_state_root,
-                new_state_root: self.checksum,
-                trace_root: self.checksum,
-                tx_effect_root: self.checksum,
-                readonly_l1_root: [0; 32],
-                da_commitment: self.checksum,
-                effect_commitment: self.checksum,
+                step_count: u64::from(commitment.step_count),
+                previous_state_root: commitment.previous_state_root,
+                new_state_root: commitment.new_state_root,
+                trace_root: commitment.trace_root,
+                tx_effect_root: commitment.transaction_effect_root,
+                readonly_l1_root: commitment.readonly_l1_root,
+                da_commitment: commitment.da_commitment,
+                effect_commitment: commitment.effect_commitment,
                 challenge_window_slots,
             }))
             .unwrap(),
@@ -356,6 +421,7 @@ impl SettlementPlan {
         session_pda: Pubkey,
         validator: Pubkey,
         include_begin: bool,
+        effect_commitment: [u8; 32],
     ) -> Vec<Instruction> {
         if self.has_unsupported_changes() {
             warn!(
@@ -363,7 +429,8 @@ impl SettlementPlan {
                 self.unsupported_changes
             );
         }
-        if self.is_empty() {
+        // A bound zero-effect checkpoint still needs Begin/Finish to release admission.
+        if self.is_empty() && self.has_unsupported_changes() {
             return vec![];
         }
 
@@ -387,6 +454,7 @@ impl SettlementPlan {
                 data: borsh::to_vec(&PortalInstruction::BeginSettlement(BeginSettlement {
                     er_slot: self.er_slot,
                     checksum: self.checksum,
+                    effect_commitment,
                 }))
                 .unwrap(),
             });
@@ -573,7 +641,7 @@ pub fn token_withdrawal_transactions(
     portal_program_id: Pubkey,
     session_pda: Pubkey,
     er_slot: Slot,
-    checksum: [u8; 32],
+    effect_commitment: [u8; 32],
     validator: &Keypair,
     recent_blockhash: Hash,
 ) -> Vec<Transaction> {
@@ -609,7 +677,7 @@ pub fn token_withdrawal_transactions(
                 data: borsh::to_vec(
                     &northstar_token_bridge::instruction::TokenBridgeInstruction::SettleWithdrawal {
                         er_slot,
-                        checksum,
+                        checksum: effect_commitment,
                         amount: withdrawal.amount,
                         withdrawn: withdrawal.withdrawn,
                         decimals: withdrawal.decimals,
@@ -1472,14 +1540,29 @@ mod tests {
                 Pubkey::new_unique()
             )
             .is_empty());
+        let portal_program_id = Pubkey::new_unique();
+        let session_pda = Pubkey::new_unique();
+        let commitment = CheckpointCommitmentV1 {
+            version: 1,
+            session: session_pda,
+            er_slot: plan.er_slot,
+            step_count: 16,
+            previous_state_root: [1; 32],
+            new_state_root: [2; 32],
+            trace_root: [3; 32],
+            transaction_effect_root: [4; 32],
+            readonly_l1_root: [5; 32],
+            da_commitment: [6; 32],
+            effect_commitment: [7; 32],
+        };
         assert!(
             plan.checkpoint_proposal_transaction(
-                Pubkey::new_unique(),
-                Pubkey::new_unique(),
+                portal_program_id,
+                session_pda,
                 &Keypair::new(),
                 Hash::new_unique(),
                 10,
-                [0; 32],
+                &commitment,
             )
             .is_some(),
             "token-only settlement still needs a checkpoint proposal",
@@ -1650,5 +1733,76 @@ mod tests {
             PortalInstruction::try_from_slice(&instructions[4].data).unwrap(),
             PortalInstruction::FinishSettlement(_)
         ));
+    }
+
+    #[test]
+    fn checkpoint_bound_empty_plan_finishes_without_effects() {
+        use borsh::BorshDeserialize;
+        let mut plan = SettlementPlan {
+            er_slot: 9,
+            checksum: [0; 32],
+            chunks: vec![],
+            owner_changes: vec![],
+            lamport_changes: vec![],
+            receipt_balances: vec![],
+            token_withdrawals: vec![],
+            unsupported_changes: vec![],
+        };
+        plan.checksum = plan.recomputed_checksum();
+        let validator = Keypair::new();
+        let portal = Pubkey::new_unique();
+        let session = Pubkey::new_unique();
+        assert!(plan
+            .portal_instructions(portal, session, validator.pubkey())
+            .is_empty());
+        assert!(plan
+            .portal_transactions(portal, session, &validator, Hash::new_unique())
+            .is_empty());
+        assert!(plan
+            .portal_retry_transactions_after_begin(portal, session, &validator, Hash::new_unique())
+            .is_empty());
+        assert!(plan
+            .portal_instruction_batches(portal, session, &validator, true)
+            .is_empty());
+        for include_begin in [true, false] {
+            let transactions = plan.portal_transactions_with_effect_commitment(
+                portal,
+                session,
+                &validator,
+                Hash::new_unique(),
+                [7; 32],
+                include_begin,
+            );
+            let instructions: Vec<_> = transactions
+                .iter()
+                .flat_map(|tx| &tx.message.instructions)
+                .map(|ix| PortalInstruction::try_from_slice(&ix.data).unwrap())
+                .collect();
+            assert_eq!(instructions.len(), if include_begin { 2 } else { 1 });
+            if include_begin {
+                assert!(
+                    matches!(&instructions[0], PortalInstruction::BeginSettlement(value) if value.effect_commitment == [7; 32])
+                );
+            }
+            assert!(matches!(
+                instructions.last().unwrap(),
+                PortalInstruction::FinishSettlement(_)
+            ));
+        }
+        plan.unsupported_changes
+            .push(SettlementUnsupportedChange::TooManyLamportChanges {
+                count: MAX_SETTLEMENT_LAMPORT_ACCOUNTS + 1,
+                max: MAX_SETTLEMENT_LAMPORT_ACCOUNTS,
+            });
+        assert!(plan
+            .portal_transactions_with_effect_commitment(
+                portal,
+                session,
+                &validator,
+                Hash::new_unique(),
+                [7; 32],
+                true,
+            )
+            .is_empty());
     }
 }

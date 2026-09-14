@@ -1,4 +1,5 @@
 use {
+    solana_account::AccountSharedData,
     solana_clock::{Slot, UnixTimestamp},
     solana_commitment_config::CommitmentConfig,
     solana_pubkey::Pubkey,
@@ -10,7 +11,7 @@ use {
         TransactionWithStatusMeta, VersionedTransactionWithStatusMeta,
     },
     std::{
-        collections::{BTreeMap, HashMap},
+        collections::{BTreeMap, HashMap, VecDeque},
         sync::RwLock,
     },
 };
@@ -36,6 +37,26 @@ struct ErSlotHistory {
     signatures: Vec<Signature>,
 }
 
+// Sonic: Full account values needed to reconstruct a supported replay witness.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ErReplayAccountSnapshot {
+    pub transaction_index: u32,
+    pub key: Pubkey,
+    pub pre_account: AccountSharedData,
+    pub post_account: AccountSharedData,
+    pub touched: bool,
+}
+
+// Sonic: Checkpoint-scoped execution material omitted from standard RPC metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ErReplayCapture {
+    pub reexecution_snapshot: Option<Vec<u8>>,
+    pub accounts: Vec<ErReplayAccountSnapshot>,
+    pub loaded_accounts_data_size: u64,
+    pub transaction_fee: u64,
+    pub prioritization_fee: u64,
+}
+
 /// Slim performance sample for ER, mapped 1:1 onto `RpcPerfSample`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ErPerfSample {
@@ -48,15 +69,20 @@ pub struct ErPerfSample {
 
 /// Maximum number of non-empty ER slots retained by default.
 pub const DEFAULT_MAX_RETAINED_SLOTS: usize = 10_000;
+/// Maximum number of checkpoint replay captures retained by default.
+pub const DEFAULT_MAX_REPLAY_CAPTURES: usize = 256;
 #[derive(Default)]
 struct ErHistoryInner {
     slots: BTreeMap<Slot, ErSlotHistory>,
     transactions: HashMap<Signature, ConfirmedTransactionWithStatusMeta>,
+    replay_captures: HashMap<Signature, ErReplayCapture>,
+    replay_capture_order: VecDeque<Signature>,
 }
 
 pub struct ErHistoryStore {
     inner: RwLock<ErHistoryInner>,
     max_retained_slots: usize,
+    max_replay_captures: usize,
 }
 
 impl Default for ErHistoryStore {
@@ -67,9 +93,14 @@ impl Default for ErHistoryStore {
 
 impl ErHistoryStore {
     pub fn new(max_retained_slots: usize) -> Self {
+        Self::new_with_replay_limit(max_retained_slots, DEFAULT_MAX_REPLAY_CAPTURES)
+    }
+
+    pub fn new_with_replay_limit(max_retained_slots: usize, max_replay_captures: usize) -> Self {
         Self {
             inner: RwLock::new(ErHistoryInner::default()),
             max_retained_slots,
+            max_replay_captures,
         }
     }
 
@@ -124,9 +155,59 @@ impl ErHistoryStore {
             if let Some(slot_history) = inner.slots.remove(&slot) {
                 for signature in slot_history.signatures {
                     inner.transactions.remove(&signature);
+                    inner.replay_captures.remove(&signature);
                 }
+                inner
+                    .replay_capture_order
+                    .retain(|signature| inner.replay_captures.contains_key(signature));
             }
         }
+    }
+
+    // Sonic: Replay captures are immutable, bounded, and only accepted for
+    // successful transactions already present in ER history.
+    pub fn record_replay_capture(&self, signature: Signature, capture: ErReplayCapture) -> bool {
+        if capture.reexecution_snapshot.as_ref().is_some_and(|bytes| {
+            bytes.len() > solana_runtime::bank::er_replay::MAX_ER_REPLAY_SNAPSHOT_BYTES
+        }) {
+            return false;
+        }
+        let mut inner = self.inner.write().unwrap();
+        let Some(transaction) = inner.transactions.get(&signature) else {
+            return false;
+        };
+        if transaction
+            .tx_with_meta
+            .get_status_meta()
+            .is_none_or(|meta| meta.status.is_err())
+        {
+            return false;
+        }
+        if let Some(existing) = inner.replay_captures.get(&signature) {
+            return existing == &capture;
+        }
+        inner.replay_captures.insert(signature, capture);
+        inner.replay_capture_order.push_back(signature);
+        while inner.replay_capture_order.len() > self.max_replay_captures {
+            if let Some(expired) = inner.replay_capture_order.pop_front() {
+                inner.replay_captures.remove(&expired);
+            }
+        }
+        true
+    }
+
+    pub fn get_replay_capture(
+        &self,
+        signature: &Signature,
+        commitment: CommitmentConfig,
+    ) -> Option<ErReplayCapture> {
+        let inner = self.inner.read().unwrap();
+        let transaction = inner.transactions.get(signature)?;
+        let slot_history = inner.slots.get(&transaction.slot)?;
+        if !slot_visible_at_commitment(slot_history, commitment) {
+            return None;
+        }
+        inner.replay_captures.get(signature).cloned()
     }
 
     pub fn finalize_slot(&self, bank: &Bank) {
@@ -720,6 +801,84 @@ mod tests {
             store
                 .get_transaction(&signatures[2], CommitmentConfig::confirmed())
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn replay_capture_is_immutable_commitment_aware_and_bounded() {
+        let store = ErHistoryStore::new_with_replay_limit(3, 1);
+        let payer = Keypair::new();
+        let recipient = Pubkey::new_unique();
+        let bank = create_test_bank();
+        let first = create_test_tx(&bank, &payer, &recipient);
+        let first_signature = first.transaction.signatures[0];
+        assert_eq!(store.record_transaction(&bank, first), Some(0));
+
+        let account = AccountSharedData::new(10, 4, &Pubkey::new_unique());
+        let first_capture = ErReplayCapture {
+            reexecution_snapshot: None,
+            accounts: vec![ErReplayAccountSnapshot {
+                transaction_index: 0,
+                key: payer.pubkey(),
+                pre_account: account.clone(),
+                post_account: account,
+                touched: true,
+            }],
+            loaded_accounts_data_size: 4,
+            transaction_fee: 5_000,
+            prioritization_fee: 0,
+        };
+        let mut oversized = first_capture.clone();
+        oversized.reexecution_snapshot = Some(vec![
+            0;
+            solana_runtime::bank::er_replay::MAX_ER_REPLAY_SNAPSHOT_BYTES
+                + 1
+        ]);
+        assert!(!store.record_replay_capture(first_signature, oversized));
+        assert!(store.record_replay_capture(first_signature, first_capture.clone()));
+        assert!(store.record_replay_capture(first_signature, first_capture.clone()));
+        let mut changed = first_capture.clone();
+        changed.loaded_accounts_data_size = 1;
+        assert!(!store.record_replay_capture(first_signature, changed));
+        let mut changed = first_capture.clone();
+        changed.reexecution_snapshot = Some(vec![1]);
+        assert!(!store.record_replay_capture(first_signature, changed));
+        assert_eq!(
+            store.get_replay_capture(&first_signature, CommitmentConfig::confirmed()),
+            Some(first_capture)
+        );
+        assert!(
+            store
+                .get_replay_capture(&first_signature, CommitmentConfig::finalized())
+                .is_none()
+        );
+        store.finalize_slot(&bank);
+        assert!(
+            store
+                .get_replay_capture(&first_signature, CommitmentConfig::finalized())
+                .is_some()
+        );
+
+        let mut second = create_test_tx(&bank, &payer, &recipient);
+        second.transaction.signatures[0] = Signature::from([2; 64]);
+        let second_signature = second.transaction.signatures[0];
+        assert_eq!(store.record_transaction(&bank, second), Some(1));
+        let second_capture = ErReplayCapture {
+            reexecution_snapshot: None,
+            accounts: vec![],
+            loaded_accounts_data_size: 0,
+            transaction_fee: 5_000,
+            prioritization_fee: 0,
+        };
+        assert!(store.record_replay_capture(second_signature, second_capture.clone()));
+        assert!(
+            store
+                .get_replay_capture(&first_signature, CommitmentConfig::confirmed())
+                .is_none()
+        );
+        assert_eq!(
+            store.get_replay_capture(&second_signature, CommitmentConfig::confirmed()),
+            Some(second_capture)
         );
     }
 

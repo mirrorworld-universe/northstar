@@ -310,6 +310,46 @@ fn live_validator_spl_token_bridge_round_trip() {
         alice_er,
         DEPOSIT_AMOUNT - TRANSFER_AMOUNT + MID_DELEGATION_DEPOSIT,
     );
+    let origin = Pubkey::find_program_address(
+        &[b"token_deposit_origin", alice_er.as_ref()],
+        &northstar_token_bridge::id(),
+    )
+    .0;
+    let origin: northstar_token_bridge::state::TokenDepositProgress =
+        borsh::from_slice(&rpc.get_account_data(&origin).unwrap()).unwrap();
+    let cursor = Pubkey::find_program_address(
+        &[
+            b"token_deposit_cursor",
+            alice_er.as_ref(),
+            &origin.balance.to_le_bytes(),
+        ],
+        &northstar_token_bridge::id(),
+    )
+    .0;
+    let progress: northstar_token_bridge::state::TokenDepositProgress =
+        borsh::from_slice(&er_rpc.get_account_data(&cursor).unwrap()).unwrap();
+    assert_eq!(progress.balance, DEPOSIT_AMOUNT + MID_DELEGATION_DEPOSIT);
+    let credits = er_rpc.get_signatures_for_address(&cursor).unwrap().into_iter()
+        .filter(|entry| entry.err.is_none())
+        .filter(|entry| {
+            let signature = entry.signature.parse::<solana_signature::Signature>().unwrap();
+            let confirmed = er_rpc.get_transaction_with_config(&signature,
+                solana_rpc_client_api::config::RpcTransactionConfig {
+                    encoding: Some(solana_transaction_status_client_types::UiTransactionEncoding::Base64),
+                    commitment: Some(CommitmentConfig::confirmed()),
+                    max_supported_transaction_version: Some(0),
+                }).unwrap();
+            let transaction = confirmed.transaction.transaction.decode().unwrap();
+            transaction.message.instructions().iter().any(|instruction| {
+                transaction.message.static_account_keys()[instruction.program_id_index as usize] == northstar_token_bridge::id()
+                    && matches!(borsh::from_slice::<TokenBridgeInstruction>(&instruction.data),
+                        Ok(TokenBridgeInstruction::ApplyTokenDeposit { balance }) if balance == DEPOSIT_AMOUNT + MID_DELEGATION_DEPOSIT)
+            })
+        }).count();
+    assert_eq!(
+        credits, 1,
+        "the deposit must execute exactly once in ER history"
+    );
 
     validator.kill();
     let _ = std::fs::remove_dir_all(&ledger);
@@ -448,6 +488,14 @@ fn deposit_ix(
             AccountMeta::new(deposit_receipt, false),
             AccountMeta::new_readonly(delegation_record, false),
             AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new_readonly(
+                Pubkey::find_program_address(
+                    &[b"undelegation_request", er_account.as_ref()],
+                    &PORTAL_PROGRAM_ID,
+                )
+                .0,
+                false,
+            ),
         ],
         data: borsh::to_vec(&TokenBridgeInstruction::Deposit {
             amount,
@@ -524,6 +572,23 @@ fn delegate_er_ix(
             AccountMeta::new(delegation_record, false),
             AccountMeta::new(buffer, false),
             AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new_readonly(
+                northstar_token_bridge::find_token_deposit_receipt_pda(
+                    &northstar_token_bridge::id(),
+                    &session_bridge,
+                    &er_account,
+                )
+                .0,
+                false,
+            ),
+            AccountMeta::new(
+                Pubkey::find_program_address(
+                    &[b"token_deposit_origin", er_account.as_ref()],
+                    &northstar_token_bridge::id(),
+                )
+                .0,
+                false,
+            ),
         ],
         data: borsh::to_vec(&TokenBridgeInstruction::DelegateErTokenAccount { grid_id: GRID_ID })
             .unwrap(),

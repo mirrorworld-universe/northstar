@@ -1,15 +1,11 @@
+pub mod checkpoint;
 pub mod commitment;
 #[cfg(feature = "host")]
 pub mod fixture;
 
 use {
-    ark_bn254::Fr,
     borsh::{BorshDeserialize, BorshSerialize},
-    commitment::{
-        bytes, fold, fr_to_bytes, list, CommitmentError, ACCOUNT_LIST_TAG, ACCOUNT_TAG,
-        READONLY_TAG, RESULT_TAG, RUNTIME_TAG, SESSION_CONTEXT_TAG, SETTLEMENT_TAG,
-        TRACE_SCHEMA_TAG, TRANSACTION_TAG, TX_EFFECT_TAG, VM_TABLE_TAG,
-    },
+    commitment::{bytes, fr_to_bytes, CommitmentError, SESSION_CONTEXT_TAG},
     ed25519_dalek::{Signature, VerifyingKey},
     northstar_zk_types::{
         ErStepPublicInputsV1, FrBytes, FullTransactionPublicInputsV1,
@@ -20,7 +16,7 @@ use {
 };
 
 pub const WITNESS_MAGIC_V1: [u8; 8] = *b"NSTXPF01";
-pub const WITNESS_VERSION_V1: u16 = 1;
+pub const WITNESS_VERSION_V2: u16 = 2;
 pub const TRACE_SCHEMA_VERSION_V1: u16 = 1;
 pub const SBPF_VERSION_V0: u8 = 0;
 pub const SOL_MEMCPY_KEY: u32 = 0x717c_c4a3;
@@ -29,6 +25,28 @@ pub const MM_PROGRAM_START: u64 = 0x1_0000_0000;
 pub const MM_STACK_START: u64 = 0x2_0000_0000;
 pub const MM_HEAP_START: u64 = 0x3_0000_0000;
 pub const MM_INPUT_START: u64 = 0x4_0000_0000;
+
+pub const SESSION_CONTEXT_DOMAIN_V1: &[u8] = b"northstar-session-context-v1";
+pub const SETTLEMENT_POLICY_VERSION_V1: u8 = 1;
+
+pub fn session_context_bytes_v1(
+    portal_program: [u8; 32],
+    session: [u8; 32],
+    grid_id: u64,
+    nonce: u128,
+    validator: [u8; 32],
+) -> Vec<u8> {
+    let mut context = Vec::with_capacity(149);
+    context.extend_from_slice(SESSION_CONTEXT_DOMAIN_V1);
+    context.extend_from_slice(&portal_program);
+    context.extend_from_slice(&session);
+    context.extend_from_slice(&grid_id.to_le_bytes());
+    context.extend_from_slice(&nonce.to_le_bytes());
+    context.extend_from_slice(&validator);
+    context.push(SETTLEMENT_POLICY_VERSION_V1);
+    debug_assert_eq!(context.len(), 149);
+    context
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshDeserialize, BorshSerialize)]
 pub struct AccountWitnessV1 {
@@ -116,6 +134,7 @@ pub struct ReplayWitnessV1 {
     pub post_accounts: Vec<AccountWitnessV1>,
     pub rollback_accounts: Vec<AccountWitnessV1>,
     pub readonly_accounts: Vec<AccountWitnessV1>,
+    pub checkpoint: checkpoint::CheckpointBindingV1,
     pub runtime: RuntimeWitnessV1,
     pub event_tags: Vec<u8>,
     pub program_words: Vec<ProgramWordV1>,
@@ -183,7 +202,7 @@ pub fn replay(witness: &ReplayWitnessV1) -> Result<ErStepPublicInputsV1, ReplayE
         validate_accounts_and_result(witness)
     })?;
     validate_trace(witness, elf_hash)?;
-    let public = track("poseidon_commitments", || {
+    let public = track("checkpoint_commitments", || {
         derive_public_inputs_with_elf_hash(witness, elf_hash)
     })?;
     FullTransactionPublicInputsV1::try_from(public).map_err(|_| ReplayError::Domain)?;
@@ -194,7 +213,7 @@ fn validate_header(witness: &ReplayWitnessV1) -> Result<(), ReplayError> {
     if witness.magic != WITNESS_MAGIC_V1 {
         return Err(ReplayError::Magic);
     }
-    if witness.version != WITNESS_VERSION_V1
+    if witness.version != WITNESS_VERSION_V2
         || witness.proof_kind != ER_STEP_PROOF_KIND_FULL_TRANSACTION
         || witness.proof_version != ER_STEP_PROOF_VERSION_V1
         || witness.trace_schema_version != TRACE_SCHEMA_VERSION_V1
@@ -673,30 +692,8 @@ fn derive_public_inputs_with_elf_hash(
     witness: &ReplayWitnessV1,
     elf_hash: [u8; 32],
 ) -> Result<ErStepPublicInputsV1, ReplayError> {
-    let transaction_commitment = transaction_commitment(witness)?;
-    let runtime_commitment = runtime_commitment(witness, elf_hash)?;
-    let result_commitment = result_commitment(witness)?;
-    let pre_state_root = account_list_commitment(ACCOUNT_LIST_TAG, &witness.pre_accounts)?;
-    let post_state_root = account_list_commitment(ACCOUNT_LIST_TAG, &witness.post_accounts)?;
-    let readonly_l1_root = account_list_commitment(READONLY_TAG, &witness.readonly_accounts)?;
-    let settlement_effect_root = account_list_commitment(SETTLEMENT_TAG, &witness.post_accounts)?;
-    let trace_schema = fold(
-        TRACE_SCHEMA_TAG,
-        &[
-            Fr::from(u64::from(witness.trace_schema_version)),
-            vm_table_commitment(witness)?,
-        ],
-    )?;
-    let tx_effect_root = fold(
-        TX_EFFECT_TAG,
-        &[
-            transaction_commitment,
-            runtime_commitment,
-            result_commitment,
-            trace_schema,
-            settlement_effect_root,
-        ],
-    )?;
+    let checkpoint = checkpoint::verify_checkpoint_binding(witness)?;
+    let _ = elf_hash;
     Ok(ErStepPublicInputsV1 {
         domain: FrBytes::er_step_domain_v1(
             ER_STEP_PROOF_KIND_FULL_TRANSACTION,
@@ -704,11 +701,16 @@ fn derive_public_inputs_with_elf_hash(
         ),
         session_context: fr_to_bytes(bytes(SESSION_CONTEXT_TAG, &witness.session_context)?),
         slot_step: FrBytes::from_u64_pair(witness.er_slot, witness.step_index),
-        pre_state_root: fr_to_bytes(pre_state_root),
-        post_state_root: fr_to_bytes(post_state_root),
-        tx_effect_root: fr_to_bytes(tx_effect_root),
-        readonly_l1_root: fr_to_bytes(readonly_l1_root),
-        settlement_effect_root: fr_to_bytes(settlement_effect_root),
+        pre_state_root: FrBytes::new(checkpoint.pre_state_root)
+            .map_err(|_| ReplayError::Commitment)?,
+        post_state_root: FrBytes::new(checkpoint.post_state_root)
+            .map_err(|_| ReplayError::Commitment)?,
+        tx_effect_root: FrBytes::new(checkpoint.transaction_effect_commitment)
+            .map_err(|_| ReplayError::Commitment)?,
+        readonly_l1_root: FrBytes::new(checkpoint.readonly_l1_root)
+            .map_err(|_| ReplayError::Commitment)?,
+        settlement_effect_root: FrBytes::new(checkpoint.settlement_effect_root)
+            .map_err(|_| ReplayError::Commitment)?,
     })
 }
 
@@ -720,104 +722,6 @@ pub fn public_inputs_bytes(public: ErStepPublicInputsV1) -> [u8; 256] {
         bytes[start..end].copy_from_slice(value);
     }
     bytes
-}
-
-fn transaction_commitment(witness: &ReplayWitnessV1) -> Result<Fr, ReplayError> {
-    fold(
-        TRANSACTION_TAG,
-        &[
-            bytes(1, &witness.transaction_bytes)?,
-            bytes(2, &witness.signature)?,
-            bytes(3, &Sha256::digest(&witness.message_bytes))?,
-            bytes(4, &witness.signer)?,
-            bytes(5, &witness.recent_blockhash)?,
-            bytes(6, &witness.instruction_data)?,
-        ],
-    )
-    .map_err(Into::into)
-}
-
-fn runtime_commitment(witness: &ReplayWitnessV1, elf_hash: [u8; 32]) -> Result<Fr, ReplayError> {
-    fold(
-        RUNTIME_TAG,
-        &[
-            Fr::from(u64::from(witness.proof_version)),
-            Fr::from(u64::from(witness.trace_schema_version)),
-            bytes(1, &witness.runtime.agave_revision)?,
-            bytes(2, &witness.runtime.northstar_revision)?,
-            bytes(3, &witness.runtime.feature_set_hash)?,
-            Fr::from(witness.runtime.lamports_per_signature),
-            Fr::from(witness.runtime.slot),
-            Fr::from(u64::from(witness.runtime.sbpf_version)),
-            bytes(4, &witness.runtime.vm_config_hash)?,
-            bytes(5, &witness.runtime.syscall_registry_hash)?,
-            bytes(6, &witness.runtime.program_id)?,
-            bytes(7, &witness.runtime.programdata_id)?,
-            Fr::from(witness.runtime.entry_pc),
-            bytes(8, &elf_hash)?,
-            bytes(9, &witness.runtime.program_hash)?,
-        ],
-    )
-    .map_err(Into::into)
-}
-
-fn result_commitment(witness: &ReplayWitnessV1) -> Result<Fr, ReplayError> {
-    fold(
-        RESULT_TAG,
-        &[
-            Fr::from(u64::from(witness.result.executed_success)),
-            Fr::from(u64::from(witness.result.transaction_error)),
-            Fr::from(u64::from(witness.result.instruction_error)),
-            Fr::from(u64::from(witness.result.instruction_index)),
-            Fr::from(u64::from(witness.result.custom_error)),
-            Fr::from(witness.result.executed_units),
-            Fr::from(witness.result.loaded_accounts_data_size),
-            Fr::from(witness.result.transaction_fee),
-            Fr::from(witness.result.prioritization_fee),
-            bytes(1, &witness.result.return_data)?,
-            bytes(2, &witness.result.log_commitment)?,
-        ],
-    )
-    .map_err(Into::into)
-}
-
-fn account_list_commitment(tag: u64, accounts: &[AccountWitnessV1]) -> Result<Fr, ReplayError> {
-    let commitments = accounts
-        .iter()
-        .map(account_commitment)
-        .collect::<Result<Vec<_>, _>>()?;
-    list(tag, &commitments).map_err(Into::into)
-}
-
-fn account_commitment(account: &AccountWitnessV1) -> Result<Fr, ReplayError> {
-    fold(
-        ACCOUNT_TAG,
-        &[
-            bytes(1, &account.key)?,
-            Fr::from(u64::from(account.signer)),
-            Fr::from(u64::from(account.writable)),
-            Fr::from(u64::from(account.invoked)),
-            Fr::from(account.lamports),
-            bytes(2, &account.owner)?,
-            Fr::from(u64::from(account.executable)),
-            Fr::from(account.rent_epoch),
-            bytes(3, &account.data)?,
-        ],
-    )
-    .map_err(Into::into)
-}
-
-fn vm_table_commitment(witness: &ReplayWitnessV1) -> Result<Fr, ReplayError> {
-    let mut hasher = Sha256::new();
-    hasher.update((witness.vm_rows.len() as u64).to_le_bytes());
-    for row in &witness.vm_rows {
-        for register in row.registers {
-            hasher.update(register.to_le_bytes());
-        }
-        hasher.update(row.instruction);
-        hasher.update(row.syscall_key.to_le_bytes());
-    }
-    bytes(VM_TABLE_TAG, &hasher.finalize()).map_err(Into::into)
 }
 
 struct ParsedLegacyTransaction<'a> {
@@ -916,6 +820,62 @@ fn take_array<const N: usize>(bytes: &[u8], cursor: &mut usize) -> Result<[u8; N
 #[cfg(all(test, feature = "host"))]
 mod tests {
     use {super::*, crate::fixture::build_replay_witness_v1, ed25519_dalek::Verifier as _};
+
+    #[test]
+    fn canonical_session_context_is_length_delimited() {
+        let context = session_context_bytes_v1([1; 32], [2; 32], 3, 4, [5; 32]);
+        assert_eq!(context.len(), 149);
+        assert!(context.starts_with(SESSION_CONTEXT_DOMAIN_V1));
+        assert_ne!(
+            context,
+            session_context_bytes_v1([1; 32], [2; 32], 4, 4, [5; 32])
+        );
+        assert_ne!(
+            context,
+            session_context_bytes_v1([1; 32], [2; 32], 3, 5, [5; 32])
+        );
+    }
+
+    #[test]
+    fn public_inputs_are_checkpoint_authenticated() {
+        let witness = build_replay_witness_v1().unwrap();
+        let checkpoint = checkpoint::verify_checkpoint_binding(&witness).unwrap();
+        let public = replay(&witness).unwrap();
+        assert_eq!(public.pre_state_root.to_bytes(), checkpoint.pre_state_root);
+        assert_eq!(
+            public.post_state_root.to_bytes(),
+            checkpoint.post_state_root
+        );
+        assert_eq!(
+            public.tx_effect_root.to_bytes(),
+            checkpoint.transaction_effect_commitment,
+        );
+        assert_eq!(
+            public.readonly_l1_root.to_bytes(),
+            checkpoint.readonly_l1_root,
+        );
+        assert_eq!(
+            public.settlement_effect_root.to_bytes(),
+            checkpoint.settlement_effect_root,
+        );
+    }
+
+    #[test]
+    fn checkpoint_authentication_paths_fail_closed() {
+        let mut transaction = build_replay_witness_v1().unwrap();
+        transaction.checkpoint.transaction_effect_path.siblings[0][0] ^= 1;
+        assert_eq!(replay(&transaction), Err(ReplayError::Commitment));
+
+        let mut readonly = build_replay_witness_v1().unwrap();
+        readonly.checkpoint.readonly_l1_values[0]
+            .value
+            .observed_l1_slot += 1;
+        assert_eq!(replay(&readonly), Err(ReplayError::Commitment));
+
+        let mut settlement = build_replay_witness_v1().unwrap();
+        settlement.checkpoint.settlement_effects[0].path.siblings[0][0] ^= 1;
+        assert_eq!(replay(&settlement), Err(ReplayError::Commitment));
+    }
 
     fn row(opcode: u8, pc: u64) -> VmRowV1 {
         let mut registers = [0; 12];

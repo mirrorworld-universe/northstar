@@ -68,3 +68,17 @@ pub struct BridgeBuffer;
 impl BridgeBuffer {
     pub const SEED_PREFIX: &'static [u8] = b"northstar-token-buffer";
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct TokenDepositProgress {
+    pub discriminator: u8,
+    pub balance: u64,
+    pub bump: u8,
+}
+
+impl TokenDepositProgress {
+    pub const ORIGIN_DISCRIMINATOR: u8 = 4;
+    pub const CURSOR_DISCRIMINATOR: u8 = 5;
+    pub const ORIGIN_SEED: &'static [u8] = b"token_deposit_origin";
+    pub const CURSOR_SEED: &'static [u8] = b"token_deposit_cursor";
+}

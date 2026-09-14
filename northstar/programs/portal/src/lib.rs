@@ -30,12 +30,16 @@ compile_error!(
 pub const MAX_SETTLEMENT_CHUNK: usize = 700;
 pub const MAX_SETTLEMENT_LAMPORT_ACCOUNTS: usize = 7;
 pub const CHECKPOINT_PROPOSER_BOND_LAMPORTS: u64 = 1_000_000;
+pub const MAX_CHECKPOINT_CADENCE_L1_SLOTS: u64 = 75;
+pub const CANONICAL_CHECKPOINT_STEPS: u64 = 16;
+pub const TRACE_AUTH_PATH_NODES: usize = 5;
+pub const TX_EFFECT_AUTH_PATH_NODES: usize = 4;
 /// About one hour at Solana's target 400ms slot time.
 pub const MAX_CHALLENGE_WINDOW_SLOTS: u64 = 9_000;
 /// Five-minute response budget, capped by checkpoint's hard deadline.
 pub const CHALLENGE_TURN_WINDOW_SLOTS: u64 = 750;
-// Groth16-class v1 cap. Larger zkVM/STARK receipts need a future multi-account proof store.
-pub const MAX_STEP_PROOF_BYTES: usize = 256;
+// SP1 v1 envelope: 4-byte key prefix + 3 metadata fields + 256-byte Groth16 proof.
+pub const MAX_STEP_PROOF_BYTES: usize = 356;
 pub const MAX_STEP_PROOF_CHUNK: usize = 128;
 
 #[cfg(not(feature = "no-entrypoint"))]

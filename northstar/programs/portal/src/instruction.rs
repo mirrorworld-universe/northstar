@@ -59,6 +59,7 @@ pub struct OpenSession {
 pub struct BeginSettlement {
     pub er_slot: u64,
     pub checksum: Hash32,
+    pub effect_commitment: Hash32,
 }
 
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
@@ -138,7 +139,10 @@ pub struct CreateStepProof {
     pub proof_kind: u8,
     pub proof_version: u8,
     pub step_index: u64,
+    pub session_context: Hash32,
     pub tx_effect_root: Hash32,
+    pub tx_effect_path_len: u8,
+    pub tx_effect_path: [[u8; 32]; 4],
     pub readonly_l1_root: Hash32,
     pub settlement_effect_root: Hash32,
 }
@@ -203,6 +207,8 @@ pub struct RespondChallenge {
     pub er_slot: u64,
     pub claimed_step: u64,
     pub claimed_state_root: Hash32,
+    pub trace_path_len: u8,
+    pub trace_path: [[u8; 32]; 5],
     pub da_payload_root: Hash32,
     pub da_inclusion_proof_hash: Hash32,
 }
@@ -221,6 +227,6 @@ pub struct TimeoutChallenge {
 #[cfg(feature = "zk-verifier-prototype")]
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
 pub struct VerifyErStepProofV1 {
-    pub proof: [u8; 256],
+    pub proof: [u8; 356],
     pub public_inputs: [u8; 256],
 }

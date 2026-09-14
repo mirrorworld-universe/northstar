@@ -17,6 +17,18 @@ A checkpoint binds one ordered ER execution trace:
 
 All hashes are 32 bytes. Hash trees use domain-separated SHA-256, ordered children, and explicit leaf indexes. Empty trees use a domain-specific empty root; zero is not an implicit empty-tree value.
 
+The first finalized checkpoint establishes the session's initial authenticated ER state root. Every later checkpoint must start at the cursor's latest finalized state root. Portal's settlement checksum remains a separate incremental transcript-integrity value; `BeginSettlement` binds both that checksum and the checkpoint's `effect_commitment`, so the Portal write protocol does not force unrelated checkpoint roots to reuse the settlement checksum.
+
+### Canonical checkpoint and DA encoding
+
+Checkpoint format v1 contains 1–16 actual steps and N+1 state roots. The canonical acceptance benchmark remains 16 steps and 17 state roots. It uses Borsh encoding with explicit format, page, step, leaf, and list indexes. One immutable DA page contains each step's serialized transaction, canonical execution effect, sorted pre/post state-account commitments, per-step transaction/effect commitment, readonly L1 values, settlement effects, and authentication paths. The page re-derives both state roots from those account commitments instead of accepting unbacked roots. The sealed manifest binds session, ER slot, all checkpoint roots, raw codec, empty dictionary hash, page indexes, encoded/uncompressed lengths, and page hashes. `da_commitment` is the count-bound Merkle root of the manifest followed by the N ordered page hashes.
+
+Trees pad to the next power of two with domain-separated, position-bound empty leaves; they never duplicate the final real leaf. Node hashes include tree kind and level. Final roots include the original leaf count, so missing or trailing leaves cannot share a root.
+
+State roots, per-step transaction/effect commitments, `readonly_l1_root`, and `effect_commitment` enter the BN254 proof ABI. Format v1 explicitly projects these SHA-256 digests into Fr by clearing the top three bits. This is a named 253-bit field projection, not implicit modulo reduction. `trace_root`, checkpoint `tx_effect_root`, and `da_commitment` retain their full SHA-256 values.
+
+The runtime captures successful committed transactions from SVM's pre-commit results without serializing batch execution. Each step records the exact wire transaction, executed units, sorted touched-account effects, readonly loaded-account values at the latest observed L1 slot, and sorted state-account commitments before and after applying the touched effects to the ER overlay. Accounts first touched in a checkpoint window are initialized from their pre-commit bank values. Failed or rejected transactions do not consume a checkpoint step. The first 16 successful steps seal one immutable artifact. When settlement is due and no earlier checkpoint is active, the manager seals a non-empty partial batch under the bank-operation lock before building its settlement plan. Empty batches do not produce checkpoints. Existing forced-undelegation scheduling remains available. ER transaction admission pauses after sealing until the artifact is consumed following settlement; the next window retains the post-state map. Portal rejects session cadence above 75 L1 slots. Outstanding checkpoints retain backpressure rather than allowing overlapping proposals.
+
 ## One disputed step
 
 One disputed step is transition `i -> i + 1` for one serialized ER transaction/effect leaf. Its pre-state root is trace root `i`; its post-state root is trace root `i + 1`. It includes deterministic transaction sanitization, the declared writable account transition, readonly L1 inputs, execution result/effects, and the settlement effects attributed to that transaction.
@@ -28,7 +40,7 @@ The v1 proof does not prove a complete SVM implementation. It proves the ER-shap
 `northstar-er-step-v1` uses this canonical ordered ABI. Portal hashes the same ordered byte values into `StepProofAccount.public_input_hash`; the Groth16 adapter may pack them into eight field elements without changing their meaning.
 
 1. Protocol domain: `northstar-er-step-v1`, `proof_kind`, and `proof_version`.
-2. Session context: Portal program, session pubkey, and checkpoint identity.
+2. Session context: Poseidon commitment to Portal program, session pubkey, grid id, session nonce, validator, and settlement-policy version.
 3. Position: `er_slot` and `step_index`.
 4. `pre_state_root`.
 5. `post_state_root`.
@@ -37,6 +49,7 @@ The v1 proof does not prove a complete SVM implementation. It proves the ER-shap
 8. `effect_commitment`, including the disputed step's settlement-effect membership witness.
 
 Integers are unsigned little-endian. No variable-length value enters public inputs directly; it is length-delimited in the witness and represented publicly by a domain-separated hash.
+All SHA-256 commitments entering these fields use the explicit format-v1 field projection defined above. Verifiers reject noncanonical field encodings rather than reducing them modulo Fr.
 
 ## Required witness
 

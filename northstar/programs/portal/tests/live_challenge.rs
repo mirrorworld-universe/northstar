@@ -19,6 +19,91 @@ use {
 const PORTAL_PROGRAM_ID: Pubkey =
     solana_pubkey::pubkey!("5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf");
 
+fn synthetic_state_root(index: u64) -> [u8; 32] {
+    let mut root = [0; 32];
+    root[24..].copy_from_slice(&(index + 1).to_be_bytes());
+    root
+}
+
+fn trace_leaf_hash(index: u32, state_root: &[u8; 32]) -> [u8; 32] {
+    solana_sha256_hasher::hashv(&[
+        b"northstar-checkpoint-v1",
+        b"trace",
+        b"leaf",
+        &36u64.to_le_bytes(),
+        &index.to_le_bytes(),
+        state_root,
+    ])
+    .to_bytes()
+}
+
+fn trace_node_hash(level: u32, left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    solana_sha256_hasher::hashv(&[
+        b"northstar-checkpoint-v1",
+        b"trace",
+        b"node",
+        &level.to_le_bytes(),
+        left,
+        right,
+    ])
+    .to_bytes()
+}
+
+fn synthetic_trace_layers(step_count: u64) -> Vec<Vec<[u8; 32]>> {
+    let count = (step_count + 1) as usize;
+    let width = count.next_power_of_two();
+    let mut leaves = (0..count)
+        .map(|index| trace_leaf_hash(index as u32, &synthetic_state_root(index as u64)))
+        .collect::<Vec<_>>();
+    leaves.extend((count..width).map(|index| {
+        solana_sha256_hasher::hashv(&[
+            b"northstar-checkpoint-v1",
+            b"trace",
+            b"empty-leaf",
+            &4u64.to_le_bytes(),
+            &(index as u32).to_le_bytes(),
+        ])
+        .to_bytes()
+    }));
+    let mut layers = vec![leaves];
+    let mut level = 0;
+    while layers.last().unwrap().len() > 1 {
+        let next = layers
+            .last()
+            .unwrap()
+            .chunks_exact(2)
+            .map(|pair| trace_node_hash(level, &pair[0], &pair[1]))
+            .collect();
+        layers.push(next);
+        level += 1;
+    }
+    layers
+}
+
+fn synthetic_trace_root(step_count: u64) -> [u8; 32] {
+    let layers = synthetic_trace_layers(step_count);
+    let inner = layers.last().unwrap()[0];
+    solana_sha256_hasher::hashv(&[
+        b"northstar-checkpoint-v1",
+        b"trace",
+        b"root",
+        &((step_count + 1) as u32).to_le_bytes(),
+        &inner,
+    ])
+    .to_bytes()
+}
+
+fn synthetic_trace_path(step_count: u64, state_index: u64) -> (u8, [[u8; 32]; 5]) {
+    let layers = synthetic_trace_layers(step_count);
+    let mut path = [[0; 32]; 5];
+    let mut index = state_index as usize;
+    for (level, layer) in layers[..layers.len() - 1].iter().enumerate() {
+        path[level] = layer[index ^ 1];
+        index /= 2;
+    }
+    ((layers.len() - 1) as u8, path)
+}
+
 #[test]
 #[ignore = "requires a Northstar solana-test-validator started with --portal"]
 fn live_validator_challenge_bisection_and_da_reveal() {
@@ -93,10 +178,10 @@ fn live_validator_challenge_bisection_and_da_reveal() {
             ],
             PortalInstruction::ProposeCheckpoint(ProposeCheckpoint {
                 er_slot,
-                step_count: 4,
-                previous_state_root: [0; 32],
-                new_state_root: [2; 32],
-                trace_root: [4; 32],
+                step_count: 16,
+                previous_state_root: synthetic_state_root(0),
+                new_state_root: synthetic_state_root(16),
+                trace_root: synthetic_trace_root(16),
                 tx_effect_root: [5; 32],
                 readonly_l1_root: [6; 32],
                 da_commitment: [7; 32],
@@ -134,8 +219,8 @@ fn live_validator_challenge_bisection_and_da_reveal() {
             challenge,
             da_proof,
             er_slot,
-            2,
-            [9; 32],
+            8,
+            synthetic_state_root(8),
         )],
     );
     send(
@@ -166,8 +251,8 @@ fn live_validator_challenge_bisection_and_da_reveal() {
             challenge,
             da_proof,
             er_slot,
-            3,
-            [10; 32],
+            12,
+            synthetic_state_root(12),
         )],
     );
 
@@ -175,9 +260,9 @@ fn live_validator_challenge_bisection_and_da_reveal() {
     let challenge_state = Challenge::try_from_slice(&challenge_account.data).unwrap();
     assert_eq!(
         (challenge_state.start_step, challenge_state.end_step),
-        (2, 4)
+        (8, 16)
     );
-    assert_eq!(challenge_state.midpoint_step, 3);
+    assert_eq!(challenge_state.midpoint_step, 12);
     assert_eq!(challenge_state.turn, ChallengeTurn::Challenger);
 
     let da_account = rpc.get_account(&da_proof).unwrap();
@@ -208,6 +293,8 @@ fn respond_ix(
             er_slot,
             claimed_step,
             claimed_state_root,
+            trace_path_len: synthetic_trace_path(16, claimed_step).0,
+            trace_path: synthetic_trace_path(16, claimed_step).1,
             da_payload_root: [7; 32],
             da_inclusion_proof_hash: [8; 32],
         }),
