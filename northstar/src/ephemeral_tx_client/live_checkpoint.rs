@@ -374,7 +374,7 @@ fn real_checkpoint_bisects_to_captured_transaction() {
         (selected_step as u64, selected_step as u64 + 1)
     );
     assert_eq!(state.turn, ChallengeTurn::Prove);
-    assert_eq!(u32::from(state.rounds), rounds);
+    assert_eq!(state.rounds, rounds);
     assert!(rounds <= usize::BITS - (step_count - 1).leading_zeros());
     if step_count == 16 {
         assert_eq!(rounds, 4);

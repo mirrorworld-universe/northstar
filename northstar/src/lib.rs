@@ -604,13 +604,15 @@ impl Manager {
         }
         let force_settlement = runtime.has_unapproved_undelegations();
         self.cleanup_terminal_checkpoint_plans(l1_bank, session_pda);
-        if let Some(plan) = self.pending_token_release_plan(l1_bank, session_pda) {
+        if let Some((plan, effect_commitment)) =
+            self.pending_token_release_plan(l1_bank, session_pda)
+        {
             let transactions = settlement::token_withdrawal_transactions(
                 &plan.token_withdrawals,
                 self.config.portal_program_id,
                 session_pda,
                 plan.er_slot,
-                plan.checksum,
+                effect_commitment,
                 self.config.manager_account.as_ref(),
                 recent_blockhash,
             );
@@ -942,7 +944,7 @@ impl Manager {
         &self,
         l1_bank: &Bank,
         session_pda: Pubkey,
-    ) -> Option<SettlementPlan> {
+    ) -> Option<(SettlementPlan, [u8; 32])> {
         let plans = self
             .checkpoint_plans
             .read()
@@ -953,27 +955,27 @@ impl Manager {
             })
             .collect::<Vec<_>>();
 
-        plans.into_iter().find(|plan| {
-            if plan.token_withdrawals.is_empty() || Self::token_withdrawals_complete(l1_bank, plan)
+        plans.into_iter().find_map(|plan| {
+            if plan.token_withdrawals.is_empty() || Self::token_withdrawals_complete(l1_bank, &plan)
             {
-                return false;
+                return None;
             }
-            let checkpoint =
+            let address =
                 find_checkpoint_pda(&self.config.portal_program_id, &session_pda, plan.er_slot).0;
-            l1_bank
-                .get_account(&checkpoint)
-                .filter(|account| account.owner() == &self.config.portal_program_id)
-                .and_then(|account| try_parse_raw_portal_account(account.data()))
-                .is_some_and(|account| {
-                    matches!(
-                        account,
-                        PortalAccount::Checkpoint(checkpoint)
-                            if checkpoint.is_valid()
-                                && checkpoint.session == session_pda
-                                && checkpoint.er_slot == plan.er_slot
-                                && checkpoint.status == CheckpointStatus::Settled
-                    )
-                })
+            let account = l1_bank.get_account(&address)?;
+            if account.owner() != &self.config.portal_program_id {
+                return None;
+            }
+            let PortalAccount::Checkpoint(checkpoint) =
+                try_parse_raw_portal_account(account.data())?
+            else {
+                return None;
+            };
+            (checkpoint.is_valid()
+                && checkpoint.session == session_pda
+                && checkpoint.er_slot == plan.er_slot
+                && checkpoint.status == CheckpointStatus::Settled)
+                .then_some((plan, checkpoint.effect_commitment))
         })
     }
 
@@ -1214,7 +1216,7 @@ impl Manager {
             self.config.portal_program_id,
             session_pda,
             plan.er_slot,
-            plan.checksum,
+            effect_commitment,
             self.config.manager_account.as_ref(),
             recent_blockhash,
         ));
@@ -1313,7 +1315,7 @@ impl Manager {
                         self.config.portal_program_id,
                         session_pda,
                         plan.er_slot,
-                        plan.checksum,
+                        checkpoint.effect_commitment,
                         self.config.manager_account.as_ref(),
                         recent_blockhash,
                     ))
@@ -4014,7 +4016,7 @@ mod portal_e2e_tests {
             &plan,
             Pubkey::new_unique(),
             Hash::new_unique(),
-            plan.checksum,
+            [8; 32],
             true,
         );
         let program_id = |transaction: &Transaction| {
@@ -4025,6 +4027,19 @@ mod portal_e2e_tests {
         assert_eq!(transactions.len(), 4);
         assert_eq!(program_id(&transactions[2]), portal_program);
         assert_eq!(program_id(&transactions[3]), bridge_program);
+        let release: northstar_token_bridge::instruction::TokenBridgeInstruction =
+            borsh::from_slice(&transactions[3].message.instructions[0].data).unwrap();
+        let northstar_token_bridge::instruction::TokenBridgeInstruction::SettleWithdrawal {
+            checksum,
+            ..
+        } = release
+        else {
+            panic!("expected withdrawal release");
+        };
+        assert_eq!(
+            checksum, [8; 32],
+            "release must bind the checkpoint effect commitment, not the plan checksum"
+        );
     }
 
     #[test]

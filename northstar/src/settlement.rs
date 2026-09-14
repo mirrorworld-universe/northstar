@@ -641,7 +641,7 @@ pub fn token_withdrawal_transactions(
     portal_program_id: Pubkey,
     session_pda: Pubkey,
     er_slot: Slot,
-    checksum: [u8; 32],
+    effect_commitment: [u8; 32],
     validator: &Keypair,
     recent_blockhash: Hash,
 ) -> Vec<Transaction> {
@@ -677,7 +677,7 @@ pub fn token_withdrawal_transactions(
                 data: borsh::to_vec(
                     &northstar_token_bridge::instruction::TokenBridgeInstruction::SettleWithdrawal {
                         er_slot,
-                        checksum,
+                        checksum: effect_commitment,
                         amount: withdrawal.amount,
                         withdrawn: withdrawal.withdrawn,
                         decimals: withdrawal.decimals,
