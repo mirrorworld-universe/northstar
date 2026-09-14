@@ -137,32 +137,122 @@ fn live_service_seals_and_settles_one_transaction() {
         "NORTHSTAR_TIMING {}",
         serde_json::json!({"phase":"live_low_traffic_proposal", "wall_ms":started.elapsed().as_millis(), "submitted_l1_slot": submitted_slot, "proposed_l1_slot": checkpoint.proposed_at_l1_slot, "step_count":1})
     );
+    let challenged_restart = env::var_os("NORTHSTAR_LIVE_CRASH_CHALLENGED").is_some();
+    let challenge_key = northstar_portal::find_challenge_pda(&PORTAL, &checkpoint_key).0;
+    let da_key = northstar_portal::find_da_proof_pda(&PORTAL, &challenge_key).0;
+    if challenged_restart {
+        assert!(env::var_os("NORTHSTAR_LIVE_RESTART_READY").is_some());
+        send(
+            &rpc,
+            &payer,
+            &[&payer],
+            &[instruction(
+                vec![
+                    AccountMeta::new(payer.pubkey(), true),
+                    AccountMeta::new_readonly(session, false),
+                    AccountMeta::new(checkpoint_key, false),
+                    AccountMeta::new(challenge_key, false),
+                    AccountMeta::new(da_key, false),
+                    AccountMeta::new_readonly(system_program::id(), false),
+                ],
+                PortalInstruction::OpenChallenge(northstar_portal::OpenChallenge {
+                    er_slot: checkpoint.er_slot,
+                }),
+            )],
+        );
+    }
+    let expected_status = if challenged_restart {
+        CheckpointStatus::Challenged
+    } else {
+        CheckpointStatus::Pending
+    };
 
-    if let Ok(ready) = env::var("NORTHSTAR_LIVE_RESTART_READY") {
-        let resume =
-            env::var("NORTHSTAR_LIVE_RESTART_RESUME").expect("restart resume marker required");
-        let rooted = poll("checkpoint rooted before crash", 60, || {
-            let account = rpc
-                .get_account_with_commitment(&checkpoint_key, CommitmentConfig::finalized())
-                .ok()?
-                .value?;
-            let rooted = Checkpoint::try_from_slice(&account.data).ok()?;
-            (rooted.new_state_root == checkpoint.new_state_root).then_some(rooted)
+    let restart_after_settlement = env::var_os("NORTHSTAR_LIVE_CRASH_SETTLED").is_some();
+    let restart = |expected_status| {
+        if let Ok(ready) = env::var("NORTHSTAR_LIVE_RESTART_READY") {
+            let resume =
+                env::var("NORTHSTAR_LIVE_RESTART_RESUME").expect("restart resume marker required");
+            let rooted = poll("checkpoint rooted before crash", 60, || {
+                let account = rpc
+                    .get_account_with_commitment(&checkpoint_key, CommitmentConfig::finalized())
+                    .ok()?
+                    .value?;
+                let rooted = Checkpoint::try_from_slice(&account.data).ok()?;
+                (rooted.new_state_root == checkpoint.new_state_root
+                    && rooted.status == expected_status)
+                    .then_some(rooted)
+            });
+            assert_eq!(rooted.status, expected_status);
+            std::fs::write(ready, checkpoint_key.to_string()).unwrap();
+            poll("external validator restart", 180, || {
+                PathBuf::from(&resume).exists().then_some(())
+            });
+            poll("RPC after restart", 90, || rpc.get_health().ok());
+            let restored = poll("checkpoint restored after replay", 90, || {
+                let account = rpc.get_account(&checkpoint_key).ok()?;
+                let state = Checkpoint::try_from_slice(&account.data).ok()?;
+                (state.status == expected_status).then_some(state)
+            });
+            assert_eq!(restored.er_slot, checkpoint.er_slot);
+            assert_eq!(restored.step_count, checkpoint.step_count);
+            assert_eq!(restored.new_state_root, checkpoint.new_state_root);
+            assert_eq!(restored.effect_commitment, checkpoint.effect_commitment);
+        }
+    };
+    if !restart_after_settlement {
+        restart(expected_status);
+    }
+    if challenged_restart {
+        let restored =
+            Checkpoint::try_from_slice(&rpc.get_account(&checkpoint_key).unwrap().data).unwrap();
+        assert_eq!(restored.status, CheckpointStatus::Challenged);
+        assert_eq!(rpc.get_account(&receipt).unwrap(), initial_receipt);
+        let challenge = northstar_portal::Challenge::try_from_slice(
+            &rpc.get_account(&challenge_key).unwrap().data,
+        )
+        .unwrap();
+        assert_eq!(challenge.status, northstar_portal::ChallengeStatus::Active);
+        let deadline = challenge
+            .turn_deadline_l1_slot
+            .min(challenge.hard_deadline_l1_slot);
+        poll("natural challenged deadline", 900, || {
+            (rpc.get_slot().ok()? >= deadline).then_some(())
         });
-        assert_eq!(rooted.status, CheckpointStatus::Pending);
-        std::fs::write(ready, checkpoint_key.to_string()).unwrap();
-        poll("external validator restart", 180, || {
-            PathBuf::from(&resume).exists().then_some(())
-        });
-        poll("RPC after restart", 90, || rpc.get_health().ok());
-        let restored = poll("checkpoint restored after replay", 90, || {
-            let account = rpc.get_account(&checkpoint_key).ok()?;
-            Checkpoint::try_from_slice(&account.data).ok()
-        });
-        assert_eq!(restored.er_slot, checkpoint.er_slot);
-        assert_eq!(restored.step_count, checkpoint.step_count);
-        assert_eq!(restored.new_state_root, checkpoint.new_state_root);
-        assert_eq!(restored.effect_commitment, checkpoint.effect_commitment);
+        send(
+            &rpc,
+            &payer,
+            &[&payer],
+            &[instruction(
+                vec![
+                    AccountMeta::new_readonly(payer.pubkey(), true),
+                    AccountMeta::new_readonly(session, false),
+                    AccountMeta::new(checkpoint_key, false),
+                    AccountMeta::new(challenge_key, false),
+                    AccountMeta::new(da_key, false),
+                    AccountMeta::new(payer.pubkey(), false),
+                    AccountMeta::new(cursor, false),
+                ],
+                PortalInstruction::TimeoutChallenge(northstar_portal::TimeoutChallenge {
+                    er_slot: checkpoint.er_slot,
+                }),
+            )],
+        );
+        let terminal =
+            Checkpoint::try_from_slice(&rpc.get_account(&checkpoint_key).unwrap().data).unwrap();
+        assert_eq!(terminal.status, CheckpointStatus::Invalid);
+        assert_eq!(
+            terminal.bond_status,
+            northstar_portal::CheckpointBondStatus::Slashed
+        );
+        assert_eq!(rpc.get_account(&receipt).unwrap(), initial_receipt);
+        let terminal_cursor =
+            CheckpointCursor::try_from_slice(&rpc.get_account(&cursor).unwrap().data).unwrap();
+        assert_eq!(terminal_cursor.active_er_slot, 0);
+        eprintln!(
+            "NORTHSTAR_TIMING {}",
+            serde_json::json!({"phase":"challenged_restart_timeout", "wall_ms":started.elapsed().as_millis(), "slot_warps":false, "receipt_unchanged":true})
+        );
+        return;
     }
     poll("automatic settlement", 180, || {
         let account = rpc.get_account(&checkpoint_key).ok()?;
@@ -188,6 +278,17 @@ fn live_service_seals_and_settles_one_transaction() {
         assert_eq!(er.get_balance(&recipient).unwrap(), 1_000_000);
         assert_eq!(receipt_before, initial_receipt);
     }
+    if restart_after_settlement {
+        restart(CheckpointStatus::Settled);
+        assert_eq!(rpc.get_account(&receipt).unwrap(), receipt_before);
+        let restored =
+            Checkpoint::try_from_slice(&rpc.get_account(&checkpoint_key).unwrap().data).unwrap();
+        assert_eq!(restored.status, CheckpointStatus::Settled);
+        assert_eq!(
+            restored.bond_status,
+            northstar_portal::CheckpointBondStatus::Released
+        );
+    }
     let settled_slot = rpc.get_slot().unwrap();
     poll("post-settlement retry observation", 30, || {
         (rpc.get_slot().ok()? >= settled_slot + 10).then_some(())
@@ -203,9 +304,32 @@ fn live_service_seals_and_settles_one_transaction() {
         assert_eq!(er.get_balance(&payer.pubkey()).unwrap(), 2_500_000);
         assert_eq!(er.get_balance(&recipient).unwrap(), 1_500_000);
         assert_eq!(rpc.get_account(&receipt).unwrap(), initial_receipt);
+    } else {
+        let payout_balance = rpc.get_balance(&payer.pubkey()).unwrap();
+        send(
+            &er,
+            &payer,
+            &[&payer],
+            &[crate::er_withdrawal_instruction(
+                &PORTAL,
+                &payer.pubkey(),
+                &payer.pubkey(),
+                500_000,
+            )],
+        );
+        poll("next withdrawal settles once", 180, || {
+            let state =
+                DepositReceipt::try_from_slice(&rpc.get_account(&receipt).ok()?.data).ok()?;
+            (state.withdrawn == 1_500_000).then_some(())
+        });
+        assert_eq!(
+            rpc.get_balance(&payer.pubkey()).unwrap(),
+            payout_balance + 500_000
+        );
+        assert_eq!(er.get_balance(&payer.pubkey()).unwrap(), 2_500_000);
     }
     eprintln!(
         "NORTHSTAR_TIMING {}",
-        serde_json::json!({"phase":"live_low_traffic_settled", "wall_ms":started.elapsed().as_millis(), "restart_requested":env::var_os("NORTHSTAR_LIVE_RESTART_READY").is_some(), "slot_warps":false, "no_settlement_effects": no_effects, "admission_resumed": no_effects})
+        serde_json::json!({"phase":"live_low_traffic_settled", "wall_ms":started.elapsed().as_millis(), "restart_requested":env::var_os("NORTHSTAR_LIVE_RESTART_READY").is_some(), "restart_after_settlement":restart_after_settlement, "slot_warps":false, "no_settlement_effects": no_effects, "admission_resumed": true})
     );
 }
