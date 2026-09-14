@@ -74,6 +74,22 @@ pub(super) fn send(
 #[test]
 #[ignore = "requires a fresh solana-test-validator with the Portal SBF program"]
 fn real_checkpoint_bisects_to_captured_transaction() {
+    if let Some(prover) = env::var_os("NORTHSTAR_LIVE_PROVER") {
+        let directory = PathBuf::from(
+            env::var_os("NORTHSTAR_LIVE_PROOF_DIR").expect("NORTHSTAR_LIVE_PROOF_DIR path"),
+        );
+        assert!(directory.is_absolute() && !directory.exists());
+        let status = Command::new("timeout")
+            .args(["--kill-after=5s", "240s"])
+            .arg(prover)
+            .arg("preflight")
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "GPU preflight failed before opening session"
+        );
+    }
     let payer_path = env::var_os("NORTHSTAR_LIVE_PAYER")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -478,7 +494,9 @@ fn real_checkpoint_bisects_to_captured_transaction() {
     );
 
     let proving_started = std::time::Instant::now();
-    let status = Command::new(prover)
+    let status = Command::new("timeout")
+        .args(["--kill-after=5s", "300s"])
+        .arg(prover)
         .current_dir(&artifact_dir)
         .env("SP1_PROVER", "cuda")
         .arg("groth16")

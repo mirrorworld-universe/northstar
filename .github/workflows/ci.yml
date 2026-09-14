@@ -69,6 +69,11 @@ jobs:
           sudo apt-get install -y protobuf-compiler libprotobuf-dev libudev-dev libclang-dev
       - name: Test SOL smoke restart finalization guard
         run: bash .github/scripts/test-devnet-e2e-smoke.sh
+      - name: Test bounded GPU runner without GPU
+        run: |
+          python3 -B northstar/scripts/test_gpu_prover.py
+          bash -n northstar/scripts/gpu-prover-ssh.sh
+          bash -n northstar/scripts/live-cadence-recovery.sh
       - name: Install Solana tools
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
