@@ -33,10 +33,12 @@ The explicit prototype SBF must be loaded at the harness Portal address. Bundled
 
 Remaining before complete acceptance:
 
-- Harden prover preflight, process timeout, pinned measurement validation, and per-phase persistent JSON.
+- Complete portable GPU provisioning. Preflight, process-group timeout, measurement checks, SSH bounds and CPU-only runner regressions are now implemented; see [recovery and runner follow-up](recovery-and-gpu-runner-v1.md).
 - Add full proof/public-field/path/metadata mutation coverage and state-preservation assertions to the real resolver route.
-- Complete post-resolution settlement/recovery; current live assertions stop at resolution. An additional fresh canonical run asserts unchanged bond amount/status, checkpoint lamports, cursor account and challenger account across resolution (127,978 CU; 124.305s challenge-to-outcome).
+- Extend [combined proof-to-settlement recovery](gpu-proof-to-settlement-v1.md) beyond genesis delegation fixtures and the snapshot-fenced boundary. Resolution conservation also passed in the original canonical fixture (127,978 CU; 124.305s challenge-to-outcome).
 - Finish a reproducible GPU-host provisioning and live runner. Proofs, witnesses, measurements, timing events and the preserved guest ELF are committed under [`evidence/l40s-v1`](../zkvm-replay/evidence/l40s-v1/README.md), with SHA-256 checksums. Raw logs and private signer material are excluded.
 - Complete broader crash drills; obtain independent acceptance and explicit rollout review. Local full strict clippy, format, shell smoke guard, both default SBF builds, validator build, Bridge example/core/E2E, Northstar/Portal, SVM/core service and transaction-proof suites passed. Prototype SBF tests verified six retained proofs and rejected seven envelope/point mutations plus each of eight public fields per proof; this CPU-only check is also wired into CI.
+
+The follow-up also verifies pending/zero-effect/challenged SIGKILL recovery and snapshot-fenced post-settlement recovery with the next exact withdrawal payout. It fixes ER clock regression after restart. These service drills are separate from the newer combined GPU proof-to-settlement fixture, which additionally passes snapshot-fenced mid-settlement restart and plan replay. A fresh bounded-runner proof is retained under [`hardened-runner-v1`](../zkvm-replay/evidence/hardened-runner-v1/).
 
 No deployment, verifier default enablement, or Linear updates occurred. Publishing this evidence is not independent production acceptance.
