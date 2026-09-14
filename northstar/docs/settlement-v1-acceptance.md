@@ -1,3 +1,5 @@
+> September 14 update: [L40S validation](gpu-proof-validation-v1.md) records successful direct SBF verification and three fresh production-mode resolver runs plus a partial case. Retained artifacts and CPU-only proof checks are committed. Older “Blocked” proof-generation rows below describe the pre-GPU baseline; settlement/recovery and independent production acceptance remain incomplete.
+
 # Settlement v1 acceptance matrix
 
 Status: **GPU-free implementation and coverage are substantial; production proof acceptance is incomplete**.

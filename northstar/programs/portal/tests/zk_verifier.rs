@@ -208,3 +208,58 @@ async fn sbf_verifier_accepts_checkpoint_bound_sp1_proof() {
         .unwrap();
     assert!(result.result.unwrap().is_err());
 }
+
+#[tokio::test]
+async fn sbf_verifier_accepts_retained_l40s_proofs_and_rejects_changed_fields() {
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zkvm-replay/evidence/l40s-v1");
+    let context = setup().await;
+    for case in [
+        "compatibility-02",
+        "compatibility-03",
+        "live-01",
+        "live-02",
+        "live-03",
+        "live-partial",
+    ] {
+        let proof = std::fs::read(root.join(case).join("northstar-sp1-groth16-onchain.bin"))
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let public_inputs = std::fs::read(root.join(case).join("northstar-sp1-public-inputs.bin"))
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let instruction = Instruction {
+            program_id: PORTAL_PROGRAM_ID,
+            accounts: vec![],
+            data: borsh::to_vec(&PortalInstruction::VerifyErStepProofV1(
+                VerifyErStepProofV1 {
+                    proof,
+                    public_inputs,
+                },
+            ))
+            .unwrap(),
+        };
+        let result = context
+            .banks_client
+            .simulate_transaction(transaction(&context, instruction.clone()))
+            .await
+            .unwrap();
+        assert_eq!(result.result.unwrap(), Ok(()), "{case}");
+        assert!(result.simulation_details.unwrap().units_consumed <= 130_000);
+        for offset in [1, 5, 37, 69, 101, 165, 293]
+            .into_iter()
+            .chain((0..8).map(|field| 1 + SP1_GROTH16_PROOF_V1_LEN + field * 32 + 31))
+        {
+            let mut changed = instruction.clone();
+            changed.data[offset] ^= 1;
+            let result = context
+                .banks_client
+                .simulate_transaction(transaction(&context, changed))
+                .await
+                .unwrap();
+            assert!(result.result.unwrap().is_err(), "{case}, byte {offset}");
+        }
+    }
+}
