@@ -728,14 +728,14 @@ impl NorthStarService {
                                     bridge_program,
                                     session_bridge,
                                     er_token_account,
-                                    delta,
+                                    amount,
                                     ..
                                 } => {
                                     manager.credit_token_deposit(
                                         &bridge_program,
                                         &session_bridge,
                                         &er_token_account,
-                                        delta,
+                                        amount,
                                     );
                                 }
                                 other => {

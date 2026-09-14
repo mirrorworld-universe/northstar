@@ -589,6 +589,7 @@ impl Manager {
         recent_blockhash: Hash,
     ) -> Option<(u64, [u8; 32], Vec<Transaction>)> {
         let runtime = self.runtime.as_ref()?;
+        runtime.process_token_deposits();
         let session_pda = (*runtime.session_pda().read().unwrap())?;
         let session_account = l1_bank.get_account(&session_pda)?;
         if session_account.owner() != &self.config.portal_program_id {

@@ -1,3 +1,5 @@
+mod token_deposit;
+
 use {
     crate::{
         checkpoint::CheckpointArtifactV1,
@@ -225,6 +227,7 @@ pub struct EphemeralRuntime {
     portal_program_id: Pubkey,
 
     _tx_client: EphemeralTransactionClient,
+    manager_keypair: Arc<Keypair>,
     settings: EphemeralRollupSettings,
     slot_duration: Duration,
     _ledger_dir: TempDir,
@@ -611,6 +614,12 @@ impl EphemeralRuntime {
                 })
                 .collect::<HashMap<_, _>>(),
         ));
+        if let Some(account) = initial_bank.get_account(&manager_keypair.pubkey()) {
+            er_account_overlay
+                .write()
+                .unwrap()
+                .insert(manager_keypair.pubkey(), account);
+        }
         let bank_operation_lock = Arc::new(Mutex::new(()));
         // Sonic: Starts inactive — transactions rejected until activate() is called
         let active = Arc::new(AtomicBool::new(false));
@@ -846,6 +855,7 @@ impl EphemeralRuntime {
             settings,
             slot_duration,
             _tx_client: tx_client,
+            manager_keypair,
             _ledger_dir: ledger_dir,
             _runtime: runtime,
         })
@@ -2192,6 +2202,7 @@ impl EphemeralRuntime {
             .iter()
             .filter(|(account, request)| {
                 !request.approved
+                    && !self.has_pending_token_deposit(account)
                     && (last_settled_er_slot >= request.frozen_at
                         || !changed_accounts.contains(account))
             })
@@ -2388,80 +2399,6 @@ impl EphemeralRuntime {
             "Credited {} lamports to {} on ER (base: {}, new balance: {})",
             lamports, depositor, base_balance, new_balance
         );
-    }
-    pub fn credit_token_deposit(
-        &self,
-        bridge_program: &Pubkey,
-        session_bridge: &Pubkey,
-        er_token_account: &Pubkey,
-        amount: u64,
-    ) -> bool {
-        let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
-        if !self
-            .delegated_accounts
-            .read()
-            .unwrap()
-            .contains(er_token_account)
-        {
-            warn!(
-                "Ignoring token deposit for non-delegated ER account {}",
-                er_token_account
-            );
-            return false;
-        }
-
-        let bank = self.bank();
-        let Some(mut account) = bank.get_account(er_token_account) else {
-            warn!("Ignoring token deposit for missing ER account {er_token_account}");
-            return false;
-        };
-        if account.owner() != bridge_program {
-            warn!(
-                "Ignoring token deposit for {} owned by {}, expected {}",
-                er_token_account,
-                account.owner(),
-                bridge_program
-            );
-            return false;
-        }
-        let Ok(mut state) =
-            borsh::from_slice::<northstar_token_bridge::state::ErTokenAccount>(account.data())
-        else {
-            warn!("Ignoring token deposit for invalid ER token account {er_token_account}");
-            return false;
-        };
-        if !state.is_valid() || state.session_bridge != session_bridge.to_bytes() {
-            return false;
-        }
-        let Some(new_amount) = state.amount.checked_add(amount) else {
-            warn!("Ignoring overflowing token deposit for {er_token_account}");
-            return false;
-        };
-        state.amount = new_amount;
-        let Ok(data) = borsh::to_vec(&state) else {
-            return false;
-        };
-        if data.len() != account.data().len() {
-            return false;
-        }
-        account.data_as_mut_slice().copy_from_slice(&data);
-
-        bank.store_account(er_token_account, &account);
-        self.er_account_overlay
-            .write()
-            .unwrap()
-            .insert(*er_token_account, account.clone());
-        self.touched_accounts
-            .write()
-            .unwrap()
-            .insert(*er_token_account);
-        self.persist_unsettled_update(&[(*er_token_account, account)], &[*er_token_account], None);
-        self.publish_bank_for_rpc();
-        info!(
-            "Credited {} tokens to {} on ER (new amount: {})",
-            amount, er_token_account, new_amount
-        );
-        true
     }
 }
 
@@ -2897,7 +2834,7 @@ mod tests {
     }
 
     #[test]
-    fn test_token_deposit_credits_delegated_er_account() {
+    fn test_token_deposit_requires_authenticated_origin() {
         let parent_bank = create_test_bank();
         let bridge_program = Pubkey::new_unique();
         let er_token_account = Pubkey::new_unique();
@@ -2914,6 +2851,26 @@ mod tests {
         let mut account = AccountSharedData::new(1_000_000, data.len(), &bridge_program);
         account.data_as_mut_slice().copy_from_slice(&data);
         parent_bank.store_account(&er_token_account, &account);
+        let (receipt_key, bump) = northstar_token_bridge::find_token_deposit_receipt_pda(
+            &bridge_program,
+            &session_bridge,
+            &er_token_account,
+        );
+        let receipt = northstar_token_bridge::state::TokenDepositReceipt {
+            discriminator: northstar_token_bridge::state::TokenDepositReceipt::DISCRIMINATOR,
+            session_bridge: session_bridge.to_bytes(),
+            er_token_account: er_token_account.to_bytes(),
+            balance: 600_000_000,
+            withdrawn: 0,
+            bump,
+        };
+        let receipt_data = borsh::to_vec(&receipt).unwrap();
+        let mut receipt_account =
+            AccountSharedData::new(1_000_000, receipt_data.len(), &bridge_program);
+        receipt_account
+            .data_as_mut_slice()
+            .copy_from_slice(&receipt_data);
+        parent_bank.store_account(&receipt_key, &receipt_account);
         parent_bank.freeze();
 
         let settings = EphemeralRollupSettings {
@@ -2937,7 +2894,8 @@ mod tests {
         .unwrap();
         runtime.handle_delegation(&er_token_account, account.clone());
 
-        assert!(runtime.credit_token_deposit(
+        runtime.active.store(true, Ordering::Relaxed);
+        assert!(!runtime.credit_token_deposit(
             &bridge_program,
             &session_bridge,
             &er_token_account,
@@ -2947,17 +2905,17 @@ mod tests {
         let credited_state =
             borsh::from_slice::<northstar_token_bridge::state::ErTokenAccount>(credited.data())
                 .unwrap();
-        assert_eq!(credited_state.amount, 600_000_000);
+        assert_eq!(credited_state.amount, 0);
+        assert!(runtime.checkpoint_artifact_v1().is_none());
+        runtime.handle_undelegation_request(&er_token_account, Pubkey::new_unique(), false);
+        assert!(runtime.ready_undelegation_approvals(u64::MAX).is_empty());
 
         runtime.handle_delegation(&er_token_account, account);
         let rehydrated = runtime.bank().get_account(&er_token_account).unwrap();
         let rehydrated_state =
             borsh::from_slice::<northstar_token_bridge::state::ErTokenAccount>(rehydrated.data())
                 .unwrap();
-        assert_eq!(
-            rehydrated_state.amount, 600_000_000,
-            "duplicate L1 delegation hydration must preserve unsettled ER state",
-        );
+        assert_eq!(rehydrated_state.amount, 0);
 
         runtime.shutdown();
     }

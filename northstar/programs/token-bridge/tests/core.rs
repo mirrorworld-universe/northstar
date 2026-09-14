@@ -1,3 +1,6 @@
+#[path = "core/token_deposit.rs"]
+mod token_deposit;
+
 use {
     borsh::BorshDeserialize,
     northstar_portal::{account_size, DelegationRecord, Session, SessionBridge, SettlementStatus},
@@ -33,7 +36,7 @@ fn process_pda_owner_delegate(
     accounts: &[AccountInfo],
     data: &[u8],
 ) -> ProgramResult {
-    let [payer, owner, er_token_account, bridge_program, session_bridge, portal_program, session, delegation_record, buffer, system_program_info] =
+    let [payer, owner, er_token_account, bridge_program, session_bridge, portal_program, session, delegation_record, buffer, system_program_info, receipt, origin] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -55,6 +58,8 @@ fn process_pda_owner_delegate(
             AccountMeta::new(*delegation_record.key, false),
             AccountMeta::new(*buffer.key, false),
             AccountMeta::new_readonly(*system_program_info.key, false),
+            AccountMeta::new_readonly(*receipt.key, false),
+            AccountMeta::new(*origin.key, false),
         ],
         data: data.to_vec(),
     };
@@ -648,6 +653,46 @@ async fn undelegate_rejects_unsettled_token_deposit() {
         &[&world.payer, &world.alice],
     )
     .await;
+    let late_deposit = deposit_ix(&world, 101);
+    let receipt = late_deposit.accounts[10].pubkey;
+    let before_receipt = world
+        .context
+        .banks_client
+        .get_account(receipt)
+        .await
+        .unwrap();
+    let before_vault = world
+        .context
+        .banks_client
+        .get_account(world.vault_token)
+        .await
+        .unwrap();
+    assert!(process_result(
+        &mut world.context,
+        &payer_pubkey,
+        &[late_deposit],
+        &[&world.payer, &world.alice]
+    )
+    .await
+    .is_err());
+    assert_eq!(
+        world
+            .context
+            .banks_client
+            .get_account(receipt)
+            .await
+            .unwrap(),
+        before_receipt
+    );
+    assert_eq!(
+        world
+            .context
+            .banks_client
+            .get_account(world.vault_token)
+            .await
+            .unwrap(),
+        before_vault
+    );
     let undelegate = undelegate_ix(&world);
     let result = process_result(
         &mut world.context,
@@ -1008,6 +1053,14 @@ fn deposit_ix_for(
             AccountMeta::new(deposit_receipt, false),
             AccountMeta::new_readonly(delegation_record, false),
             AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new_readonly(
+                Pubkey::find_program_address(
+                    &[b"undelegation_request", er_account.as_ref()],
+                    &PORTAL_PROGRAM_ID,
+                )
+                .0,
+                false,
+            ),
         ],
         data: borsh::to_vec(&TokenBridgeInstruction::Deposit {
             amount,
@@ -1108,6 +1161,23 @@ fn delegate_ix_for_authority_and_account(
             AccountMeta::new(delegation_record, false),
             AccountMeta::new(buffer, false),
             AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new_readonly(
+                northstar_token_bridge::find_token_deposit_receipt_pda(
+                    &northstar_token_bridge::id(),
+                    &world.session_bridge,
+                    &er_account,
+                )
+                .0,
+                false,
+            ),
+            AccountMeta::new(
+                Pubkey::find_program_address(
+                    &[b"token_deposit_origin", er_account.as_ref()],
+                    &northstar_token_bridge::id(),
+                )
+                .0,
+                false,
+            ),
         ],
         data: borsh::to_vec(&TokenBridgeInstruction::DelegateErTokenAccount { grid_id: 1 })
             .unwrap(),
@@ -1133,6 +1203,23 @@ fn pda_delegate_ix(world: &TestWorld) -> Instruction {
             AccountMeta::new(delegation_record, false),
             AccountMeta::new(buffer, false),
             AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new_readonly(
+                northstar_token_bridge::find_token_deposit_receipt_pda(
+                    &northstar_token_bridge::id(),
+                    &world.session_bridge,
+                    &world.pda_er,
+                )
+                .0,
+                false,
+            ),
+            AccountMeta::new(
+                Pubkey::find_program_address(
+                    &[b"token_deposit_origin", world.pda_er.as_ref()],
+                    &northstar_token_bridge::id(),
+                )
+                .0,
+                false,
+            ),
         ],
         data: borsh::to_vec(&TokenBridgeInstruction::DelegateErTokenAccount { grid_id: 1 })
             .unwrap(),

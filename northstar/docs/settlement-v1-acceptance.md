@@ -246,3 +246,11 @@ failed before the fix: it received zero instructions instead of Begin/Finish. It
 now covers both initial submission and retry without Begin, legacy empty APIs,
 and rejection of an unsupported-only plan. Zero-effect crash recovery is not
 claimed by these runs.
+
+## Receipt-backed token deposits
+
+[Token deposit replay](token-deposit-replay-v1.md) replaces direct bank credits
+with real ER transactions. The live Bridge round trip now covers a mid-session
+deposit followed by automatic settlement and undelegation, including exactly-once
+credit history. Client account-list changes and legacy-delegation migration
+requirements are documented there; this is not additional ZK or crash acceptance.

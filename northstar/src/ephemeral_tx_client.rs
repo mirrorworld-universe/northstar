@@ -808,6 +808,26 @@ impl TransactionClient for EphemeralTransactionClient {
         wire_transactions: Vec<Vec<u8>>,
         _stats: &SendTransactionServiceStats,
     ) {
+        self.send_transactions_with_deposit_context(wire_transactions, None);
+    }
+}
+
+impl EphemeralTransactionClient {
+    pub(super) fn send_token_deposit_transaction(
+        &self,
+        wire: Vec<u8>,
+        account: Pubkey,
+        payer: Pubkey,
+        cursor: Pubkey,
+    ) {
+        self.send_transactions_with_deposit_context(vec![wire], Some((account, payer, cursor)));
+    }
+
+    fn send_transactions_with_deposit_context(
+        &self,
+        wire_transactions: Vec<Vec<u8>>,
+        deposit_context: Option<(Pubkey, Pubkey, Pubkey)>,
+    ) {
         // Sonic: Reject all transactions when ephemeral rollup session is not active
         if !self.active.load(Ordering::Relaxed) {
             warn!(
@@ -842,9 +862,17 @@ impl TransactionClient for EphemeralTransactionClient {
         drop(checkpoint_capture);
         let bank = self.bank();
         let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
-        let touched_accounts = self.touched_accounts.read().unwrap().clone();
+        let mut frozen_accounts = self.frozen_accounts.read().unwrap().clone();
+        if let Some((account, payer, _)) = deposit_context {
+            // Only the internal receipt-credit builder uses this path. Frozen accounts must still receive L1 deposits before approval.
+            frozen_accounts.remove(&account);
+            self.touched_accounts.write().unwrap().insert(payer);
+        }
+        let mut touched_accounts = self.touched_accounts.read().unwrap().clone();
+        if let Some((_, _, cursor)) = deposit_context {
+            touched_accounts.insert(cursor);
+        }
         let enforce_account_access = self.session_pda.read().unwrap().is_some();
-        let frozen_accounts = self.frozen_accounts.read().unwrap().clone();
         let txs: Vec<_> = txs
             .into_iter()
             .filter(|tx| {
