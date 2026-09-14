@@ -112,7 +112,11 @@ fn real_checkpoint_bisects_to_captured_transaction() {
         .map(|value| value.parse::<usize>().expect("integer selected step"))
         .unwrap_or(10.min(step_count - 1));
     assert!(selected_step < step_count);
-    let (artifact, history) = supported_sbf_checkpoint_with_steps(0, session, step_count);
+    let (artifact, history) = if env::var_os("NORTHSTAR_LIVE_SETTLE").is_some() {
+        super::tests::supported_sbf_checkpoint_with_target_offset(0, session, step_count, 128)
+    } else {
+        supported_sbf_checkpoint_with_steps(0, session, step_count)
+    };
     artifact.verify().unwrap();
     let commitment = artifact.checkpoint;
     let er_slot = commitment.er_slot;
@@ -681,4 +685,13 @@ fn real_checkpoint_bisects_to_captured_transaction() {
     )
     .unwrap();
     println!("NORTHSTAR_TIMING {summary}");
+    if env::var_os("NORTHSTAR_LIVE_SETTLE").is_some() {
+        super::live_settlement::settle_resolved_fixture(
+            &rpc,
+            &payer,
+            &artifact,
+            &history,
+            &artifact_dir,
+        );
+    }
 }
