@@ -1,5 +1,8 @@
 #![cfg(feature = "zk-verifier-prototype")]
 
+#[path = "zk_verifier/resolver.rs"]
+mod resolver;
+
 use {
     northstar_portal::{PortalError, PortalInstruction, VerifyErStepProofV1},
     northstar_zk_types::{

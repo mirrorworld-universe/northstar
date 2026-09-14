@@ -646,6 +646,23 @@ fn real_checkpoint_bisects_to_captured_transaction() {
     assert_eq!(simulation.err, None);
     let resolver_cu = simulation.units_consumed.unwrap();
     assert!(resolver_cu <= 130_000);
+    let resolver_accounts = [
+        session,
+        checkpoint,
+        challenge,
+        da,
+        proof_account,
+        challenger.pubkey(),
+        cursor,
+    ]
+    .into_iter()
+    .map(|key| (key, rpc.get_account(&key).unwrap()))
+    .collect::<Vec<_>>();
+    fs::write(
+        artifact_dir.join("resolver-fixture.bin"),
+        bincode::serialize(&(rpc.get_slot().unwrap(), er_slot, resolver_accounts)).unwrap(),
+    )
+    .unwrap();
     let checkpoint_before = rpc.get_account(&checkpoint).unwrap();
     let cursor_before = rpc.get_account(&cursor).unwrap();
     let recipient_before = rpc.get_account(&challenger.pubkey()).unwrap();
