@@ -99,6 +99,7 @@ jobs:
         run: |
           cargo build-sbf --manifest-path northstar/programs/portal/Cargo.toml --features zk-verifier-prototype -- --locked
           BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar-portal --features zk-verifier-prototype --test zk_verifier
+          cargo test --locked -p northstar-portal --features zk-verifier-prototype --lib
       - name: Build Portal SBF program
         run: cargo build-sbf --manifest-path northstar/programs/portal/Cargo.toml -- --locked
       - name: Build Token Bridge SBF program
