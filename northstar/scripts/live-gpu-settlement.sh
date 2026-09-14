@@ -2,7 +2,7 @@
 set -euo pipefail
 umask 077
 mode=${1:-settle}
-[[ $mode == settle || $mode == crash-settling ]] || { echo 'usage: live-gpu-settlement.sh [settle|crash-settling]' >&2; exit 2; }
+[[ $mode == settle || $mode == crash-settling || $mode == crash-upload ]] || { echo 'usage: live-gpu-settlement.sh [settle|crash-settling|crash-upload]' >&2; exit 2; }
 : "${NORTHSTAR_LIVE_PROVER:?preflight-capable GPU adapter required}"
 : "${NORTHSTAR_LIVE_PORTAL_SBF:?explicit prototype Portal SBF required}"
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -60,17 +60,20 @@ start_validator() {
 }
 start_validator
 export NORTHSTAR_LIVE_RPC_URL="$url" NORTHSTAR_LIVE_SETTLE=1 NORTHSTAR_LIVE_PROOF_DIR="$work/proof"
+unset NORTHSTAR_LIVE_SETTLEMENT_RESTART_READY NORTHSTAR_LIVE_SETTLEMENT_RESTART_RESUME NORTHSTAR_LIVE_UPLOAD_RESTART_READY NORTHSTAR_LIVE_UPLOAD_RESTART_RESUME
 if [[ $mode == crash-settling ]]; then
     export NORTHSTAR_LIVE_SETTLEMENT_RESTART_READY="$work/ready" NORTHSTAR_LIVE_SETTLEMENT_RESTART_RESUME="$work/resume"
+elif [[ $mode == crash-upload ]]; then
+    export NORTHSTAR_LIVE_UPLOAD_RESTART_READY="$work/ready" NORTHSTAR_LIVE_UPLOAD_RESTART_RESUME="$work/resume"
 fi
 test_env=()
-for name in CARGO_TARGET_DIR PATH HOME RUSTC RUSTDOC LD_LIBRARY_PATH ICICLE_BACKEND_INSTALL_DIR NORTHSTAR_LIVE_PROVER NORTHSTAR_LIVE_RPC_URL NORTHSTAR_LIVE_SETTLE NORTHSTAR_LIVE_PROOF_DIR NORTHSTAR_LIVE_PAYER NORTHSTAR_LIVE_STEP_COUNT NORTHSTAR_LIVE_SELECTED_STEP NORTHSTAR_LIVE_SETTLEMENT_RESTART_READY NORTHSTAR_LIVE_SETTLEMENT_RESTART_RESUME NORTHSTAR_GPU_SSH NORTHSTAR_GPU_REMOTE_RUNNER NORTHSTAR_GPU_REMOTE_ARTIFACTS NORTHSTAR_GPU_PROVER NORTHSTAR_GPU_REPLAY_DIR; do
+for name in CARGO_TARGET_DIR PATH HOME RUSTC RUSTDOC LD_LIBRARY_PATH ICICLE_BACKEND_INSTALL_DIR NORTHSTAR_LIVE_PROVER NORTHSTAR_LIVE_RPC_URL NORTHSTAR_LIVE_SETTLE NORTHSTAR_LIVE_PROOF_DIR NORTHSTAR_LIVE_PAYER NORTHSTAR_LIVE_STEP_COUNT NORTHSTAR_LIVE_SELECTED_STEP NORTHSTAR_LIVE_SETTLEMENT_RESTART_READY NORTHSTAR_LIVE_SETTLEMENT_RESTART_RESUME NORTHSTAR_LIVE_UPLOAD_RESTART_READY NORTHSTAR_LIVE_UPLOAD_RESTART_RESUME NORTHSTAR_GPU_SSH NORTHSTAR_GPU_REMOTE_RUNNER NORTHSTAR_GPU_REMOTE_ARTIFACTS NORTHSTAR_GPU_PROVER NORTHSTAR_GPU_REPLAY_DIR; do
     if [[ -v $name ]]; then test_env+=("$name=${!name}"); fi
 done
 printf -v command '%q ' env "${test_env[@]}" cargo test --locked -p northstar real_checkpoint_bisects_to_captured_transaction -- --ignored --nocapture
 printf 'cd %q; %s > %q 2>&1; echo $? > %q\n' "$root" "$command" "$work/test.log" "$work/result" > "$work/test-launch.sh"
 tmux new-session -d -s "$test_session" "exec bash '$work/test-launch.sh'"
-if [[ $mode == crash-settling ]]; then
+if [[ $mode == crash* ]]; then
     wait_for 600 test -f "$work/ready"
     read -r fence < "$work/ready" || [[ -n $fence ]]
     [[ $fence =~ ^[0-9]+$ ]]
@@ -98,6 +101,6 @@ if [[ $mode == crash-settling ]]; then
     touch "$work/resume"
 fi
 wait_for 1000 test -f "$work/result"
-grep -E 'proof_resolution|proof_to_settlement|test result:|panicked' "$work/test.log" | tail -8
+grep -E 'proof_resolution|proof_to_settlement|upload_recovery|settlement_recovery|test result:|panicked' "$work/test.log" | tail -8
 read -r result < "$work/result"
 exit "$result"

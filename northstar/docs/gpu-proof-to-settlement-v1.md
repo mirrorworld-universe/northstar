@@ -15,8 +15,11 @@ The real Portal SBF live fixture now continues beyond `ResolveChallenge`:
 | --- | ---: | ---: | ---: |
 | Combined proof/settlement with batch replay | 123.915s | 127,976 | 200.582s |
 | Combined proof/settlement with SIGKILL recovery | 123.997s | 127,976 | 258.197s |
+| SIGKILL during partial proof upload, then resolution/settlement | 167.517s | 127,978 | 173.915s |
 
-Both passed without slot warps. The crash run used finalized fence **829**, full snapshot **900**, and distinct process PIDs. It completed the test in 400.24s, including GPU preflight and natural L1 deadline/snapshot waits. The retained proof, witness, measurements, serialized settlement plan, genesis fixtures and restart evidence are under [`evidence/combined-settlement-v1`](../zkvm-replay/evidence/combined-settlement-v1/). `SHA256SUMS` covers those files. CPU-only SBF verifier CI also accepts this proof and rejects changed envelope/public fields.
+All passed without slot warps. The crash run used finalized fence **829**, full snapshot **900**, and distinct process PIDs. It completed the test in 400.24s, including GPU preflight and natural L1 deadline/snapshot waits. The retained proof, witness, measurements, serialized settlement plan, genesis fixtures and restart evidence are under [`evidence/combined-settlement-v1`](../zkvm-replay/evidence/combined-settlement-v1/). `SHA256SUMS` covers those files. CPU-only SBF verifier CI also accepts this proof and rejects changed envelope/public fields.
+
+The partial-upload run stopped after the first 128-byte proof chunk. A snapshot at slot 400 covered finalized fence 373. After SIGKILL/restart, the entire proof account matched its pre-crash state, upload continued, and production resolution plus 16-account settlement passed. Recovery wait was 27.148s; total test time was 359.92s. Public artifacts and restart evidence are under [`evidence/upload-recovery-v1`](../zkvm-replay/evidence/upload-recovery-v1/), using the same genesis fixtures as the combined run. This proof is also covered by CPU-only verification/mutation checks.
 
 ## Scope of the fixture
 
@@ -38,6 +41,7 @@ export NORTHSTAR_LIVE_PORTAL_SBF="$PWD/target/deploy/northstar_portal.so"
 # Set authorized SSH destination, remote runner and artifact directory first.
 bash northstar/scripts/live-gpu-settlement.sh settle
 bash northstar/scripts/live-gpu-settlement.sh crash-settling
+bash northstar/scripts/live-gpu-settlement.sh crash-upload
 ```
 
 The runner exports fresh trusted genesis fixtures before launch, refuses occupied RPC endpoints, passes environment explicitly to tmux, bounds readiness waits, retains private launch/log files only in its fresh evidence directory, and cleans up validator/test sessions. Only reviewed public artifacts should be copied into the repository. Do not deploy the prototype program or enable the production verifier as part of this test.

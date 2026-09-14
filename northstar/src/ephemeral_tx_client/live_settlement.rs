@@ -184,31 +184,7 @@ pub(super) fn settle_resolved_fixture(
     assert!(initial.len() > 1);
     fees += rpc.get_fee_for_message(&initial[0].message).unwrap();
     rpc.send_and_confirm_transaction(&initial[0]).unwrap();
-    if let Ok(ready) = env::var("NORTHSTAR_LIVE_SETTLEMENT_RESTART_READY") {
-        let resume = env::var("NORTHSTAR_LIVE_SETTLEMENT_RESTART_RESUME").unwrap();
-        let applied = rpc.get_account(&session).unwrap();
-        let wait_started = Instant::now();
-        loop {
-            let response = rpc
-                .get_account_with_commitment(&session, CommitmentConfig::finalized())
-                .unwrap();
-            if response.value.as_ref() == Some(&applied) {
-                fs::write(&ready, response.context.slot.to_string()).unwrap();
-                break;
-            }
-            assert!(wait_started.elapsed() < Duration::from_secs(60));
-            sleep(Duration::from_millis(200));
-        }
-        while !Path::new(&resume).exists() {
-            assert!(wait_started.elapsed() < Duration::from_secs(240));
-            sleep(Duration::from_millis(200));
-        }
-        let wait_started = Instant::now();
-        while rpc.get_account(&session).ok().as_ref() != Some(&applied) {
-            assert!(wait_started.elapsed() < Duration::from_secs(60));
-            sleep(Duration::from_millis(200));
-        }
-    }
+    restart_after_account(rpc, &session, "SETTLEMENT");
     let restored: crate::DurableSettlementPlan =
         borsh::from_slice(&fs::read(&plan_path).unwrap()).unwrap();
     let restored = SettlementPlan::from(restored);
@@ -265,6 +241,43 @@ pub(super) fn settle_resolved_fixture(
     let summary = serde_json::json!({"schema_version":1, "phase":"proof_to_settlement", "wall_ms":started.elapsed().as_millis(), "slot_warps":false, "settled":true, "bond_released":true, "changed_accounts":accounts.len(), "genesis_delegation_fixtures":true});
     fs::write(
         directory.join("settlement.json"),
+        serde_json::to_vec_pretty(&summary).unwrap(),
+    )
+    .unwrap();
+    println!("NORTHSTAR_TIMING {summary}");
+}
+
+pub(super) fn restart_after_account(rpc: &RpcClient, account: &Pubkey, phase: &str) {
+    let Ok(ready) = env::var(format!("NORTHSTAR_LIVE_{phase}_RESTART_READY")) else {
+        return;
+    };
+    let resume = env::var(format!("NORTHSTAR_LIVE_{phase}_RESTART_RESUME")).unwrap();
+    let applied = rpc.get_account(account).unwrap();
+    let wait_started = Instant::now();
+    loop {
+        let response = rpc
+            .get_account_with_commitment(account, CommitmentConfig::finalized())
+            .unwrap();
+        if response.value.as_ref() == Some(&applied) {
+            fs::write(&ready, response.context.slot.to_string()).unwrap();
+            break;
+        }
+        assert!(wait_started.elapsed() < Duration::from_secs(60));
+        sleep(Duration::from_millis(200));
+    }
+    while !Path::new(&resume).exists() {
+        assert!(wait_started.elapsed() < Duration::from_secs(240));
+        sleep(Duration::from_millis(200));
+    }
+    let rpc_started = Instant::now();
+    while rpc.get_account(account).ok().as_ref() != Some(&applied) {
+        assert!(rpc_started.elapsed() < Duration::from_secs(60));
+        sleep(Duration::from_millis(200));
+    }
+    let summary = serde_json::json!({"schema_version":1, "phase":format!("{}_recovery",phase.to_lowercase()), "wall_ms":wait_started.elapsed().as_millis(), "account_unchanged":true, "slot_warps":false});
+    let directory = env::var("NORTHSTAR_LIVE_PROOF_DIR").unwrap();
+    fs::write(
+        Path::new(&directory).join(format!("{}-recovery.json", phase.to_lowercase())),
         serde_json::to_vec_pretty(&summary).unwrap(),
     )
     .unwrap();

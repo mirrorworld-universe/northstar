@@ -593,6 +593,9 @@ fn real_checkpoint_bisects_to_captured_transaction() {
                 }),
             )],
         );
+        if offset == 0 {
+            super::live_settlement::restart_after_account(&rpc, &proof_account, "UPLOAD");
+        }
     }
     send(
         &rpc,

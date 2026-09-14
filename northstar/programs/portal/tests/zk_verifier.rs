@@ -223,6 +223,7 @@ async fn sbf_verifier_accepts_retained_l40s_proofs_and_rejects_changed_fields() 
         "live-partial",
         "../hardened-runner-v1",
         "../combined-settlement-v1",
+        "../upload-recovery-v1",
     ] {
         let proof = std::fs::read(root.join(case).join("northstar-sp1-groth16-onchain.bin"))
             .unwrap()
