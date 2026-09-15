@@ -55,7 +55,7 @@ slop-whir = "=6.1.0"
 slop-fri = "=6.1.0"
 slop-utils = "=6.1.0"
 p3-fri = "=0.3.2-succinct"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt-multi-thread"] }
 
 [build-dependencies]
 sp1-build.workspace = true
