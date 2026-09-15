@@ -29,7 +29,6 @@ pub struct FeatureSnapshot {
     pub simplify_alt_bn128_syscall_error_codes: bool,
     pub enable_big_mod_exp_syscall: bool,
     pub remove_bpf_loader_incorrect_program_id: bool,
-    pub syscall_parameter_address_restrictions: bool,
     pub virtual_address_space_adjustments: bool,
     pub account_data_direct_mapping: bool,
     pub last_restart_slot_sysvar: bool,
@@ -109,9 +108,6 @@ impl From<&AHashMap<Pubkey, u64>> for FeatureSnapshot {
             enable_big_mod_exp_syscall: is_active(&enable_big_mod_exp_syscall::ID),
             remove_bpf_loader_incorrect_program_id: is_active(
                 &remove_bpf_loader_incorrect_program_id::ID,
-            ),
-            syscall_parameter_address_restrictions: is_active(
-                &syscall_parameter_address_restrictions::ID,
             ),
             virtual_address_space_adjustments: is_active(&virtual_address_space_adjustments::ID),
             account_data_direct_mapping: is_active(&account_data_direct_mapping::ID),
@@ -294,7 +290,6 @@ impl FeatureSet {
         let snapshot = &self.snapshot;
         SVMFeatureSet {
             move_precompile_verification_to_svm: snapshot.move_precompile_verification_to_svm,
-            syscall_parameter_address_restrictions: snapshot.syscall_parameter_address_restrictions,
             virtual_address_space_adjustments: snapshot.virtual_address_space_adjustments,
             account_data_direct_mapping: snapshot.account_data_direct_mapping,
             enable_bpf_loader_set_authority_checked_ix: snapshot
@@ -1290,7 +1285,7 @@ pub mod formalize_loaded_transaction_data_size {
 }
 
 pub mod alpenglow {
-    solana_pubkey::declare_id!("a1p3RiCfMmzm5jgCva97UUNwUiVLq5EJhtusRWHDBsp");
+    solana_pubkey::declare_id!("A1pengvuM6JEcyNuTnMqepBKhwHE3N6PmUrdATGawhJS");
 }
 
 pub mod disable_zk_elgamal_proof_program {
@@ -1532,6 +1527,12 @@ pub mod alpenglow_fast_leader_handover {
 
 pub mod relax_fee_payer_constraint {
     solana_pubkey::declare_id!("FEEXbxUuKobtrt1qNK5pjtzbPQhsppBTrNNG74xu4mai");
+}
+
+pub mod double_disinflation_rate {
+    solana_pubkey::declare_id!("55oikhjJ2LUi1xdgJ17ueRyHFURZEw32asT3iAKfh7gg");
+    /// Taper (yearly disinflation rate) applied from activation onward.
+    pub const TAPER: f64 = 0.30;
 }
 
 pub static FEATURE_NAMES: LazyLock<AHashMap<Pubkey, &'static str>> = LazyLock::new(|| {
@@ -2615,6 +2616,10 @@ pub static FEATURE_NAMES: LazyLock<AHashMap<Pubkey, &'static str>> = LazyLock::n
         (
             relax_fee_payer_constraint::id(),
             "SIMD-0290: Relax block constraint requiring valid fee-payer",
+        ),
+        (
+            double_disinflation_rate::id(),
+            "SIMD-0550: Double disinflation rate",
         ),
         /*************** ADD NEW FEATURES HERE ***************/
         /***** ADD NEW FEATURE BOOL TO `FeatureSnapshot` *****/

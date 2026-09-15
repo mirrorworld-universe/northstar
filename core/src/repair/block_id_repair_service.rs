@@ -625,6 +625,7 @@ impl BlockIdRepairService {
                             slot,
                             block_id,
                             fec_set_index,
+                            fec_set_count,
                         })
                     }));
 
@@ -643,6 +644,9 @@ impl BlockIdRepairService {
                 };
                 let start_index = fec_set_index;
                 let end_index = fec_set_index + DATA_SHREDS_PER_FEC_BLOCK as u32;
+                // The proof authenticates only the first 20 bytes of a leaf. Shred response
+                // verification compares that prefix, and the returned shred's leader
+                // signature authenticates its complete FEC-set root.
 
                 // Queue ShredForBlockId requests
                 state
@@ -1054,6 +1058,7 @@ impl BlockIdRepairService {
 mod tests {
     use {
         super::*,
+        crate::repair::request_response::RequestResponse as _,
         solana_gossip::{cluster_info::ClusterInfo, contact_info::ContactInfo, ping_pong::Ping},
         solana_hash::Hash,
         solana_keypair::{Keypair, Signer},
@@ -1173,25 +1178,16 @@ mod tests {
 
         for slot in base_slot..base_slot + MAX_PENDING_REPAIR_EVENTS as Slot {
             state.push_pending_repair_event(RepairEvent::FetchBlock {
-                block: Block {
-                    slot,
-                    block_id: Hash::new_unique(),
-                },
+                block: Block::new_unique(slot),
             });
             assert!(state.pending_repair_events.len() <= MAX_PENDING_REPAIR_EVENTS);
         }
 
         state.push_pending_repair_event(RepairEvent::FetchBlock {
-            block: Block {
-                slot: 1,
-                block_id: Hash::new_unique(),
-            },
+            block: Block::new_unique(1),
         });
         state.push_pending_repair_event(RepairEvent::FetchBlock {
-            block: Block {
-                slot: base_slot + MAX_PENDING_REPAIR_EVENTS as Slot,
-                block_id: Hash::new_unique(),
-            },
+            block: Block::new_unique(base_slot + MAX_PENDING_REPAIR_EVENTS as Slot),
         });
 
         assert_eq!(state.pending_repair_events.len(), MAX_PENDING_REPAIR_EVENTS);
@@ -1245,7 +1241,7 @@ mod tests {
 
     #[test]
     fn test_deserialize_fec_set_root_response() {
-        let fec_set_root = Hash::new_unique();
+        let fec_set_root = Hash::new_unique().into();
         let fec_set_proof = vec![2u8; SIZE_OF_MERKLE_PROOF_ENTRY * 3];
 
         let response = BlockIdRepairResponse::FecSetRoot {
@@ -1254,6 +1250,13 @@ mod tests {
         };
 
         let data = wincode::serialize(&response).unwrap();
+        assert_eq!(
+            data.len(),
+            std::mem::size_of::<u32>()
+                + SIZE_OF_MERKLE_PROOF_ENTRY
+                + std::mem::size_of::<u64>()
+                + fec_set_proof.len()
+        );
         let packet = make_packet(&data);
         let packet_data = packet.data(..).unwrap();
 
@@ -1316,6 +1319,7 @@ mod tests {
             slot: 102,
             block_id: Hash::new_unique(),
             fec_set_index: 0,
+            fec_set_count: 1,
         });
         state
             .sent_requests
@@ -1325,7 +1329,7 @@ mod tests {
         let expired_shred_not_received = OutgoingMessage::Shred(ShredRepairType::ShredForBlockId {
             slot: 103,
             index: 5,
-            fec_set_merkle_root: Hash::new_unique(),
+            fec_set_merkle_root: Hash::new_unique().into(),
             block_id: Hash::new_unique(),
         });
         state
@@ -1347,7 +1351,7 @@ mod tests {
             OutgoingMessage::Shred(ShredRepairType::ShredForBlockId {
                 slot: received_slot,
                 index: received_shred_index,
-                fec_set_merkle_root: Hash::new_unique(),
+                fec_set_merkle_root: Hash::new_unique().into(),
                 block_id: received_block_id,
             });
         state
@@ -1358,7 +1362,7 @@ mod tests {
         let recent_shred = OutgoingMessage::Shred(ShredRepairType::ShredForBlockId {
             slot: 105,
             index: 15,
-            fec_set_merkle_root: Hash::new_unique(),
+            fec_set_merkle_root: Hash::new_unique().into(),
             block_id: Hash::new_unique(),
         });
         state.sent_requests.insert(recent_shred.clone(), now);
@@ -1443,6 +1447,13 @@ mod tests {
 
         // Verify: FecSetRoot requests were added to pending
         assert_eq!(state.pending_repair_requests.len(), fec_set_count_usize);
+        assert!(state.pending_repair_requests.iter().all(|request| matches!(
+            request,
+            OutgoingMessage::Metadata(BlockIdRepairType::FecSetRoot {
+                fec_set_count: count,
+                ..
+            }) if *count == fec_set_count
+        )));
 
         // Verify: request was removed from sent_requests
         assert!(
@@ -1474,7 +1485,7 @@ mod tests {
 
         // The FEC set root for fec_set_index=32 corresponds to leaf index 1 (32/32=1)
         let fec_set_leaf_index = fec_set_index as usize / DATA_SHREDS_PER_FEC_BLOCK;
-        let fec_set_root = fec_set_roots[fec_set_leaf_index];
+        let fec_set_root = fec_set_roots[fec_set_leaf_index].into();
         let fec_set_proof = proofs[fec_set_leaf_index].clone();
 
         // Create the request that would have been sent
@@ -1482,6 +1493,7 @@ mod tests {
             slot,
             block_id,
             fec_set_index,
+            fec_set_count: u32::try_from(fec_set_count).unwrap(),
         };
 
         // Register the request in outstanding_requests and get the nonce
@@ -1492,11 +1504,11 @@ mod tests {
             .sent_requests
             .insert(OutgoingMessage::Metadata(request), timestamp());
 
-        // Build the response
         let response = BlockIdRepairResponse::FecSetRoot {
             fec_set_root,
             fec_set_proof,
         };
+        assert!(request.verify_response(&response));
 
         // Serialize and create packet
         let data = serialize_response(&response, nonce);
@@ -1861,10 +1873,7 @@ mod tests {
 
         // Fill up requested_blocks with MAX_ALTERNATE_BLOCKS_PER_SLOT blocks for this slot
         for _ in 0..MAX_ALTERNATE_BLOCKS_PER_SLOT {
-            state.requested_blocks.insert(Block {
-                slot,
-                block_id: Hash::new_unique(),
-            });
+            state.requested_blocks.insert(Block::new_unique(slot));
         }
 
         let new_block_id = Hash::new_unique();

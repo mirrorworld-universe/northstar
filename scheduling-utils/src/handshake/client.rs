@@ -1,8 +1,9 @@
 use {
     crate::handshake::{
-        ClientHandshakeError, ClientLogon, ClientSession, ClientWorkerSession,
-        shared::{LOGON_FAILURE, MAX_WORKERS, VERSION},
+        ClientHandshakeError, ClientLogon, ClientSession, ClientWorkerSession, ProtocolVersions,
+        shared::{LOGON_FAILURE, MAX_WORKERS},
     },
+    agave_scheduler_bindings::{CheckWorkerToPackMessage, PackToCheckWorkerMessage},
     libc::CMSG_LEN,
     nix::sys::socket::{self, ControlMessageOwned, MsgFlags, UnixAddr},
     rts_alloc::Allocator,
@@ -19,7 +20,7 @@ use {
 };
 
 /// Number of global shared memory objects (in addition to per worker objects).
-const GLOBAL_SHMEM: usize = 3;
+const GLOBAL_SHMEM: usize = 5;
 
 /// The maximum size in bytes of the control message containing the queues assuming [`MAX_WORKERS`]
 /// is respected.
@@ -43,13 +44,14 @@ pub fn connect(
     logon: ClientLogon,
     timeout: Duration,
 ) -> Result<ClientSession, ClientHandshakeError> {
-    connect_path(path.as_ref(), logon, timeout)
+    connect_path(path.as_ref(), logon, timeout, ProtocolVersions::current())
 }
 
-fn connect_path(
+pub(crate) fn connect_path(
     path: &Path,
     logon: ClientLogon,
     timeout: Duration,
+    versions: ProtocolVersions,
 ) -> Result<ClientSession, ClientHandshakeError> {
     // NB: Technically this connect call can block indefinitely if the receiver's connection queue
     // is full. In practice this should almost never happen. If it does work arounds are:
@@ -63,7 +65,7 @@ fn connect_path(
     stream.set_write_timeout(Some(timeout))?;
 
     // Send the logon message to the server.
-    send_logon(&mut stream, logon)?;
+    send_logon(&mut stream, logon, versions)?;
 
     // Receive the server's response & on success the files for the newly allocated shared memory.
     let files = recv_response(&mut stream)?;
@@ -74,17 +76,25 @@ fn connect_path(
     Ok(session)
 }
 
-fn send_logon(stream: &mut UnixStream, logon: ClientLogon) -> Result<(), ClientHandshakeError> {
+fn send_logon(
+    stream: &mut UnixStream,
+    logon: ClientLogon,
+    versions: ProtocolVersions,
+) -> Result<(), ClientHandshakeError> {
     // Send the logon message.
     let mut buf = [0; 1024];
-    buf[..8].copy_from_slice(&VERSION.to_le_bytes());
-    const LOGON_END: usize = 8 + core::mem::size_of::<ClientLogon>();
-    let ptr = buf[8..LOGON_END].as_mut_ptr().cast::<ClientLogon>();
+    let versions_ptr = buf.as_mut_ptr().cast::<ProtocolVersions>();
+    const LOGON_END: usize =
+        ProtocolVersions::SERIALIZED_SIZE + core::mem::size_of::<ClientLogon>();
+    let logon_ptr = buf[ProtocolVersions::SERIALIZED_SIZE..LOGON_END]
+        .as_mut_ptr()
+        .cast::<ClientLogon>();
     // SAFETY:
     // - `buf` is valid for writes.
-    // - `buf.len()` has enough space for logon's size in memory.
+    // - `buf.len()` has enough space for both values.
     unsafe {
-        core::ptr::write_unaligned(ptr, logon);
+        core::ptr::write_unaligned(versions_ptr, versions);
+        core::ptr::write_unaligned(logon_ptr, logon);
     }
     stream.write_all(&buf)?;
 
@@ -138,7 +148,14 @@ pub fn setup_session(
         return Err(ClientHandshakeError::ProtocolViolation);
     }
     let (global_files, worker_files) = files.split_at(GLOBAL_SHMEM);
-    let [allocator_file, tpu_to_pack_file, progress_tracker_file] = global_files else {
+    let [
+        allocator_file,
+        tpu_to_pack_file,
+        progress_tracker_file,
+        pack_to_check_worker_file,
+        check_worker_to_pack_file,
+    ] = global_files
+    else {
         unreachable!();
     };
 
@@ -161,6 +178,14 @@ pub fn setup_session(
         allocators,
         tpu_to_pack: unsafe { shaq::spsc::Consumer::join(tpu_to_pack_file)? },
         progress_tracker: unsafe { shaq::spsc::Consumer::join(progress_tracker_file)? },
+        // SAFETY: the server initialized this FD as a matching MPMC consumer.
+        pack_to_check_worker: unsafe {
+            shaq::mpmc::Producer::<PackToCheckWorkerMessage>::join(pack_to_check_worker_file)?
+        },
+        // SAFETY: the server initialized this FD as a matching MPMC producer.
+        check_worker_to_pack: unsafe {
+            shaq::mpmc::Consumer::<CheckWorkerToPackMessage>::join(check_worker_to_pack_file)?
+        },
         workers: worker_files
             .chunks(2)
             .map(|window| {

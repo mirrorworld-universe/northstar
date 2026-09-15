@@ -61,13 +61,13 @@ agave-snapshots = { workspace = true }
 agave-transaction-view = { workspace = true }
 agave-votor = { workspace = true }
 agave-votor-messages = { workspace = true }
+agave-votor-transport = { workspace = true }
 agave-xdp = { workspace = true }
 ahash = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 arrayvec = { workspace = true }
 assert_matches = { workspace = true }
-async-trait = { workspace = true }
 bincode = { workspace = true }
 bitvec = { workspace = true }
 bytes = { workspace = true }
@@ -96,7 +96,7 @@ shaq = { workspace = true }
 signal-hook = { workspace = true }
 slab = { workspace = true }
 smallvec = { workspace = true }
-solana-account = { workspace = true }
+solana-account = { workspace = true, features = ["wincode"] }
 solana-accounts-db = { workspace = true }
 solana-address-lookup-table-interface = { workspace = true }
 solana-bincode = { workspace = true }
@@ -112,12 +112,8 @@ solana-epoch-schedule = { workspace = true }
 solana-fee = { workspace = true }
 solana-fee-calculator = { workspace = true }
 solana-fee-structure = { workspace = true }
-solana-frozen-abi = { workspace = true, optional = true, features = [
-    "frozen-abi",
-] }
-solana-frozen-abi-macro = { workspace = true, optional = true, features = [
-    "frozen-abi",
-] }
+solana-frozen-abi = { workspace = true, optional = true, features = ["frozen-abi"] }
+solana-frozen-abi-macro = { workspace = true, optional = true, features = ["frozen-abi"] }
 solana-genesis-config = { workspace = true }
 solana-genesis-utils = { workspace = true }
 solana-geyser-plugin-manager = { workspace = true }
@@ -133,7 +129,7 @@ solana-message = { workspace = true }
 solana-metrics = { workspace = true }
 solana-native-token = { workspace = true }
 solana-net-utils = { workspace = true }
-solana-nonce = { workspace = true }
+solana-nonce = { workspace = true, features = ["wincode"] }
 solana-packet = { workspace = true }
 solana-perf = { workspace = true }
 solana-poh = { workspace = true }
@@ -197,14 +193,17 @@ sysctl = { workspace = true }
 
 [dev-dependencies]
 agave-reserved-account-keys = { path = "../reserved-account-keys", features = ["agave-unstable-api"] }
-agave-scheduler-bindings = { path = "../scheduler-bindings", features = ["agave-unstable-api"] }
 bencher = { workspace = true }
 bitvec = { workspace = true }
 criterion = { workspace = true }
 serial_test = { workspace = true }
+<<<<<<< HEAD
 serde_json = { workspace = true }
 borsh = { workspace = true }
 solana-account = { workspace = true, features = ["dev-context-only-utils"] }
+=======
+solana-account = { workspace = true, features = ["bincode", "wincode"] }
+>>>>>>> upstream/master
 solana-bpf-loader-program = { path = "../programs/bpf_loader", default-features = false, features = ["agave-unstable-api", "svm-internal"] }
 solana-client = { path = "../client", features = ["dev-context-only-utils"] }
 solana-commitment-config = { workspace = true }

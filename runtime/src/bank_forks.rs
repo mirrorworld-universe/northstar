@@ -79,7 +79,6 @@ pub struct BankForks {
     root: Slot,
     working_slot: Slot,
     sharable_banks: SharableBanks,
-    highest_slot_at_startup: Slot,
     scheduler_pool: Option<InstalledSchedulerPoolArc>,
 
     /// The status tracker for the Alpenglow migration. Initialized via either
@@ -136,7 +135,6 @@ impl BankForks {
             },
             banks,
             descendants,
-            highest_slot_at_startup: 0,
             scheduler_pool: None,
             migration_status,
         }));
@@ -374,12 +372,8 @@ impl BankForks {
     pub fn insert_with_scheduling_mode(
         &mut self,
         mode: SchedulingMode,
-        mut bank: Bank,
+        bank: Bank,
     ) -> BankWithScheduler {
-        if self.root < self.highest_slot_at_startup {
-            bank.set_check_program_deployment_slot(true);
-        }
-
         let bank = Arc::new(bank);
         let bank = if let Some(scheduler_pool) = &self.scheduler_pool {
             Self::install_scheduler_into_bank(scheduler_pool, mode, bank)
@@ -419,11 +413,6 @@ impl BankForks {
             scheduler_pool.register_timeout_listener(bank_with_scheduler.create_timeout_listener());
         }
         bank_with_scheduler
-    }
-
-    pub fn insert_from_ledger(&mut self, bank: Bank) -> BankWithScheduler {
-        self.highest_slot_at_startup = std::cmp::max(self.highest_slot_at_startup, bank.slot());
-        self.insert(bank)
     }
 
     pub fn remove(&mut self, slot: Slot) -> Option<BankWithScheduler> {
@@ -905,6 +894,7 @@ mod tests {
             },
         },
         agave_feature_set::FeatureSet,
+        agave_transaction_view::resolved_transaction_view::ResolvedTransactionView,
         agave_votor_messages::{
             certificate::{CertSignature, GenesisCert},
             consensus_message::Block,
@@ -923,7 +913,6 @@ mod tests {
         solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
         solana_sdk_ids::system_program,
         solana_signer::Signer,
-        solana_transaction::sanitized::SanitizedTransaction,
         solana_transaction_error::TransactionError,
         solana_unified_scheduler_logic::OrderedTaskId,
         solana_vote_program::vote_state::BlockTimestamp,
@@ -955,7 +944,7 @@ mod tests {
 
         fn schedule_execution(
             &self,
-            _transaction: RuntimeTransaction<SanitizedTransaction>,
+            _transaction: RuntimeTransaction<ResolvedTransactionView<bytes::Bytes>>,
             _task_id: OrderedTaskId,
         ) -> ScheduleResult {
             Ok(())
@@ -1158,10 +1147,7 @@ mod tests {
     fn test_initialize_migration_status() {
         let ff_activation_slot = 5;
         let genesis_cert = GenesisCert {
-            block: Block {
-                slot: 1,
-                block_id: Hash::default(),
-            },
+            block: Block::new_unique(1),
             signature: CertSignature {
                 signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
                 bitmap: vec![],
@@ -1252,10 +1238,7 @@ mod tests {
         // Migration can still succeed
         let mut bank = Bank::new_from_parent(root_bank, SlotLeader::default(), 10);
         let genesis_cert = GenesisCert {
-            block: Block {
-                slot: 1,
-                block_id: Hash::new_unique(),
-            },
+            block: Block::new_unique(1),
             signature: CertSignature {
                 signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
                 bitmap: vec![],

@@ -15,6 +15,7 @@ use {
         SnapshotInterval, paths as snapshot_paths,
         snapshot_archive_info::SnapshotArchiveInfoGetter, snapshot_config::SnapshotConfig,
     },
+    agave_votor_messages::migration::MigrationStatus,
     crossbeam_channel::unbounded,
     jsonrpc_core::{MetaIoHandler, futures::prelude::*},
     jsonrpc_http_server::{
@@ -41,6 +42,7 @@ use {
         bank::Bank, bank_forks::BankForks, commitment::BlockCommitmentCache,
         non_circulating_supply::calculate_non_circulating_supply,
         prioritization_fee_cache::PrioritizationFeeCache,
+        validated_block_finalization::ValidatedBlockFinalizationCert,
     },
     solana_send_transaction_service::{
         send_transaction_service::{self, SendTransactionService},
@@ -490,6 +492,7 @@ pub struct JsonRpcServiceConfig<'a> {
     pub exit: Arc<AtomicBool>,
     pub override_health_check: Arc<AtomicBool>,
     pub optimistically_confirmed_bank: Arc<RwLock<OptimisticallyConfirmedBank>>,
+    pub highest_finalized: Arc<RwLock<Option<ValidatedBlockFinalizationCert>>>,
     pub send_transaction_service_config: send_transaction_service::Config,
     pub max_slots: Arc<MaxSlots>,
     pub leader_schedule_cache: Arc<LeaderScheduleCache>,
@@ -562,6 +565,8 @@ impl JsonRpcService {
             config.exit,
             config.override_health_check,
             config.optimistically_confirmed_bank,
+            config.highest_finalized,
+            migration_status,
             config.send_transaction_service_config,
             config.max_slots,
             config.leader_schedule_cache,
@@ -664,6 +669,8 @@ impl JsonRpcService {
         exit: Arc<AtomicBool>,
         override_health_check: Arc<AtomicBool>,
         optimistically_confirmed_bank: Arc<RwLock<OptimisticallyConfirmedBank>>,
+        highest_finalized: Arc<RwLock<Option<ValidatedBlockFinalizationCert>>>,
+        migration_status: Arc<MigrationStatus>,
         send_transaction_service_config: send_transaction_service::Config,
         max_slots: Arc<MaxSlots>,
         leader_schedule_cache: Arc<LeaderScheduleCache>,
@@ -693,6 +700,8 @@ impl JsonRpcService {
         let health = Arc::new(RpcHealth::new(
             Arc::clone(&optimistically_confirmed_bank),
             Arc::clone(&blockstore),
+            highest_finalized,
+            migration_status,
             config.health_check_slot_distance,
             override_health_check,
         ));
@@ -746,10 +755,9 @@ impl JsonRpcService {
                             bigtable_ledger_upload_service,
                         )
                     })
-                    .unwrap_or_else(|err| {
-                        error!("Failed to initialize BigTable ledger storage: {err:?}");
-                        (None, None)
-                    })
+                    .map_err(|err| {
+                        format!("Failed to initialize BigTable ledger storage: {err:?}")
+                    })?
             } else {
                 (None, None)
             };
@@ -991,6 +999,7 @@ mod tests {
         let block_commitment_cache = Arc::new(RwLock::new(BlockCommitmentCache::default()));
         let optimistically_confirmed_bank =
             OptimisticallyConfirmedBank::locked_from_bank_forks_root(&bank_forks);
+        let migration_status = bank_forks.read().unwrap().migration_status();
         let json_rpc_config = JsonRpcConfig::default();
         let runtime = service_runtime(
             json_rpc_config.rpc_threads,
@@ -1024,6 +1033,8 @@ mod tests {
             exit,
             Arc::new(AtomicBool::new(false)),
             optimistically_confirmed_bank,
+            Arc::default(),
+            migration_status,
             send_transaction_service_config,
             Arc::new(MaxSlots::default()),
             Arc::new(LeaderScheduleCache::default()),

@@ -894,6 +894,30 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             ),
     )
     .arg(
+        Arg::with_name("num_votor_endpoints")
+            .long("num-votor-endpoints")
+            .takes_value(true)
+            .default_value(&default_args.num_votor_endpoints)
+            .validator(is_parsable::<usize>)
+            .hidden(hidden_unless_forced())
+            .help("The number of QUIC endpoints used for the votor transport."),
+    )
+    .arg(
+        Arg::with_name("votor_peer_overrides")
+            .long("votor-peer-overrides")
+            .validator(is_pubkey)
+            .value_name("VALIDATOR IDENTITY")
+            .multiple(true)
+            .takes_value(true)
+            .hidden(hidden_unless_forced())
+            .help(
+                "A list of additional validator identities for this node to send votor consensus \
+                 messages to while staked. By default we only send consensus messages to staked \
+                 nodes, however an operator can use this flag to additionally send messages to an \
+                 unstaked RPC node for faster state. These identities are resolved from gossip.",
+            ),
+    )
+    .arg(
         Arg::with_name("staked_nodes_overrides")
             .long("staked-nodes-overrides")
             .value_name("PATH")
@@ -1023,10 +1047,10 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             ),
     )
     .arg(
-        Arg::with_name("accounts_db_verify_refcounts")
-            .long("accounts-db-verify-refcounts")
+        Arg::with_name("accounts_db_verify_index")
+            .long("accounts-db-verify-index")
             .help(
-                "Debug option to scan all append vecs and verify account index refcounts prior to \
+                "Debug option to scan all storages and verify account index slot lists prior to \
                  clean",
             )
             .hidden(hidden_unless_forced()),
@@ -1158,7 +1182,7 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
                  index may use up to 50 GB of memory. The \"unlimited\" option keeps the entire \
                  accounts index in memory. All index entries that are not in memory are kept in \
                  the disk-backed index. The disk-backed index has lower performance; prefer \
-                 higher explicit limits here.",
+                 higher explicit limits here. \"minimal\" is deprecated and behaves as \"25GB\".",
             ),
     )
     .arg(

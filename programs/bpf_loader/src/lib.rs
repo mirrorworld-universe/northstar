@@ -766,10 +766,9 @@ fn process_loader_upgradeable_instruction(
                                 .program_cache_for_tx_batch
                                 .store_modified_entry(
                                     program_key,
-                                    Arc::new(ProgramCacheEntry::new_tombstone(
+                                    Arc::new(ProgramCacheEntry::new_closed_tombstone(
                                         clock.slot,
                                         ProgramCacheEntryOwner::LoaderV3,
-                                        ProgramCacheEntryType::Closed,
                                     )),
                                 );
                         }
@@ -1075,7 +1074,7 @@ mod test_utils {
                     .data()
                     .get(programdata_data_offset.min(account.data().len())..)
                     .unwrap();
-                let loaded_program = ProgramCacheEntry::new(
+                let loaded_program = ProgramCacheEntry::load(
                     owner,
                     ProgramRuntimeEnvironment::clone(&program_runtime_environment),
                     0,
@@ -1101,8 +1100,7 @@ mod tests {
         assert_matches::assert_matches,
         rand::Rng,
         solana_account::{
-            AccountSharedData, ReadableAccount, WritableAccount,
-            create_account_shared_data_for_test as create_account_for_test, state_traits::StateMut,
+            AccountSharedData, ReadableAccount, WritableAccount, state_traits::StateMut,
         },
         solana_clock::Clock,
         solana_epoch_schedule::EpochSchedule,
@@ -1116,8 +1114,26 @@ mod tests {
         solana_sbpf::program::{BuiltinFunctionDefinition, BuiltinProgram},
         solana_sdk_ids::{system_program, sysvar},
         solana_svm_type_overrides::sync::atomic::{AtomicU64, Ordering},
+        solana_sysvar_id::SysvarId,
         std::{fs::File, io::Read, ops::Range},
     };
+
+    fn create_sysvar_account<T>(value: &T) -> AccountSharedData
+    where
+        T: wincode::Serialize<Src = T> + SysvarId,
+    {
+        let serialized_len = wincode::serialized_size(value).unwrap() as usize;
+        let canonical_data_len = match T::id() {
+            sysvar::clock::ID => solana_clock::SIZE,
+            sysvar::epoch_schedule::ID => solana_epoch_schedule::SIZE,
+            sysvar::rent::ID => solana_rent::SIZE,
+            id => panic!("unsupported sysvar: {id}"),
+        };
+        let required_data_len = canonical_data_len.max(serialized_len);
+        let mut account = AccountSharedData::new(1, required_data_len, &sysvar::id());
+        wincode::serialize_into(account.data_as_mut_slice(), value).unwrap();
+        account
+    }
 
     // 10 iterations is intentionally low: `mock_process_instruction` runs on a
     // single thread, so additional `shuttle::check_random` iterations validate
@@ -1182,9 +1198,8 @@ mod tests {
 
             // Consume the harness cell after Shuttle exits so extraction does
             // not call `shuttle::sync::Mutex::lock` outside the scheduler.
-            let mut result = match shuttle::sync::Arc::try_unwrap(result) {
-                Ok(result) => result,
-                Err(_) => panic!("shuttle test result still has outstanding references"),
+            let Ok(mut result) = shuttle::sync::Arc::try_unwrap(result) else {
+                panic!("shuttle test result still has outstanding references")
             };
             result
                 .get_mut()
@@ -1232,7 +1247,7 @@ mod tests {
         let rent = Rent::default();
         let mut program_account =
             AccountSharedData::new(rent.minimum_balance(elf.len()), 0, loader_id);
-        program_account.set_data(elf);
+        program_account.set_data_from_slice(&elf);
         program_account.set_executable(true);
         program_account
     }
@@ -1697,7 +1712,7 @@ mod tests {
     fn truncate_data(account: &mut AccountSharedData, len: usize) {
         let mut data = account.data().to_vec();
         data.truncate(len);
-        account.set_data(data);
+        account.set_data_from_slice(&data);
     }
 
     #[test]
@@ -1769,8 +1784,8 @@ mod tests {
                 })
                 .unwrap();
             let spill_account = AccountSharedData::new(0, 0, &Pubkey::new_unique());
-            let rent_account = create_account_for_test(&rent);
-            let clock_account = create_account_for_test(&Clock {
+            let rent_account = create_sysvar_account(&rent);
+            let clock_account = create_sysvar_account(&Clock {
                 slot: SLOT.saturating_add(1),
                 ..Clock::default()
             });
@@ -2384,8 +2399,8 @@ mod tests {
                 0,
                 &system_program::id(),
             );
-            let rent_account = create_account_for_test(&rent);
-            let clock_account = create_account_for_test(&Clock {
+            let rent_account = create_sysvar_account(&rent);
+            let clock_account = create_sysvar_account(&Clock {
                 slot: SLOT,
                 ..Clock::default()
             });
@@ -2468,7 +2483,6 @@ mod tests {
                     invoke_context.program_cache_for_tx_batch.replenish(
                         system_program::id(),
                         Arc::new(ProgramCacheEntry::new_builtin(
-                            0,
                             solana_system_program::system_processor::Entrypoint::register,
                         )),
                     );
@@ -3741,7 +3755,7 @@ mod tests {
                 programdata_address,
             })
             .unwrap();
-        let clock_account = create_account_for_test(&Clock {
+        let clock_account = create_sysvar_account(&Clock {
             slot: 1,
             ..Clock::default()
         });
@@ -3837,6 +3851,34 @@ mod tests {
             accounts.first().unwrap().data().len()
         );
 
+        // Case: close a program account with a non-writable program account
+        process_instruction(
+            &loader_id,
+            &instruction,
+            vec![
+                (programdata_address, programdata_account.clone()),
+                (recipient_address, recipient_account.clone()),
+                (authority_address, authority_account.clone()),
+                (program_address, program_account.clone()),
+                (sysvar::clock::id(), clock_account.clone()),
+            ],
+            vec![
+                AccountMeta {
+                    pubkey: programdata_address,
+                    is_signer: false,
+                    is_writable: true,
+                },
+                recipient_meta.clone(),
+                authority_meta.clone(),
+                AccountMeta {
+                    pubkey: program_address,
+                    is_signer: false,
+                    is_writable: false,
+                },
+            ],
+            Err(InstructionError::InvalidArgument),
+        );
+
         // Case: close a program account
         let accounts = process_instruction(
             &loader_id,
@@ -3899,10 +3941,7 @@ mod tests {
                 (programdata_address, programdata_account),
                 (program_address, program_account),
                 (buffer_address, buffer_account),
-                (
-                    sysvar::rent::id(),
-                    create_account_for_test(&Rent::default()),
-                ),
+                (sysvar::rent::id(), create_sysvar_account(&Rent::default())),
                 (sysvar::clock::id(), clock_account),
                 (
                     system_program::id(),
@@ -3999,7 +4038,7 @@ mod tests {
             0..255,
             |bytes: &mut [u8]| {
                 let mut program_account = AccountSharedData::new(1, 0, &loader_id);
-                program_account.set_data(bytes.to_vec());
+                program_account.set_data_from_slice(bytes);
                 program_account.set_executable(true);
                 process_instruction(
                     &program_id,
@@ -4084,7 +4123,7 @@ mod tests {
     fn do_test_program_usage_count_on_upgrade() {
         let transaction_accounts = vec![(
             sysvar::epoch_schedule::id(),
-            create_account_for_test(&EpochSchedule::default()),
+            create_sysvar_account(&EpochSchedule::default()),
         )];
         with_mock_invoke_context!(invoke_context, transaction_context, transaction_accounts);
         let program_id = Pubkey::new_unique();
@@ -4135,7 +4174,7 @@ mod tests {
     fn do_test_program_usage_count_on_non_upgrade() {
         let transaction_accounts = vec![(
             sysvar::epoch_schedule::id(),
-            create_account_for_test(&EpochSchedule::default()),
+            create_sysvar_account(&EpochSchedule::default()),
         )];
         with_mock_invoke_context!(invoke_context, transaction_context, transaction_accounts);
         let program_id = Pubkey::new_unique();
