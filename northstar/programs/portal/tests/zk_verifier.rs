@@ -216,8 +216,8 @@ async fn sbf_verifier_accepts_checkpoint_bound_sp1_proof() {
 async fn sbf_verifier_accepts_retained_l40s_proofs_and_rejects_changed_fields() {
     let root =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zkvm-replay/evidence/l40s-v1");
-    let context = setup().await;
-    for case in [
+    let mut context = setup().await;
+    for (case, prefix) in [
         "compatibility-02",
         "compatibility-03",
         "live-01",
@@ -229,15 +229,40 @@ async fn sbf_verifier_accepts_retained_l40s_proofs_and_rejects_changed_fields() 
         "../upload-recovery-v1",
         "../resolver-v1",
         "../userspace-v1",
-    ] {
-        let proof = std::fs::read(root.join(case).join("northstar-sp1-groth16-onchain.bin"))
-            .unwrap()
-            .try_into()
-            .unwrap();
-        let public_inputs = std::fs::read(root.join(case).join("northstar-sp1-public-inputs.bin"))
-            .unwrap()
-            .try_into()
-            .unwrap();
+        "../proof-performance-v1/worker-live-01",
+        "../proof-performance-v1/worker-live-02",
+        "../proof-performance-v1/worker-live-partial",
+        "../proof-performance-v1/worker-after-deadline",
+        "../proof-performance-v1/worker-fast-deadline",
+        "../proof-performance-v1/fast-live-1",
+        "../proof-performance-v1/fast-live-2",
+        "../proof-performance-v1/fast-live-3",
+    ]
+    .into_iter()
+    .map(|case| (case, String::new()))
+    .chain(
+        [
+            "../proof-performance-v1/persistent-01",
+            "../proof-performance-v1/cpu8-01",
+            "../proof-performance-v1/cuda-server-01",
+        ]
+        .into_iter()
+        .flat_map(|case| (0..3).map(move |sample| (case, format!("sample-{sample}-")))),
+    ) {
+        let proof = std::fs::read(
+            root.join(case)
+                .join(format!("{prefix}northstar-sp1-groth16-onchain.bin")),
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        let public_inputs = std::fs::read(
+            root.join(case)
+                .join(format!("{prefix}northstar-sp1-public-inputs.bin")),
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
         let instruction = Instruction {
             program_id: PORTAL_PROGRAM_ID,
             accounts: vec![],
@@ -249,12 +274,13 @@ async fn sbf_verifier_accepts_retained_l40s_proofs_and_rejects_changed_fields() 
             ))
             .unwrap(),
         };
+        context.last_blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
         let result = context
             .banks_client
             .simulate_transaction(transaction(&context, instruction.clone()))
             .await
             .unwrap();
-        assert_eq!(result.result.unwrap(), Ok(()), "{case}");
+        assert_eq!(result.result.unwrap(), Ok(()), "{case}/{prefix}");
         assert!(result.simulation_details.unwrap().units_consumed <= 130_000);
         for offset in [1, 5, 37, 69, 101, 165, 293]
             .into_iter()
@@ -262,12 +288,16 @@ async fn sbf_verifier_accepts_retained_l40s_proofs_and_rejects_changed_fields() 
         {
             let mut changed = instruction.clone();
             changed.data[offset] ^= 1;
+            context.last_blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
             let result = context
                 .banks_client
                 .simulate_transaction(transaction(&context, changed))
                 .await
                 .unwrap();
-            assert!(result.result.unwrap().is_err(), "{case}, byte {offset}");
+            assert!(
+                result.result.unwrap().is_err(),
+                "{case}/{prefix}, byte {offset}"
+            );
         }
     }
 }

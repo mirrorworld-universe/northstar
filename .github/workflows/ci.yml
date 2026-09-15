@@ -25,6 +25,7 @@ jobs:
       # Pin rustfmt so nightly style changes do not invalidate unchanged upstream files.
       - run: rustup toolchain install nightly-2026-07-20 --component rustfmt
       - run: cargo +nightly-2026-07-20 fmt --all -- --check
+      - run: cargo +nightly-2026-07-20 fmt --manifest-path northstar/zkvm-replay/Cargo.toml --all -- --check
 
   clippy:
     name: Clippy
@@ -72,10 +73,12 @@ jobs:
       - name: Test bounded GPU runner without GPU
         run: |
           python3 -B northstar/scripts/test_gpu_prover.py
+          python3 -B northstar/scripts/test_gpu_worker.py
           bash -n northstar/scripts/gpu-prover-ssh.sh
           bash -n northstar/scripts/live-cadence-recovery.sh
           bash -n northstar/scripts/live-gpu-settlement.sh
           bash -n northstar/scripts/provision-gpu-userspace.sh
+          bash -n northstar/scripts/provision-gpu-server.sh
           bash northstar/scripts/test-gpu-provision.sh
       - name: Install Solana tools
         run: |
