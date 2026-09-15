@@ -31,13 +31,13 @@ Icicle's build required a temporary header overlay because CUDA 13.1 and glibc 2
 
 The explicit prototype SBF must be loaded at the harness Portal address. Bundled default Portal remains fail-closed. With the current validator, setting `--portal` to a different address and using `--bpf-program` at the harness address avoids the bundled default program replacing the explicit prototype. ER execution remains a local Bank/client, not the validator's ER service.
 
-Remaining before complete acceptance:
+Acceptance status and remaining boundaries:
 
-- Complete portable GPU provisioning. Preflight, process-group timeout, measurement checks, SSH bounds and CPU-only runner regressions are now implemented; see [recovery and runner follow-up](recovery-and-gpu-runner-v1.md).
-- Add full proof/public-field/path/metadata mutation coverage and state-preservation assertions to the real resolver route.
-- Extend [combined proof-to-settlement recovery](gpu-proof-to-settlement-v1.md) beyond genesis delegation fixtures and the snapshot-fenced boundary. Resolution conservation also passed in the original canonical fixture (127,978 CU; 124.305s challenge-to-outcome).
-- Finish a reproducible GPU-host provisioning and live runner. Proofs, witnesses, measurements, timing events and the preserved guest ELF are committed under [`evidence/l40s-v1`](../zkvm-replay/evidence/l40s-v1/README.md), with SHA-256 checksums. Raw logs and private signer material are excluded.
-- Complete broader crash drills; obtain independent acceptance and explicit rollout review. Local full strict clippy, format, shell smoke guard, both default SBF builds, validator build, Bridge example/core/E2E, Northstar/Portal, SVM/core service and transaction-proof suites passed. Prototype SBF tests verified six retained proofs and rejected seven envelope/point mutations plus each of eight public fields per proof; this CPU-only check is also wired into CI.
+- [Pinned userspace provisioning](gpu-userspace-provisioning-v1.md) passed a fresh private-prefix build and CUDA proof (81.008s). Driver/toolchain prerequisites and shared circuit caches remain explicit.
+- [Resolver binding checks](resolver-bindings-v1.md) cover 31 real-SBF resolver cases and 10 proof-creation/path cases, including exact rejected-state and bond conservation. CPU-only verifier coverage includes 11 retained proofs.
+- [Combined proof-to-settlement recovery](gpu-proof-to-settlement-v1.md) passes data settlement, partial-upload restart and mid-settlement restart within the genesis-fixture/snapshot-fenced boundary. This does not establish fresh delegation, automatic manager ownership of the combined fixture or arbitrary-crash L1 durability.
+- Proofs, witnesses, measurements, timing events and the preserved guest ELF are retained under [`evidence`](../zkvm-replay/evidence/), with SHA-256 manifests. Raw logs and signer material are excluded.
+- Independent acceptance and explicit rollout review remain required. Local full strict clippy, format, shell guards, SBF builds and the documented crate/live suites passed; CI checks retained proofs and state invariants without a GPU.
 
 The follow-up also verifies pending/zero-effect/challenged SIGKILL recovery and snapshot-fenced post-settlement recovery with the next exact withdrawal payout. It fixes ER clock regression after restart. These service drills are separate from the newer combined GPU proof-to-settlement fixture, which additionally passes snapshot-fenced mid-settlement restart and plan replay. A fresh bounded-runner proof is retained under [`hardened-runner-v1`](../zkvm-replay/evidence/hardened-runner-v1/).
 

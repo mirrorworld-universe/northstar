@@ -75,6 +75,8 @@ jobs:
           bash -n northstar/scripts/gpu-prover-ssh.sh
           bash -n northstar/scripts/live-cadence-recovery.sh
           bash -n northstar/scripts/live-gpu-settlement.sh
+          bash -n northstar/scripts/provision-gpu-userspace.sh
+          bash northstar/scripts/test-gpu-provision.sh
       - name: Install Solana tools
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
