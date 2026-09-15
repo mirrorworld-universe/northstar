@@ -2,7 +2,7 @@
 set -euo pipefail
 umask 077
 mode=${1:-settle}
-[[ $mode == settle || $mode == crash-settling || $mode == crash-upload ]] || { echo 'usage: live-gpu-settlement.sh [settle|crash-settling|crash-upload]' >&2; exit 2; }
+[[ $mode == resolve || $mode == settle || $mode == crash-settling || $mode == crash-upload ]] || { echo 'usage: live-gpu-settlement.sh [resolve|settle|crash-settling|crash-upload]' >&2; exit 2; }
 : "${NORTHSTAR_LIVE_PROVER:?preflight-capable GPU adapter required}"
 : "${NORTHSTAR_LIVE_PORTAL_SBF:?explicit prototype Portal SBF required}"
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -41,12 +41,16 @@ for endpoint in "$url" http://127.0.0.1:8910; do
     fi
 done
 export CARGO_TARGET_DIR="$target"
-NORTHSTAR_LIVE_GENESIS_DIR="$work/genesis" cargo test --locked -p northstar export_live_settlement_genesis -- --ignored > "$work/genesis.log" 2>&1
 accounts=()
-for file in "$work/genesis"/*.json; do
-    key=${file##*/}; key=${key%.json}
-    accounts+=(--account "$key" "$file")
-done
+if [[ $mode == resolve ]]; then
+    cargo test --locked -p northstar real_checkpoint_bisects_to_captured_transaction --no-run > "$work/build.log" 2>&1
+else
+    NORTHSTAR_LIVE_GENESIS_DIR="$work/genesis" cargo test --locked -p northstar export_live_settlement_genesis -- --ignored > "$work/genesis.log" 2>&1
+    for file in "$work/genesis"/*.json; do
+        key=${file##*/}; key=${key%.json}
+        accounts+=(--account "$key" "$file")
+    done
+fi
 validator_env=()
 start_validator() {
     local command
@@ -59,7 +63,8 @@ start_validator() {
     wait_for 120 rpc_slot
 }
 start_validator
-export NORTHSTAR_LIVE_RPC_URL="$url" NORTHSTAR_LIVE_SETTLE=1 NORTHSTAR_LIVE_PROOF_DIR="$work/proof"
+export NORTHSTAR_LIVE_RPC_URL="$url" NORTHSTAR_LIVE_PROOF_DIR="$work/proof"
+if [[ $mode == resolve ]]; then unset NORTHSTAR_LIVE_SETTLE; else export NORTHSTAR_LIVE_SETTLE=1; fi
 unset NORTHSTAR_LIVE_SETTLEMENT_RESTART_READY NORTHSTAR_LIVE_SETTLEMENT_RESTART_RESUME NORTHSTAR_LIVE_UPLOAD_RESTART_READY NORTHSTAR_LIVE_UPLOAD_RESTART_RESUME
 if [[ $mode == crash-settling ]]; then
     export NORTHSTAR_LIVE_SETTLEMENT_RESTART_READY="$work/ready" NORTHSTAR_LIVE_SETTLEMENT_RESTART_RESUME="$work/resume"
@@ -67,7 +72,7 @@ elif [[ $mode == crash-upload ]]; then
     export NORTHSTAR_LIVE_UPLOAD_RESTART_READY="$work/ready" NORTHSTAR_LIVE_UPLOAD_RESTART_RESUME="$work/resume"
 fi
 test_env=()
-for name in CARGO_TARGET_DIR PATH HOME RUSTC RUSTDOC LD_LIBRARY_PATH ICICLE_BACKEND_INSTALL_DIR NORTHSTAR_LIVE_PROVER NORTHSTAR_LIVE_RPC_URL NORTHSTAR_LIVE_SETTLE NORTHSTAR_LIVE_PROOF_DIR NORTHSTAR_LIVE_PAYER NORTHSTAR_LIVE_STEP_COUNT NORTHSTAR_LIVE_SELECTED_STEP NORTHSTAR_LIVE_SETTLEMENT_RESTART_READY NORTHSTAR_LIVE_SETTLEMENT_RESTART_RESUME NORTHSTAR_LIVE_UPLOAD_RESTART_READY NORTHSTAR_LIVE_UPLOAD_RESTART_RESUME NORTHSTAR_GPU_SSH NORTHSTAR_GPU_REMOTE_RUNNER NORTHSTAR_GPU_REMOTE_ARTIFACTS NORTHSTAR_GPU_PROVER NORTHSTAR_GPU_REPLAY_DIR; do
+for name in CARGO_TARGET_DIR PATH HOME RUSTC RUSTDOC LD_LIBRARY_PATH ICICLE_BACKEND_INSTALL_DIR NORTHSTAR_LIVE_PROVER NORTHSTAR_LIVE_RPC_URL NORTHSTAR_LIVE_SETTLE NORTHSTAR_LIVE_PROOF_DIR NORTHSTAR_LIVE_PAYER NORTHSTAR_LIVE_STEP_COUNT NORTHSTAR_LIVE_SELECTED_STEP NORTHSTAR_LIVE_SETTLEMENT_RESTART_READY NORTHSTAR_LIVE_SETTLEMENT_RESTART_RESUME NORTHSTAR_LIVE_UPLOAD_RESTART_READY NORTHSTAR_LIVE_UPLOAD_RESTART_RESUME NORTHSTAR_GPU_SSH NORTHSTAR_GPU_REMOTE_RUNNER NORTHSTAR_GPU_REMOTE_ARTIFACTS NORTHSTAR_GPU_PROVER NORTHSTAR_GPU_REPLAY_DIR NORTHSTAR_GPU_WORKER_SOCKET NORTHSTAR_GPU_REQUEST_TIMEOUT; do
     if [[ -v $name ]]; then test_env+=("$name=${!name}"); fi
 done
 printf -v command '%q ' env "${test_env[@]}" cargo test --locked -p northstar real_checkpoint_bisects_to_captured_transaction -- --ignored --nocapture

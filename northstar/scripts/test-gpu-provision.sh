@@ -21,3 +21,13 @@ status=0
 PATH=/nonexistent "$(command -v bash)" "$script" "$work/new" > "$work/output" 2>&1 || status=$?
 [[ $status == 2 && ! -e $work/new ]]
 echo 'GPU provisioning guards passed (no downloads or system changes).'
+
+script=$(cd "$(dirname "$0")" && pwd)/provision-gpu-server.sh
+expect_refusal
+expect_refusal relative-prefix "$work/new"
+expect_refusal "$work/missing" "$work/existing"
+[[ $(< "$work/existing/sentinel") == preserve ]]
+expect_refusal "$work/missing" "$work/link"
+expect_refusal "$work/missing" "$work/new"
+[[ ! -e $work/new && ! -e $work/missing ]]
+echo 'GPU server provisioning guards passed.'
