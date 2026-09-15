@@ -2,6 +2,8 @@
 mod live_cadence;
 #[cfg(test)]
 mod live_checkpoint;
+#[cfg(test)]
+mod live_settlement;
 
 use {
     crate::{
@@ -2530,6 +2532,15 @@ mod tests {
         session: Pubkey,
         step_count: usize,
     ) -> (CheckpointArtifactV1, Arc<ErHistoryStore>) {
+        supported_sbf_checkpoint_with_target_offset(lamports_per_signature, session, step_count, 64)
+    }
+
+    pub(super) fn supported_sbf_checkpoint_with_target_offset(
+        lamports_per_signature: u64,
+        session: Pubkey,
+        step_count: usize,
+        target_offset: u8,
+    ) -> (CheckpointArtifactV1, Arc<ErHistoryStore>) {
         use {
             agave_feature_set::disable_sbpf_v0_execution,
             solana_fee_structure::FeeStructure,
@@ -2559,7 +2570,7 @@ mod tests {
         }
         fund_account(&bank, &signer.pubkey(), 10_000_000);
         let targets = (0..step_count)
-            .map(|index| Pubkey::new_from_array([index as u8 + 64; 32]))
+            .map(|index| Pubkey::new_from_array([index as u8 + target_offset; 32]))
             .collect::<Vec<_>>();
         for target in &targets {
             let account = AccountSharedData::new(1_000_000, 8, &fixture.program_id);

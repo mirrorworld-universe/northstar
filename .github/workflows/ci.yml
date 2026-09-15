@@ -25,6 +25,7 @@ jobs:
       # Pin rustfmt so nightly style changes do not invalidate unchanged upstream files.
       - run: rustup toolchain install nightly-2026-07-20 --component rustfmt
       - run: cargo +nightly-2026-07-20 fmt --all -- --check
+      - run: cargo +nightly-2026-07-20 fmt --manifest-path northstar/zkvm-replay/Cargo.toml --all -- --check
 
   clippy:
     name: Clippy
@@ -69,6 +70,16 @@ jobs:
           sudo apt-get install -y protobuf-compiler libprotobuf-dev libudev-dev libclang-dev
       - name: Test SOL smoke restart finalization guard
         run: bash .github/scripts/test-devnet-e2e-smoke.sh
+      - name: Test bounded GPU runner without GPU
+        run: |
+          python3 -B northstar/scripts/test_gpu_prover.py
+          python3 -B northstar/scripts/test_gpu_worker.py
+          bash -n northstar/scripts/gpu-prover-ssh.sh
+          bash -n northstar/scripts/live-cadence-recovery.sh
+          bash -n northstar/scripts/live-gpu-settlement.sh
+          bash -n northstar/scripts/provision-gpu-userspace.sh
+          bash -n northstar/scripts/provision-gpu-server.sh
+          bash northstar/scripts/test-gpu-provision.sh
       - name: Install Solana tools
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
@@ -89,6 +100,11 @@ jobs:
           key: ${{ runner.os }}-solana-platform-tools-v3-${{ steps.solana_tools.outputs.platform_tools_version }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-solana-platform-tools-v3-${{ steps.solana_tools.outputs.platform_tools_version }}-
+      - name: Verify retained L40S proofs against prototype Portal SBF
+        run: |
+          cargo build-sbf --manifest-path northstar/programs/portal/Cargo.toml --features zk-verifier-prototype -- --locked
+          BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar-portal --features zk-verifier-prototype --test zk_verifier
+          cargo test --locked -p northstar-portal --features zk-verifier-prototype --lib
       - name: Build Portal SBF program
         run: cargo build-sbf --manifest-path northstar/programs/portal/Cargo.toml -- --locked
       - name: Build Token Bridge SBF program

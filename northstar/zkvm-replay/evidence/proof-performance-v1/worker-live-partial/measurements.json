@@ -1,0 +1,21 @@
+{
+  "executed_units": 218,
+  "phases": [
+    {
+      "artifact_bytes": 1950,
+      "onchain_proof_bytes": 356,
+      "onchain_proof_path": "northstar-sp1-groth16-onchain.bin",
+      "phase": "groth16",
+      "prove_and_wrap_ms": 43870,
+      "public_inputs_path": "northstar-sp1-public-inputs.bin",
+      "verify_ms": 332
+    }
+  ],
+  "profile": "worker-live-partial",
+  "program_vkey_hash": "0x0050535e1d6450ca9f99ea6ac433acc14e0defb4795ee36f3e8fb375155f9e6c",
+  "public_inputs": "00000000000000006e6f727468737461722d65722d737465702d76310000020119332bc15f353b607188620724183e8c1ce7151b831d8e7dee49f37dc2e9753b000000000000000000000000000000000000000000000001000000000000000205fcc2369941699f58cb0a59ea1a23d021b191dadf84d1a984c2c879eadeeb6a04d465a6e626d957ed0204c075e5cc739f4f0eef7c3dfaba43b251c5aeee5a1a1ff333945dfb09a7ced48286f4bbebc5941def700b2ae936960822aaf3b134bf0571947a97178cc0eeb205075fee5ab7d5a55a4bbbe158ed58d496467d2844340cf5875b796b50f33aa03d833d37d3d6dad51244c5c318a19a5dffc68fc35a52",
+  "schema": "northstar-sp1-benchmark-v2",
+  "vm_rows": 208,
+  "witness_bytes": 362515,
+  "worker_request_id": "516eabf9151e408881bfae3ad63101e5"
+}

@@ -2,8 +2,11 @@ use {
     super::tests::supported_sbf_checkpoint_with_steps,
     borsh::BorshDeserialize,
     northstar_portal::{
-        BisectChallenge, Challenge, ChallengeTurn, DataAvailabilityProof, DataAvailabilityStatus,
-        OpenChallenge, OpenSession, PortalInstruction, ProposeCheckpoint, RespondChallenge,
+        BisectChallenge, Challenge, ChallengeStatus, ChallengeTurn, CreateStepProof,
+        DataAvailabilityProof, DataAvailabilityStatus, OpenChallenge, OpenSession,
+        PortalInstruction, ProposeCheckpoint, ResolveChallenge, RespondChallenge, SealStepProof,
+        StepProofVerifierMode, WriteStepProof, MAX_STEP_PROOF_BYTES, MAX_STEP_PROOF_CHUNK,
+        TX_EFFECT_AUTH_PATH_NODES,
     },
     solana_commitment_config::CommitmentConfig,
     solana_instruction::{AccountMeta, Instruction},
@@ -14,7 +17,7 @@ use {
     solana_signer::Signer,
     solana_system_interface::instruction::transfer,
     solana_transaction::Transaction,
-    std::{env, path::PathBuf},
+    std::{env, fs, path::PathBuf, process::Command},
 };
 
 pub(super) const PORTAL: Pubkey =
@@ -71,6 +74,22 @@ pub(super) fn send(
 #[test]
 #[ignore = "requires a fresh solana-test-validator with the Portal SBF program"]
 fn real_checkpoint_bisects_to_captured_transaction() {
+    if let Some(prover) = env::var_os("NORTHSTAR_LIVE_PROVER") {
+        let directory = PathBuf::from(
+            env::var_os("NORTHSTAR_LIVE_PROOF_DIR").expect("NORTHSTAR_LIVE_PROOF_DIR path"),
+        );
+        assert!(directory.is_absolute() && !directory.exists());
+        let status = Command::new("timeout")
+            .args(["--kill-after=5s", "240s"])
+            .arg(prover)
+            .arg("preflight")
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "GPU preflight failed before opening session"
+        );
+    }
     let payer_path = env::var_os("NORTHSTAR_LIVE_PAYER")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -93,7 +112,11 @@ fn real_checkpoint_bisects_to_captured_transaction() {
         .map(|value| value.parse::<usize>().expect("integer selected step"))
         .unwrap_or(10.min(step_count - 1));
     assert!(selected_step < step_count);
-    let (artifact, history) = supported_sbf_checkpoint_with_steps(0, session, step_count);
+    let (artifact, history) = if env::var_os("NORTHSTAR_LIVE_SETTLE").is_some() {
+        super::tests::supported_sbf_checkpoint_with_target_offset(0, session, step_count, 128)
+    } else {
+        supported_sbf_checkpoint_with_steps(0, session, step_count)
+    };
     artifact.verify().unwrap();
     let commitment = artifact.checkpoint;
     let er_slot = commitment.er_slot;
@@ -151,6 +174,7 @@ fn real_checkpoint_bisects_to_captured_transaction() {
             }),
         )],
     );
+    let challenge_started = std::time::Instant::now();
     send(
         &rpc,
         &payer,
@@ -393,8 +417,13 @@ fn real_checkpoint_bisects_to_captured_transaction() {
     assert_eq!(da_state.payload_root, commitment.da_commitment);
 
     use {
-        northstar_transaction_proof::{fixture::build_replay_witness_v1, public_inputs_bytes},
-        northstar_zk_types::{ErStepPublicInputsV1, FrBytes},
+        northstar_transaction_proof::{
+            decode_witness, encode_witness, fixture::build_replay_witness_v1, public_inputs_bytes,
+        },
+        northstar_zk_types::{
+            ErStepPublicInputsV1, FrBytes, ER_STEP_PROOF_KIND_FULL_TRANSACTION,
+            ER_STEP_PROOF_VERSION_V1,
+        },
     };
     let session_state =
         northstar_portal::Session::try_from_slice(&rpc.get_account(&session).unwrap().data)
@@ -449,4 +478,240 @@ fn real_checkpoint_bisects_to_captured_transaction() {
         public_inputs_bytes(northstar_transaction_proof::replay(&witness).unwrap()),
         expected
     );
+
+    let Some(prover) = env::var_os("NORTHSTAR_LIVE_PROVER") else {
+        return;
+    };
+    let artifact_dir = PathBuf::from(
+        env::var_os("NORTHSTAR_LIVE_PROOF_DIR").expect("NORTHSTAR_LIVE_PROOF_DIR path"),
+    );
+    assert!(artifact_dir.is_absolute());
+    fs::create_dir(&artifact_dir).unwrap();
+    let witness_path = artifact_dir.join("witness-v2.bin");
+    let measurement_path = artifact_dir.join("measurements.json");
+    let encoded = encode_witness(&witness).unwrap();
+    fs::write(&witness_path, &encoded).unwrap();
+    let exported = decode_witness(&fs::read(&witness_path).unwrap()).unwrap();
+    assert_eq!(
+        public_inputs_bytes(northstar_transaction_proof::replay(&exported).unwrap()),
+        expected
+    );
+
+    let proving_started = std::time::Instant::now();
+    let status = Command::new("timeout")
+        .args(["--kill-after=5s", "300s"])
+        .arg(prover)
+        .current_dir(&artifact_dir)
+        .env("SP1_PROVER", "cuda")
+        .arg("groth16")
+        .arg(&witness_path)
+        .arg(&measurement_path)
+        .arg("live-checkpoint")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let proving_ms = proving_started.elapsed().as_secs_f64() * 1000.0;
+    let proof: [u8; MAX_STEP_PROOF_BYTES] =
+        fs::read(artifact_dir.join("northstar-sp1-groth16-onchain.bin"))
+            .unwrap()
+            .try_into()
+            .unwrap();
+    let proved_public: [u8; 256] = fs::read(artifact_dir.join("northstar-sp1-public-inputs.bin"))
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(proved_public, expected);
+    let measurements: serde_json::Value =
+        serde_json::from_slice(&fs::read(&measurement_path).unwrap()).unwrap();
+    let candidate: serde_json::Value =
+        serde_json::from_str(include_str!("../../zkvm-replay/partial-candidate-v1.json")).unwrap();
+    assert_eq!(
+        measurements["program_vkey_hash"],
+        candidate["program_vkey_hash"]
+    );
+    let proof_phase = measurements["phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|phase| phase["phase"] == "groth16")
+        .unwrap();
+    assert!(proof_phase["prove_and_wrap_ms"].as_u64().unwrap() <= 120_000);
+    assert!(challenge_started.elapsed().as_secs() < 600);
+
+    let proof_account = northstar_portal::find_step_proof_pda(&PORTAL, &checkpoint).0;
+    let mut tx_effect_path = [[0; 32]; TX_EFFECT_AUTH_PATH_NODES];
+    tx_effect_path[..page.transaction_effect_path.siblings.len()]
+        .copy_from_slice(&page.transaction_effect_path.siblings);
+    let upload_started = std::time::Instant::now();
+    send(
+        &rpc,
+        &payer,
+        &[&payer, &challenger],
+        &[instruction(
+            vec![
+                AccountMeta::new(challenger.pubkey(), true),
+                AccountMeta::new_readonly(session, false),
+                AccountMeta::new_readonly(checkpoint, false),
+                AccountMeta::new_readonly(challenge, false),
+                AccountMeta::new(proof_account, false),
+                AccountMeta::new_readonly(system_program::id(), false),
+            ],
+            PortalInstruction::CreateStepProof(CreateStepProof {
+                er_slot,
+                proof_kind: ER_STEP_PROOF_KIND_FULL_TRANSACTION,
+                proof_version: ER_STEP_PROOF_VERSION_V1,
+                step_index: state.start_step,
+                session_context: expected[32..64].try_into().unwrap(),
+                tx_effect_root: page.transaction_effect_commitment,
+                tx_effect_path_len: page.transaction_effect_path.siblings.len() as u8,
+                tx_effect_path,
+                readonly_l1_root: commitment.readonly_l1_root,
+                settlement_effect_root: commitment.effect_commitment,
+            }),
+        )],
+    );
+    for (offset, bytes) in proof.chunks(MAX_STEP_PROOF_CHUNK).enumerate() {
+        let mut chunk = [0; MAX_STEP_PROOF_CHUNK];
+        chunk[..bytes.len()].copy_from_slice(bytes);
+        send(
+            &rpc,
+            &payer,
+            &[&payer, &challenger],
+            &[instruction(
+                vec![
+                    AccountMeta::new_readonly(challenger.pubkey(), true),
+                    AccountMeta::new_readonly(session, false),
+                    AccountMeta::new_readonly(checkpoint, false),
+                    AccountMeta::new_readonly(challenge, false),
+                    AccountMeta::new(proof_account, false),
+                ],
+                PortalInstruction::WriteStepProof(WriteStepProof {
+                    er_slot,
+                    offset: (offset * MAX_STEP_PROOF_CHUNK) as u32,
+                    chunk_len: bytes.len() as u16,
+                    chunk,
+                }),
+            )],
+        );
+        if offset == 0 {
+            super::live_settlement::restart_after_account(&rpc, &proof_account, "UPLOAD");
+        }
+    }
+    send(
+        &rpc,
+        &payer,
+        &[&payer, &challenger],
+        &[instruction(
+            vec![
+                AccountMeta::new_readonly(challenger.pubkey(), true),
+                AccountMeta::new_readonly(session, false),
+                AccountMeta::new_readonly(checkpoint, false),
+                AccountMeta::new_readonly(challenge, false),
+                AccountMeta::new(proof_account, false),
+            ],
+            PortalInstruction::SealStepProof(SealStepProof {
+                er_slot,
+                proof_len: proof.len() as u32,
+            }),
+        )],
+    );
+    let upload_ms = upload_started.elapsed().as_secs_f64() * 1000.0;
+
+    let resolve = instruction(
+        vec![
+            AccountMeta::new_readonly(challenger.pubkey(), true),
+            AccountMeta::new_readonly(session, false),
+            AccountMeta::new(checkpoint, false),
+            AccountMeta::new(challenge, false),
+            AccountMeta::new_readonly(da, false),
+            AccountMeta::new_readonly(proof_account, false),
+            AccountMeta::new(challenger.pubkey(), false),
+            AccountMeta::new(cursor, false),
+        ],
+        PortalInstruction::ResolveChallenge(ResolveChallenge {
+            er_slot,
+            verifier_mode: StepProofVerifierMode::Production,
+        }),
+    );
+    let resolve_transaction = Transaction::new_signed_with_payer(
+        std::slice::from_ref(&resolve),
+        Some(&payer.pubkey()),
+        &[&payer, &challenger],
+        rpc.get_latest_blockhash().unwrap(),
+    );
+    let simulation = rpc
+        .simulate_transaction(&resolve_transaction)
+        .unwrap()
+        .value;
+    assert_eq!(simulation.err, None);
+    let resolver_cu = simulation.units_consumed.unwrap();
+    assert!(resolver_cu <= 130_000);
+    let resolver_accounts = [
+        session,
+        checkpoint,
+        challenge,
+        da,
+        proof_account,
+        challenger.pubkey(),
+        cursor,
+    ]
+    .into_iter()
+    .map(|key| (key, rpc.get_account(&key).unwrap()))
+    .collect::<Vec<_>>();
+    fs::write(
+        artifact_dir.join("resolver-fixture.bin"),
+        bincode::serialize(&(rpc.get_slot().unwrap(), er_slot, resolver_accounts)).unwrap(),
+    )
+    .unwrap();
+    let checkpoint_before = rpc.get_account(&checkpoint).unwrap();
+    let cursor_before = rpc.get_account(&cursor).unwrap();
+    let recipient_before = rpc.get_account(&challenger.pubkey()).unwrap();
+    let resolution_started = std::time::Instant::now();
+    rpc.send_and_confirm_transaction(&resolve_transaction)
+        .unwrap();
+    let resolution_ms = resolution_started.elapsed().as_secs_f64() * 1000.0;
+
+    let resolved =
+        northstar_portal::Checkpoint::try_from_slice(&rpc.get_account(&checkpoint).unwrap().data)
+            .unwrap();
+    let resolved_challenge =
+        Challenge::try_from_slice(&rpc.get_account(&challenge).unwrap().data).unwrap();
+    assert_eq!(resolved.status, northstar_portal::CheckpointStatus::Pending);
+    assert!(resolved.challenge_resolved);
+    assert_eq!(resolved_challenge.status, ChallengeStatus::ValidatorWon);
+    assert_eq!(rpc.get_account(&cursor).unwrap(), cursor_before);
+    assert_eq!(
+        rpc.get_account(&challenger.pubkey()).unwrap(),
+        recipient_before
+    );
+    assert_eq!(
+        rpc.get_account(&checkpoint).unwrap().lamports,
+        checkpoint_before.lamports
+    );
+    let checkpoint_before =
+        northstar_portal::Checkpoint::try_from_slice(&checkpoint_before.data).unwrap();
+    assert_eq!(resolved.bond_lamports, checkpoint_before.bond_lamports);
+    assert_eq!(resolved.bond_status, checkpoint_before.bond_status);
+    let summary = serde_json::json!({
+        "schema_version": 1, "clock": "wall", "phase": "proof_resolution",
+        "step": state.start_step, "proving_ms": proving_ms, "upload_ms": upload_ms,
+        "resolution_ms": resolution_ms, "resolver_cu": resolver_cu,
+        "challenge_to_outcome_ms": challenge_started.elapsed().as_secs_f64() * 1000.0,
+        "resolved": true, "slot_warps": false,
+    });
+    fs::write(
+        artifact_dir.join("resolution.json"),
+        serde_json::to_vec_pretty(&summary).unwrap(),
+    )
+    .unwrap();
+    println!("NORTHSTAR_TIMING {summary}");
+    if env::var_os("NORTHSTAR_LIVE_SETTLE").is_some() {
+        super::live_settlement::settle_resolved_fixture(
+            &rpc,
+            &payer,
+            &artifact,
+            &history,
+            &artifact_dir,
+        );
+    }
 }

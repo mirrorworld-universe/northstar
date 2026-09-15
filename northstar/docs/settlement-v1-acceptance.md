@@ -1,6 +1,8 @@
 # Settlement v1 acceptance matrix
 
-Status: **GPU-free implementation and coverage are substantial; production proof acceptance is incomplete**.
+> Current evidence and pinned reproduction commands: [independent-review handoff](gpu-independent-review-v1.md). Three live proof-backed resolver runs, bounded proof-to-settlement/crash recovery, named resolver/path invariants and private-prefix GPU setup now pass. The older “Blocked” proof-generation rows below describe the pre-GPU baseline, not current execution status. Genesis-fixture and snapshot-fenced recovery limits remain explicit.
+
+Status: **GPU proof and bounded recovery evidence retained; independent acceptance and rollout approval still required**.
 
 This runbook separates reproducible CPU/SBF checks from proof-generation checks that require CUDA hardware or an authorized proving service. Passing the CPU section does not authorize enabling the production verifier.
 
