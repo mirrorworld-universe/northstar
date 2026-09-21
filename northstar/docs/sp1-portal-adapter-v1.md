@@ -29,7 +29,7 @@ The adapter binds both layers of SP1 verification:
 - SP1 6.1.0 Groth16 key SHA-256: `4388a21c687fdd5f218d7e3d13190cac4c5355818d3605fd5fb811df468ee696`.
 - Required proof prefix: `4388a21c`.
 - SP1 recursion key root: `002f850ee998974d6cc00e50cd0814b098c05bfade466d28573240d057f25352`.
-- Northstar replay program key hash: `0x00566483d6fa2d3e348b61ce6acca85960a7e0152748ab20770add0b7d8c953f`.
+- Northstar replay program key hash: `0x0050535e1d6450ca9f99ea6ac433acc14e0defb4795ee36f3e8fb375155f9e6c` (partial-checkpoint candidate; see `../zkvm-replay/partial-candidate-v1.json`).
 
 The compressed 492-byte SP1 key is retained in `programs/portal/keys/`. Portal embeds its converted 832-byte Solana verifier points in executable read-only data. Proof key prefix, exit code, recursion root, and all scalar encodings fail closed before pairing.
 

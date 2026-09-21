@@ -83,6 +83,7 @@ pub fn process_verify_er_step_proof_v1(
 mod tests {
     use {
         super::*,
+        alloc::format,
         northstar_zk_types::{
             ErStepPublicInputsV1, FrBytes, Groth16ProofRaw, BN254_FR_MODULUS_BE,
             ER_STEP_PROOF_KIND_FULL_TRANSACTION, ER_STEP_PROOF_VERSION_V1,

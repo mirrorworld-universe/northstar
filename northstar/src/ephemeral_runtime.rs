@@ -1082,6 +1082,14 @@ impl EphemeralRuntime {
     /// clears session state, and starts a new SlotAdvancer.
     /// Called when a new session opens to get a fresh L1 snapshot.
     pub fn reset_to_new_parent(&mut self, parent_bank: Arc<Bank>) {
+        self.reset_to_new_parent_with_slot_floor(parent_bank, 0);
+    }
+
+    pub(crate) fn reset_to_new_parent_with_slot_floor(
+        &mut self,
+        parent_bank: Arc<Bank>,
+        slot_floor: Slot,
+    ) {
         self.sync_status.update_latest_l1_slot(parent_bank.slot());
         self.sync_status.mark_synced_through(parent_bank.slot());
 
@@ -1098,8 +1106,9 @@ impl EphemeralRuntime {
             // 2. Create new ephemeral bank from current L1 root
             let old_er_bank = self.bank_forks.read().unwrap().working_bank();
             let current_er_tip = old_er_bank.slot();
-            let ephemeral_slot =
-                Self::er_slot_for(&parent_bank).max(current_er_tip.saturating_add(1));
+            let ephemeral_slot = Self::er_slot_for(&parent_bank)
+                .max(current_er_tip.saturating_add(1))
+                .max(slot_floor.saturating_add(1));
             info!(
                 "reset_to_new_parent: parent_slot={}, ephemeral_slot={}, parent_epoch={}",
                 parent_bank.slot(),
@@ -5219,6 +5228,40 @@ mod tests {
         assert!(
             root_was_frozen,
             "RPC fallback root must be frozen during reset so preflight simulation cannot panic"
+        );
+    }
+
+    #[test]
+    fn test_reset_respects_persisted_checkpoint_slot_floor() {
+        let parent = create_test_bank();
+        parent.freeze();
+        let parent = Arc::new(parent);
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            parent.clone(),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        let floor = runtime.bank_forks.read().unwrap().working_bank().slot() + 10_000;
+        runtime.reset_to_new_parent_with_slot_floor(parent, floor);
+        let root = runtime.bank_forks.read().unwrap().root();
+        runtime.shutdown();
+        assert!(
+            root > floor,
+            "restart must advance beyond persisted checkpoints"
         );
     }
 

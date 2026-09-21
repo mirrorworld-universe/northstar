@@ -1766,7 +1766,23 @@ impl Manager {
             root_bank.epoch(),
         );
         runtime.set_session_settings(session.grid_id, session.ttl_slots, session.fee_cap);
-        runtime.reset_to_new_parent(root_bank);
+        let cursor_key = northstar_portal::find_checkpoint_cursor_pda(
+            &self.config.portal_program_id,
+            &session_pda,
+        )
+        .0;
+        let active_er_slot = root_bank
+            .get_account(&cursor_key)
+            .filter(|account| account.owner() == &self.config.portal_program_id)
+            .and_then(|account| {
+                borsh::from_slice::<northstar_portal::CheckpointCursor>(account.data()).ok()
+            })
+            .map_or(0, |cursor| cursor.active_er_slot);
+        // A fresh process's ER clock can lag checkpoints persisted on L1.
+        runtime.reset_to_new_parent_with_slot_floor(
+            root_bank,
+            session.last_settled_er_slot.max(active_er_slot),
+        );
         runtime.set_session_pda(session_pda);
         if !persistence_enabled {
             return Some(RecoveredUnsettledState {

@@ -1,0 +1,13 @@
+{
+  "challenge_to_outcome_ms": 87389.956781,
+  "clock": "wall",
+  "phase": "proof_resolution",
+  "proving_ms": 78462.260652,
+  "resolution_ms": 567.9988099999999,
+  "resolved": true,
+  "resolver_cu": 127977,
+  "schema_version": 1,
+  "slot_warps": false,
+  "step": 10,
+  "upload_ms": 2646.378092
+}
