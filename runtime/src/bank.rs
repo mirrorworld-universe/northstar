@@ -235,10 +235,13 @@ mod check_transactions;
 pub mod entry_bytes_budget;
 // Sonic: Supported ER transaction reconstruction inputs.
 pub mod er_replay;
+// Sonic: Bank-private construction for the external Northstar replay harness.
 mod fee_distribution;
 mod metrics;
 pub(crate) mod partitioned_epoch_rewards;
 mod recent_blockhashes_account;
+#[cfg(feature = "northstar-replay")]
+pub mod replay_execution;
 mod serde_snapshot;
 mod sysvar_cache;
 pub(crate) mod tests;
@@ -5191,8 +5194,8 @@ impl Bank {
         .unwrap()
     }
 
-    // Sonic: conformance-only environment; production execution remains untraced.
-    #[cfg(feature = "conformance")]
+    // Sonic: replay-only environment; production execution remains untraced.
+    #[cfg(feature = "northstar-replay")]
     pub(crate) fn enable_transaction_tracing(&mut self) {
         let simd_0268_active = self.feature_set.snapshot().raise_cpi_nesting_limit_to_8;
         let compute_budget = self

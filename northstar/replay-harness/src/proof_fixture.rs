@@ -59,7 +59,7 @@ pub fn full_transaction_fixture_v1() -> FullTransactionFixtureV1 {
     full_transaction_fixture(
         concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../svm/tests/example-programs/write-to-account/write_to_account_program.so"
+            "/../../svm/tests/example-programs/write-to-account/write_to_account_program.so"
         ),
         b"northstar-full-transaction-proof-v1",
         &[1],
@@ -73,7 +73,7 @@ pub fn full_transaction_benchmark_fixture_v1(iterations: u32) -> FullTransaction
     full_transaction_fixture(
         concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../svm/tests/example-programs/proof-benchmark-loop/proof_benchmark_loop.so"
+            "/../../svm/tests/example-programs/proof-benchmark-loop/proof_benchmark_loop.so"
         ),
         b"northstar-full-transaction-proof-benchmark-v1",
         &instruction_data,
@@ -85,7 +85,7 @@ pub fn full_transaction_rollback_fixture_v1() -> FullTransactionFixtureV1 {
     full_transaction_fixture(
         concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../svm/tests/example-programs/write-then-fail/write_then_fail_program.so"
+            "/../../svm/tests/example-programs/write-then-fail/write_then_fail_program.so"
         ),
         b"northstar-full-transaction-rollback-v1",
         &[],

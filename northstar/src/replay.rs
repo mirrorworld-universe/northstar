@@ -2,6 +2,11 @@
 use {
     crate::checkpoint::{CheckpointArtifactV1, CheckpointTransactionEffectV1},
     bincode::Options,
+    northstar_replay_harness::{
+        proof_fixture::{ExecutedFullTransactionFixtureV1, FullTransactionFixtureV1},
+        trace::{build_transaction_trace_v1, fixture_trace_header_v1},
+        txn::BankTxnProcessingResult,
+    },
     northstar_transaction_proof::{
         checkpoint::CheckpointBindingV1, fixture::assemble_replay_witness_v1, public_inputs_bytes,
         replay, set_trace_hash, ReplayWitnessV1,
@@ -9,14 +14,7 @@ use {
     solana_account::ReadableAccount,
     solana_loader_v3_interface::state::UpgradeableLoaderState,
     solana_rpc::er_history::ErHistoryStore,
-    solana_runtime::{
-        bank::er_replay::{ErReplaySnapshot, MAX_ER_REPLAY_SNAPSHOT_BYTES},
-        conformance::{
-            proof_fixture::{ExecutedFullTransactionFixtureV1, FullTransactionFixtureV1},
-            trace::{build_transaction_trace_v1, fixture_trace_header_v1},
-            txn::BankTxnProcessingResult,
-        },
-    },
+    solana_runtime::bank::er_replay::{ErReplaySnapshot, MAX_ER_REPLAY_SNAPSHOT_BYTES},
     solana_sha256_hasher::hash,
     solana_svm::transaction_processing_result::ProcessedTransaction,
     solana_transaction::versioned::VersionedTransaction,
@@ -87,7 +85,7 @@ pub fn extract_replay_witness_v1(
     }
     let effect: CheckpointTransactionEffectV1 =
         borsh::from_slice(&page.transaction_effect).map_err(|_| "transaction effect encoding")?;
-    let execution = snapshot.reexecute(transaction.clone());
+    let execution = northstar_replay_harness::replay::reexecute(&snapshot, transaction.clone());
     let BankTxnProcessingResult::Processed {
         result: Ok(ProcessedTransaction::Executed(executed)),
         ..

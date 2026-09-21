@@ -5,6 +5,7 @@ use {
     ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem},
     ark_serialize::{CanonicalSerialize, Compress},
     ark_std::rand::SeedableRng,
+    northstar_replay_harness::proof_fixture::execute_full_transaction_benchmark_fixture_v1,
     northstar_transaction_proof::{
         encode_witness,
         fixture::{assemble_replay_witness_v1, benchmark_profile_v1},
@@ -17,7 +18,6 @@ use {
     rand_chacha::ChaCha20Rng,
     serde_json::json,
     sha2::{Digest, Sha256},
-    solana_runtime::conformance::proof_fixture::execute_full_transaction_benchmark_fixture_v1,
     std::{env, time::Instant},
 };
 

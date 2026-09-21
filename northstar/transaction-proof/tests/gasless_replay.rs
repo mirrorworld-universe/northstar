@@ -1,16 +1,16 @@
 #![cfg(feature = "host")]
 
 use {
+    northstar_replay_harness::{
+        proof_fixture::{full_transaction_fixture_v1, ExecutedFullTransactionFixtureV1},
+        trace::{build_transaction_trace_v1, fixture_trace_header_v1},
+        txn::execute_er_txn_with_trace,
+    },
     northstar_transaction_proof::{
         checkpoint::fixture_checkpoint_binding, fixture::assemble_replay_witness_v1, replay,
         set_trace_hash, ReplayError,
     },
     solana_account::ReadableAccount,
-    solana_runtime::conformance::{
-        proof_fixture::{full_transaction_fixture_v1, ExecutedFullTransactionFixtureV1},
-        trace::{build_transaction_trace_v1, fixture_trace_header_v1},
-        txn::execute_er_txn_with_trace,
-    },
 };
 
 #[test]

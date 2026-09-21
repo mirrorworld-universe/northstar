@@ -19,7 +19,7 @@ solana-sbpf = { workspace = true }
 rand_chacha = "0.3"
 serde_json = "1"
 sha2 = "0.10"
-solana-runtime = { workspace = true, features = ["conformance"] }
+northstar-replay-harness = { workspace = true }
 
 
 [lints]

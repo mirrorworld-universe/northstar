@@ -17,7 +17,7 @@ host = [
     "dep:solana-account",
     "dep:solana-program-runtime",
     "dep:solana-pubkey",
-    "dep:solana-runtime",
+    "dep:northstar-replay-harness",
     "dep:solana-sha256-hasher",
     "dep:solana-svm",
     "dep:solana-svm-transaction",
@@ -38,7 +38,7 @@ bincode = { workspace = true, optional = true }
 solana-account = { workspace = true, optional = true }
 solana-program-runtime = { workspace = true, optional = true }
 solana-pubkey = { workspace = true, optional = true }
-solana-runtime = { workspace = true, features = ["conformance"], optional = true }
+northstar-replay-harness = { workspace = true, optional = true }
 solana-sha256-hasher = { workspace = true, optional = true }
 solana-svm = { workspace = true, optional = true }
 solana-svm-transaction = { workspace = true, optional = true }

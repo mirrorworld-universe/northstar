@@ -133,6 +133,7 @@ members = [
     "northstar/zk-prover",
     "northstar/zk-types",
     "northstar/transaction-proof",
+    "northstar/replay-harness",
     "northstar/zk-verifier-bench",
 ]
 
@@ -588,6 +589,7 @@ northstar = { path = "northstar" }
 northstar-portal.path = "northstar/programs/portal"
 northstar-zk-prover.path = "northstar/zk-prover"
 northstar-transaction-proof.path = "northstar/transaction-proof"
+northstar-replay-harness.path = "northstar/replay-harness"
 northstar-zk-types.path = "northstar/zk-types"
 
 [profile.dev]

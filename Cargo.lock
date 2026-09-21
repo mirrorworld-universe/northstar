@@ -5164,6 +5164,7 @@ dependencies = [
  "crossbeam-channel",
  "log",
  "northstar-portal",
+ "northstar-replay-harness",
  "northstar-token-bridge",
  "northstar-transaction-proof",
  "northstar-zk-types",
@@ -5258,6 +5259,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "northstar-replay-harness"
+version = "0.1.0"
+dependencies = [
+ "agave-feature-set",
+ "bincode",
+ "northstar-zk-types",
+ "serde",
+ "solana-account 4.3.1",
+ "solana-accounts-db",
+ "solana-address-lookup-table-interface",
+ "solana-clock",
+ "solana-epoch-schedule",
+ "solana-fee-calculator",
+ "solana-fee-structure",
+ "solana-hash 4.5.0",
+ "solana-instruction",
+ "solana-keypair",
+ "solana-loader-v3-interface",
+ "solana-message",
+ "solana-program-option",
+ "solana-program-pack",
+ "solana-program-runtime",
+ "solana-pubkey 4.2.0",
+ "solana-rent",
+ "solana-runtime",
+ "solana-sdk-ids",
+ "solana-sha256-hasher",
+ "solana-signature",
+ "solana-signer",
+ "solana-slot-hashes",
+ "solana-svm",
+ "solana-svm-transaction",
+ "solana-system-interface 3.2.0",
+ "solana-transaction",
+ "solana-transaction-error",
+ "spl-token-2022-interface",
+ "wincode 0.5.5",
+]
+
+[[package]]
 name = "northstar-token-bridge"
 version = "0.1.0"
 dependencies = [
@@ -5306,13 +5347,13 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "hex",
  "light-poseidon 0.4.0",
+ "northstar-replay-harness",
  "northstar-zk-types",
  "sha2 0.10.9",
  "solana-account 4.3.1",
  "solana-fee-structure",
  "solana-program-runtime",
  "solana-pubkey 4.2.0",
- "solana-runtime",
  "solana-sha256-hasher",
  "solana-svm",
  "solana-svm-transaction",
@@ -5332,12 +5373,12 @@ dependencies = [
  "ark-std 0.5.0",
  "hex",
  "light-poseidon 0.4.0",
+ "northstar-replay-harness",
  "northstar-transaction-proof",
  "northstar-zk-types",
  "rand_chacha 0.3.1",
  "serde_json",
  "sha2 0.10.9",
- "solana-runtime",
  "solana-sbpf",
 ]
 
@@ -10909,7 +10950,6 @@ dependencies = [
  "libsecp256k1",
  "log",
  "mockall",
- "northstar-zk-types",
  "num-derive 0.5.1",
  "num-traits",
  "proptest",

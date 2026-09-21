@@ -2543,9 +2543,9 @@ mod tests {
     ) -> (CheckpointArtifactV1, Arc<ErHistoryStore>) {
         use {
             agave_feature_set::disable_sbpf_v0_execution,
+            northstar_replay_harness::proof_fixture::full_transaction_fixture_v1,
             solana_fee_structure::FeeStructure,
             solana_instruction::{AccountMeta, Instruction},
-            solana_runtime::conformance::proof_fixture::full_transaction_fixture_v1,
         };
 
         let fixture = full_transaction_fixture_v1();
@@ -2652,8 +2652,8 @@ mod tests {
                     .expect("snapshot retained"),
             )
             .unwrap();
-            let execution = snapshot.reexecute(transaction);
-            let solana_runtime::conformance::txn::BankTxnProcessingResult::Processed {
+            let execution = northstar_replay_harness::replay::reexecute(&snapshot, transaction);
+            let northstar_replay_harness::txn::BankTxnProcessingResult::Processed {
                 result:
                     Ok(solana_svm::transaction_processing_result::ProcessedTransaction::Executed(
                         executed,
