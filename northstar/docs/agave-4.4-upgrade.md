@@ -2,7 +2,7 @@
 
 Merged upstream master `07f3bf47f5092d350f69e02649aa652c392d0e06` (4.4.0-alpha.5, Rust 1.98.1) without rewriting Northstar history. The preceding extraction moves proof fixtures, traces, and replay orchestration into `northstar-replay-harness`; only the Bank-private execution adapter remains in runtime behind `northstar-replay`.
 
-Northstar adopts upstream transaction views, deployment-slot-aware program tombstones, RPC configuration, and instruction-error crate separation while preserving ER history, isolated builtins, fee policy, and forwarding behavior. Upstream's 300 ms L1 slot duration changes the wall-clock-preserving ER age limits from 1200/2400 to 900/1800.
+Northstar adopts upstream transaction views, deployment-slot-aware program tombstones, RPC configuration, and instruction-error crate separation while preserving ER history, isolated builtins, fee policy, and forwarding behavior. Upstream's 300 ms L1 slot default changes the L1-scaled ER age limits from 1200/2400 to 900/1800. At the unchanged 50 ms ER slot default, the nominal processing/history windows therefore shorten from 60/120 seconds to 45/90 seconds; previous wall-clock durations are not preserved.
 
 ## Dependency migration
 
