@@ -2,7 +2,7 @@ use {
     ark_bn254::Fr,
     ark_ff::PrimeField,
     ark_r1cs_std::{alloc::AllocVar, eq::EqGadget, fields::fp::FpVar},
-    ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError},
+    ark_relations::gr1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError},
     northstar_transaction_proof::{replay, ReplayWitnessV1, VmRowV1},
     northstar_zk_types::ErStepPublicInputsV1,
     solana_sbpf::ebpf,
@@ -116,12 +116,11 @@ fn constrain_rows(cs: ConstraintSystemRef<Fr>, rows: &[VmRowV1]) -> Result<(), S
 mod tests {
     use {
         super::*,
-        crate::{prove, setup},
+        crate::{prove, rng::ChaCha20Rng, setup},
         ark_groth16::{prepare_verifying_key, Groth16},
-        ark_relations::r1cs::ConstraintSystem,
+        ark_relations::gr1cs::ConstraintSystem,
         ark_std::rand::SeedableRng,
         northstar_transaction_proof::fixture::build_replay_witness_v1,
-        rand_chacha::ChaCha20Rng,
     };
 
     fn circuit() -> SbpfExecutionTableCircuitV1 {

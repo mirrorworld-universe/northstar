@@ -12,7 +12,7 @@ use {
     log::*,
     serde::{Deserialize, Deserializer, Serialize, ser::Serializer},
     solana_account::{AccountSharedData, ReadableAccount},
-    solana_instruction::error::InstructionError,
+    solana_instruction_error::InstructionError,
     solana_pubkey::Pubkey,
     solana_transaction::SchemaWrite,
     std::{
@@ -218,12 +218,15 @@ impl VoteAccounts {
         let capacity = max_vote_accounts.min(self.vote_accounts.len());
         let mut entries_to_sort: Vec<(&Pubkey, &VoteAccount, u64)> = Vec::with_capacity(capacity);
         for (pubkey, (stake, vote_account)) in self.vote_accounts.iter() {
-            let has_bls = vote_account
-                .vote_state_view()
-                .bls_pubkey_compressed()
-                .is_some();
+            let vote_state_view = vote_account.vote_state_view();
+            let has_bls = vote_state_view.bls_pubkey_compressed().is_some();
             let has_stake = *stake != 0u64;
-            let has_balance = vote_account.lamports() >= minimum_vote_account_balance;
+            // Pending delegator rewards are deducted at the start of the epoch,
+            // so this operation reflects the actual expected balance
+            let has_balance = vote_account
+                .lamports()
+                .saturating_sub(vote_state_view.pending_delegator_rewards())
+                >= minimum_vote_account_balance;
 
             if !has_bls || !has_stake || !has_balance {
                 continue;
@@ -286,6 +289,13 @@ impl VoteAccounts {
         self.vote_accounts
             .iter()
             .map(|(vote_pubkey, (_stake, vote_account))| (vote_pubkey, vote_account))
+    }
+
+    /// Helper used if some other kind of iterator is needed directly on the
+    /// inner HashMap. In general, prefer using any other getter, such as
+    /// `iter()`, `delegated_starkes()`, `get()`, or `get_delegated_stake()`
+    pub fn inner(&self) -> &VoteAccountsHashMap {
+        &self.vote_accounts
     }
 
     pub fn delegated_stakes(&self) -> impl Iterator<Item = (&Pubkey, u64)> {

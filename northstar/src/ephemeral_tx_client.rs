@@ -2543,9 +2543,9 @@ mod tests {
     ) -> (CheckpointArtifactV1, Arc<ErHistoryStore>) {
         use {
             agave_feature_set::disable_sbpf_v0_execution,
+            northstar_replay_harness::proof_fixture::full_transaction_fixture_v1,
             solana_fee_structure::FeeStructure,
             solana_instruction::{AccountMeta, Instruction},
-            solana_runtime::conformance::proof_fixture::full_transaction_fixture_v1,
         };
 
         let fixture = full_transaction_fixture_v1();
@@ -2652,8 +2652,8 @@ mod tests {
                     .expect("snapshot retained"),
             )
             .unwrap();
-            let execution = snapshot.reexecute(transaction);
-            let solana_runtime::conformance::txn::BankTxnProcessingResult::Processed {
+            let execution = northstar_replay_harness::replay::reexecute(&snapshot, transaction);
+            let northstar_replay_harness::txn::BankTxnProcessingResult::Processed {
                 result:
                     Ok(solana_svm::transaction_processing_result::ProcessedTransaction::Executed(
                         executed,
@@ -2937,8 +2937,8 @@ mod tests {
             &crate::EphemeralRollupSettings::zero_fee_structure(),
             recent_blockhash_max_age,
         );
-        assert_eq!(crate::DEFAULT_ER_TRANSACTION_MAX_AGE, 1200);
-        assert_eq!(recent_blockhash_max_age, 2400);
+        assert_eq!(crate::DEFAULT_ER_TRANSACTION_MAX_AGE, 900);
+        assert_eq!(recent_blockhash_max_age, 1800);
         for _ in 0..=crate::DEFAULT_ER_TRANSACTION_MAX_AGE {
             bank.register_unique_recent_blockhash_for_test();
         }

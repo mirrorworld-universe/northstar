@@ -148,6 +148,11 @@ pub trait StorableAccounts<'a>: Sync {
     }
     // current slot for account at 'index'
     fn slot(&self, index: usize) -> Slot;
+
+    /// (current slot, pubkey) for each account, in index order
+    fn slots_and_pubkeys(&self) -> impl Iterator<Item = (Slot, &Pubkey)> {
+        (0..self.len()).map(|index| (self.slot(index), self.pubkey(index)))
+    }
     /// slot that all accounts are to be written to
     fn target_slot(&self) -> Slot;
     /// true if no accounts to write
@@ -285,7 +290,7 @@ impl<'a> StorableAccountsBySlot<'a> {
         // This happens when we are just shrinking a single slot storage, which happens very often.
         // Note: we check the actual number of entries, not just whether slots differ,
         // because multiple entries can have the same slot value (e.g., when packing
-        // many_refs_newest and one_ref accounts from the same source slot).
+        // newest_duplicate and no_duplicates accounts from the same source slot).
         if self.slots_and_accounts.len() == 1 {
             return (0, index);
         }
@@ -373,6 +378,14 @@ impl<'a> StorableAccounts<'a> for StorableAccountsBySlot<'a> {
     fn slot(&self, index: usize) -> Slot {
         let indexes = self.find_internal_index(index);
         self.slots_and_accounts[indexes.0].0
+    }
+    fn slots_and_pubkeys(&self) -> impl Iterator<Item = (Slot, &Pubkey)> {
+        // walk the source slices directly, avoiding a `find_internal_index` search per account
+        self.slots_and_accounts.iter().flat_map(|(slot, accounts)| {
+            accounts
+                .iter()
+                .map(move |account| (*slot, account.pubkey()))
+        })
     }
     fn target_slot(&self) -> Slot {
         self.target_slot
@@ -602,7 +615,7 @@ mod tests {
                             let offset = 0; // does not matter
                             AccountFromStorage {
                                 index_info: AccountInfo::new(
-                                    StorageLocation::AppendVec(storage_id, offset),
+                                    StorageLocation::AccountsFile(storage_id, offset),
                                     account.is_zero_lamport(),
                                 ),
                                 data_len: account.data.len() as u64,
@@ -641,7 +654,7 @@ mod tests {
                             .zip(offsets.offsets.iter())
                             .for_each(|(account, offset)| {
                                 account.index_info = AccountInfo::new(
-                                    StorageLocation::AppendVec(0, *offset),
+                                    StorageLocation::AccountsFile(0, *offset),
                                     account.is_zero_lamport(),
                                 )
                             });
@@ -728,7 +741,7 @@ mod tests {
                     let offset = 0; // does not matter
                     AccountFromStorage {
                         index_info: AccountInfo::new(
-                            StorageLocation::AppendVec(storage_id, offset),
+                            StorageLocation::AccountsFile(storage_id, offset),
                             account.is_zero_lamport(),
                         ),
                         data_len: account.data.len() as u64,
@@ -768,7 +781,7 @@ mod tests {
                                         result.iter_mut().zip(offsets.offsets.iter()).for_each(
                                             |(account, offset)| {
                                                 account.index_info = AccountInfo::new(
-                                                    StorageLocation::AppendVec(0, *offset),
+                                                    StorageLocation::AccountsFile(0, *offset),
                                                     account.is_zero_lamport(),
                                                 )
                                             },
@@ -818,7 +831,7 @@ mod tests {
         let account = AccountSharedData::default();
         let account_from_storage = AccountFromStorage {
             index_info: AccountInfo::new(
-                StorageLocation::AppendVec(storage_id, offset),
+                StorageLocation::AccountsFile(storage_id, offset),
                 account.is_zero_lamport(),
             ),
             data_len: account.data().len() as u64,
@@ -856,7 +869,7 @@ mod tests {
         let accounts_db = AccountsDb::default_for_tests();
         let all_accounts: Vec<_> = iter::repeat_with(|| AccountFromStorage {
             index_info: AccountInfo::new(
-                StorageLocation::AppendVec(0, 0), // id and offset do not matter
+                StorageLocation::AccountsFile(0, 0), // id and offset do not matter
                 false,
             ),
             data_len: 0,
@@ -883,7 +896,7 @@ mod tests {
         let accounts_db = AccountsDb::default_for_tests();
         let all_accounts: Vec<_> = iter::repeat_with(|| AccountFromStorage {
             index_info: AccountInfo::new(
-                StorageLocation::AppendVec(0, 0), // id and offset do not matter
+                StorageLocation::AccountsFile(0, 0), // id and offset do not matter
                 false,
             ),
             data_len: 0,

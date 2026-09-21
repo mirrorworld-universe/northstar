@@ -2314,7 +2314,7 @@ impl EphemeralRuntime {
             inner_instructions: None,
             log_messages: Some(vec![
                 format!("Program {} invoke [1]", self.portal_program_id),
-                format!("Program log: Instruction: NorthstarDeposit"),
+                "Program log: Instruction: NorthstarDeposit".to_string(),
                 format!(
                     "Program log: NorthstarTransferEvent kind={} from={from} to={depositor} \
                      lamports={lamports} pre_balance={base_balance} post_balance={new_balance} \

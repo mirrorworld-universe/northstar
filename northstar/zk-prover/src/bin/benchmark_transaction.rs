@@ -2,22 +2,23 @@ use {
     ark_bn254::{Bn254, Fr},
     ark_ff::PrimeField,
     ark_groth16::{prepare_verifying_key, Groth16},
-    ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem},
+    ark_relations::gr1cs::{ConstraintSynthesizer, ConstraintSystem},
     ark_serialize::{CanonicalSerialize, Compress},
     ark_std::rand::SeedableRng,
+    northstar_replay_harness::proof_fixture::execute_full_transaction_benchmark_fixture_v1,
     northstar_transaction_proof::{
         encode_witness,
         fixture::{assemble_replay_witness_v1, benchmark_profile_v1},
         public_inputs_bytes, replay,
     },
     northstar_zk_prover::{
-        prove, setup,
+        prove,
+        rng::ChaCha20Rng,
+        setup,
         transaction::{execution_table_metrics, SbpfExecutionTableCircuitV1},
     },
-    rand_chacha::ChaCha20Rng,
     serde_json::json,
     sha2::{Digest, Sha256},
-    solana_runtime::conformance::proof_fixture::execute_full_transaction_benchmark_fixture_v1,
     std::{env, time::Instant},
 };
 

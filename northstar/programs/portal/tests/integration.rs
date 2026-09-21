@@ -115,7 +115,9 @@ fn synthetic_trace_layers(step_count: u64) -> Vec<Vec<[u8; 32]>> {
         let next = layers
             .last()
             .unwrap()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| trace_node_hash(level, &pair[0], &pair[1]))
             .collect();
         layers.push(next);
@@ -181,7 +183,9 @@ fn synthetic_tx_effect_layers(step_count: u64) -> Vec<Vec<[u8; 32]>> {
         let next = layers
             .last()
             .unwrap()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 hashv(&[
                     b"northstar-checkpoint-v1",
@@ -926,7 +930,7 @@ async fn assert_terminal_timeout_retries_preserve_state(
             error.unwrap(),
             solana_transaction::TransactionError::InstructionError(
                 1,
-                solana_instruction::error::InstructionError::Custom(
+                solana_instruction_error::InstructionError::Custom(
                     northstar_portal::PortalError::CheckpointStateInvalid as u32,
                 ),
             ),

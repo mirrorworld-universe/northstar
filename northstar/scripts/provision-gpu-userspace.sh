@@ -3,7 +3,7 @@ set -euo pipefail
 umask 077
 if [[ $# != 1 || $1 != /* ]]; then
     echo 'usage: provision-gpu-userspace.sh /absolute/new/prefix' >&2
-    echo 'Requires an existing NVIDIA driver, CUDA toolkit, Rust 1.97.1, Go, CMake, C/C++ toolchain, protoc and libclang.' >&2
+    echo 'Requires an existing NVIDIA driver, CUDA toolkit, Rust 1.98.1, Go, CMake, C/C++ toolchain, protoc and libclang.' >&2
     exit 2
 fi
 prefix=$1
@@ -12,7 +12,7 @@ for command in git cmake nvcc cc go rustup cargo protoc python3 gzip sha256sum n
     command -v "$command" >/dev/null || { echo "Missing prerequisite: $command" >&2; exit 2; }
 done
 [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]]
-rustup run 1.97.1 rustc --version
+rustup run 1.98.1 rustc --version
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
 root=$(cd "$(dirname "$0")/../.." && pwd)
 replay="$root/northstar/zkvm-replay"
@@ -76,9 +76,9 @@ export C_INCLUDE_PATH="$prefix/include${C_INCLUDE_PATH:+:$C_INCLUDE_PATH}"
 export ICICLE_BACKEND_INSTALL_DIR="$prefix/lib/backend"
 elf="$CARGO_TARGET_DIR/elf-compilation/riscv64im-succinct-zkvm-elf/release/northstar-zkvm-replay-program"
 mkdir -p "$(dirname "$elf")"
-gzip -dc "$replay/evidence/l40s-v1/candidate.elf.gz" > "$elf"
-printf '23f1520bf46ab8852770c0f4802005c8cb88b7fa6657f99f2d7c4a948d1551c5  %s\n' "$elf" | sha256sum -c -
-(cd "$replay"; SP1_SKIP_PROGRAM_BUILD=true cargo +1.97.1 build --release --locked -p northstar-zkvm-replay-script --features cuda)
+gzip -dc "$replay/evidence/sp1-v6.8.0/candidate.elf.gz" > "$elf"
+printf '484af2d12fb26d8b6a70014b2d209d7cb474ea32d66eed0d273036914650e033  %s\n' "$elf" | sha256sum -c -
+(cd "$replay"; SP1_SKIP_PROGRAM_BUILD=true cargo +1.98.1 build --release --locked -p northstar-zkvm-replay-script --features cuda)
 {
     printf '#!/usr/bin/env bash\nset -euo pipefail\n'
     printf 'export LD_LIBRARY_PATH=%q\n' "$LD_LIBRARY_PATH"
@@ -96,5 +96,5 @@ if grep 'libicicle_' "$prefix/linked-libraries.txt" | grep -vF "$prefix/lib/"; t
     exit 1
 fi
 "$prefix/bin/gpu-prover" preflight
-printf 'icicle_revision=%s\nsp1_sdk=6.1.0\nhost_rust=1.97.1\n' "$revision" > "$prefix/READY"
+printf 'icicle_revision=%s\nsp1_sdk=6.8.0\nhost_rust=1.98.1\n' "$revision" > "$prefix/READY"
 echo "Ready: $prefix/bin/gpu-prover. Run a compatibility proof to warm circuits before timing challenges."

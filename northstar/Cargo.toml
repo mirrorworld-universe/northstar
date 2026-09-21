@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-replay = ["dep:northstar-transaction-proof"]
+replay = ["dep:northstar-transaction-proof", "dep:northstar-replay-harness"]
 
 [dependencies]
+northstar-replay-harness = { workspace = true, optional = true }
 northstar-transaction-proof = { workspace = true, optional = true }
 solana-account.workspace = true
 solana-accounts-db.workspace = true
@@ -69,6 +70,7 @@ spl-memo-interface.workspace = true
 spl-token-interface.workspace = true
 
 [dev-dependencies]
+northstar-replay-harness.workspace = true
 agave-feature-set.workspace = true
 agave-snapshots.workspace = true
 northstar-transaction-proof.workspace = true

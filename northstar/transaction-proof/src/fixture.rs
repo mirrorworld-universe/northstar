@@ -5,19 +5,19 @@ use {
         ReplayError, ReplayWitnessV1, ResultWitnessV1, RuntimeWitnessV1, VmRowV1, SBPF_VERSION_V0,
         TRACE_SCHEMA_VERSION_V1, WITNESS_MAGIC_V1, WITNESS_VERSION_V2,
     },
-    northstar_zk_types::{ER_STEP_PROOF_KIND_FULL_TRANSACTION, ER_STEP_PROOF_VERSION_V1},
-    solana_account::ReadableAccount,
-    solana_program_runtime::invoke_context::VmExecutionTrace,
-    solana_runtime::conformance::{
+    northstar_replay_harness::{
         proof_fixture::{
             execute_full_transaction_benchmark_fixture_v1, execute_full_transaction_fixture_v1,
             ExecutedFullTransactionFixtureV1, TRANSACTION_FEE_V1,
         },
         txn::BankTxnProcessingResult,
     },
+    northstar_zk_types::{ER_STEP_PROOF_KIND_FULL_TRANSACTION, ER_STEP_PROOF_VERSION_V1},
+    solana_account::ReadableAccount,
+    solana_program_runtime::invoke_context::VmExecutionTrace,
     solana_sha256_hasher::hash,
     solana_svm::transaction_processing_result::ProcessedTransaction,
-    solana_svm_transaction::svm_message::SVMMessage,
+    solana_svm_transaction::svm_message::{SVMMessage, SVMStaticMessage},
 };
 
 const REVISION: [u8; 20] = [

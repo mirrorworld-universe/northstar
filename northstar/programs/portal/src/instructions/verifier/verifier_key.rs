@@ -1,4 +1,4 @@
-// Generated from SP1 6.1.0 Groth16 verifying key.
+// Generated from SP1 6.1.0's Groth16 key, byte-identical in SP1 6.8.0.
 
 use groth16_solana::groth16::Groth16Verifyingkey;
 

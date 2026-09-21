@@ -248,7 +248,9 @@ impl MerkleTree {
         while layers.last().expect("tree has leaf layer").len() > 1 {
             let previous = layers.last().expect("tree has previous layer");
             let next = previous
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|children| node_hash(kind, level, &children[0], &children[1]))
                 .collect();
             layers.push(next);

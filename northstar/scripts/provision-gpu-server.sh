@@ -14,7 +14,7 @@ for command in git cmake nvcc cc go rustup cargo protoc python3 sha256sum nvidia
     command -v "$command" >/dev/null || { echo "Missing prerequisite: $command" >&2; exit 2; }
 done
 [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]]
-rustup run 1.97.1 rustc --version
+rustup run 1.98.1 rustc --version
 cuda=$(dirname "$(dirname "$(command -v nvcc)")")
 arch=${CUDA_ARCHS:-$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d '. ')}
 [[ $arch =~ ^[0-9]+$ ]] || { echo 'Specify one numeric CUDA_ARCHS target.' >&2; exit 2; }
@@ -30,10 +30,10 @@ export CUDA_PATH="$cuda" CUDA_ARCHS="$arch"
 if [[ -f $icicle/cuda-compat/bits/mathcalls.h ]]; then
     export NVCC_PREPEND_FLAGS="${NVCC_PREPEND_FLAGS:-} -I$icicle/cuda-compat"
 fi
-revision=d454975ac7c1126097e36eceda9bce2cb9899da4
-git clone --depth 1 --branch v6.1.0 https://github.com/succinctlabs/sp1.git "$prefix/src"
+revision=58c4aeadbc504c274dd9fb82ed8130d0939ab756
+git clone --depth 1 --branch v6.8.0 https://github.com/succinctlabs/sp1.git "$prefix/src"
 [[ $(git -C "$prefix/src" rev-parse HEAD) == "$revision" ]]
-(cd "$prefix/src"; CARGO_TARGET_DIR="$prefix/target" cargo +1.97.1 build --release --locked \
+(cd "$prefix/src"; CARGO_TARGET_DIR="$prefix/target" cargo +1.98.1 build --release --locked \
     -j "${NORTHSTAR_GPU_BUILD_JOBS:-8}" -p sp1-gpu-server --features groth16-cuda)
 server="$prefix/home/.sp1/bin/sp1-gpu-server"
 cp "$prefix/target/release/sp1-gpu-server" "$server"
@@ -44,10 +44,7 @@ if grep 'libicicle_' "$prefix/linked-libraries.txt" | grep -vF "$icicle/lib/"; t
     echo 'Icicle resolved outside its private prefix' >&2
     exit 1
 fi
-[[ $("$server" --version) == 6.1.0 ]]
-if [[ -d $HOME/.sp1/circuits ]]; then
-    ln -s "$HOME/.sp1/circuits" "$prefix/home/.sp1/circuits"
-fi
+[[ $("$server" --version) == 6.8.0 ]]
 {
     printf '#!/usr/bin/env bash\nset -euo pipefail\n'
     printf 'export HOME=%q\n' "$prefix/home"
