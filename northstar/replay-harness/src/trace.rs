@@ -578,7 +578,7 @@ fn outcome_event(
 }
 
 fn error_fields(error: Option<&TransactionError>) -> (u32, u32, u32, u32) {
-    use solana_instruction::error::InstructionError;
+    use solana_instruction_error::InstructionError;
     let Some(error) = error else {
         return (0, 0, 0, 0);
     };

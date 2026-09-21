@@ -420,8 +420,10 @@ pub fn prove<R: Rng, C: ConstraintSynthesizer<Fr>>(
 fn reverse_chunks<const CHUNK: usize, const TOTAL: usize>(bytes: &[u8; TOTAL]) -> [u8; TOTAL] {
     let mut output = [0; TOTAL];
     for (source, destination) in bytes
-        .chunks_exact(CHUNK)
-        .zip(output.chunks_exact_mut(CHUNK))
+        .as_chunks::<CHUNK>()
+        .0
+        .iter()
+        .zip(output.as_chunks_mut::<CHUNK>().0.iter_mut())
     {
         for (index, byte) in source.iter().rev().enumerate() {
             destination[index] = *byte;

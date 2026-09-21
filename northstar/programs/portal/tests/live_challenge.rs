@@ -71,7 +71,9 @@ fn synthetic_trace_layers(step_count: u64) -> Vec<Vec<[u8; 32]>> {
         let next = layers
             .last()
             .unwrap()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| trace_node_hash(level, &pair[0], &pair[1]))
             .collect();
         layers.push(next);

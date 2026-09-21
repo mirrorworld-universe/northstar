@@ -338,6 +338,7 @@ fn live_validator_spl_token_bridge_round_trip() {
                     encoding: Some(solana_transaction_status_client_types::UiTransactionEncoding::Base64),
                     commitment: Some(CommitmentConfig::confirmed()),
                     max_supported_transaction_version: Some(0),
+                    ..Default::default()
                 }).unwrap();
             let transaction = confirmed.transaction.transaction.decode().unwrap();
             transaction.message.instructions().iter().any(|instruction| {

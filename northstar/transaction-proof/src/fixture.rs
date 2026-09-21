@@ -17,7 +17,7 @@ use {
     solana_program_runtime::invoke_context::VmExecutionTrace,
     solana_sha256_hasher::hash,
     solana_svm::transaction_processing_result::ProcessedTransaction,
-    solana_svm_transaction::svm_message::SVMMessage,
+    solana_svm_transaction::svm_message::{SVMMessage, SVMStaticMessage},
 };
 
 const REVISION: [u8; 20] = [

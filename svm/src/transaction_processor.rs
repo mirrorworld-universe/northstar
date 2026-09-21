@@ -21,7 +21,7 @@ use {
         transaction_processing_result::{ProcessedTransaction, TransactionProcessingResult},
     },
     log::debug,
-    solana_account::{AccountSharedData, ReadableAccount, state_traits::StateMut},
+    solana_account::{AccountSharedData, ReadableAccount, state_traits::StateMutWincode as _},
     solana_clock::{Epoch, Slot},
     solana_hash::Hash,
     solana_instruction::TRANSACTION_LEVEL_STACK_HEIGHT,
@@ -42,10 +42,9 @@ use {
         invoke_context::{EnvironmentConfig, InvokeContext},
         loaded_programs::{
             EpochBoundaryPreparation, ForkGraph, Percent, ProgramCache, ProgramCacheForTxBatch,
-            ProgramCacheMatchCriteria, ProgramRuntimeEnvironment, ProgramRuntimeEnvironments,
-            ProgramToLoad,
+            ProgramRuntimeEnvironment, ProgramRuntimeEnvironments, ProgramToLoad,
         },
-        program_cache_entry::{ProgramCacheEntry, ProgramCacheEntryOwner, ProgramCacheEntryType},
+        program_cache_entry::{ProgramCacheEntry, ProgramCacheEntryOwner},
         program_metrics::ProgramStatistics,
         solana_sbpf::{program::BuiltinProgram, vm::Config as VmConfig},
         sysvar_cache::SysvarCache,
@@ -118,9 +117,6 @@ pub struct TransactionProcessingConfig<'a> {
     /// Encapsulates overridden accounts, typically used for transaction
     /// simulation.
     pub account_overrides: Option<&'a AccountOverrides>,
-    /// Whether or not to check a program's deployment slot when replenishing
-    /// a program cache instance.
-    pub check_program_deployment_slot: bool,
     /// The maximum number of bytes that log messages can consume.
     pub log_messages_bytes_limit: Option<usize>,
     /// Whether to limit the number of programs loaded for the transaction
@@ -186,7 +182,6 @@ pub fn get_mock_transaction_processing_environment() -> TransactionProcessingEnv
     }
 }
 
-#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[cfg_attr(
     feature = "dev-context-only-utils",
     field_qualifiers(slot(pub), epoch(pub), sysvar_cache(pub))
@@ -212,12 +207,20 @@ pub struct TransactionBatchProcessor<FG: ForkGraph> {
     /// ProgramRuntimeEnvironment of the current epoch
     pub program_runtime_environment: ProgramRuntimeEnvironment,
 
-    /// Builtin program ids
+    /// Builtin program ids for this fork.
+    /// Used to see the `builtin_program_cache` between slots via
+    /// `new_from()`.
     pub builtin_program_ids: RwLock<HashSet<Pubkey>>,
 
     /// Cached ProgramCacheForTxBatch pre-populated with builtin entries.
-    /// Populated once per block in `new_from()` from the global program cache,
-    /// avoiding re-acquiring the lock and re-running extract() on every batch.
+    /// Populated once per slot in `new_from()` from the global program cache.
+    ///
+    /// Keeping a dedicated builtin program cache for each slot:
+    ///
+    /// - Protects different forks from extracting the another fork's version
+    ///   of a builtin that may have been recently enabled or migrated to Core
+    ///   BPF.
+    /// - Avoids re-acquiring the lock and re-running extract() on every batch.
     builtin_program_cache: RwLock<ProgramCacheForTxBatch>,
 
     execution_cost: SVMTransactionExecutionCost,
@@ -324,14 +327,32 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
 
         // Pre-populate the builtin program cache from the global cache.
         // This is done once per block rather than once per batch.
+        //
+        // Note: Only the builtins already-listed in this slot's builtin program
+        // IDs can be extracted from the global program cache. This is important
+        // for cross-fork extraction when a builtin may be activated for the
+        // first time or migrated to Core BPF.
+        //
+        // The `builtin_program_ids` on the batch processor are effectively a
+        // guard against cross-fork extraction:
+        //
+        // - If a builtin appears in one fork's `builtin_program_ids`, it will
+        //   never be extracted by a fork whose `builtin_program_ids` _doesn't_
+        //   have it.
+        // - If a builtin is removed from one fork's `builtin_program_ids`, it
+        //   may still be extracted on another fork whose `builtin_program_ids`
+        //   still has it.
+        //
+        // `builtin_program_ids` seeds the `builtin_program_cache` below, which
+        // ensures only non-cached program IDs are extracted from the global
+        // program cache during `replenish_program_cache`.
         let mut builtin_program_cache = ProgramCacheForTxBatch::new(slot);
         let mut search_for: Vec<ProgramToLoad> = builtin_program_ids
             .iter()
             .map(|program_id| ProgramToLoad {
                 program_id,
                 loader: ProgramCacheEntryOwner::NativeLoader,
-                match_criteria: ProgramCacheMatchCriteria::NoCriteria,
-                last_modification_slot: 0,
+                deployment_slot: 0,
             })
             .collect();
         self.global_program_cache.read().unwrap().extract(
@@ -340,6 +361,14 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             &environments,
             false,
             false,
+        );
+
+        // Every registered builtin must be present in the global program cache,
+        // since `add_builtin` writes both together.
+        debug_assert!(
+            search_for.is_empty(),
+            "builtin(s) registered on this fork but missing from the global program cache: \
+             {search_for:?}"
         );
 
         Self {
@@ -591,7 +620,6 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                             &account_loader,
                             &program_cache_for_tx_batch,
                             tx.account_keys().iter(),
-                            config.check_program_deployment_slot,
                         ));
                     execute_timings.saturating_add_in_place(
                         ExecuteTimingType::FilterExecutableUs,
@@ -825,6 +853,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                     compute_unit_limit: compute_budget_and_limits.budget.compute_unit_limit,
                     loaded_accounts_bytes_limit: compute_budget_and_limits
                         .loaded_accounts_data_size_limit,
+                    nonce_address,
                 })
             }
             Err(e) => TransactionValidationResult::Unprocessable(e),
@@ -982,13 +1011,13 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             drop(global_program_cache);
 
             let program_to_store = program_to_load.map(|key| {
-                let loader = missing_programs
+                let (loader, deployment_slot) = missing_programs
                     .iter()
                     .find(|program| *program.program_id == key)
-                    .map(|program| program.loader)
-                    .unwrap_or_default();
+                    .map(|program| (program.loader, program.deployment_slot))
+                    .expect("loading task must refer to a missing program");
                 // Load, verify and compile one program.
-                let (program, last_modification_slot) = load_program_with_pubkey(
+                let program = load_program_with_pubkey(
                     account_loader,
                     program_runtime_environment_for_execution,
                     &key,
@@ -996,22 +1025,16 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                     execute_timings,
                 )
                 .unwrap_or_else(|| {
-                    // Sonic: ER banks can be sparse while L1 program hydration catches up.
-                    // Cache a tombstone under the requested loader so the tx fails retryably
-                    // instead of looping on a loader-mismatched tombstone.
-                    (
-                        Arc::new(ProgramCacheEntry::new_tombstone(
-                            self.slot,
-                            loader,
-                            ProgramCacheEntryType::Closed,
-                        )),
-                        self.slot,
-                    )
+                    // Sonic: match both loader and deployment slot so sparse ER hydration cannot loop.
+                    Arc::new(ProgramCacheEntry::new_closed_tombstone(
+                        deployment_slot,
+                        loader,
+                    ))
                 });
-                (key, program, last_modification_slot)
+                (key, program)
             });
 
-            if let Some((key, program, last_modification_slot)) = program_to_store {
+            if let Some((key, program)) = program_to_store {
                 program_cache_for_tx_batch.loaded_missing = true;
                 let mut global_program_cache = self.global_program_cache.write().unwrap();
                 // Submit our last completed loading task.
@@ -1019,7 +1042,6 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                     program_runtime_environment_for_execution,
                     self.slot,
                     key,
-                    last_modification_slot,
                     program,
                 ) && limit_to_load_programs
                 {
@@ -1048,7 +1070,6 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
     pub fn prepare_one_program_for_upcoming_feature_set<CB: TransactionProcessingCallback>(
         &self,
         account_loader: &CB,
-        check_program_deployment_slot: bool,
         upcoming_environment: &ProgramRuntimeEnvironment,
         key: &Pubkey,
         stats_of_enqueued_program: &ProgramStatistics,
@@ -1058,7 +1079,6 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             account_loader,
             &program_cache_for_tx_batch,
             std::iter::once(key),
-            check_program_deployment_slot,
         );
         if missing_programs.is_empty() {
             // Program account was closed
@@ -1078,7 +1098,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         // Maybe the enqueued program was already loaded and can be skipped.
         if let Some(key) = program_to_load {
             // Load, verify and compile one program.
-            let (recompiled, last_modification_slot) = load_program_with_pubkey(
+            let recompiled = load_program_with_pubkey(
                 account_loader,
                 upcoming_environment,
                 &key,
@@ -1094,7 +1114,6 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                 upcoming_environment,
                 self.slot,
                 key,
-                last_modification_slot,
                 recompiled,
             );
         }
@@ -1421,7 +1440,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         callbacks: &CB,
     ) {
         sysvar_cache.fill_missing_entries(|pubkey, set_sysvar| {
-            if let Some((account, _slot)) = callbacks.get_account_shared_data(pubkey) {
+            if let Some(account) = callbacks.get_account_shared_data(pubkey) {
                 set_sysvar(account.data());
             }
         });
@@ -1436,7 +1455,11 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         self.sysvar_cache.read().unwrap().clone()
     }
 
-    /// Add a built-in program
+    /// Add a built-in program to this fork.
+    ///
+    /// A builtin program should _never_ be inserted directly into the global
+    /// program cache without updating the fork guard: `builtin_program_ids`
+    /// and `builtin_program_cache`.
     pub fn add_builtin(&self, program_id: Pubkey, builtin: ProgramCacheEntry) {
         self.builtin_program_ids.write().unwrap().insert(program_id);
         let entry = Arc::new(builtin);
@@ -1450,6 +1473,19 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             .write()
             .unwrap()
             .replenish(program_id, entry);
+    }
+
+    /// Remove a builtin-program from this fork.
+    ///
+    /// This removes the builtin from the fork guard (`builtin_program_ids` and
+    /// `builtin_program_cache`), but it does not remove it from the global
+    /// program cache. Another fork could be relying on the global entry.
+    pub fn remove_builtin(&self, program_id: &Pubkey) {
+        self.builtin_program_cache
+            .write()
+            .unwrap()
+            .remove_entry(program_id);
+        self.builtin_program_ids.write().unwrap().remove(program_id);
     }
 
     #[cfg(feature = "dev-context-only-utils")]
@@ -1471,16 +1507,18 @@ mod tests {
                 ValidatedTransactionDetails,
             },
             nonce_info::NonceInfo,
+            program_loader::test_utils::*,
             rent_calculator::RENT_EXEMPT_RENT_EPOCH,
             rollback_accounts::RollbackAccounts,
         },
-        solana_account::{WritableAccount, create_account_shared_data_for_test},
+        solana_account::WritableAccount,
         solana_clock::Clock,
         solana_compute_budget_interface::ComputeBudgetInstruction,
         solana_epoch_schedule::EpochSchedule,
         solana_fee_calculator::FeeCalculator,
         solana_fee_structure::FeeDetails,
         solana_hash::Hash,
+        solana_loader_v4_interface::state::{LoaderV4State, LoaderV4Status},
         solana_message::{LegacyMessage, Message, MessageHeader, SanitizedMessage},
         solana_nonce as nonce,
         solana_program_runtime::{
@@ -1493,16 +1531,38 @@ mod tests {
         },
         solana_rent::Rent,
         solana_sbpf::vm,
-        solana_sdk_ids::{bpf_loader, system_program, sysvar},
+        solana_sdk_ids::{
+            bpf_loader, bpf_loader_upgradeable, loader_v4, native_loader, system_program, sysvar,
+        },
         solana_signature::Signature,
         solana_svm_callback::{AccountState, InvokeContextCallback},
+        solana_svm_type_overrides::sync::atomic::Ordering,
         solana_system_interface::instruction as system_instruction,
+        solana_sysvar_id::SysvarId,
         solana_transaction::sanitized::SanitizedTransaction,
         solana_transaction_context::transaction::TransactionContext,
         solana_transaction_error::TransactionError,
         std::{borrow::Cow, collections::HashMap},
         test_case::test_case,
     };
+
+    fn create_sysvar_account<T>(value: &T) -> AccountSharedData
+    where
+        T: wincode::Serialize<Src = T> + SysvarId,
+    {
+        let serialized_len = wincode::serialized_size(value).unwrap() as usize;
+        let canonical_data_len = match T::id() {
+            sysvar::clock::ID => solana_clock::SIZE,
+            sysvar::epoch_schedule::ID => solana_epoch_schedule::SIZE,
+            sysvar::fees::ID => solana_sysvar::fees::SIZE,
+            sysvar::rent::ID => solana_rent::SIZE,
+            id => panic!("unsupported sysvar: {id}"),
+        };
+        let required_data_len = canonical_data_len.max(serialized_len);
+        let mut account = AccountSharedData::new(1, required_data_len, &sysvar::id());
+        wincode::serialize_into(account.data_as_mut_slice(), value).unwrap();
+        account
+    }
 
     fn new_unchecked_sanitized_message(message: Message) -> SanitizedMessage {
         SanitizedMessage::Legacy(LegacyMessage::new(message, &HashSet::new()))
@@ -1538,12 +1598,12 @@ mod tests {
     impl InvokeContextCallback for MockBankCallback {}
 
     impl TransactionProcessingCallback for MockBankCallback {
-        fn get_account_shared_data(&self, pubkey: &Pubkey) -> Option<(AccountSharedData, Slot)> {
+        fn get_account_shared_data(&self, pubkey: &Pubkey) -> Option<AccountSharedData> {
             self.account_shared_data
                 .read()
                 .unwrap()
                 .get(pubkey)
-                .map(|account| (account.clone(), 0))
+                .cloned()
         }
 
         fn inspect_account(
@@ -1649,6 +1709,7 @@ mod tests {
             11,
             4,
         );
+        let num_transaction_accounts = usize::from(transaction_context.get_number_of_accounts());
 
         // Four top level instructions
         for i in 0..4 {
@@ -1657,7 +1718,7 @@ mod tests {
                     i,
                     0,
                     vec![],
-                    vec![u16::MAX; 256],
+                    vec![u8::MAX; num_transaction_accounts],
                     Cow::Owned(vec![i as u8]),
                     None,
                 )
@@ -1876,7 +1937,7 @@ mod tests {
             header: MessageHeader::default(),
             instructions: vec![CompiledInstruction {
                 program_id_index: 0,
-                accounts: vec![2],
+                accounts: vec![1],
                 data: vec![],
             }],
             recent_blockhash: Hash::default(),
@@ -1892,8 +1953,6 @@ mod tests {
             false,
         );
 
-        let mut account_data = AccountSharedData::default();
-        account_data.set_owner(bpf_loader::id());
         let loaded_transaction = LoadedTransaction {
             accounts: vec![
                 (key1, AccountSharedData::default()),
@@ -1935,7 +1994,7 @@ mod tests {
         let account_loader = (&mock_bank).into();
         let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
         let batch_processor =
-            TransactionBatchProcessor::new(0, 0, Arc::downgrade(&fork_graph), None);
+            TransactionBatchProcessor::new(10, 0, Arc::downgrade(&fork_graph), None);
         let program_runtime_environment_for_execution =
             batch_processor.program_runtime_environment_for_epoch(0);
         let key = Pubkey::new_from_array([42; 32]);
@@ -1947,8 +2006,7 @@ mod tests {
             vec![ProgramToLoad {
                 program_id: &key,
                 loader: ProgramCacheEntryOwner::LoaderV3,
-                match_criteria: ProgramCacheMatchCriteria::NoCriteria,
-                last_modification_slot: 0,
+                deployment_slot: 0,
             }],
             &program_runtime_environment_for_execution,
             &mut program_cache_for_tx_batch,
@@ -1961,55 +2019,33 @@ mod tests {
         assert!(matches!(program.program, ProgramCacheEntryType::Closed));
     }
 
+    // Sonic: isolated ER children retain their fork's builtins without sharing mutable caches.
     #[test]
-    fn test_replenish_program_cache() {
-        let mock_bank = MockBankCallback::default();
+    fn northstar_new_from_isolated_cache_preserves_builtin_entries() {
         let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
-        let batch_processor =
-            TransactionBatchProcessor::new(0, 0, Arc::downgrade(&fork_graph), None);
-        let program_runtime_environment_for_execution =
-            batch_processor.program_runtime_environment_for_epoch(0);
+        let parent = TransactionBatchProcessor::new(0, 0, Arc::downgrade(&fork_graph), None);
         let key = Pubkey::new_unique();
-
-        let mut account_data = AccountSharedData::default();
-        account_data.set_owner(bpf_loader::id());
-        mock_bank
-            .account_shared_data
-            .write()
-            .unwrap()
-            .insert(key, account_data);
-        let account_loader = (&mock_bank).into();
-
-        let mut loaded_missing = 0;
-        for limit_to_load_programs in [false, true] {
-            let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::new(batch_processor.slot);
-
-            batch_processor.replenish_program_cache(
-                &account_loader,
-                vec![ProgramToLoad {
-                    program_id: &key,
-                    loader: ProgramCacheEntryOwner::LoaderV2,
-                    match_criteria: ProgramCacheMatchCriteria::NoCriteria,
-                    last_modification_slot: 0,
-                }],
-                &program_runtime_environment_for_execution,
-                &mut program_cache_for_tx_batch,
-                &mut ExecuteTimings::default(),
-                limit_to_load_programs,
-                true,
-            );
-            assert!(!program_cache_for_tx_batch.hit_max_limit);
-            if program_cache_for_tx_batch.loaded_missing {
-                loaded_missing += 1;
-            }
-
-            let program = program_cache_for_tx_batch.find(&key).unwrap();
-            assert!(matches!(
-                program.program,
-                ProgramCacheEntryType::FailedVerification(_)
-            ));
-        }
-        assert!(loaded_missing > 0);
+        let register_fn: BuiltinFunctionRegisterer = |p, n| {
+            p.register_function(
+                n,
+                (
+                    |_invoke_context, _param0, _param1, _param2, _param3, _param4| {},
+                    |_| {},
+                ),
+            )
+        };
+        parent.add_builtin(key, ProgramCacheEntry::new_builtin(register_fn));
+        let isolated = parent.new_from_isolated_cache(1, 0);
+        let cache = isolated.builtin_program_cache.read().unwrap();
+        assert_eq!(cache.slot(), 1);
+        assert_eq!(
+            cache.find(&key).unwrap(),
+            Arc::new(ProgramCacheEntry::new_builtin(register_fn))
+        );
+        assert!(!Arc::ptr_eq(
+            &parent.global_program_cache,
+            &isolated.global_program_cache
+        ));
     }
 
     #[test]
@@ -2024,7 +2060,7 @@ mod tests {
             leader_schedule_epoch: 4,
             unix_timestamp: 5,
         };
-        let clock_account = create_account_shared_data_for_test(&clock);
+        let clock_account = create_sysvar_account(&clock);
         mock_bank
             .account_shared_data
             .write()
@@ -2032,7 +2068,7 @@ mod tests {
             .insert(sysvar::clock::id(), clock_account);
 
         let epoch_schedule = EpochSchedule::custom(64, 2, true);
-        let epoch_schedule_account = create_account_shared_data_for_test(&epoch_schedule);
+        let epoch_schedule_account = create_sysvar_account(&epoch_schedule);
         mock_bank
             .account_shared_data
             .write()
@@ -2044,7 +2080,7 @@ mod tests {
                 lamports_per_signature: 123,
             },
         };
-        let fees_account = create_account_shared_data_for_test(&fees);
+        let fees_account = create_sysvar_account(&fees);
         mock_bank
             .account_shared_data
             .write()
@@ -2052,7 +2088,7 @@ mod tests {
             .insert(sysvar::fees::id(), fees_account);
 
         let rent = Rent::default();
-        let rent_account = create_account_shared_data_for_test(&rent);
+        let rent_account = create_sysvar_account(&rent);
         mock_bank
             .account_shared_data
             .write()
@@ -2100,7 +2136,7 @@ mod tests {
             leader_schedule_epoch: 4,
             unix_timestamp: 5,
         };
-        let clock_account = create_account_shared_data_for_test(&clock);
+        let clock_account = create_sysvar_account(&clock);
         mock_bank
             .account_shared_data
             .write()
@@ -2108,7 +2144,7 @@ mod tests {
             .insert(sysvar::clock::id(), clock_account);
 
         let epoch_schedule = EpochSchedule::custom(64, 2, true);
-        let epoch_schedule_account = create_account_shared_data_for_test(&epoch_schedule);
+        let epoch_schedule_account = create_sysvar_account(&epoch_schedule);
         mock_bank
             .account_shared_data
             .write()
@@ -2120,7 +2156,7 @@ mod tests {
                 lamports_per_signature: 123,
             },
         };
-        let fees_account = create_account_shared_data_for_test(&fees);
+        let fees_account = create_sysvar_account(&fees);
         mock_bank
             .account_shared_data
             .write()
@@ -2128,7 +2164,7 @@ mod tests {
             .insert(sysvar::fees::id(), fees_account);
 
         let rent = Rent::default();
-        let rent_account = create_account_shared_data_for_test(&rent);
+        let rent_account = create_sysvar_account(&rent);
         mock_bank
             .account_shared_data
             .write()
@@ -2146,7 +2182,7 @@ mod tests {
             leader_schedule_epoch: 9,
             unix_timestamp: 10,
         };
-        let updated_clock_account = create_account_shared_data_for_test(&updated_clock);
+        let updated_clock_account = create_sysvar_account(&updated_clock);
         mock_bank
             .account_shared_data
             .write()
@@ -2222,7 +2258,7 @@ mod tests {
                 ),
             )
         };
-        let program = ProgramCacheEntry::new_builtin(0, register_fn);
+        let program = ProgramCacheEntry::new_builtin(register_fn);
         batch_processor.add_builtin(key, program);
 
         let mut loaded_programs_for_tx_batch = ProgramCacheForTxBatch::new(0);
@@ -2236,8 +2272,7 @@ mod tests {
                 &mut vec![ProgramToLoad {
                     program_id: &key,
                     loader: ProgramCacheEntryOwner::NativeLoader,
-                    match_criteria: ProgramCacheMatchCriteria::NoCriteria,
-                    last_modification_slot: 0,
+                    deployment_slot: 0,
                 }],
                 &mut loaded_programs_for_tx_batch,
                 &program_runtime_environment,
@@ -2247,14 +2282,15 @@ mod tests {
         let entry = loaded_programs_for_tx_batch.find(&key).unwrap();
 
         // Repeating code because ProgramCacheEntry does not implement clone.
-        let program = ProgramCacheEntry::new_builtin(0, register_fn);
+        let program = ProgramCacheEntry::new_builtin(register_fn);
         assert_eq!(entry, Arc::new(program));
     }
 
     #[test]
-    fn northstar_new_from_isolated_cache_preserves_builtin_entries() {
+    fn test_builtin_in_global_cache_but_not_in_fork_is_not_extracted() {
         let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
-        let parent = TransactionBatchProcessor::new(0, 0, Arc::downgrade(&fork_graph), None);
+        let batch_processor =
+            TransactionBatchProcessor::new(0, 0, Arc::downgrade(&fork_graph), None);
 
         let key = Pubkey::new_unique();
         let register_fn: BuiltinFunctionRegisterer = |p, n| {
@@ -2266,36 +2302,293 @@ mod tests {
                 ),
             )
         };
-        let program = ProgramCacheEntry::new_builtin(0, register_fn);
-        parent.add_builtin(key, program);
 
-        let isolated = parent.new_from_isolated_cache(1, 0);
-        isolated
+        // Insert the builtin into the global program cache only, but bypass the
+        // `builtin_program_ids` fork guard.
+        batch_processor
             .global_program_cache
             .write()
             .unwrap()
-            .set_fork_graph(Arc::downgrade(&fork_graph));
-        let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::new(isolated.slot);
-        let program_runtime_environment =
-            isolated.program_runtime_environment_for_epoch(isolated.epoch);
-        isolated.global_program_cache.read().unwrap().extract(
-            &mut vec![ProgramToLoad {
-                program_id: &key,
-                loader: ProgramCacheEntryOwner::NativeLoader,
-                match_criteria: ProgramCacheMatchCriteria::NoCriteria,
-                last_modification_slot: 0,
-            }],
-            &mut program_cache_for_tx_batch,
-            &program_runtime_environment,
+            .assign_program(
+                &batch_processor.program_runtime_environment,
+                key,
+                0,
+                Arc::new(ProgramCacheEntry::new_builtin(register_fn)),
+            );
+        assert!(
+            !batch_processor
+                .builtin_program_ids
+                .read()
+                .unwrap()
+                .contains(&key)
+        );
+
+        // Roll over into another slot.
+        // Assert this bank does not pick up the inserted builtin.
+        let next_slot = batch_processor.new_from(1, 0);
+        assert!(!next_slot.builtin_program_ids.read().unwrap().contains(&key));
+        assert!(
+            next_slot
+                .builtin_program_cache
+                .read()
+                .unwrap()
+                .find(&key)
+                .is_none()
+        );
+
+        // Now register the address on this fork.
+        // Assert the builtin is still not available without a slot rollover.
+        batch_processor
+            .builtin_program_ids
+            .write()
+            .unwrap()
+            .insert(key);
+        assert!(
+            next_slot
+                .builtin_program_cache
+                .read()
+                .unwrap()
+                .find(&key)
+                .is_none()
+        );
+
+        // Now roll over into another slot.
+        // Assert the builtin was extracted from the global cache.
+        let next_slot = batch_processor.new_from(2, 0);
+        let entry = next_slot
+            .builtin_program_cache
+            .read()
+            .unwrap()
+            .find(&key)
+            .unwrap();
+        assert_eq!(entry, Arc::new(ProgramCacheEntry::new_builtin(register_fn)));
+    }
+
+    #[test]
+    fn test_builtin_not_in_fork_is_never_searched_for() {
+        let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
+        let batch_processor =
+            TransactionBatchProcessor::new(0, 0, Arc::downgrade(&fork_graph), None);
+
+        let key = Pubkey::new_unique();
+        let register_fn: BuiltinFunctionRegisterer = |p, n| {
+            p.register_function(
+                n,
+                (
+                    |_invoke_context, _param0, _param1, _param2, _param3, _param4| {},
+                    |_| {},
+                ),
+            )
+        };
+
+        // Insert a builtin into the global program cache.
+        // This is a builtin added by another fork, but not by ours.
+        batch_processor
+            .global_program_cache
+            .write()
+            .unwrap()
+            .assign_program(
+                &batch_processor.program_runtime_environment,
+                key,
+                0,
+                Arc::new(ProgramCacheEntry::new_builtin(register_fn)),
+            );
+
+        // Assert that a transaction naming the builtin's address does not
+        // tamper with the global program cache.
+        let mock_bank = MockBankCallback::default();
+        for account_exists in [false, true] {
+            if account_exists {
+                // Even if the account exists owned by the native loader,
+                // the invariant should hold.
+                mock_bank
+                    .account_shared_data
+                    .write()
+                    .unwrap()
+                    .insert(key, AccountSharedData::new(1, 1, &native_loader::id()));
+            }
+
+            let program_cache_for_tx_batch = batch_processor
+                .builtin_program_cache
+                .read()
+                .unwrap()
+                .clone();
+            assert!(program_cache_for_tx_batch.find(&key).is_none());
+
+            let search_for = filter_executable_program_accounts(
+                &mock_bank,
+                &program_cache_for_tx_batch,
+                std::iter::once(&key),
+            );
+            assert!(search_for.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_core_bpf_migration_of_a_builtin() {
+        const BUILTIN_SLOT: Slot = 0;
+        const MIGRATION_SLOT: Slot = 10;
+        const NEXT_SLOT: Slot = 11;
+
+        struct SingleChainForkGraph;
+        impl ForkGraph for SingleChainForkGraph {
+            fn relationship(&self, a: Slot, b: Slot) -> BlockRelation {
+                if a == b {
+                    BlockRelation::Equal
+                } else if a < b {
+                    BlockRelation::Ancestor
+                } else {
+                    BlockRelation::Descendant
+                }
+            }
+        }
+
+        let fork_graph = Arc::new(RwLock::new(SingleChainForkGraph));
+        let batch_processor =
+            TransactionBatchProcessor::new(BUILTIN_SLOT, 0, Arc::downgrade(&fork_graph), None);
+
+        let key = Pubkey::new_unique();
+        let register_fn: BuiltinFunctionRegisterer = |p, n| {
+            p.register_function(
+                n,
+                (
+                    |_invoke_context, _param0, _param1, _param2, _param3, _param4| {},
+                    |_| {},
+                ),
+            )
+        };
+
+        // Start with a properly guarded builtin: registered on the fork and
+        // present in the global program cache.
+        batch_processor.add_builtin(key, ProgramCacheEntry::new_builtin(register_fn));
+        assert!(
+            batch_processor
+                .builtin_program_ids
+                .read()
+                .unwrap()
+                .contains(&key)
+        );
+
+        // Simulate migrating the builtin program to Core BPF: "deploy" the
+        // program by assigning it a new Unloaded entry owned by Loader V3 in
+        // the global program cache, then remove it from `builtin_program_ids`.
+        batch_processor
+            .global_program_cache
+            .write()
+            .unwrap()
+            .assign_program(
+                &batch_processor.program_runtime_environment,
+                key,
+                MIGRATION_SLOT,
+                Arc::new(ProgramCacheEntry::new_unloaded(
+                    MIGRATION_SLOT,
+                    ProgramCacheEntryOwner::LoaderV3,
+                    batch_processor.program_runtime_environment.clone(),
+                )),
+            );
+        batch_processor.remove_builtin(&key);
+
+        // The builtin leaves the batch cache in the same slot.
+        let program_cache_for_tx_batch = batch_processor
+            .builtin_program_cache
+            .read()
+            .unwrap()
+            .clone();
+        assert!(program_cache_for_tx_batch.find(&key).is_none());
+
+        // The new account state seeds the extraction search, and since the
+        // program was just "deployed" in this slot, we get a delayed visibility
+        // tombstone.
+        let mut search_for = vec![ProgramToLoad {
+            program_id: &key,
+            loader: ProgramCacheEntryOwner::LoaderV3,
+            deployment_slot: MIGRATION_SLOT,
+        }];
+        let mut extracted = ProgramCacheForTxBatch::new(MIGRATION_SLOT);
+        batch_processor
+            .global_program_cache
+            .read()
+            .unwrap()
+            .extract(
+                &mut search_for,
+                &mut extracted,
+                &batch_processor.program_runtime_environment,
+                false,
+                false,
+            );
+        assert!(matches!(
+            extracted.find(&key).unwrap().program,
+            ProgramCacheEntryType::DelayVisibility
+        ));
+
+        // Rolling to the next slot rebuilds the batch cache from the fork guard,
+        // which no longer lists the address, so the builtin is gone.
+        let next_slot = batch_processor.new_from(NEXT_SLOT, 0);
+        assert!(
+            next_slot
+                .builtin_program_cache
+                .read()
+                .unwrap()
+                .find(&key)
+                .is_none()
+        );
+
+        // A caller reporting the deployed slot now reaches the migrated program's
+        // entry, which is unloaded, so the cache signals a reload from account
+        // state. Crucially the builtin is not served in its place.
+        let mut search_for = vec![ProgramToLoad {
+            program_id: &key,
+            loader: ProgramCacheEntryOwner::LoaderV3,
+            deployment_slot: MIGRATION_SLOT,
+        }];
+        let mut extracted = ProgramCacheForTxBatch::new(NEXT_SLOT);
+        next_slot.global_program_cache.read().unwrap().extract(
+            &mut search_for,
+            &mut extracted,
+            &next_slot.program_runtime_environment,
             false,
             false,
         );
+        assert!(extracted.find(&key).is_none());
+        assert_eq!(search_for.len(), 1);
 
-        let entry = program_cache_for_tx_batch.find(&key).unwrap();
+        // The builtin entry does survive in the global program cache, but keyed at
+        // slot 0 under `NativeLoader`, which the lookup above cannot reach.
+        let mut search_for = vec![ProgramToLoad {
+            program_id: &key,
+            loader: ProgramCacheEntryOwner::NativeLoader,
+            deployment_slot: BUILTIN_SLOT,
+        }];
+        let mut extracted = ProgramCacheForTxBatch::new(NEXT_SLOT);
+        next_slot.global_program_cache.read().unwrap().extract(
+            &mut search_for,
+            &mut extracted,
+            &next_slot.program_runtime_environment,
+            false,
+            false,
+        );
+        assert!(matches!(
+            extracted.find(&key).unwrap().program,
+            ProgramCacheEntryType::Builtin(_)
+        ));
+    }
 
-        // Repeating code because ProgramCacheEntry does not implement clone.
-        let program = ProgramCacheEntry::new_builtin(0, register_fn);
-        assert_eq!(&*entry, &program);
+    #[test]
+    #[should_panic(expected = "missing from the global program cache")]
+    fn test_builtin_in_fork_but_not_in_global_cache_panics() {
+        let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
+        let batch_processor =
+            TransactionBatchProcessor::new(0, 0, Arc::downgrade(&fork_graph), None);
+
+        // Register a builtin without going through `add_builtin()` and just
+        // add it to `builtin_program_ids` directly. This will trip the debug
+        // assertion for the fork guard's `search_for`.
+        batch_processor
+            .builtin_program_ids
+            .write()
+            .unwrap()
+            .insert(Pubkey::new_unique());
+        batch_processor.new_from(1, 0);
     }
 
     #[test]
@@ -2407,6 +2700,7 @@ mod tests {
                 fee_payer_balance: None,
                 compute_unit_limit: fee_and_limits.budget.compute_unit_limit,
                 loaded_accounts_bytes_limit: fee_and_limits.loaded_accounts_data_size_limit,
+                nonce_address: None,
             })
         } else {
             TransactionValidationResult::Unprocessable(expected_error)
@@ -2459,6 +2753,7 @@ mod tests {
                 fee_payer_balance: Some(fee_payer_balance),
                 compute_unit_limit: fee_and_limits.budget.compute_unit_limit,
                 loaded_accounts_bytes_limit: fee_and_limits.loaded_accounts_data_size_limit,
+                nonce_address: None,
             })
         } else {
             TransactionValidationResult::Unprocessable(expected_error)
@@ -2514,6 +2809,7 @@ mod tests {
                 fee_payer_balance: Some(starting_balance),
                 compute_unit_limit: fee_and_limits.budget.compute_unit_limit,
                 loaded_accounts_bytes_limit: fee_and_limits.loaded_accounts_data_size_limit,
+                nonce_address: None,
             })
         } else {
             TransactionValidationResult::Unprocessable(expected_error)
@@ -2565,6 +2861,7 @@ mod tests {
                 fee_payer_balance: Some(fee_payer_balance),
                 compute_unit_limit: fee_and_limits.budget.compute_unit_limit,
                 loaded_accounts_bytes_limit: fee_and_limits.loaded_accounts_data_size_limit,
+                nonce_address: None,
             })
         } else {
             TransactionValidationResult::Unprocessable(expected_error)
@@ -2960,5 +3257,619 @@ mod tests {
             transaction_processor.program_runtime_environment,
             new_environment,
         );
+    }
+
+    fn catch_panic(f: impl FnOnce()) -> Option<String> {
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        std::panic::set_hook(previous_hook);
+        result.err().map(|payload| {
+            payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic payload>".to_string())
+        })
+    }
+
+    #[test_case(ProgramCacheEntryOwner::LoaderV1)]
+    #[test_case(ProgramCacheEntryOwner::LoaderV2)]
+    #[test_case(ProgramCacheEntryOwner::LoaderV3)]
+    #[test_case(ProgramCacheEntryOwner::LoaderV4)]
+    fn test_replenish_program_cache_success(loader: ProgramCacheEntryOwner) {
+        const BATCH_SLOT: u64 = 200;
+        const DEPLOYMENT_SLOT: u64 = 10;
+
+        let mock_bank = MockBankCallback::default();
+        let account_loader = (&mock_bank).into();
+        let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
+        let batch_processor =
+            TransactionBatchProcessor::new(BATCH_SLOT, 0, Arc::downgrade(&fork_graph), None);
+        let environment = batch_processor.program_runtime_environment_for_epoch(0);
+        let program_id = Pubkey::new_unique();
+
+        let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::new(batch_processor.slot);
+
+        // Set up a valid program, with a valid ELF, for each loader. Note V1
+        // and V2 do not retain a deployment slot, so they report zero.
+        let expected_deployment_slot = match loader {
+            ProgramCacheEntryOwner::LoaderV1 | ProgramCacheEntryOwner::LoaderV2 => {
+                let mut account = AccountSharedData::default();
+                account.set_owner(Pubkey::from(loader));
+                account.set_data_from_slice(&load_test_program());
+                mock_bank
+                    .account_shared_data
+                    .write()
+                    .unwrap()
+                    .insert(program_id, account);
+                0
+            }
+            ProgramCacheEntryOwner::LoaderV3 => {
+                let programdata_id = Pubkey::new_unique();
+                mock_bank
+                    .account_shared_data
+                    .write()
+                    .unwrap()
+                    .insert(program_id, loader_v3_program_account(programdata_id));
+                mock_bank.account_shared_data.write().unwrap().insert(
+                    programdata_id,
+                    loader_v3_programdata_account(DEPLOYMENT_SLOT, &load_test_program()),
+                );
+                DEPLOYMENT_SLOT
+            }
+            ProgramCacheEntryOwner::LoaderV4 => {
+                mock_bank.account_shared_data.write().unwrap().insert(
+                    program_id,
+                    loader_v4_account(
+                        DEPLOYMENT_SLOT,
+                        LoaderV4Status::Deployed,
+                        &load_test_program(),
+                    ),
+                );
+                DEPLOYMENT_SLOT
+            }
+            ProgramCacheEntryOwner::NativeLoader => unreachable!(),
+        };
+
+        // The program should be identified for extraction.
+        let keys = [program_id];
+        let missing_programs = filter_executable_program_accounts(
+            &mock_bank,
+            &program_cache_for_tx_batch,
+            keys.iter(),
+        );
+        assert_eq!(
+            missing_programs,
+            &[ProgramToLoad {
+                program_id: &program_id,
+                loader,
+                deployment_slot: expected_deployment_slot,
+            }]
+        );
+
+        // The load succeeds, leaving a `Loaded` entry in the batch cache.
+        batch_processor.replenish_program_cache(
+            &account_loader,
+            missing_programs,
+            &environment,
+            &mut program_cache_for_tx_batch,
+            &mut ExecuteTimings::default(),
+            true,
+            true,
+        );
+        let entry = program_cache_for_tx_batch.find(&program_id).unwrap();
+        assert!(matches!(entry.program, ProgramCacheEntryType::Loaded(_)));
+        assert_eq!(entry.deployment_slot, expected_deployment_slot);
+        assert_eq!(entry.account_owner, loader);
+    }
+
+    #[test_case(ProgramCacheEntryOwner::LoaderV1)]
+    #[test_case(ProgramCacheEntryOwner::LoaderV2)]
+    #[test_case(ProgramCacheEntryOwner::LoaderV3)]
+    #[test_case(ProgramCacheEntryOwner::LoaderV4)]
+    #[test_case(ProgramCacheEntryOwner::NativeLoader)]
+    fn test_replenish_program_cache_program_account_not_found(loader: ProgramCacheEntryOwner) {
+        let mock_bank = MockBankCallback::default();
+        let account_loader = (&mock_bank).into();
+        let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
+        let batch_processor =
+            TransactionBatchProcessor::new(0, 0, Arc::downgrade(&fork_graph), None);
+        let environment = batch_processor.program_runtime_environment_for_epoch(0);
+        let program_id = Pubkey::new_unique();
+
+        let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::new(batch_processor.slot);
+
+        // The program should not be identified as a program we must extract.
+        let keys = [program_id];
+        let missing_programs = filter_executable_program_accounts(
+            &mock_bank,
+            &program_cache_for_tx_batch,
+            keys.iter(),
+        );
+        assert!(missing_programs.is_empty());
+
+        // But still, even if we did happen to try to extract this program, it
+        // should panic.
+        let panicked = catch_panic(|| {
+            batch_processor.replenish_program_cache(
+                &account_loader,
+                vec![ProgramToLoad {
+                    program_id: &program_id,
+                    loader,
+                    deployment_slot: 0,
+                }],
+                &environment,
+                &mut program_cache_for_tx_batch,
+                &mut ExecuteTimings::default(),
+                true,
+                true,
+            )
+        });
+        assert_eq!(
+            panicked.as_deref(),
+            Some("called load_program_with_pubkey() with nonexistent account")
+        );
+    }
+
+    #[test_case(ProgramCacheEntryOwner::LoaderV1)]
+    #[test_case(ProgramCacheEntryOwner::LoaderV2)]
+    #[test_case(ProgramCacheEntryOwner::LoaderV3)]
+    #[test_case(ProgramCacheEntryOwner::LoaderV4)]
+    #[test_case(ProgramCacheEntryOwner::NativeLoader)]
+    fn test_replenish_program_cache_program_account_empty(loader: ProgramCacheEntryOwner) {
+        const BATCH_SLOT: u64 = 200;
+
+        let mock_bank = MockBankCallback::default();
+        let account_loader = (&mock_bank).into();
+        let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
+        let batch_processor =
+            TransactionBatchProcessor::new(BATCH_SLOT, 0, Arc::downgrade(&fork_graph), None);
+        let environment = batch_processor.program_runtime_environment_for_epoch(0);
+        let program_id = Pubkey::new_unique();
+
+        let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::new(batch_processor.slot);
+
+        // Insert a program account owned by the proper loader, but with no
+        // state in it at all.
+        let mut program_account = AccountSharedData::default();
+        program_account.set_owner(Pubkey::from(loader));
+        mock_bank
+            .account_shared_data
+            .write()
+            .unwrap()
+            .insert(program_id, program_account);
+
+        // The program should not be identified as a program we must extract.
+        let keys = [program_id];
+        let missing_programs = filter_executable_program_accounts(
+            &mock_bank,
+            &program_cache_for_tx_batch,
+            keys.iter(),
+        );
+        assert!(missing_programs.is_empty());
+
+        // Try to extract it anyway.
+        let panicked = catch_panic(|| {
+            batch_processor.replenish_program_cache(
+                &account_loader,
+                vec![ProgramToLoad {
+                    program_id: &program_id,
+                    loader,
+                    deployment_slot: 0,
+                }],
+                &environment,
+                &mut program_cache_for_tx_batch,
+                &mut ExecuteTimings::default(),
+                true,
+                true,
+            )
+        });
+
+        match loader {
+            ProgramCacheEntryOwner::LoaderV1 | ProgramCacheEntryOwner::LoaderV2 => {
+                // For Loader V1 & V2, the entire account contents is taken
+                // as-is and passed to `load`. Empty bytes == invalid ELF.
+                assert_eq!(
+                    panicked.as_deref(),
+                    None, // <-- no panic
+                );
+                let entry = program_cache_for_tx_batch.find(&program_id).unwrap();
+                assert_eq!(
+                    entry,
+                    Arc::new(ProgramCacheEntry::new_failed_verification_tombstone(
+                        0, // <-- V1/V2 programs are always deployment slot 0
+                        loader,
+                        environment,
+                    ))
+                );
+            }
+            ProgramCacheEntryOwner::LoaderV3 | ProgramCacheEntryOwner::LoaderV4 => {
+                // For Loader V3 & V4, data is too small for the respective
+                // metadata section, so the program is considered *closed*.
+                //
+                // We observe a panic here from `assign_program`, as extraction
+                // enters into a **continuous loop** of inserting a `Closed`
+                // tombstone for the batch slot and missing it on extraction,
+                // which targets the *deployment slot*.
+                //
+                // More information on this loop condition is provided below in
+                // `test_replenish_program_cache_loader_v3_closed`.
+                assert_eq!(
+                    panicked.as_deref(),
+                    Some("Unexpected replacement of an entry")
+                );
+            }
+            ProgramCacheEntryOwner::NativeLoader => {
+                // Native loader-owned accounts panic, since the call to
+                // `load_program_with_pubkey` just returns an error which gets
+                // unwrapped via `expect` in `replenish_program_cache`.
+                assert_eq!(
+                    panicked.as_deref(),
+                    Some("called load_program_with_pubkey() with nonexistent account")
+                );
+            }
+        }
+    }
+
+    enum ProgramDataCase {
+        DoesNotExist,
+        OwnedButEmpty,
+        Uninitialized,
+    }
+
+    #[test_case(ProgramDataCase::DoesNotExist)]
+    #[test_case(ProgramDataCase::OwnedButEmpty)]
+    #[test_case(ProgramDataCase::Uninitialized)]
+    fn test_replenish_program_cache_loader_v3_closed(case: ProgramDataCase) {
+        const BATCH_SLOT: u64 = 200;
+        const DEPLOYMENT_SLOT: u64 = 10;
+
+        let mock_bank = MockBankCallback::default();
+        let account_loader = (&mock_bank).into();
+        let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
+        let batch_processor =
+            TransactionBatchProcessor::new(BATCH_SLOT, 0, Arc::downgrade(&fork_graph), None);
+        let environment = batch_processor.program_runtime_environment_for_epoch(0);
+        let program_id = Pubkey::new_unique();
+        let programdata_id = Pubkey::new_unique();
+
+        let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::new(batch_processor.slot);
+
+        // Insert a legit program account.
+        mock_bank
+            .account_shared_data
+            .write()
+            .unwrap()
+            .insert(program_id, loader_v3_program_account(programdata_id));
+
+        let programdata_account = match case {
+            ProgramDataCase::DoesNotExist => {
+                // Case: Programdata does not exist
+                AccountSharedData::default()
+            }
+            ProgramDataCase::OwnedButEmpty => {
+                // Case: Programdata is owned by Loader V3, but no state.
+                let mut account = AccountSharedData::default();
+                account.set_owner(bpf_loader_upgradeable::id());
+                account
+            }
+            ProgramDataCase::Uninitialized => {
+                // Case: Programdata is `Uninitialized`.
+                let mut account = AccountSharedData::default();
+                account.set_owner(bpf_loader_upgradeable::id());
+                account.set_data_from_slice(&[0u8; 4]);
+                account
+            }
+        };
+        mock_bank
+            .account_shared_data
+            .write()
+            .unwrap()
+            .insert(programdata_id, programdata_account);
+
+        // The program should not be identified as a program we must extract.
+        let keys = [program_id];
+        let missing_programs = filter_executable_program_accounts(
+            &mock_bank,
+            &program_cache_for_tx_batch,
+            keys.iter(),
+        );
+        assert!(missing_programs.is_empty());
+
+        // `filter_executable_program_accounts` is the guard. As long as we
+        // don't place a closed/non-existant program in the search list for
+        // extraction, we correctly treat it as a `Closed` program in the batch
+        // cache.
+        //
+        // If this ever goes wrong, and a closed/non-existant program appears
+        // in the search list for extraction, we can end up with a **continuous
+        // loop**.
+        //
+        // The loop works like this:
+        //
+        // - Closed program is requested for extraction. Global cache doesn't
+        //   have it, so it signals for reload.
+        // - Reloading via `load_program_with_pubkey` returns a `Closed`
+        //   tombstone. This tombstone is inserted into the global program
+        //   cache via `finish_cooperative_loading_task`, which calls into
+        //   `assign_program`.
+        // - After this step, extraction is *supposed* to run again, so the
+        //   program key is still present in the search list. However, each
+        //   subsequent call to `extract` is going to MISS. This is due to the
+        //   fact that extraction MUST match on the deployment slot, and a
+        //   `Closed` tombstone holds the **batch slot**.
+        //
+        // The loop can only happen in production. In debug mode, we trip on
+        // the `debug_assert!` inside of `assign_program`, which traps on an
+        // invalid `Closed`-`Closed` transition. We observe this below.
+        let panicked = catch_panic(|| {
+            batch_processor.replenish_program_cache(
+                &account_loader,
+                vec![ProgramToLoad {
+                    program_id: &program_id,
+                    loader: ProgramCacheEntryOwner::LoaderV3,
+                    deployment_slot: DEPLOYMENT_SLOT,
+                }],
+                &environment,
+                &mut program_cache_for_tx_batch,
+                &mut ExecuteTimings::default(),
+                true,
+                true,
+            )
+        });
+        assert_eq!(
+            panicked.as_deref(),
+            Some("Unexpected replacement of an entry")
+        );
+    }
+
+    #[test_case(true)]
+    #[test_case(false)]
+    fn test_replenish_program_cache_loader_v4_retracted(just_zeroes: bool) {
+        const BATCH_SLOT: u64 = 200;
+
+        let mock_bank = MockBankCallback::default();
+        let account_loader = (&mock_bank).into();
+        let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
+        let batch_processor =
+            TransactionBatchProcessor::new(BATCH_SLOT, 0, Arc::downgrade(&fork_graph), None);
+        let environment = batch_processor.program_runtime_environment_for_epoch(0);
+        let program_id = Pubkey::new_unique();
+
+        let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::new(batch_processor.slot);
+
+        let program_account = if just_zeroes {
+            // Case: "gifted" state
+            // Sized correctly, all-zeroes. Since `LoaderV4Status::Retracted`
+            // holds variant `0`, we check this case, too.
+            let mut account = AccountSharedData::default();
+            account.set_owner(loader_v4::id());
+            account.set_data_from_slice(&[0u8; LoaderV4State::program_data_offset()]);
+            account
+        } else {
+            // Case: status is Retracted
+            loader_v4_account(9, LoaderV4Status::Retracted, &load_test_program())
+        };
+        mock_bank
+            .account_shared_data
+            .write()
+            .unwrap()
+            .insert(program_id, program_account);
+
+        // The program should not be identified as a program we must extract.
+        let keys = [program_id];
+        let missing_programs = filter_executable_program_accounts(
+            &mock_bank,
+            &program_cache_for_tx_batch,
+            keys.iter(),
+        );
+        assert!(missing_programs.is_empty());
+
+        // As in `test_replenish_program_cache_loader_v3_closed`,
+        // `filter_executable_program_accounts` is the guard. Forcing the
+        // program into the search list anyway walks into the continuous loop
+        // described there, which debug mode traps on.
+        let panicked = catch_panic(|| {
+            batch_processor.replenish_program_cache(
+                &account_loader,
+                vec![ProgramToLoad {
+                    program_id: &program_id,
+                    loader: ProgramCacheEntryOwner::LoaderV4,
+                    deployment_slot: if just_zeroes { 0 } else { 9 },
+                }],
+                &environment,
+                &mut program_cache_for_tx_batch,
+                &mut ExecuteTimings::default(),
+                true,
+                true,
+            )
+        });
+        assert_eq!(
+            panicked.as_deref(),
+            Some("Unexpected replacement of an entry")
+        );
+    }
+
+    fn store_loader_v3_program(
+        mock_bank: &MockBankCallback,
+        program_id: &Pubkey,
+        deployment_slot: Slot,
+        elf: &[u8],
+    ) {
+        let programdata_id = Pubkey::new_unique();
+        let mut accounts = mock_bank.account_shared_data.write().unwrap();
+        accounts.insert(*program_id, loader_v3_program_account(programdata_id));
+        accounts.insert(
+            programdata_id,
+            loader_v3_programdata_account(deployment_slot, elf),
+        );
+    }
+
+    #[test_case(false)]
+    #[test_case(true)]
+    fn test_replenish_program_cache_delay_visibility(already_cached: bool) {
+        // Tests delay visibility behavior in `replenish_program_cache`.
+        //
+        // Deployments currently insert an unloaded entry into the cache, so we
+        // should always see an existing entry. If, for some reason, the
+        // program is not already cached as unloaded, we end up doing a
+        // cooperative load one slot too early.
+        const BATCH_SLOT: u64 = 200;
+
+        let mock_bank = MockBankCallback::default();
+        let account_loader = (&mock_bank).into();
+        let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
+        let batch_processor =
+            TransactionBatchProcessor::new(BATCH_SLOT, 0, Arc::downgrade(&fork_graph), None);
+        let environment = batch_processor.program_runtime_environment_for_epoch(0);
+        let program_id = Pubkey::new_unique();
+
+        // Deployed in the batch's own slot, so it is not effective yet.
+        store_loader_v3_program(&mock_bank, &program_id, BATCH_SLOT, &load_test_program());
+
+        if already_cached {
+            batch_processor
+                .global_program_cache
+                .write()
+                .unwrap()
+                .assign_program(
+                    &environment,
+                    program_id,
+                    BATCH_SLOT,
+                    Arc::new(ProgramCacheEntry::new_unloaded(
+                        BATCH_SLOT,
+                        ProgramCacheEntryOwner::LoaderV3,
+                        environment.clone(),
+                    )),
+                );
+            batch_processor
+                .global_program_cache
+                .write()
+                .unwrap()
+                .stats
+                .reset();
+        }
+
+        let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::new(batch_processor.slot);
+        let keys = [program_id];
+        batch_processor.replenish_program_cache(
+            &account_loader,
+            filter_executable_program_accounts(
+                &mock_bank,
+                &program_cache_for_tx_batch,
+                keys.iter(),
+            ),
+            &environment,
+            &mut program_cache_for_tx_batch,
+            &mut ExecuteTimings::default(),
+            true,
+            true,
+        );
+
+        // Either way the batch is handed a tombstone.
+        // Here we read the entry directly.
+        let stored = program_cache_for_tx_batch
+            .get_entry_for_tests(&program_id)
+            .unwrap();
+        assert!(matches!(
+            stored.program,
+            ProgramCacheEntryType::DelayVisibility
+        ));
+        assert_eq!(stored.deployment_slot, BATCH_SLOT);
+
+        // And here we query with `::find`, and see the same thing.
+        let entry = program_cache_for_tx_batch.find(&program_id).unwrap();
+        assert!(matches!(
+            entry.program,
+            ProgramCacheEntryType::DelayVisibility
+        ));
+        assert_eq!(entry.deployment_slot, BATCH_SLOT);
+
+        // The global cache should just have one entry for this program.
+        // What that entry looks like will differ, though.
+        let global_program_cache = batch_processor.global_program_cache.read().unwrap();
+        let slot_versions = global_program_cache.get_slot_versions_for_tests(&program_id);
+        assert_eq!(slot_versions.len(), 1);
+
+        if already_cached {
+            // If the program was already cached as unloaded, we did not waste
+            // a load here, and it remains unloaded until effective.
+            assert!(matches!(
+                slot_versions[0].program,
+                ProgramCacheEntryType::Unloaded(_)
+            ));
+            assert!(!program_cache_for_tx_batch.loaded_missing);
+            assert_eq!(global_program_cache.stats.hits.load(Ordering::Relaxed), 1);
+            assert_eq!(global_program_cache.stats.misses.load(Ordering::Relaxed), 0);
+        } else {
+            // If the program was not cached, we actually loaded it, even
+            // though we couldn't use it.
+            //
+            // It's fine, since the batch cache still returns the tombstone.
+            assert!(matches!(
+                slot_versions[0].program,
+                ProgramCacheEntryType::Loaded(_)
+            ));
+            assert!(program_cache_for_tx_batch.loaded_missing);
+            assert_eq!(global_program_cache.stats.hits.load(Ordering::Relaxed), 0);
+            assert_eq!(global_program_cache.stats.misses.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    #[test]
+    fn test_replenish_program_cache_failed_verification_is_cached() {
+        const BATCH_SLOT: u64 = 200;
+        const DEPLOYMENT_SLOT: u64 = 10;
+
+        let mock_bank = MockBankCallback::default();
+        let account_loader = (&mock_bank).into();
+        let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
+        let batch_processor =
+            TransactionBatchProcessor::new(BATCH_SLOT, 0, Arc::downgrade(&fork_graph), None);
+        let environment = batch_processor.program_runtime_environment_for_epoch(0);
+        let program_id = Pubkey::new_unique();
+
+        // Valid programdata, bad ELF.
+        store_loader_v3_program(&mock_bank, &program_id, DEPLOYMENT_SLOT, &[1u8; 64]);
+
+        let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::new(batch_processor.slot);
+        let keys = [program_id];
+        let missing_programs = filter_executable_program_accounts(
+            &mock_bank,
+            &program_cache_for_tx_batch,
+            keys.iter(),
+        );
+        assert_eq!(missing_programs.len(), 1);
+
+        batch_processor.replenish_program_cache(
+            &account_loader,
+            missing_programs,
+            &environment,
+            &mut program_cache_for_tx_batch,
+            &mut ExecuteTimings::default(),
+            true,
+            true,
+        );
+
+        // Unlike a closed program, a program which fails verification is
+        // tombstoned at its own deployment slot, so the extraction which
+        // follows the load finds it.
+        let entry = program_cache_for_tx_batch.find(&program_id).unwrap();
+        assert!(matches!(
+            entry.program,
+            ProgramCacheEntryType::FailedVerification(_)
+        ));
+        assert_eq!(entry.deployment_slot, DEPLOYMENT_SLOT);
+
+        // It is cached globally too, so the next batch does not recompile it.
+        let global_program_cache = batch_processor.global_program_cache.read().unwrap();
+        let slot_versions = global_program_cache.get_slot_versions_for_tests(&program_id);
+        assert_eq!(slot_versions.len(), 1);
+        assert!(matches!(
+            slot_versions[0].program,
+            ProgramCacheEntryType::FailedVerification(_)
+        ));
+        assert!(matches!(slot_versions[0].deployment_slot, DEPLOYMENT_SLOT));
     }
 }

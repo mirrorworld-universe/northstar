@@ -7,6 +7,11 @@ use {
         stakes::{DeserializableDelegationStakes, SerdeStakesToStakeFormat, Stakes},
     },
     agave_feature_set::FeatureSet,
+    agave_transaction_view::{
+        resolved_transaction_view::ResolvedTransactionView,
+        transaction_view::UnsanitizedTransactionView,
+    },
+    bytes::Bytes,
     solana_account::AccountSharedData,
     solana_accounts_db::{
         accounts::Accounts, accounts_db::AccountsDb, ancestors::Ancestors,
@@ -26,10 +31,7 @@ use {
         transaction_processor::{ExecutionRecordingConfig, TransactionProcessingConfig},
     },
     solana_svm_timings::ExecuteTimings,
-    solana_transaction::{
-        TransactionVerificationMode, sanitized::SanitizedTransaction,
-        versioned::VersionedTransaction,
-    },
+    solana_transaction::{TransactionVerificationMode, versioned::VersionedTransaction},
     solana_transaction_error::TransactionError,
     solana_vote::vote_account::VoteAccounts,
     std::{collections::HashMap, sync::Arc},
@@ -42,7 +44,7 @@ pub enum BankTxnProcessingResult {
     /// processing result and transaction for effect extraction.
     Processed {
         result: TransactionProcessingResult,
-        runtime_transaction: Box<RuntimeTransaction<SanitizedTransaction>>,
+        runtime_transaction: Box<RuntimeTransaction<ResolvedTransactionView<Bytes>>>,
     },
 }
 
@@ -150,7 +152,7 @@ fn execute_txn_inner(
     // Populate the accounts DB with the input accounts at the parent slot.
     let bank_accounts = Accounts::new(Arc::new(AccountsDb::default_for_tests()));
     let ancestors = Ancestors::from(vec![parent_slot]);
-    bank_accounts.store_accounts_seq((parent_slot, accounts), BankId::default(), None, &ancestors);
+    bank_accounts.store_accounts((parent_slot, accounts), BankId::default(), None, &ancestors);
     bank_accounts.accounts_db.add_root(parent_slot);
     let bank_rc = BankRc::new(bank_accounts);
 
@@ -201,7 +203,17 @@ fn execute_txn_inner(
     }
     let (bank, _bank_forks) = bank.wrap_with_bank_forks_for_tests();
 
-    let runtime_transaction = match bank.verify_transaction(transaction, verification_mode) {
+    let transaction_bytes = match wincode::serialize(&transaction) {
+        Ok(bytes) => Bytes::from(bytes),
+        Err(_) => {
+            return BankTxnProcessingResult::FailedVerification(TransactionError::SanitizeFailure);
+        }
+    };
+    let Ok(transaction_view) = UnsanitizedTransactionView::try_new_unsanitized(transaction_bytes)
+    else {
+        return BankTxnProcessingResult::FailedVerification(TransactionError::SanitizeFailure);
+    };
+    let runtime_transaction = match bank.verify_transaction(transaction_view, verification_mode) {
         Ok(tx) => tx,
         Err(err) => return BankTxnProcessingResult::FailedVerification(err),
     };

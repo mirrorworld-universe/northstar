@@ -18,7 +18,6 @@ use {
 /// Wrapper struct with custom serialization to support serializing
 /// `Stakes<StakeAccount>` as `Stakes<Stake>` without doing an intermediate
 /// clone of the stake data.
-#[cfg_attr(feature = "frozen-abi", derive(AbiExample, AbiEnumVisitor))]
 #[derive(Debug, Clone)]
 pub enum SerdeStakesToStakeFormat {
     Stake(Stakes<Stake>),
@@ -132,7 +131,6 @@ impl From<Stakes<StakeAccount>> for SerdeStakeAccountsToStakeFormat {
     }
 }
 
-#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Serialize)]
 struct SerdeStakeAccountsToDelegationFormat {
     vote_accounts: VoteAccounts,
@@ -142,7 +140,6 @@ struct SerdeStakeAccountsToDelegationFormat {
     stake_history: StakeHistory,
 }
 
-#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Serialize)]
 struct SerdeStakeAccountsToStakeFormat {
     vote_accounts: VoteAccounts,
@@ -152,7 +149,6 @@ struct SerdeStakeAccountsToStakeFormat {
     stake_history: StakeHistory,
 }
 
-#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 struct SerdeStakeAccountMapToDelegationFormat(ImblHashMap<Pubkey, StakeAccount>);
 impl Serialize for SerdeStakeAccountMapToDelegationFormat {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -167,7 +163,6 @@ impl Serialize for SerdeStakeAccountMapToDelegationFormat {
     }
 }
 
-#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 struct SerdeStakeAccountMapToStakeFormat(ImblHashMap<Pubkey, StakeAccount>);
 impl Serialize for SerdeStakeAccountMapToStakeFormat {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -270,7 +265,7 @@ mod tests {
                 &node_pubkey,
                 rng.random_range(0..1_000_000), // lamports
             );
-            stakes_cache.check_and_store(&vote_pubkey, &vote_account, None, true);
+            stakes_cache.check_and_store(&vote_pubkey, &vote_account, None);
             for _ in 0..rng.random_range(10usize..20) {
                 let stake_pubkey = solana_pubkey::new_rand();
                 let rent = Rent::free();
@@ -281,7 +276,7 @@ mod tests {
                     &rent,
                     rng.random_range(0..1_000_000), // lamports
                 );
-                stakes_cache.check_and_store(&stake_pubkey, &stake_account, None, true);
+                stakes_cache.check_and_store(&stake_pubkey, &stake_account, None);
             }
         }
         let stakes: Stakes<StakeAccount> = stakes_cache.stakes().clone();

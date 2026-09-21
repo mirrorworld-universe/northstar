@@ -74,10 +74,11 @@ pub fn process_delegate(
 
     let session_state = validate_session(program_id, session, grid_id)?;
 
-    for group in delegation_accounts.chunks_exact_mut(ACCOUNTS_PER_DELEGATION) {
-        let [delegated_account, owner_program, delegation_record, buffer] = group else {
-            unreachable!();
-        };
+    for group in delegation_accounts
+        .as_chunks_mut::<ACCOUNTS_PER_DELEGATION>()
+        .0
+    {
+        let [delegated_account, owner_program, delegation_record, buffer] = group;
         process_delegate_account(
             program_id,
             payer,

@@ -231,7 +231,12 @@ mod tests {
                 .accounts
                 .iter()
                 .enumerate()
-                .filter(|(index, _)| runtime_transaction.message().is_writable(*index))
+                .filter(|(index, _)| {
+                    solana_svm_transaction::svm_message::SVMMessage::is_writable(
+                        runtime_transaction.as_ref(),
+                        *index,
+                    )
+                })
                 .find(|(_, (key, _))| key == pubkey)
                 .map(|(_, (_, account))| account.lamports()),
             _ => None,

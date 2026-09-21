@@ -567,7 +567,9 @@ impl MerkleTree {
             let next = layers
                 .last()
                 .expect("tree has previous layer")
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|children| node_hash(kind, level, &children[0], &children[1]))
                 .collect();
             layers.push(next);

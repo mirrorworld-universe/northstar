@@ -50,7 +50,7 @@ regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 soketto = { workspace = true }
-solana-account = { workspace = true }
+solana-account = { workspace = true, features = ["wincode"] }
 solana-account-decoder = { workspace = true }
 solana-accounts-db = { workspace = true }
 solana-cli-output = { workspace = true }
@@ -85,6 +85,7 @@ solana-signer = { workspace = true }
 solana-slot-history = { workspace = true }
 solana-storage-bigtable = { workspace = true }
 solana-svm = { workspace = true }
+solana-svm-transaction = { workspace = true }
 solana-system-interface = { workspace = true }
 solana-system-transaction = { workspace = true }
 solana-sysvar = { workspace = true }
@@ -111,7 +112,9 @@ wincode = { workspace = true }
 [dev-dependencies]
 agave-reserved-account-keys = { path = "../reserved-account-keys", features = ["agave-unstable-api"] }
 serial_test = { workspace = true }
+solana-account = { workspace = true, features = ["bincode"] }
 solana-address-lookup-table-interface = { workspace = true }
+solana-bls-signatures = { workspace = true }
 solana-client = { workspace = true }
 solana-cluster-type = { workspace = true }
 solana-compute-budget-interface = { workspace = true }
@@ -119,8 +122,9 @@ solana-fee-calculator = { workspace = true }
 solana-fee-structure = { workspace = true }
 solana-gossip = { path = "../gossip", features = ["agave-unstable-api", "dev-context-only-utils"] }
 solana-instruction = { workspace = true }
-solana-nonce = { workspace = true }
-solana-nonce-account = { workspace = true }
+solana-instruction-error = { workspace = true }
+solana-nonce = { workspace = true, features = ["wincode"] }
+solana-nonce-account = { workspace = true, features = ["wincode"] }
 solana-program-option = { workspace = true }
 solana-program-runtime = { path = "../program-runtime", features = ["agave-unstable-api"] }
 solana-rent = { workspace = true }
@@ -130,10 +134,10 @@ solana-runtime-transaction = { path = "../runtime-transaction", features = ["aga
 solana-sdk-ids = { workspace = true }
 solana-send-transaction-service = { path = "../send-transaction-service", features = ["agave-unstable-api", "dev-context-only-utils"] }
 solana-sha256-hasher = { workspace = true }
+solana-slot-hashes = { workspace = true }
 solana-stake-interface = { workspace = true }
 solana-svm-log-collector = { path = "../svm-log-collector", features = ["agave-unstable-api"] }
-solana-vote-interface = { workspace = true }
-spl-pod = { workspace = true }
+solana-vote-interface = { workspace = true, features = ["wincode"] }
 symlink = { workspace = true }
 test-case = { workspace = true }
 
