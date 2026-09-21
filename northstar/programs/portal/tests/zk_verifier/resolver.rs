@@ -21,7 +21,27 @@ type Fixture = (u64, u64, Vec<(Pubkey, Account)>);
 fn fixture() -> Fixture {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../zkvm-replay/evidence/resolver-v1/resolver-fixture.bin");
-    bincode::deserialize(&std::fs::read(path).unwrap()).unwrap()
+    let (slot, er_slot, mut accounts): Fixture =
+        bincode::deserialize(&std::fs::read(&path).unwrap()).unwrap();
+    let current = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../zkvm-replay/evidence/sp1-v6.8.0/resolver");
+    let proof = std::fs::read(current.join("northstar-sp1-groth16-onchain.bin")).unwrap();
+    let public = std::fs::read(current.join("northstar-sp1-public-inputs.bin")).unwrap();
+    // Keep the authenticated account snapshot; rotate only the program's proof.
+    assert_eq!(
+        public,
+        std::fs::read(
+            path.parent()
+                .unwrap()
+                .join("northstar-sp1-public-inputs.bin")
+        )
+        .unwrap()
+    );
+    update::<StepProofAccount>(&mut accounts[4].1, |state| {
+        state.data = proof.try_into().unwrap();
+        state.proof_hash = hashv(&[&state.data]).to_bytes();
+    });
+    (slot, er_slot, accounts)
 }
 
 fn update<T: BorshDeserialize + BorshSerialize>(

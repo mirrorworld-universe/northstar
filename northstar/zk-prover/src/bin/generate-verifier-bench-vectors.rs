@@ -1,13 +1,12 @@
 use {
     ark_bn254::{Bn254, Fr},
     ark_groth16::Groth16,
-    ark_relations::r1cs::ConstraintSynthesizer,
+    ark_relations::gr1cs::ConstraintSynthesizer,
     ark_std::rand::SeedableRng,
     northstar_zk_prover::{
-        proof_to_solana, sample_circuit, verifying_key_to_solana, Groth16VerifyingKeyRaw,
-        PaddedPublicInputCircuitV1,
+        proof_to_solana, rng::ChaCha20Rng, sample_circuit, verifying_key_to_solana,
+        Groth16VerifyingKeyRaw, PaddedPublicInputCircuitV1,
     },
-    rand_chacha::ChaCha20Rng,
     serde_json::json,
     std::{
         env,
@@ -108,7 +107,7 @@ fn generate<const N: usize>(
     let mut public_inputs: Vec<[u8; 32]> = transition.public.to_array().into_iter().collect();
     public_inputs.resize(N, [0; 32]);
 
-    let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+    let cs = ark_relations::gr1cs::ConstraintSystem::<Fr>::new_ref();
     PaddedPublicInputCircuitV1::<N> { transition }
         .generate_constraints(cs.clone())
         .unwrap();

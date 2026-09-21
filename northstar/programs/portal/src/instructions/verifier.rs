@@ -13,8 +13,8 @@ use {
 mod verifier_key;
 
 const SP1_REPLAY_PROGRAM_VKEY_HASH: [u8; 32] = [
-    0x00, 0x50, 0x53, 0x5e, 0x1d, 0x64, 0x50, 0xca, 0x9f, 0x99, 0xea, 0x6a, 0xc4, 0x33, 0xac, 0xc1,
-    0x4e, 0x0d, 0xef, 0xb4, 0x79, 0x5e, 0xe3, 0x6f, 0x3e, 0x8f, 0xb3, 0x75, 0x15, 0x5f, 0x9e, 0x6c,
+    0x00, 0x73, 0x7c, 0x84, 0x09, 0x1d, 0x07, 0x22, 0xe0, 0x88, 0x49, 0x93, 0xf9, 0xe2, 0x5b, 0x8c,
+    0x0f, 0x50, 0x46, 0x36, 0x77, 0x73, 0x29, 0xcb, 0xae, 0xb3, 0x68, 0x40, 0x93, 0x3f, 0xa2, 0xa5,
 ];
 
 fn sp1_public_inputs(
@@ -22,7 +22,10 @@ fn sp1_public_inputs(
     proof_nonce: FrBytes,
 ) -> Result<[[u8; 32]; 5], PortalError> {
     let mut fields = [[0; 32]; 8];
-    for (field, bytes) in fields.iter_mut().zip(public_input_bytes.chunks_exact(32)) {
+    for (field, bytes) in fields
+        .iter_mut()
+        .zip(public_input_bytes.as_chunks::<32>().0)
+    {
         field.copy_from_slice(bytes);
     }
     let public_inputs = ErStepPublicInputsV1::from_array(fields)
@@ -106,7 +109,12 @@ mod tests {
             settlement_effect_root: FrBytes::from_u64(8),
         };
         let mut bytes = [0; 256];
-        for (output, input) in bytes.chunks_exact_mut(32).zip(public.to_array()) {
+        for (output, input) in bytes
+            .as_chunks_mut::<32>()
+            .0
+            .iter_mut()
+            .zip(public.to_array())
+        {
             output.copy_from_slice(&input);
         }
         bytes

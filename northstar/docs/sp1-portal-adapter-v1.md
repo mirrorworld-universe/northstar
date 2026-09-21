@@ -1,8 +1,8 @@
 # SP1 Groth16 Portal adapter v1
 
-Status: **direct adapter selected; compatibility prototype passes the preliminary CU gate**.
+Status: **SP1 6.8.0 compatibility and resolver tests pass; production acceptance remains disabled**.
 
-Portal can verify the SP1 6.1.0 Groth16 wrapper directly. A second outer circuit is not needed: Portal validates the frozen eight-field proof ABI, hashes its exact 256-byte encoding as SP1 does, reconstructs SP1's five outer public inputs, and verifies the wrapper proof with the pinned SP1 key.
+Portal can verify the SP1 6.8.0 Groth16 wrapper directly. A second outer circuit is not needed: Portal validates the frozen eight-field proof ABI, hashes its exact 256-byte encoding as SP1 does, reconstructs SP1's five outer public inputs, and verifies the wrapper proof with the pinned SP1 key.
 
 ## Proof layout
 
@@ -26,10 +26,10 @@ The instruction contains the 356-byte proof followed by the frozen 256-byte Port
 
 The adapter binds both layers of SP1 verification:
 
-- SP1 6.1.0 Groth16 key SHA-256: `4388a21c687fdd5f218d7e3d13190cac4c5355818d3605fd5fb811df468ee696`.
+- SP1 6.8.0 Groth16 key SHA-256 (unchanged from 6.1.0): `4388a21c687fdd5f218d7e3d13190cac4c5355818d3605fd5fb811df468ee696`.
 - Required proof prefix: `4388a21c`.
 - SP1 recursion key root: `002f850ee998974d6cc00e50cd0814b098c05bfade466d28573240d057f25352`.
-- Northstar replay program key hash: `0x0050535e1d6450ca9f99ea6ac433acc14e0defb4795ee36f3e8fb375155f9e6c` (partial-checkpoint candidate; see `../zkvm-replay/partial-candidate-v1.json`).
+- Northstar replay program key hash: `0x00737c84091d0722e0884993f9e25b8c0f504636777329cbaeb36840933fa2a5` (partial-checkpoint candidate; see `../zkvm-replay/partial-candidate-v1.json`).
 
 The compressed 492-byte SP1 key is retained in `programs/portal/keys/`. Portal embeds its converted 832-byte Solana verifier points in executable read-only data. Proof key prefix, exit code, recursion root, and all scalar encodings fail closed before pairing.
 
@@ -56,9 +56,9 @@ The exact concatenated 256 bytes are SHA-256 hashed and the top three bits are c
 
 This keeps the frozen Portal ABI while adapting it to SP1's wrapper relation.
 
-## Measurements
+## Historical measurements
 
-Measured on 2026-09-07 against the current Agave SBF runtime:
+Measured on 2026-09-07 against the then-current Agave SBF runtime:
 
 | Item | Result |
 |---|---:|
@@ -73,15 +73,15 @@ Measured on 2026-09-07 against the current Agave SBF runtime:
 
 The 97,156-CU run uses curve-valid Groth16 points from the existing benchmark corpus against the pinned SP1 key. It intentionally reaches all five scalar multiplications and the pairing syscall, then fails because it is not an SP1 proof. This is a preliminary verifier-path measurement, not a successful Northstar proof verification. It is 32,844 CU below the 130K target and 52,844 CU below the 150K stop threshold.
 
-The direct verifier remains behind `zk-verifier-prototype` until an unchanged real proof passes the full resolver test. Feature-enabled builds route production `ResolveChallenge` through it; default builds fail closed with `StepProofVerifierUnavailable`. The dummy verifier still requires its explicit guarded test feature.
+The direct verifier remains behind `zk-verifier-prototype`; passing compatibility tests does not enable production acceptance. Feature-enabled builds route production `ResolveChallenge` through it; default builds fail closed with `StepProofVerifierUnavailable`. The dummy verifier still requires its explicit guarded test feature.
 
-SP1 6.1.0 has CPU and CUDA proving backends but no AMD XDNA NPU backend. The revised program setup completed locally in 117,929 ms. The checkpoint-bound Groth16 run was stopped after 61 minutes without completing or emitting an artifact; it used all cores, about 7 GiB of resident memory, and substantial existing swap pressure. Generating the compatibility artifact now requires a CUDA machine or SP1 proving service.
+SP1 6.1.0 has CPU and CUDA proving backends but no AMD XDNA NPU backend. The revised program setup completed locally in 117,929 ms. The checkpoint-bound Groth16 run was stopped after 61 minutes without completing or emitting an artifact; it used all cores, about 7 GiB of resident memory, and substantial existing swap pressure. That CPU attempt did not produce compatibility evidence; subsequent validation uses CUDA.
 
-## Remaining compatibility check
+## Current compatibility check
 
-Portal-side production challenge resolution authenticates the isolated trace boundary and transaction/effect leaf, recomputes the canonical Poseidon `session_context`, reconstructs the eight public fields from the sealed account, and invokes the direct SP1 verifier. Replay witness encoding v2 now recomputes projected checkpoint state roots, validates the canonical transaction/effect record, and verifies readonly-L1 and settlement authentication paths. The remaining gate is generating and testing a real Groth16 artifact for this revised SP1 program.
+Portal-side production challenge resolution authenticates the isolated trace boundary and transaction/effect leaf, recomputes the canonical Poseidon `session_context`, reconstructs the eight public fields from the sealed account, and invokes the direct SP1 verifier. Replay witness encoding v2 now recomputes projected checkpoint state roots, validates the canonical transaction/effect record, and verifies readonly-L1 and settlement authentication paths. Fresh SP1 6.8.0 artifacts and measurements are retained in [`../zkvm-replay/evidence/sp1-v6.8.0/`](../zkvm-replay/evidence/sp1-v6.8.0/README.md). Warm baseline and resolver proofs take 42,795 ms and 40,728 ms respectively. Standalone SBF verification consumes 97,113 CU; full resolver tests fit the 130,000-CU transaction budget. Previous-program proofs are now rejected; their evidence is retained unchanged.
 
-The final compatibility check must:
+The current compatibility tests:
 
 - authenticate trace and transaction-effect membership in Portal and readonly-L1/settlement membership in the replay relation;
 - accept the resulting unchanged 356-byte Northstar proof through `ResolveChallenge`;
@@ -91,11 +91,6 @@ The final compatibility check must:
 ## Reproduction
 
 ```bash
-cd northstar/zkvm-replay
-cargo run -p northstar-zkvm-replay-script -- \
-  key fixture-v1.bin /tmp/northstar-sp1-key.json baseline
-
-cd ../..
 cargo build-sbf \
   --manifest-path northstar/programs/portal/Cargo.toml \
   --features zk-verifier-prototype

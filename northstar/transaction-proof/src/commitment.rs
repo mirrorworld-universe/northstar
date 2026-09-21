@@ -1,7 +1,7 @@
 use {
+    crate::poseidon,
     ark_bn254::Fr,
     ark_ff::{BigInteger, PrimeField},
-    light_poseidon::{Poseidon, PoseidonHasher},
     northstar_zk_types::FrBytes,
 };
 
@@ -40,9 +40,7 @@ pub fn fr_from_bytes(value: FrBytes) -> Fr {
 }
 
 pub fn poseidon2(left: Fr, right: Fr) -> Result<Fr, CommitmentError> {
-    Poseidon::<Fr>::new_circom(2)
-        .and_then(|mut hasher| hasher.hash(&[left, right]))
-        .map_err(|_| CommitmentError::Poseidon)
+    poseidon::hash(&[left, right]).map_err(|_| CommitmentError::Poseidon)
 }
 
 pub fn fold(tag: u64, values: &[Fr]) -> Result<Fr, CommitmentError> {
@@ -55,9 +53,7 @@ pub fn fold(tag: u64, values: &[Fr]) -> Result<Fr, CommitmentError> {
         let mut inputs = Vec::with_capacity(capacity);
         inputs.push(accumulator);
         inputs.extend_from_slice(chunk);
-        accumulator = Poseidon::<Fr>::new_circom(inputs.len())
-            .and_then(|mut hasher| hasher.hash(&inputs))
-            .map_err(|_| CommitmentError::Poseidon)?;
+        accumulator = poseidon::hash(&inputs).map_err(|_| CommitmentError::Poseidon)?;
     }
     Ok(accumulator)
 }

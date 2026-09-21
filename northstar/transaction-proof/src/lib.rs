@@ -2,6 +2,7 @@ pub mod checkpoint;
 pub mod commitment;
 #[cfg(feature = "host")]
 pub mod fixture;
+pub mod poseidon;
 
 use {
     borsh::{BorshDeserialize, BorshSerialize},

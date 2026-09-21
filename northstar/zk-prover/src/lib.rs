@@ -1,3 +1,4 @@
+pub mod rng;
 pub mod transaction;
 
 use {
@@ -11,10 +12,10 @@ use {
         eq::EqGadget,
         fields::{fp::FpVar, FieldVar},
     },
-    ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError},
+    ark_relations::gr1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError},
     ark_serialize::{CanonicalSerialize, Compress, SerializationError},
     ark_std::rand::Rng,
-    light_poseidon::{parameters::bn254_x5, Poseidon, PoseidonHasher, PoseidonParameters},
+    northstar_transaction_proof::poseidon::{self, PoseidonError, PoseidonParameters},
     northstar_zk_types::{ErStepPublicInputsV1, FrBytes, Groth16ProofRaw},
 };
 
@@ -29,13 +30,13 @@ const TX_EFFECT_TAG: u64 = 4;
 
 #[derive(Debug)]
 pub enum ProverError {
-    Poseidon(light_poseidon::PoseidonError),
+    Poseidon(PoseidonError),
     Synthesis(SynthesisError),
     Serialization(SerializationError),
 }
 
-impl From<light_poseidon::PoseidonError> for ProverError {
-    fn from(value: light_poseidon::PoseidonError) -> Self {
+impl From<PoseidonError> for ProverError {
+    fn from(value: PoseidonError) -> Self {
         Self::Poseidon(value)
     }
 }
@@ -89,12 +90,12 @@ pub struct Groth16VerifyingKeyRaw {
     pub ic: Vec<[u8; 64]>,
 }
 
-fn poseidon_parameters() -> Result<PoseidonParameters<Fr>, ProverError> {
-    Ok(bn254_x5::get_poseidon_parameters::<Fr>(3)?)
+fn poseidon_parameters() -> Result<PoseidonParameters, ProverError> {
+    Ok(poseidon::parameters(3)?)
 }
 
 fn poseidon2_native(left: Fr, right: Fr) -> Result<Fr, ProverError> {
-    Ok(Poseidon::<Fr>::new_circom(2)?.hash(&[left, right])?)
+    Ok(poseidon::hash(&[left, right])?)
 }
 
 fn poseidon_fold_native(tag: u64, values: &[Fr]) -> Result<Fr, ProverError> {
@@ -110,7 +111,7 @@ fn poseidon_fold_native(tag: u64, values: &[Fr]) -> Result<Fr, ProverError> {
 fn poseidon2_var(
     left: &FpVar<Fr>,
     right: &FpVar<Fr>,
-    params: &PoseidonParameters<Fr>,
+    params: &PoseidonParameters,
 ) -> Result<FpVar<Fr>, SynthesisError> {
     let mut state = [FpVar::zero(), left.clone(), right.clone()];
     let all_rounds = params
@@ -156,7 +157,7 @@ fn poseidon2_var(
 fn poseidon_fold_var(
     tag: u64,
     values: &[FpVar<Fr>],
-    params: &PoseidonParameters<Fr>,
+    params: &PoseidonParameters,
 ) -> Result<FpVar<Fr>, SynthesisError> {
     let mut accumulator = FpVar::Constant(Fr::from(tag));
     for value in values {
@@ -509,7 +510,7 @@ pub fn sample_circuit() -> Result<OneAccountTransitionCircuitV1, ProverError> {
 }
 
 pub fn constraint_count(circuit: OneAccountTransitionCircuitV1) -> Result<usize, ProverError> {
-    let cs = ark_relations::r1cs::ConstraintSystem::<Fr>::new_ref();
+    let cs = ark_relations::gr1cs::ConstraintSystem::<Fr>::new_ref();
     circuit.generate_constraints(cs.clone())?;
     cs.finalize();
     Ok(cs.num_constraints())
@@ -518,8 +519,8 @@ pub fn constraint_count(circuit: OneAccountTransitionCircuitV1) -> Result<usize,
 #[cfg(test)]
 mod tests {
     use {
-        super::*, ark_groth16::prepare_verifying_key, ark_relations::r1cs::ConstraintSystem,
-        ark_std::rand::SeedableRng, rand_chacha::ChaCha20Rng,
+        super::*, crate::rng::ChaCha20Rng, ark_groth16::prepare_verifying_key,
+        ark_relations::gr1cs::ConstraintSystem, ark_std::rand::SeedableRng,
     };
 
     #[test]

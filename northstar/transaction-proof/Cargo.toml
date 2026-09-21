@@ -24,13 +24,16 @@ host = [
 ]
 
 [dependencies]
-ark-bn254 = "0.5"
-ark-ff = "0.5"
+ark-bn254 = "0.6"
+ark-ff = "0.6"
+# light-poseidon 0.4 still uses Arkworks 0.5; isolate its field types at the adapter boundary.
+poseidon-ark-bn254 = { package = "ark-bn254", version = "0.5" }
+poseidon-ark-ff = { package = "ark-ff", version = "0.5" }
 borsh = { workspace = true, features = ["derive"] }
-ed25519-dalek = { version = "2.2", default-features = false, features = ["alloc", "fast", "zeroize"] }
+ed25519-dalek = { version = "3.0", default-features = false, features = ["alloc", "fast", "zeroize"] }
 light-poseidon = "0.4"
 northstar-zk-types = { workspace = true }
-sha2 = "0.10"
+sha2 = "0.11"
 thiserror = { workspace = true }
 
 agave-feature-set = { workspace = true, optional = true }

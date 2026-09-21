@@ -71,7 +71,7 @@ class WorkerTests(unittest.TestCase):
         self.state.mkdir(mode=0o700)
         self.manifest = json.loads((REPLAY / "partial-candidate-v1.json").read_text())
         self.previous = os.environ.get("FAKE_EVIDENCE")
-        os.environ["FAKE_EVIDENCE"] = str(REPLAY / "evidence/userspace-v1")
+        os.environ["FAKE_EVIDENCE"] = str(REPLAY / "evidence/sp1-v6.8.0")
         self.addCleanup(self.restore_env)
         self.worker = module.Worker(
             self.state, self.fake, REPLAY / "fixture-v1.bin", self.manifest, timeout=3

@@ -5,7 +5,7 @@
   "fixtures": [
     {
       "name": "bounded-full-transaction-success",
-      "test": "solana_runtime::conformance::proof_fixture::tests::fixture_is_real_deterministic_signed_bank_execution",
+      "test": "northstar_replay_harness::proof_fixture::tests::fixture_is_real_deterministic_signed_bank_execution",
       "coverage": [
         "legacy-wire",
         "one-signer",
@@ -26,7 +26,7 @@
     },
     {
       "name": "bounded-full-transaction-rollback",
-      "test": "solana_runtime::conformance::proof_fixture::tests::paired_write_then_fail_fixture_rolls_back_mutation",
+      "test": "northstar_replay_harness::proof_fixture::tests::paired_write_then_fail_fixture_rolls_back_mutation",
       "coverage": ["sbf-write-attempt", "executed-failure", "fees", "rollback"],
       "trace_bytes": 51200,
       "trace_sha256": "9ab42ce4a93329071bb298193106669e68f8813903213d04f6ad04970121a415",
@@ -36,7 +36,7 @@
     },
     {
       "name": "sbf-system-cpi-success",
-      "test": "solana_runtime::conformance::txn::tests::test_simple_transfer",
+      "test": "northstar_replay_harness::txn::tests::test_simple_transfer",
       "coverage": [
         "fees",
         "account-loading",
@@ -51,37 +51,37 @@
     },
     {
       "name": "sbf-system-cpi-failure",
-      "test": "solana_runtime::conformance::txn::tests::trace_records_failed_sbf_and_rollback",
+      "test": "northstar_replay_harness::txn::tests::trace_records_failed_sbf_and_rollback",
       "coverage": ["sbf-error", "syscall", "cpi", "rollback"]
     },
     {
       "name": "invalid-signature",
-      "test": "solana_runtime::conformance::txn::tests::trace_rejects_bad_signature_before_execution",
+      "test": "northstar_replay_harness::txn::tests::trace_rejects_bad_signature_before_execution",
       "coverage": ["full-signature-verification", "unprocessable"]
     },
     {
       "name": "stale-blockhash",
-      "test": "solana_runtime::conformance::txn::tests::trace_records_stale_blockhash_as_bank_check_failure",
+      "test": "northstar_replay_harness::txn::tests::trace_records_stale_blockhash_as_bank_check_failure",
       "coverage": ["bank-checks", "blockhash", "unprocessable"]
     },
     {
       "name": "fee-payer-noop",
-      "test": "solana_runtime::conformance::txn::tests::trace_records_noop_fee_payer_failure",
+      "test": "northstar_replay_harness::txn::tests::trace_records_noop_fee_payer_failure",
       "coverage": ["fee-payer", "noop"]
     },
     {
       "name": "program-load-fees-only",
-      "test": "solana_runtime::conformance::txn::tests::trace_records_fees_only_program_load_failure",
+      "test": "northstar_replay_harness::txn::tests::trace_records_fees_only_program_load_failure",
       "coverage": ["fees", "program-loading", "fees-only", "rollback"]
     },
     {
       "name": "system-transfer",
-      "test": "solana_runtime::conformance::txn::tests::trace_records_native_system_execution_without_vm_rows",
+      "test": "northstar_replay_harness::txn::tests::trace_records_native_system_execution_without_vm_rows",
       "coverage": ["builtin", "system-program", "commit"]
     },
     {
       "name": "token-2022-transfer",
-      "test": "solana_runtime::conformance::txn::tests::trace_records_token_2022_transfer",
+      "test": "northstar_replay_harness::txn::tests::trace_records_token_2022_transfer",
       "coverage": ["spl", "token-2022", "sbf-registers", "account-data", "commit"]
     }
   ]

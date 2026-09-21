@@ -1602,7 +1602,9 @@ fn verify_step_proof_production(
         };
         let mut public_input_bytes = [0; 256];
         for (output, input) in public_input_bytes
-            .chunks_exact_mut(32)
+            .as_chunks_mut::<32>()
+            .0
+            .iter_mut()
             .zip(public_inputs.to_array())
         {
             output.copy_from_slice(&input);

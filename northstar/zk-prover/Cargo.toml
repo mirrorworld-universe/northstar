@@ -4,21 +4,20 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-ark-bn254 = "0.5"
-ark-ff = "0.5"
-ark-groth16 = "0.5"
-ark-relations = "0.5"
-ark-r1cs-std = "0.5"
-ark-serialize = "0.5"
-ark-std = "0.5"
+ark-bn254 = "0.6"
+ark-ff = "0.6"
+ark-groth16 = "0.6"
+ark-relations = "0.6"
+ark-r1cs-std = "0.6"
+ark-serialize = "0.6"
+ark-std = "0.6"
 hex = "0.4"
-light-poseidon = "0.4"
 northstar-zk-types = { workspace = true }
 northstar-transaction-proof = { workspace = true }
 solana-sbpf = { workspace = true }
-rand_chacha = "0.3"
+rand_chacha = "0.10"
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 northstar-replay-harness = { workspace = true }
 
 

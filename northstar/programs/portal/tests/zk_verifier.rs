@@ -59,7 +59,12 @@ fn public_input_bytes() -> [u8; 256] {
         settlement_effect_root: FrBytes::from_u64(8),
     };
     let mut bytes = [0; 256];
-    for (output, input) in bytes.chunks_exact_mut(32).zip(public.to_array()) {
+    for (output, input) in bytes
+        .as_chunks_mut::<32>()
+        .0
+        .iter_mut()
+        .zip(public.to_array())
+    {
         output.copy_from_slice(&input);
     }
     bytes
@@ -213,11 +218,11 @@ async fn sbf_verifier_accepts_checkpoint_bound_sp1_proof() {
 }
 
 #[tokio::test]
-async fn sbf_verifier_accepts_retained_l40s_proofs_and_rejects_changed_fields() {
+async fn sbf_verifier_binds_current_program_and_rejects_changed_fields() {
     let root =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zkvm-replay/evidence/l40s-v1");
     let mut context = setup().await;
-    for (case, prefix) in [
+    for (case, prefix, current) in [
         "compatibility-02",
         "compatibility-03",
         "live-01",
@@ -239,7 +244,7 @@ async fn sbf_verifier_accepts_retained_l40s_proofs_and_rejects_changed_fields() 
         "../proof-performance-v1/fast-live-3",
     ]
     .into_iter()
-    .map(|case| (case, String::new()))
+    .map(|case| (case, String::new(), false))
     .chain(
         [
             "../proof-performance-v1/persistent-01",
@@ -247,8 +252,10 @@ async fn sbf_verifier_accepts_retained_l40s_proofs_and_rejects_changed_fields() 
             "../proof-performance-v1/cuda-server-01",
         ]
         .into_iter()
-        .flat_map(|case| (0..3).map(move |sample| (case, format!("sample-{sample}-")))),
-    ) {
+        .flat_map(|case| (0..3).map(move |sample| (case, format!("sample-{sample}-"), false))),
+    )
+    .chain(std::iter::once(("../sp1-v6.8.0", String::new(), true)))
+    {
         let proof = std::fs::read(
             root.join(case)
                 .join(format!("{prefix}northstar-sp1-groth16-onchain.bin")),
@@ -280,6 +287,13 @@ async fn sbf_verifier_accepts_retained_l40s_proofs_and_rejects_changed_fields() 
             .simulate_transaction(transaction(&context, instruction.clone()))
             .await
             .unwrap();
+        if !current {
+            assert!(
+                result.result.unwrap().is_err(),
+                "previous program: {case}/{prefix}"
+            );
+            continue;
+        }
         assert_eq!(result.result.unwrap(), Ok(()), "{case}/{prefix}");
         assert!(result.simulation_details.unwrap().units_consumed <= 130_000);
         for offset in [1, 5, 37, 69, 101, 165, 293]
