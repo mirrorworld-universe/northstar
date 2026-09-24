@@ -48,6 +48,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler libprotobuf-dev libudev-dev libclang-dev
       - run: cargo clippy --locked --all --tests -- -D warnings
+      # Sonic: Check opt-in paths without enabling them in deployment builds.
+      - run: cargo clippy --locked --all --tests --features northstar/proof-coordinator-test-hooks,agave-validator/proof-coordinator-test-hooks,northstar-portal/zk-verifier-profile -- -D warnings
 
   test:
     name: Test
@@ -77,6 +79,8 @@ jobs:
           bash -n northstar/scripts/gpu-prover-ssh.sh
           bash -n northstar/scripts/live-cadence-recovery.sh
           bash -n northstar/scripts/live-gpu-settlement.sh
+          bash -n northstar/scripts/live-proof-coordinator.sh
+          python3 -B northstar/scripts/gpu-worker-stress.py --help >/dev/null
           bash -n northstar/scripts/provision-gpu-userspace.sh
           bash -n northstar/scripts/provision-gpu-server.sh
           bash northstar/scripts/test-gpu-provision.sh
@@ -132,6 +136,11 @@ jobs:
         run: BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar-token-bridge --test validator_e2e -- --nocapture
       - name: Run Northstar crate tests
         run: BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar -p northstar-portal --no-fail-fast
+      # Sonic: Coordinator and mature-capture regressions need no GPU service.
+      - name: Test opt-in proof coordination
+        run: cargo test --locked -p northstar --features proof-coordinator-test-hooks proof_ --no-fail-fast
+      - name: Test mature ER replay capture
+        run: cargo test --locked -p solana-runtime --lib bank::er_replay::tests --no-fail-fast
       - name: Run Northstar SVM regression tests
         run: cargo test --locked -p solana-svm northstar --no-fail-fast
       - name: Run Northstar core service tests
