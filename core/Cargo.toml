@@ -16,6 +16,9 @@ all-features = true
 rustdoc-args = ["--cfg=docsrs"]
 
 [features]
+# Sonic: Explicit opt-in; default validators do not link the proof coordinator.
+proof-coordinator = ["northstar/proof-coordinator"]
+proof-coordinator-test-hooks = ["proof-coordinator", "northstar/proof-coordinator-test-hooks"]
 agave-unstable-api = []
 dev-context-only-utils = [
     "agave-banking-stage-ingress-types/dev-context-only-utils",

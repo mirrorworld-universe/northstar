@@ -2,6 +2,8 @@
 mod live_cadence;
 #[cfg(test)]
 mod live_checkpoint;
+#[cfg(all(test, feature = "proof-coordinator"))]
+mod live_coordinator;
 #[cfg(test)]
 mod live_settlement;
 

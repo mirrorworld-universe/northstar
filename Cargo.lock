@@ -5251,6 +5251,7 @@ dependencies = [
  "bincode",
  "borsh",
  "crossbeam-channel",
+ "libc",
  "log",
  "northstar-portal",
  "northstar-replay-harness",
