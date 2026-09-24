@@ -112,8 +112,15 @@ fn real_checkpoint_bisects_to_captured_transaction() {
         .map(|value| value.parse::<usize>().expect("integer selected step"))
         .unwrap_or(10.min(step_count - 1));
     assert!(selected_step < step_count);
+    let owner_path = env::var("NORTHSTAR_LIVE_OWNER_SBF").ok();
     let (artifact, history) = if env::var_os("NORTHSTAR_LIVE_SETTLE").is_some() {
-        super::tests::supported_sbf_checkpoint_with_target_offset(0, session, step_count, 128)
+        super::tests::supported_sbf_checkpoint_with_owner(
+            0,
+            session,
+            step_count,
+            128,
+            owner_path.as_deref(),
+        )
     } else {
         supported_sbf_checkpoint_with_steps(0, session, step_count)
     };
@@ -148,6 +155,9 @@ fn real_checkpoint_bisects_to_captured_transaction() {
             transfer(&payer.pubkey(), &challenger.pubkey(), 50_000_000),
         ],
     );
+    if owner_path.is_some() {
+        super::live_settlement::delegate_fresh_fixture(&rpc, &payer, &artifact, &history);
+    }
     send(
         &rpc,
         &payer,

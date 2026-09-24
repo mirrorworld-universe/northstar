@@ -128,6 +128,7 @@ members = [
     # Sonic:
     "northstar",
     "northstar/programs/portal",
+    "northstar/programs/replay-owner",
     "northstar/programs/token-bridge",
     "northstar/zk-prover",
     "northstar/zk-types",

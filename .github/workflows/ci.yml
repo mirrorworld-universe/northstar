@@ -105,6 +105,11 @@ jobs:
           cargo build-sbf --manifest-path northstar/programs/portal/Cargo.toml --features zk-verifier-prototype -- --locked
           BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar-portal --features zk-verifier-prototype --test zk_verifier
           cargo test --locked -p northstar-portal --features zk-verifier-prototype --lib
+      - name: Verify fresh delegation fixture against the frozen replay relation
+        run: |
+          cargo build-sbf --manifest-path northstar/programs/replay-owner/Cargo.toml -- --locked
+          NORTHSTAR_LIVE_OWNER_SBF="$PWD/target/deploy/northstar_replay_owner.so" \
+            cargo test --locked -p northstar fresh_delegation_owner_preserves_frozen_replay_relation -- --ignored
       - name: Build Portal SBF program
         run: cargo build-sbf --manifest-path northstar/programs/portal/Cargo.toml -- --locked
       - name: Build Token Bridge SBF program

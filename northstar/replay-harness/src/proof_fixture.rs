@@ -67,6 +67,15 @@ pub fn full_transaction_fixture_v1() -> FullTransactionFixtureV1 {
     )
 }
 
+pub fn full_transaction_delegation_fixture_v1(program_path: &str) -> FullTransactionFixtureV1 {
+    full_transaction_fixture(
+        program_path,
+        b"northstar-full-transaction-proof-v1",
+        &[1],
+        true,
+    )
+}
+
 pub fn full_transaction_benchmark_fixture_v1(iterations: u32) -> FullTransactionFixtureV1 {
     let mut instruction_data = vec![1];
     instruction_data.extend_from_slice(&iterations.to_le_bytes());

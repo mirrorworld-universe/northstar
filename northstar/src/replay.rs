@@ -195,7 +195,10 @@ pub fn extract_replay_witness_v1(
         settlement_effect_root: artifact.checkpoint.effect_commitment,
     };
     set_trace_hash(&mut witness);
-    let public = replay(&witness).map_err(|_| "replay relation rejected")?;
+    let public = replay(&witness).map_err(|error| {
+        log::warn!("Replay relation rejected captured witness: {error:?}");
+        "replay relation rejected"
+    })?;
     if public_inputs_bytes(public) != *expected_public_inputs {
         return Err("checkpoint public inputs mismatch");
     }
