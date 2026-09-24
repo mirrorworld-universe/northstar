@@ -9,7 +9,7 @@ The real Portal SBF live fixture now continues beyond `ResolveChallenge`:
 5. Reload the plan, replay already-applied chunks through the production retry builder, and finish settlement.
 6. Assert all 16 account values, unchanged account lamports/ownership, terminal checkpoint/session/cursor state, and exact bond conservation including actual transaction fees.
 
-## Measured results
+## Historical measurements
 
 | Run | Challenge → resolution | Resolver CU | Resolution → settlement |
 | --- | ---: | ---: | ---: |
@@ -17,11 +17,11 @@ The real Portal SBF live fixture now continues beyond `ResolveChallenge`:
 | Combined proof/settlement with SIGKILL recovery | 123.997s | 127,976 | 258.197s |
 | SIGKILL during partial proof upload, then resolution/settlement | 167.517s | 127,978 | 173.915s |
 
-All passed without slot warps. The crash run used finalized fence **829**, full snapshot **900**, and distinct process PIDs. It completed the test in 400.24s, including GPU preflight and natural L1 deadline/snapshot waits. The retained proof, witness, measurements, serialized settlement plan, genesis fixtures and restart evidence are under [`evidence/combined-settlement-v1`](../zkvm-replay/evidence/combined-settlement-v1/). `SHA256SUMS` covers those files. CPU-only SBF verifier CI also accepts this proof and rejects changed envelope/public fields.
+All passed without slot warps. The crash run used finalized fence **829**, full snapshot **900**, and distinct process PIDs. It completed the test in 400.24s, including GPU preflight and natural L1 deadline/snapshot waits. The retained proof, witness, measurements, serialized settlement plan, genesis fixtures and restart evidence are under [`evidence/combined-settlement-v1`](../zkvm-replay/evidence/combined-settlement-v1/). `SHA256SUMS` covers those files. These artifacts predate the current SP1 6.8.0 guest; CPU-only CI now retains them as previous-program rejection cases.
 
-The partial-upload run stopped after the first 128-byte proof chunk. A snapshot at slot 400 covered finalized fence 373. After SIGKILL/restart, the entire proof account matched its pre-crash state, upload continued, and production resolution plus 16-account settlement passed. Recovery wait was 27.148s; total test time was 359.92s. Public artifacts and restart evidence are under [`evidence/upload-recovery-v1`](../zkvm-replay/evidence/upload-recovery-v1/), using the same genesis fixtures as the combined run. This proof is also covered by CPU-only verification/mutation checks.
+The partial-upload run stopped after the first 128-byte proof chunk. A snapshot at slot 400 covered finalized fence 373. After SIGKILL/restart, the entire proof account matched its pre-crash state, upload continued, and production resolution plus 16-account settlement passed. Recovery wait was 27.148s; total test time was 359.92s. Public artifacts and restart evidence are under [`evidence/upload-recovery-v1`](../zkvm-replay/evidence/upload-recovery-v1/), using the same genesis fixtures as the combined run. This older proof is also retained as a previous-program rejection case.
 
-## Scope of the fixture
+## Scope of the historical fixture
 
 Genesis explicitly supplies already-delegated accounts and Portal delegation records matching the captured transaction pre-state. This is not a live delegation/CPI demonstration. The fixture's 16 program-owned ER accounts each receive a data update; settlement writes those exact captured post-values on L1, rather than substituting an empty settlement.
 
@@ -44,4 +44,22 @@ bash northstar/scripts/live-gpu-settlement.sh crash-settling
 bash northstar/scripts/live-gpu-settlement.sh crash-upload
 ```
 
-The runner exports fresh trusted genesis fixtures before launch, refuses occupied RPC endpoints, passes environment explicitly to tmux, bounds readiness waits, retains private launch/log files only in its fresh evidence directory, and cleans up validator/test sessions. Only reviewed public artifacts should be copied into the repository. Do not deploy the prototype program or enable the production verifier as part of this test.
+These three modes export trusted genesis delegation fixtures before launch. The runner refuses occupied RPC endpoints, passes environment explicitly to tmux, bounds readiness waits, retains private launch/log files only in its fresh evidence directory, and cleans up validator/test sessions. Only reviewed public artifacts should be copied into the repository. Do not deploy the prototype program or enable the production verifier outside the isolated test.
+
+## Fresh delegation and automatic manager recovery
+
+`manager-recovery` does not import genesis delegations. It creates accounts through the test-only owner program, resolves a newly proved checkpoint, atomically persists its durable settlement plan, and exits the proof driver. A covering finalized snapshot fences SIGKILL/restart. A newly started observer submits no transactions while the real manager finishes settlement and releases the bond.
+
+After configuring and warming a local worker as described in [proof performance](proof-performance-v1.md):
+
+```sh
+cargo build --locked --bin solana-test-validator
+cargo build-sbf --manifest-path northstar/programs/portal/Cargo.toml --features zk-verifier-prototype -- --locked
+cargo build-sbf --manifest-path northstar/programs/replay-owner/Cargo.toml -- --locked
+export NORTHSTAR_LIVE_PROVER="$PWD/northstar/scripts/gpu-worker.py"
+export NORTHSTAR_LIVE_PORTAL_SBF="$PWD/target/deploy/northstar_portal.so"
+export NORTHSTAR_LIVE_OWNER_SBF="$PWD/target/deploy/northstar_replay_owner.so"
+bash northstar/scripts/live-gpu-settlement.sh manager-recovery
+```
+
+The validator must include the explicit-Portal override fix; `--portal` must not replace the supplied prototype with its fail-closed default bundle. The default bundle remains unchanged. [Current measurements and architectural boundaries](weekly-proof-recovery-v1.md) cover the 16-account run, snapshot fence, manager outcome, and remaining limits. This mode proves post-resolution manager recovery, not automatic partial proof-upload recovery.

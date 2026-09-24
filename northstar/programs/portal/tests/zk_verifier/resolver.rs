@@ -55,7 +55,20 @@ fn update<T: BorshDeserialize + BorshSerialize>(
 
 #[tokio::test]
 async fn production_resolver_binds_metadata_and_preserves_rejected_state() {
-    let (slot, er_slot, original) = fixture();
+    assert_resolver_bindings("sp1-v6.8.0/resolver", fixture()).await;
+}
+
+#[tokio::test]
+async fn production_resolver_rechecks_colocated_proofs_and_rejection_invariants() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../zkvm-replay/evidence/weekly-proof-recovery-v1");
+    for case in ["live-01", "live-02", "live-03", "manager"] {
+        let bytes = std::fs::read(root.join(case).join("resolver-fixture.bin")).unwrap();
+        assert_resolver_bindings(case, bincode::deserialize(&bytes).unwrap()).await;
+    }
+}
+
+async fn assert_resolver_bindings(case: &str, (slot, er_slot, original): Fixture) {
     assert_eq!(original.len(), 7);
     let mut test = ProgramTest::new("northstar_portal", PROGRAM, None);
     for (key, account) in &original {
@@ -275,7 +288,7 @@ async fn production_resolver_binds_metadata_and_preserves_rejected_state() {
                 .unwrap();
             assert_eq!(simulation.result.unwrap(), Ok(()));
             let units = simulation.simulation_details.unwrap().units_consumed;
-            println!("PORTAL_RESOLUTION compute_units={units}");
+            println!("PORTAL_RESOLUTION artifact={case} compute_units={units}");
             assert!(units <= 130_000);
         }
         let result = context.banks_client.process_transaction(transaction).await;

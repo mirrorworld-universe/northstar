@@ -31,7 +31,7 @@ The adapter binds both layers of SP1 verification:
 - SP1 recursion key root: `002f850ee998974d6cc00e50cd0814b098c05bfade466d28573240d057f25352`.
 - Northstar replay program key hash: `0x00737c84091d0722e0884993f9e25b8c0f504636777329cbaeb36840933fa2a5` (partial-checkpoint candidate; see `../zkvm-replay/partial-candidate-v1.json`).
 
-The compressed 492-byte SP1 key is retained in `programs/portal/keys/`. Portal embeds its converted 832-byte Solana verifier points in executable read-only data. Proof key prefix, exit code, recursion root, and all scalar encodings fail closed before pairing.
+The compressed 492-byte SP1 key is retained in `programs/portal/keys/`. Portal embeds a [fixed-input specialization](verification-performance-v1.md) of its converted Solana verifier points; the original key remains unchanged. Proof key prefix, exit code, recursion root, and all scalar encodings fail closed before pairing.
 
 ## Public-input mapping
 
@@ -54,7 +54,7 @@ The exact concatenated 256 bytes are SHA-256 hashed and the top three bits are c
 4. pinned SP1 recursion key root;
 5. proof nonce from the authenticated envelope.
 
-This keeps the frozen Portal ABI while adapting it to SP1's wrapper relation.
+This keeps the frozen Portal ABI while adapting it to SP1's wrapper relation. The implementation folds fixed fields 1, 3, and 4 into the constant key point, leaving two dynamic scalar multiplications. Envelope and canonical-input checks still run before pairing.
 
 ## Historical measurements
 
@@ -79,7 +79,7 @@ SP1 6.1.0 has CPU and CUDA proving backends but no AMD XDNA NPU backend. The rev
 
 ## Current compatibility check
 
-Portal-side production challenge resolution authenticates the isolated trace boundary and transaction/effect leaf, recomputes the canonical Poseidon `session_context`, reconstructs the eight public fields from the sealed account, and invokes the direct SP1 verifier. Replay witness encoding v2 now recomputes projected checkpoint state roots, validates the canonical transaction/effect record, and verifies readonly-L1 and settlement authentication paths. Fresh SP1 6.8.0 artifacts and measurements are retained in [`../zkvm-replay/evidence/sp1-v6.8.0/`](../zkvm-replay/evidence/sp1-v6.8.0/README.md). Warm baseline and resolver proofs take 42,795 ms and 40,728 ms respectively. Standalone SBF verification consumes 97,113 CU; full resolver tests fit the 130,000-CU transaction budget. Previous-program proofs are now rejected; their evidence is retained unchanged.
+Portal-side production challenge resolution authenticates the isolated trace boundary and transaction/effect leaf, recomputes the canonical Poseidon `session_context`, reconstructs the eight public fields from the sealed account, and invokes the direct SP1 verifier. Replay witness encoding v2 now recomputes projected checkpoint state roots, validates the canonical transaction/effect record, and verifies readonly-L1 and settlement authentication paths. Fresh SP1 6.8.0 artifacts and measurements are retained in [`../zkvm-replay/evidence/sp1-v6.8.0/`](../zkvm-replay/evidence/sp1-v6.8.0/README.md). Those initial warm baseline and resolver proofs took 42,795 ms and 40,728 ms respectively. Fixed-input specialization now verifies the same proofs in 83,986 CU instead of 97,113 CU; the full retained resolver case uses 114,998 CU. [Colocated live validation](weekly-proof-recovery-v1.md) adds three consecutive warm runs, fresh delegation, and automatic post-proof manager recovery. Previous-program proofs are rejected; their evidence is retained unchanged.
 
 The current compatibility tests:
 

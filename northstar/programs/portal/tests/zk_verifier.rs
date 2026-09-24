@@ -255,9 +255,18 @@ async fn sbf_verifier_binds_current_program_and_rejects_changed_fields() {
         .flat_map(|case| (0..3).map(move |sample| (case, format!("sample-{sample}-"), false))),
     )
     .chain(
-        ["../sp1-v6.8.0", "../sp1-v6.8.0/resolver"]
-            .into_iter()
-            .map(|case| (case, String::new(), true)),
+        [
+            "../sp1-v6.8.0",
+            "../sp1-v6.8.0/resolver",
+            "../weekly-proof-recovery-v1/cold",
+            "../weekly-proof-recovery-v1/live-01",
+            "../weekly-proof-recovery-v1/live-02",
+            "../weekly-proof-recovery-v1/live-03",
+            "../weekly-proof-recovery-v1/after-cancellation",
+            "../weekly-proof-recovery-v1/manager",
+        ]
+        .into_iter()
+        .map(|case| (case, String::new(), true)),
     ) {
         let proof = std::fs::read(
             root.join(case)
