@@ -1914,7 +1914,7 @@ impl solana_rpc::rpc::ErTxExecutor for EphemeralTransactionClient {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use {
         super::*,
         solana_account::AccountSharedData,
@@ -2527,7 +2527,7 @@ mod tests {
         supported_sbf_checkpoint_with_steps(lamports_per_signature, session, 16)
     }
 
-    pub(super) fn supported_sbf_checkpoint_with_steps(
+    pub(crate) fn supported_sbf_checkpoint_with_steps(
         lamports_per_signature: u64,
         session: Pubkey,
         step_count: usize,

@@ -374,7 +374,8 @@ fn require_live_turn(challenge_state: &Challenge, current_slot: u64) -> ProgramR
     Ok(())
 }
 
-fn step_proof_public_input_hash(
+/// Portal account-binding digest, distinct from the hash of SP1's public-input bytes.
+pub fn step_proof_public_input_hash(
     program_id: &Pubkey,
     session_key: &Pubkey,
     checkpoint_key: &Pubkey,

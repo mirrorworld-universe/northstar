@@ -30,6 +30,10 @@ pub mod ephemeral_tpu;
 pub mod ephemeral_tx_client;
 pub mod portal_state;
 pub mod proof_jobs;
+#[cfg(any(test, feature = "proof-coordinator"))]
+pub mod proof_upload;
+#[cfg(any(test, feature = "proof-coordinator"))]
+pub mod proof_verification;
 #[cfg(any(test, feature = "replay"))]
 pub mod replay;
 pub mod settlement;
