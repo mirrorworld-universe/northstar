@@ -43,8 +43,15 @@ pub struct ProofJob {
 
 pub struct ProofJobStore {
     directory: PathBuf,
-    _lease: File,
+    lease: File,
     writes: Mutex<()>,
+}
+
+impl Drop for ProofJobStore {
+    fn drop(&mut self) {
+        // A concurrent spawn can retain a forked descriptor until exec closes it.
+        let _ = self.lease.unlock();
+    }
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -107,7 +114,7 @@ impl ProofJobStore {
         lease.try_lock().map_err(io::Error::other)?;
         let store = Self {
             directory: directory.to_owned(),
-            _lease: lease,
+            lease,
             writes: Mutex::new(()),
         };
         // Only the lease holder may remove unpublished staging directories after restart.
@@ -122,6 +129,23 @@ impl ProofJobStore {
         }
         store.ids()?;
         Ok(store)
+    }
+
+    pub fn job_directory(&self, id: &[u8; 32]) -> PathBuf {
+        self.directory.join(name(id))
+    }
+
+    /// The caller must establish terminality from finalized L1 state before retiring a job.
+    pub fn retire(&self, id: &[u8; 32]) -> io::Result<()> {
+        let _write = self
+            .writes
+            .lock()
+            .map_err(|_| invalid("proof store lock poisoned"))?;
+        let source = self.job_directory(id);
+        let retired = self.directory.join(format!(".stage-retired-{}", name(id)));
+        fs::rename(source, &retired)?;
+        File::open(&self.directory)?.sync_all()?;
+        fs::remove_dir_all(retired)
     }
 
     pub fn ids(&self) -> io::Result<Vec<[u8; 32]>> {
@@ -327,6 +351,38 @@ mod tests {
         assert_eq!(job.binding, binding());
         assert_eq!(job.witness, b"witness");
         assert_eq!(job.proof.unwrap().as_slice(), proof());
+    }
+
+    #[test]
+    fn retired_jobs_and_interrupted_retirements_disappear_after_restart() {
+        let directory = private_directory();
+        let store = ProofJobStore::open(directory.path()).unwrap();
+        let id = store.enqueue(binding(), b"witness").unwrap();
+        store.retire(&id).unwrap();
+        assert!(store.ids().unwrap().is_empty());
+        let id = store.enqueue(binding(), b"witness").unwrap();
+        fs::rename(
+            store.job_directory(&id),
+            directory
+                .path()
+                .join(format!(".stage-retired-{}", name(&id))),
+        )
+        .unwrap();
+        drop(store);
+        assert!(ProofJobStore::open(directory.path())
+            .unwrap()
+            .ids()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn closing_store_releases_lease_despite_an_inherited_descriptor() {
+        let directory = private_directory();
+        let store = ProofJobStore::open(directory.path()).unwrap();
+        let _inherited = store.lease.try_clone().unwrap();
+        drop(store);
+        assert!(ProofJobStore::open(directory.path()).is_ok());
     }
 
     #[test]
