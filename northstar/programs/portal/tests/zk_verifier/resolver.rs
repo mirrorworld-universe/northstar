@@ -267,6 +267,17 @@ async fn production_resolver_binds_metadata_and_preserves_rejected_state() {
             &[&context.payer],
             context.last_blockhash,
         );
+        if *name == "valid" {
+            let simulation = context
+                .banks_client
+                .simulate_transaction(transaction.clone())
+                .await
+                .unwrap();
+            assert_eq!(simulation.result.unwrap(), Ok(()));
+            let units = simulation.simulation_details.unwrap().units_consumed;
+            println!("PORTAL_RESOLUTION compute_units={units}");
+            assert!(units <= 130_000);
+        }
         let result = context.banks_client.process_transaction(transaction).await;
         if let Some(error) = rejection {
             let actual = format!("{:?}", result.unwrap_err());

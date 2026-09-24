@@ -32,6 +32,7 @@ solana-pubkey = { workspace = true, features = ["curve25519"] }
 solana-poseidon = { workspace = true }
 
 [dev-dependencies]
+solana-bn254 = { workspace = true }
 bincode = { workspace = true }
 northstar-transaction-proof.workspace = true
 hex = "0.4"

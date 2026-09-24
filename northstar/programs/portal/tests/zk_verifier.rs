@@ -254,8 +254,11 @@ async fn sbf_verifier_binds_current_program_and_rejects_changed_fields() {
         .into_iter()
         .flat_map(|case| (0..3).map(move |sample| (case, format!("sample-{sample}-"), false))),
     )
-    .chain(std::iter::once(("../sp1-v6.8.0", String::new(), true)))
-    {
+    .chain(
+        ["../sp1-v6.8.0", "../sp1-v6.8.0/resolver"]
+            .into_iter()
+            .map(|case| (case, String::new(), true)),
+    ) {
         let proof = std::fs::read(
             root.join(case)
                 .join(format!("{prefix}northstar-sp1-groth16-onchain.bin")),
@@ -295,7 +298,9 @@ async fn sbf_verifier_binds_current_program_and_rejects_changed_fields() {
             continue;
         }
         assert_eq!(result.result.unwrap(), Ok(()), "{case}/{prefix}");
-        assert!(result.simulation_details.unwrap().units_consumed <= 130_000);
+        let units = result.simulation_details.unwrap().units_consumed;
+        println!("PORTAL_VERIFICATION case={case}/{prefix} compute_units={units}");
+        assert!(units <= 130_000);
         for offset in [1, 5, 37, 69, 101, 165, 293]
             .into_iter()
             .chain((0..8).map(|field| 1 + SP1_GROTH16_PROOF_V1_LEN + field * 32 + 31))

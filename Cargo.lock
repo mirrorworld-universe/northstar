@@ -5326,6 +5326,7 @@ dependencies = [
  "serde_json",
  "solana-account",
  "solana-address 2.7.0",
+ "solana-bn254",
  "solana-commitment-config",
  "solana-compute-budget-interface",
  "solana-hash",
