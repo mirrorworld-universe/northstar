@@ -2,7 +2,7 @@
 set -euo pipefail
 umask 077
 mode=${1:-settle}
-[[ $mode == resolve || $mode == settle || $mode == crash-settling || $mode == crash-upload ]] || { echo 'usage: live-gpu-settlement.sh [resolve|settle|crash-settling|crash-upload]' >&2; exit 2; }
+[[ $mode == resolve || $mode == settle || $mode == crash-settling || $mode == crash-upload || $mode == manager-recovery ]] || { echo 'usage: live-gpu-settlement.sh [resolve|settle|crash-settling|crash-upload|manager-recovery]' >&2; exit 2; }
 : "${NORTHSTAR_LIVE_PROVER:?preflight-capable GPU adapter required}"
 : "${NORTHSTAR_LIVE_PORTAL_SBF:?explicit prototype Portal SBF required}"
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -29,7 +29,9 @@ wait_for() {
     local deadline=$((SECONDS + $1))
     shift
     until "$@"; do
-        [[ ! -f $work/result ]] || { echo "Test ended; see $work/test.log" >&2; return 1; }
+        if [[ -f $work/result ]] && { [[ $mode != manager-recovery ]] || [[ $(<"$work/result") != 0 ]]; }; then
+            echo "Test ended; see $work/test.log" >&2; return 1
+        fi
         (( SECONDS < deadline )) || { echo "Timed out: $*" >&2; return 1; }
         sleep .2
     done
@@ -42,7 +44,7 @@ for endpoint in "$url" http://127.0.0.1:8910; do
 done
 export CARGO_TARGET_DIR="$target"
 accounts=()
-if [[ $mode == resolve ]]; then
+if [[ $mode == resolve || $mode == manager-recovery ]]; then
     cargo test --locked -p northstar real_checkpoint_bisects_to_captured_transaction --no-run > "$work/build.log" 2>&1
 else
     NORTHSTAR_LIVE_GENESIS_DIR="$work/genesis" cargo test --locked -p northstar export_live_settlement_genesis -- --ignored > "$work/genesis.log" 2>&1
@@ -51,18 +53,35 @@ else
         accounts+=(--account "$key" "$file")
     done
 fi
+if [[ $mode == manager-recovery ]]; then
+    : "${NORTHSTAR_LIVE_OWNER_SBF:?test-only replay owner SBF required for fresh delegation}"
+    NORTHSTAR_LIVE_OWNER_SBF=$(realpath "$NORTHSTAR_LIVE_OWNER_SBF")
+    [[ -f $NORTHSTAR_LIVE_OWNER_SBF ]]
+    export NORTHSTAR_LIVE_OWNER_SBF
+    accounts+=(--bpf-program FpuSfMKs3Bf5bxFZJ8UDDVYTbCGnZURDuLBmhjb5u9XC "$NORTHSTAR_LIVE_OWNER_SBF")
+else
+    unset NORTHSTAR_LIVE_OWNER_SBF
+fi
 validator_env=()
+service_portal=GikCSCpYUq7QR7esoK6GM4UbJzKgdKNvS5bR1rBYH5E4
+if [[ $mode == manager-recovery ]]; then service_portal=5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf; fi
 start_validator() {
     local command
     printf -v command '%q ' env RUST_LOG=warn "${validator_env[@]}" "$validator" \
         --ledger "$work/ledger" --rpc-port 18999 --faucet-port 19900 --bind-address 127.0.0.1 \
-        --portal GikCSCpYUq7QR7esoK6GM4UbJzKgdKNvS5bR1rBYH5E4 \
+        --portal "$service_portal" \
         --bpf-program 5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf "$portal" "${accounts[@]}"
     printf 'exec %s >> %q 2>&1\n' "$command" "$work/validator.log" > "$work/validator-launch.sh"
     tmux new-session -d -s "$validator_session" "exec bash '$work/validator-launch.sh'"
     wait_for 120 rpc_slot
 }
 start_validator
+unset NORTHSTAR_LIVE_MANAGER_PLAN_DIR NORTHSTAR_LIVE_MANAGER_RESTART_READY
+if [[ $mode == manager-recovery ]]; then
+    export NORTHSTAR_LIVE_PAYER="$work/ledger/validator-keypair.json"
+    export NORTHSTAR_LIVE_MANAGER_PLAN_DIR="$work/ledger/northstar-checkpoint-plans"
+    export NORTHSTAR_LIVE_MANAGER_RESTART_READY="$work/ready"
+fi
 export NORTHSTAR_LIVE_RPC_URL="$url" NORTHSTAR_LIVE_PROOF_DIR="$work/proof"
 if [[ $mode == resolve ]]; then unset NORTHSTAR_LIVE_SETTLE; else export NORTHSTAR_LIVE_SETTLE=1; fi
 unset NORTHSTAR_LIVE_SETTLEMENT_RESTART_READY NORTHSTAR_LIVE_SETTLEMENT_RESTART_RESUME NORTHSTAR_LIVE_UPLOAD_RESTART_READY NORTHSTAR_LIVE_UPLOAD_RESTART_RESUME
@@ -72,14 +91,19 @@ elif [[ $mode == crash-upload ]]; then
     export NORTHSTAR_LIVE_UPLOAD_RESTART_READY="$work/ready" NORTHSTAR_LIVE_UPLOAD_RESTART_RESUME="$work/resume"
 fi
 test_env=()
-for name in CARGO_TARGET_DIR PATH HOME RUSTC RUSTDOC LD_LIBRARY_PATH ICICLE_BACKEND_INSTALL_DIR NORTHSTAR_LIVE_PROVER NORTHSTAR_LIVE_RPC_URL NORTHSTAR_LIVE_SETTLE NORTHSTAR_LIVE_PROOF_DIR NORTHSTAR_LIVE_PAYER NORTHSTAR_LIVE_STEP_COUNT NORTHSTAR_LIVE_SELECTED_STEP NORTHSTAR_LIVE_SETTLEMENT_RESTART_READY NORTHSTAR_LIVE_SETTLEMENT_RESTART_RESUME NORTHSTAR_LIVE_UPLOAD_RESTART_READY NORTHSTAR_LIVE_UPLOAD_RESTART_RESUME NORTHSTAR_GPU_SSH NORTHSTAR_GPU_REMOTE_RUNNER NORTHSTAR_GPU_REMOTE_ARTIFACTS NORTHSTAR_GPU_PROVER NORTHSTAR_GPU_REPLAY_DIR NORTHSTAR_GPU_WORKER_SOCKET NORTHSTAR_GPU_REQUEST_TIMEOUT; do
+for name in NORTHSTAR_LIVE_OWNER_SBF NORTHSTAR_LIVE_MANAGER_PLAN_DIR NORTHSTAR_LIVE_MANAGER_RESTART_READY CARGO_TARGET_DIR PATH HOME RUSTC RUSTDOC LD_LIBRARY_PATH ICICLE_BACKEND_INSTALL_DIR NORTHSTAR_LIVE_PROVER NORTHSTAR_LIVE_RPC_URL NORTHSTAR_LIVE_SETTLE NORTHSTAR_LIVE_PROOF_DIR NORTHSTAR_LIVE_PAYER NORTHSTAR_LIVE_STEP_COUNT NORTHSTAR_LIVE_SELECTED_STEP NORTHSTAR_LIVE_SETTLEMENT_RESTART_READY NORTHSTAR_LIVE_SETTLEMENT_RESTART_RESUME NORTHSTAR_LIVE_UPLOAD_RESTART_READY NORTHSTAR_LIVE_UPLOAD_RESTART_RESUME NORTHSTAR_GPU_SSH NORTHSTAR_GPU_REMOTE_RUNNER NORTHSTAR_GPU_REMOTE_ARTIFACTS NORTHSTAR_GPU_PROVER NORTHSTAR_GPU_REPLAY_DIR NORTHSTAR_GPU_WORKER_SOCKET NORTHSTAR_GPU_REQUEST_TIMEOUT; do
     if [[ -v $name ]]; then test_env+=("$name=${!name}"); fi
 done
 printf -v command '%q ' env "${test_env[@]}" cargo test --locked -p northstar real_checkpoint_bisects_to_captured_transaction -- --ignored --nocapture
 printf 'cd %q; %s > %q 2>&1; echo $? > %q\n' "$root" "$command" "$work/test.log" "$work/result" > "$work/test-launch.sh"
 tmux new-session -d -s "$test_session" "exec bash '$work/test-launch.sh'"
-if [[ $mode == crash* ]]; then
+if [[ $mode == crash* || $mode == manager-recovery ]]; then
     wait_for 600 test -f "$work/ready"
+    if [[ $mode == manager-recovery ]]; then
+        wait_for 60 test -f "$work/result"
+        [[ $(<"$work/result") == 0 ]]
+        tmux kill-session -t "$test_session" 2>/dev/null || true
+    fi
     read -r fence < "$work/ready" || [[ -n $fence ]]
     [[ $fence =~ ^[0-9]+$ ]]
     snapshot_ready() {
@@ -104,8 +128,15 @@ if [[ $mode == crash* ]]; then
     [[ $new_pid != "$old_pid" ]]
     printf 'signal=SIGKILL old_pid=%s new_pid=%s same_ledger=true\n' "$old_pid" "$new_pid" > "$work/restart.txt"
     touch "$work/resume"
+    if [[ $mode == manager-recovery ]]; then
+        mv "$work/result" "$work/driver-result"
+        printf -v command '%q ' env "${test_env[@]}" cargo test --locked -p northstar observe_manager_recovery_after_proof -- --ignored --nocapture
+        printf 'cd %q; %s > %q 2>&1; echo $? > %q\n' "$root" "$command" "$work/observer.log" "$work/result" > "$work/observer-launch.sh"
+        tmux new-session -d -s "$test_session" "exec bash '$work/observer-launch.sh'"
+    fi
 fi
 wait_for 1000 test -f "$work/result"
-grep -E 'proof_resolution|proof_to_settlement|upload_recovery|settlement_recovery|test result:|panicked' "$work/test.log" | tail -8
+grep -E 'proof_resolution|proof_to_settlement|upload_recovery|settlement_recovery|manager_handoff|fresh_delegation|test result:|panicked' "$work/test.log" | tail -8
+if [[ $mode == manager-recovery ]]; then grep -E 'automatic_manager_recovery|test result:|panicked' "$work/observer.log" | tail -4; fi
 read -r result < "$work/result"
 exit "$result"
