@@ -48,9 +48,11 @@ pub(crate) fn verify_er_step_proof_v1(
     proof: &[u8],
     public_inputs: &[u8; 256],
 ) -> Result<(), PortalError> {
+    crate::profile::mark("NS_CU verifier.entry");
     let proof = Sp1Groth16ProofV1::from_bytes(proof)
         .map_err(|_| PortalError::StepProofVerificationFailed)?;
     let groth16_inputs = sp1_public_inputs(public_inputs, proof.proof_nonce)?;
+    crate::profile::mark("NS_CU verifier.envelope");
     // SP1 emits Gnark's non-negated A; groth16-solana folds the standard
     // pairing equation with -A.
     let proof_a = negate_g1_be(&proof.proof.a);
@@ -63,9 +65,12 @@ pub(crate) fn verify_er_step_proof_v1(
         &verifier_key::SP1_FIXED_INPUT_VERIFYING_KEY,
     )
     .map_err(|_| PortalError::StepProofVerificationFailed)?;
-    verifier
+    crate::profile::mark("NS_CU verifier.msm_pairing_start");
+    let result = verifier
         .verify()
-        .map_err(|_| PortalError::StepProofVerificationFailed)
+        .map_err(|_| PortalError::StepProofVerificationFailed);
+    crate::profile::mark("NS_CU verifier.msm_pairing_end");
+    result
 }
 
 #[p_instruction(

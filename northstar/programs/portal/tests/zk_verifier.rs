@@ -172,7 +172,7 @@ async fn sbf_verifier_rejects_noncanonical_portal_input() {
 }
 
 #[tokio::test]
-#[ignore = "requires checkpoint-bound SP1 Groth16 artifact"]
+#[ignore = "manual external artifact override; retained checkpoint artifacts are tested separately"]
 async fn sbf_verifier_accepts_checkpoint_bound_sp1_proof() {
     let proof: [u8; SP1_GROTH16_PROOF_V1_LEN] =
         std::fs::read(std::env::var("NORTHSTAR_SP1_PROOF").expect("NORTHSTAR_SP1_PROOF path"))
@@ -264,6 +264,10 @@ async fn sbf_verifier_binds_current_program_and_rejects_changed_fields() {
             "../weekly-proof-recovery-v1/live-03",
             "../weekly-proof-recovery-v1/after-cancellation",
             "../weekly-proof-recovery-v1/manager",
+            "../proof-coordinator-v1/proving",
+            "../proof-coordinator-v1/upload",
+            "../proof-coordinator-v1/proving-under-deadline",
+            "../proof-coordinator-v1/upload-worker-offline",
         ]
         .into_iter()
         .map(|case| (case, String::new(), true)),
@@ -307,7 +311,13 @@ async fn sbf_verifier_binds_current_program_and_rejects_changed_fields() {
             continue;
         }
         assert_eq!(result.result.unwrap(), Ok(()), "{case}/{prefix}");
-        let units = result.simulation_details.unwrap().units_consumed;
+        let details = result.simulation_details.unwrap();
+        let units = details.units_consumed;
+        #[cfg(feature = "zk-verifier-profile")]
+        println!(
+            "PORTAL_CU_PROFILE {}",
+            serde_json::json!({"case":format!("{case}/{prefix}"), "compute_units":units, "logs":details.logs})
+        );
         println!("PORTAL_VERIFICATION case={case}/{prefix} compute_units={units}");
         assert!(units <= 130_000);
         for offset in [1, 5, 37, 69, 101, 165, 293]

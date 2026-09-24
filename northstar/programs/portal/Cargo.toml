@@ -12,6 +12,7 @@ default = []
 no-entrypoint = []
 bpf-entrypoint = []
 test-verifier = []
+zk-verifier-profile = ["zk-verifier-prototype"]
 zk-verifier-prototype = ["dep:groth16-solana", "dep:northstar-zk-types"]
 
 [dependencies]

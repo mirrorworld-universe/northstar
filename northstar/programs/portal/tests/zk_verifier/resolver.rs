@@ -66,6 +66,21 @@ async fn production_resolver_rechecks_colocated_proofs_and_rejection_invariants(
         let bytes = std::fs::read(root.join(case).join("resolver-fixture.bin")).unwrap();
         assert_resolver_bindings(case, bincode::deserialize(&bytes).unwrap()).await;
     }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../zkvm-replay/evidence/proof-coordinator-v1");
+    for case in [
+        "proving",
+        "upload",
+        "proving-under-deadline",
+        "upload-worker-offline",
+    ] {
+        let bytes = std::fs::read(root.join(case).join("resolver-fixture.bin")).unwrap();
+        assert_resolver_bindings(
+            &format!("coordinator/{case}"),
+            bincode::deserialize(&bytes).unwrap(),
+        )
+        .await;
+    }
 }
 
 async fn assert_resolver_bindings(case: &str, (slot, er_slot, original): Fixture) {
@@ -287,7 +302,13 @@ async fn assert_resolver_bindings(case: &str, (slot, er_slot, original): Fixture
                 .await
                 .unwrap();
             assert_eq!(simulation.result.unwrap(), Ok(()));
-            let units = simulation.simulation_details.unwrap().units_consumed;
+            let details = simulation.simulation_details.unwrap();
+            let units = details.units_consumed;
+            #[cfg(feature = "zk-verifier-profile")]
+            println!(
+                "PORTAL_CU_PROFILE {}",
+                serde_json::json!({"case":case, "compute_units":units, "logs":details.logs})
+            );
             println!("PORTAL_RESOLUTION artifact={case} compute_units={units}");
             assert!(units <= 130_000);
         }

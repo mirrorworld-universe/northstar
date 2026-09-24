@@ -1666,6 +1666,8 @@ pub fn process_resolve_challenge(
     }: ResolveChallenge,
 ) -> ProgramResult {
     pinocchio_log::log!("Instruction: ResolveChallenge, er_slot={}", er_slot);
+    crate::profile::mark("NS_CU resolver.entry");
+    crate::profile::mark("NS_CU resolver.calibration");
 
     let [submitter, session, checkpoint, challenge, da_proof, proof, bond_recipient, cursor, ..] =
         accounts
@@ -1703,6 +1705,7 @@ pub fn process_resolve_challenge(
     require_active_checkpoint(&cursor_state, checkpoint.address(), er_slot)?;
 
     let proof_state = load_step_proof(program_id, checkpoint.address(), proof)?;
+    crate::profile::mark("NS_CU resolver.accounts");
     if proof_state.checkpoint != *checkpoint.address()
         || proof_state.challenge != *challenge.address()
     {
@@ -1735,12 +1738,14 @@ pub fn process_resolve_challenge(
         return Err(PortalError::StepProofPublicInputMismatch.into());
     }
 
+    crate::profile::mark("NS_CU resolver.binding");
     let verification = verify_step_proof(
         verifier_mode,
         &checkpoint_state,
         &challenge_state,
         &proof_state,
     );
+    crate::profile::mark("NS_CU resolver.verified");
     let outcome = match &verification {
         StepProofVerification::Unavailable => 0,
         StepProofVerification::Invalid => 1,
@@ -1774,7 +1779,9 @@ pub fn process_resolve_challenge(
             checkpoint_state.challenge_resolved = true;
             challenge_state.status = ChallengeStatus::ValidatorWon;
             store_checkpoint(checkpoint, &checkpoint_state)?;
-            store_challenge(challenge, &challenge_state)
+            let result = store_challenge(challenge, &challenge_state);
+            crate::profile::mark("NS_CU resolver.stored");
+            result
         }
     }
 }
