@@ -29,6 +29,7 @@ pub mod ephemeral_runtime;
 pub mod ephemeral_tpu;
 pub mod ephemeral_tx_client;
 pub mod portal_state;
+pub mod proof_jobs;
 #[cfg(any(test, feature = "replay"))]
 pub mod replay;
 pub mod settlement;
