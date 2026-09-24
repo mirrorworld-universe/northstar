@@ -600,6 +600,13 @@ opt-level = 3
 [profile.dev.package.solana-ed25519]
 opt-level = 3
 
+# Sonic: Unoptimized BN254 arithmetic adds seconds to coordinator verification in dev validators.
+[profile.dev.package.substrate-bn-succinct-rs]
+opt-level = 3
+
+[profile.dev.package.sp1-verifier]
+opt-level = 3
+
 [profile.full-dev]
 inherits = "dev"
 debug = "full"

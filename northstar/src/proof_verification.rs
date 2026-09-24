@@ -61,11 +61,8 @@ impl VerifiedProof {
 mod tests {
     use super::*;
 
-    #[test]
-    fn verifies_frozen_candidate_and_rejects_changed_proof_or_public_inputs() {
-        let proof =
-            include_bytes!("../zkvm-replay/evidence/sp1-v6.8.0/northstar-sp1-groth16-onchain.bin");
-        let mut binding = ProofJobBinding {
+    fn binding() -> ProofJobBinding {
+        ProofJobBinding {
             portal: [1; 32],
             session: [2; 32],
             checkpoint: [3; 32],
@@ -75,7 +72,32 @@ mod tests {
             public_inputs: *include_bytes!(
                 "../zkvm-replay/evidence/sp1-v6.8.0/northstar-sp1-public-inputs.bin"
             ),
-        };
+        }
+    }
+
+    #[test]
+    #[ignore = "manual host verification timing, separate from proving and artifact I/O"]
+    fn benchmark_frozen_host_verification() {
+        let proof =
+            include_bytes!("../zkvm-replay/evidence/sp1-v6.8.0/northstar-sp1-groth16-onchain.bin");
+        let mut samples = Vec::new();
+        for _ in 0..5 {
+            let binding = binding();
+            let started = std::time::Instant::now();
+            VerifiedProof::verify(binding, proof).unwrap();
+            samples.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        println!(
+            "HOST_PROOF_VERIFICATION {}",
+            serde_json::json!({"schema":"northstar-host-envelope-timing-v1", "first_ms":samples[0], "repeated_ms":&samples[1..], "proving_included":false, "artifact_io_included":false})
+        );
+    }
+
+    #[test]
+    fn verifies_frozen_candidate_and_rejects_changed_proof_or_public_inputs() {
+        let proof =
+            include_bytes!("../zkvm-replay/evidence/sp1-v6.8.0/northstar-sp1-groth16-onchain.bin");
+        let mut binding = binding();
         let verified = VerifiedProof::verify(binding.clone(), proof).unwrap();
         assert_eq!(verified.bytes_for(&binding).unwrap(), proof);
         binding.step += 1;
