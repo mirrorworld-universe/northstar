@@ -1446,7 +1446,7 @@ dependencies = [
  "bitflags 2.13.2",
  "cexpr",
  "clang-sys",
- "itertools 0.10.5",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "regex",
@@ -1462,8 +1462,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "90dbd31c98227229239363921e60fcf5e558e43ec69094d46fc4996f08d1d5bc"
 dependencies = [
  "bitcoin_hashes 0.14.100",
- "rand 0.7.3",
- "rand_core 0.5.1",
+ "rand 0.8.6",
+ "rand_core 0.6.4",
  "serde",
  "unicode-normalization",
 ]
@@ -4483,7 +4483,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.0",
 ]
 
 [[package]]
@@ -4780,6 +4780,9 @@ name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+dependencies = [
+ "spin",
+]
 
 [[package]]
 name = "libbz2-rs-sys"
@@ -5248,6 +5251,7 @@ dependencies = [
  "bincode",
  "borsh",
  "crossbeam-channel",
+ "libc",
  "log",
  "northstar-portal",
  "northstar-replay-harness",
@@ -5298,6 +5302,7 @@ dependencies = [
  "solana-transaction-context",
  "solana-transaction-status",
  "solana-validator-exit",
+ "sp1-verifier",
  "spl-memo-interface",
  "spl-token-interface",
  "stream-cancel",
@@ -5326,6 +5331,7 @@ dependencies = [
  "serde_json",
  "solana-account",
  "solana-address 2.7.0",
+ "solana-bn254",
  "solana-commitment-config",
  "solana-compute-budget-interface",
  "solana-hash",
@@ -5384,6 +5390,13 @@ dependencies = [
  "solana-transaction-error",
  "spl-token-2022-interface",
  "wincode",
+]
+
+[[package]]
+name = "northstar-replay-owner"
+version = "0.1.0"
+dependencies = [
+ "pinocchio 0.11.2",
 ]
 
 [[package]]
@@ -5505,7 +5518,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.0",
 ]
 
 [[package]]
@@ -7065,6 +7078,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "357703d41365b4b27c590e3ed91eabb1b663f07c4c084095e60cbed4362dff0d"
 
 [[package]]
+name = "rustc-hex"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e75f6a532d0fd9f7f13144f392b6ad56a32696bfcd9c78f797f16bbb6f072d6"
+
+[[package]]
 name = "rustc_version"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7105,7 +7124,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.0",
 ]
 
 [[package]]
@@ -7163,7 +7182,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.0",
 ]
 
 [[package]]
@@ -12812,6 +12831,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sp1-verifier"
+version = "6.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "baa28fcc5db98b8fd1d5433f20b5c02d2deb0d6bb73891850e83aa74083622f5"
+dependencies = [
+ "blake3",
+ "cfg-if 1.0.4",
+ "hex",
+ "lazy_static",
+ "sha2 0.10.9",
+ "substrate-bn-succinct-rs",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "spin"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13099,6 +13133,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "substrate-bn-succinct-rs"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a241fd7c1016fb8ad30fcf5a20986c0c4538e8f15a1b41a1761516299e377ec1"
+dependencies = [
+ "bytemuck",
+ "byteorder",
+ "cfg-if 1.0.4",
+ "crunchy",
+ "lazy_static",
+ "num-bigint",
+ "rand 0.8.6",
+ "rustc-hex",
+]
+
+[[package]]
 name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13249,7 +13299,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.0",
 ]
 
 [[package]]

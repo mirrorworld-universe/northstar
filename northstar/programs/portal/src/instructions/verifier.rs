@@ -48,23 +48,29 @@ pub(crate) fn verify_er_step_proof_v1(
     proof: &[u8],
     public_inputs: &[u8; 256],
 ) -> Result<(), PortalError> {
+    crate::profile::mark("NS_CU verifier.entry");
     let proof = Sp1Groth16ProofV1::from_bytes(proof)
         .map_err(|_| PortalError::StepProofVerificationFailed)?;
     let groth16_inputs = sp1_public_inputs(public_inputs, proof.proof_nonce)?;
+    crate::profile::mark("NS_CU verifier.envelope");
     // SP1 emits Gnark's non-negated A; groth16-solana folds the standard
     // pairing equation with -A.
     let proof_a = negate_g1_be(&proof.proof.a);
-    let mut verifier = Groth16Verifier::<5>::new(
+    let variable_inputs = [groth16_inputs[1], groth16_inputs[4]];
+    let mut verifier = Groth16Verifier::<2>::new(
         &proof_a,
         &proof.proof.b,
         &proof.proof.c,
-        &groth16_inputs,
-        &verifier_key::SP1_GROTH16_VERIFYING_KEY,
+        &variable_inputs,
+        &verifier_key::SP1_FIXED_INPUT_VERIFYING_KEY,
     )
     .map_err(|_| PortalError::StepProofVerificationFailed)?;
-    verifier
+    crate::profile::mark("NS_CU verifier.msm_pairing_start");
+    let result = verifier
         .verify()
-        .map_err(|_| PortalError::StepProofVerificationFailed)
+        .map_err(|_| PortalError::StepProofVerificationFailed);
+    crate::profile::mark("NS_CU verifier.msm_pairing_end");
+    result
 }
 
 #[p_instruction(
@@ -86,7 +92,7 @@ pub fn process_verify_er_step_proof_v1(
 mod tests {
     use {
         super::*,
-        alloc::format,
+        alloc::{format, vec::Vec},
         northstar_zk_types::{
             ErStepPublicInputsV1, FrBytes, Groth16ProofRaw, BN254_FR_MODULUS_BE,
             ER_STEP_PROOF_KIND_FULL_TRANSACTION, ER_STEP_PROOF_VERSION_V1,
@@ -178,6 +184,40 @@ mod tests {
             panic!("changed canonical public inputs must still map");
         };
         assert_ne!(changed_inputs[1], inputs[1]);
+    }
+
+    #[test]
+    fn fixed_input_key_matches_original_linear_combination() {
+        use solana_bn254::prelude::{alt_bn128_g1_addition_be, alt_bn128_g1_multiplication_be};
+
+        fn prepare(
+            key: &groth16_solana::groth16::Groth16Verifyingkey,
+            inputs: &[[u8; 32]],
+        ) -> Vec<u8> {
+            let mut point = key.vk_ic[0].to_vec();
+            for (base, scalar) in key.vk_ic[1..].iter().zip(inputs) {
+                let product =
+                    alt_bn128_g1_multiplication_be(&[base.as_slice(), scalar.as_slice()].concat())
+                        .unwrap();
+                point = alt_bn128_g1_addition_be(&[point, product].concat()).unwrap();
+            }
+            point
+        }
+
+        for nonce in [0, 1, 9, u64::MAX] {
+            let mut public = public_inputs();
+            public[255] ^= nonce as u8;
+            let Ok(inputs) = sp1_public_inputs(&public, FrBytes::from_u64(nonce)) else {
+                panic!("canonical inputs must map");
+            };
+            assert_eq!(
+                prepare(&verifier_key::SP1_GROTH16_VERIFYING_KEY, &inputs),
+                prepare(
+                    &verifier_key::SP1_FIXED_INPUT_VERIFYING_KEY,
+                    &[inputs[1], inputs[4]]
+                ),
+            );
+        }
     }
 
     #[test]

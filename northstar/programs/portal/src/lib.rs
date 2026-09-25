@@ -7,6 +7,7 @@ mod events;
 mod instruction;
 mod instructions;
 mod pda;
+mod profile;
 mod state;
 
 #[cfg(not(feature = "no-entrypoint"))]
@@ -15,7 +16,10 @@ use {
     borsh::BorshDeserialize,
     pinocchio::{error::ProgramError, AccountView as AccountInfo, ProgramResult},
 };
-pub use {error::*, events::*, instruction::*, pda::*, state::*};
+pub use {
+    error::*, events::*, instruction::*, instructions::step_proof_public_input_hash, pda::*,
+    state::*,
+};
 
 #[cfg(all(
     feature = "test-verifier",

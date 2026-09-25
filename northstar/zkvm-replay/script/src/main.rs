@@ -7,6 +7,7 @@ use {
     std::{collections::BTreeMap, env, fs, time::Instant},
 };
 
+mod verification;
 mod worker;
 
 const ELF: Elf = include_elf!("northstar-zkvm-replay-program");
@@ -17,6 +18,9 @@ const GROTH16_VKEY_SHA256: &str =
 async fn main() -> Result<()> {
     let mut args = env::args().skip(1);
     let command = args.next().unwrap_or_else(|| "execute".to_string());
+    if command == "verify" {
+        return verification::benchmark(args);
+    }
     if command == "worker" {
         let root = args
             .next()
@@ -29,7 +33,8 @@ async fn main() -> Result<()> {
     ) {
         bail!(
             "usage: northstar-zkvm-replay-script [key|execute|core|groth16|all] [fixture] \
-             [measurements] [profile] [groth16-repetitions]"
+             [measurements] [profile] [groth16-repetitions]\nor: northstar-zkvm-replay-script \
+             verify PROOF PUBLIC_INPUTS MEASUREMENTS [repetitions]"
         );
     }
     let fixture_path = args.next().unwrap_or_else(|| "fixture-v1.bin".to_string());

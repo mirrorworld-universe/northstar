@@ -1037,6 +1037,11 @@ impl EphemeralRuntime {
         self._tx_client.checkpoint_artifact_v1()
     }
 
+    #[cfg(feature = "proof-coordinator")]
+    pub(crate) fn replay_history(&self) -> Arc<ErHistoryStore> {
+        self.er_history_store.clone()
+    }
+
     pub fn seal_checkpoint_if_nonempty(&self) -> bool {
         self._tx_client.seal_checkpoint_if_nonempty()
     }

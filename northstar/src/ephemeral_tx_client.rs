@@ -2,6 +2,8 @@
 mod live_cadence;
 #[cfg(test)]
 mod live_checkpoint;
+#[cfg(all(test, feature = "proof-coordinator"))]
+mod live_coordinator;
 #[cfg(test)]
 mod live_settlement;
 
@@ -1914,7 +1916,7 @@ impl solana_rpc::rpc::ErTxExecutor for EphemeralTransactionClient {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use {
         super::*,
         solana_account::AccountSharedData,
@@ -2527,7 +2529,7 @@ mod tests {
         supported_sbf_checkpoint_with_steps(lamports_per_signature, session, 16)
     }
 
-    pub(super) fn supported_sbf_checkpoint_with_steps(
+    pub(crate) fn supported_sbf_checkpoint_with_steps(
         lamports_per_signature: u64,
         session: Pubkey,
         step_count: usize,
@@ -2541,6 +2543,22 @@ mod tests {
         step_count: usize,
         target_offset: u8,
     ) -> (CheckpointArtifactV1, Arc<ErHistoryStore>) {
+        supported_sbf_checkpoint_with_owner(
+            lamports_per_signature,
+            session,
+            step_count,
+            target_offset,
+            None,
+        )
+    }
+
+    pub(super) fn supported_sbf_checkpoint_with_owner(
+        lamports_per_signature: u64,
+        session: Pubkey,
+        step_count: usize,
+        target_offset: u8,
+        owner_path: Option<&str>,
+    ) -> (CheckpointArtifactV1, Arc<ErHistoryStore>) {
         use {
             agave_feature_set::disable_sbpf_v0_execution,
             northstar_replay_harness::proof_fixture::full_transaction_fixture_v1,
@@ -2548,7 +2566,10 @@ mod tests {
             solana_instruction::{AccountMeta, Instruction},
         };
 
-        let fixture = full_transaction_fixture_v1();
+        let fixture = owner_path.map_or_else(
+            full_transaction_fixture_v1,
+            northstar_replay_harness::proof_fixture::full_transaction_delegation_fixture_v1,
+        );
         let signer = keypair_from_seed(&[42; 32]).unwrap();
         let mut bank = create_test_bank();
         bank.deactivate_feature(&disable_sbpf_v0_execution::id());
@@ -2570,7 +2591,14 @@ mod tests {
         }
         fund_account(&bank, &signer.pubkey(), 10_000_000);
         let targets = (0..step_count)
-            .map(|index| Pubkey::new_from_array([index as u8 + target_offset; 32]))
+            .map(|index| {
+                let seed = [index as u8 + target_offset; 32];
+                if owner_path.is_some() {
+                    keypair_from_seed(&seed).unwrap().pubkey()
+                } else {
+                    Pubkey::new_from_array(seed)
+                }
+            })
             .collect::<Vec<_>>();
         for target in &targets {
             let account = AccountSharedData::new(1_000_000, 8, &fixture.program_id);

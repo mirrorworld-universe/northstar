@@ -128,6 +128,7 @@ members = [
     # Sonic:
     "northstar",
     "northstar/programs/portal",
+    "northstar/programs/replay-owner",
     "northstar/programs/token-bridge",
     "northstar/zk-prover",
     "northstar/zk-types",
@@ -597,6 +598,13 @@ opt-level = 3
 # curve25519 field arithmetic instead of depending on the curve25519-dalek
 # package, so the override above no longer covers signature verification.
 [profile.dev.package.solana-ed25519]
+opt-level = 3
+
+# Sonic: Unoptimized BN254 arithmetic adds seconds to coordinator verification in dev validators.
+[profile.dev.package.substrate-bn-succinct-rs]
+opt-level = 3
+
+[profile.dev.package.sp1-verifier]
 opt-level = 3
 
 [profile.full-dev]

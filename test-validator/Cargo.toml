@@ -15,6 +15,8 @@ all-features = true
 rustdoc-args = ["--cfg=docsrs"]
 
 [features]
+# Sonic: Keep local validator proof coordination opt-in as well.
+proof-coordinator = ["solana-core/proof-coordinator"]
 agave-unstable-api = []
 dev-context-only-utils = [
     "solana-core/dev-context-only-utils",

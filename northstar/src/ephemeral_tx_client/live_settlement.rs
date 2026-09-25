@@ -100,6 +100,146 @@ fn export_live_settlement_genesis() {
     }
 }
 
+#[test]
+#[ignore = "requires the compiled test-only replay owner SBF"]
+fn fresh_delegation_owner_preserves_frozen_replay_relation() {
+    agave_logger::setup_with_default("warn");
+    let owner = env::var("NORTHSTAR_LIVE_OWNER_SBF").unwrap();
+    let session = northstar_portal::find_session_pda(&PORTAL).0;
+    let (artifact, _) =
+        super::tests::supported_sbf_checkpoint_with_owner(0, session, 3, 128, Some(&owner));
+    assert_eq!(artifact.checkpoint.step_count, 3);
+}
+
+#[test]
+#[ignore = "requires a fresh live validator with Portal and replay owner SBF"]
+fn live_fresh_delegation_cpi() {
+    use {
+        solana_instruction::AccountMeta, solana_keypair::read_keypair_file,
+        solana_sdk_ids::system_program,
+    };
+    let payer = read_keypair_file(env::var("NORTHSTAR_LIVE_PAYER").unwrap()).unwrap();
+    let rpc = RpcClient::new_with_commitment(
+        env::var("NORTHSTAR_LIVE_RPC_URL").unwrap(),
+        CommitmentConfig::confirmed(),
+    );
+    let session = northstar_portal::find_session_pda(&PORTAL).0;
+    let fee_vault = northstar_portal::find_fee_vault_pda(&PORTAL).0;
+    super::live_checkpoint::send(
+        &rpc,
+        &payer,
+        &[&payer],
+        &[super::live_checkpoint::instruction(
+            vec![
+                AccountMeta::new(payer.pubkey(), true),
+                AccountMeta::new(session, false),
+                AccountMeta::new(fee_vault, false),
+                AccountMeta::new_readonly(system_program::id(), false),
+            ],
+            northstar_portal::PortalInstruction::OpenSession(northstar_portal::OpenSession {
+                grid_id: 1,
+                ttl_slots: 20_000,
+                fee_cap: 1_000_000_000,
+                validator: payer.pubkey(),
+                settlement_interval_slots: 75,
+            }),
+        )],
+    );
+    let owner = env::var("NORTHSTAR_LIVE_OWNER_SBF").unwrap();
+    let (artifact, history) =
+        super::tests::supported_sbf_checkpoint_with_owner(0, session, 3, 128, Some(&owner));
+    delegate_fresh_fixture(&rpc, &payer, &artifact, &history);
+}
+
+pub(super) fn delegate_fresh_fixture(
+    rpc: &RpcClient,
+    payer: &Keypair,
+    artifact: &CheckpointArtifactV1,
+    history: &ErHistoryStore,
+) {
+    use {
+        solana_instruction::{AccountMeta, Instruction},
+        solana_keypair::keypair_from_seed,
+        solana_sdk_ids::system_program,
+    };
+    let accounts = changed_accounts(artifact, history);
+    for index in 0..accounts.len() {
+        let target = keypair_from_seed(&[index as u8 + 128; 32]).unwrap();
+        let buffer = Keypair::new();
+        let (pre, _) = &accounts[&target.pubkey()];
+        let owner = *pre.owner();
+        let record = northstar_portal::find_delegation_record_pda(&PORTAL, &target.pubkey()).0;
+        assert!(rpc
+            .get_account_with_commitment(&record, CommitmentConfig::confirmed())
+            .unwrap()
+            .value
+            .is_none());
+        assert!(rpc
+            .get_account_with_commitment(&target.pubkey(), CommitmentConfig::confirmed())
+            .unwrap()
+            .value
+            .is_none());
+        super::live_checkpoint::send(
+            rpc,
+            payer,
+            &[payer, &target, &buffer],
+            &[
+                solana_system_interface::instruction::create_account(
+                    &payer.pubkey(),
+                    &target.pubkey(),
+                    pre.lamports(),
+                    pre.data().len() as u64,
+                    &owner,
+                ),
+                solana_system_interface::instruction::create_account(
+                    &payer.pubkey(),
+                    &buffer.pubkey(),
+                    rpc.get_minimum_balance_for_rent_exemption(pre.data().len())
+                        .unwrap(),
+                    pre.data().len() as u64,
+                    &owner,
+                ),
+            ],
+        );
+        let mut data = vec![0];
+        data.extend_from_slice(&1u64.to_le_bytes());
+        super::live_checkpoint::send(
+            rpc,
+            payer,
+            &[payer, &target],
+            &[Instruction::new_with_bytes(
+                owner,
+                &data,
+                vec![
+                    AccountMeta::new(target.pubkey(), true),
+                    AccountMeta::new(buffer.pubkey(), false),
+                    AccountMeta::new(payer.pubkey(), true),
+                    AccountMeta::new_readonly(artifact.checkpoint.session, false),
+                    AccountMeta::new(record, false),
+                    AccountMeta::new_readonly(owner, false),
+                    AccountMeta::new_readonly(PORTAL, false),
+                    AccountMeta::new_readonly(system_program::id(), false),
+                ],
+            )],
+        );
+        let delegated = rpc.get_account(&target.pubkey()).unwrap();
+        assert_eq!(delegated.owner, PORTAL);
+        assert_eq!(delegated.data, pre.data());
+        assert_eq!(delegated.lamports, pre.lamports());
+        let record = northstar_portal::DelegationRecord::try_from_slice(
+            &rpc.get_account(&record).unwrap().data,
+        )
+        .unwrap();
+        assert_eq!(record.owner_program.to_bytes(), owner.to_bytes());
+        assert_eq!(record.grid_id, 1);
+        assert_eq!(rpc.get_account(&buffer.pubkey()).unwrap().data, pre.data());
+    }
+    println!(
+        "NORTHSTAR_TIMING {}",
+        serde_json::json!({"phase":"fresh_delegation", "accounts":accounts.len(), "owner_program_cpi":true, "genesis_delegation_fixtures":false})
+    );
+}
+
 pub(super) fn settle_resolved_fixture(
     rpc: &RpcClient,
     payer: &Keypair,
@@ -144,11 +284,81 @@ pub(super) fn settle_resolved_fixture(
     for (key, (pre, _)) in &accounts {
         let account = rpc
             .get_account(key)
-            .expect("load exported genesis delegation fixtures");
+            .expect("load delegated fixture accounts");
         assert_eq!(account.owner, PORTAL);
         assert_eq!(account.data, pre.data());
         assert_eq!(account.lamports, pre.lamports());
         before.insert(*key, account);
+    }
+    if let Ok(plan_directory) = env::var("NORTHSTAR_LIVE_MANAGER_PLAN_DIR") {
+        let plan_directory = Path::new(&plan_directory);
+        fs::create_dir_all(plan_directory).unwrap();
+        let plan_path = plan_directory.join(format!(
+            "{PORTAL}-{session}-{}-{slot}.borsh",
+            payer.pubkey()
+        ));
+        assert!(!plan_path.exists());
+        // The running manager removes malformed plans, so never expose a partial write.
+        let temporary = plan_path.with_extension(format!("borsh.tmp.{}", std::process::id()));
+        let bytes = borsh::to_vec(&crate::DurableSettlementPlan::from(&plan)).unwrap();
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .unwrap();
+        std::io::Write::write_all(&mut file, &bytes).unwrap();
+        file.sync_all().unwrap();
+        fs::rename(temporary, plan_path).unwrap();
+        fs::File::open(plan_directory).unwrap().sync_all().unwrap();
+        let expected = accounts
+            .iter()
+            .map(|(key, (_, post))| {
+                let mut account = before[key].clone();
+                account.data = post.data().to_vec();
+                (*key, account)
+            })
+            .collect::<Vec<_>>();
+        let checkpoint_lamports = rpc.get_account(&checkpoint_key).unwrap().lamports;
+        fs::write(
+            directory.join("manager-observation.bin"),
+            bincode::serialize(&(
+                session,
+                slot,
+                checkpoint_lamports,
+                checkpoint.bond_lamports,
+                expected,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(90);
+        loop {
+            let rooted = rpc
+                .get_account_with_commitment(&checkpoint_key, CommitmentConfig::finalized())
+                .unwrap();
+            if rooted
+                .value
+                .as_ref()
+                .is_some_and(|account| account.data == borsh::to_vec(&checkpoint).unwrap())
+            {
+                fs::write(
+                    env::var("NORTHSTAR_LIVE_MANAGER_RESTART_READY").unwrap(),
+                    rooted.context.slot.to_string(),
+                )
+                .unwrap();
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "resolved checkpoint must finalize before restart"
+            );
+            sleep(Duration::from_millis(200));
+        }
+        println!(
+            "NORTHSTAR_TIMING {}",
+            serde_json::json!({"phase":"manager_handoff", "driver_exits_before_restart":true, "genesis_delegation_fixtures":false})
+        );
+        return;
     }
     while rpc.get_slot().unwrap() < checkpoint.challenge_deadline_l1_slot {
         assert!(
@@ -238,9 +448,70 @@ pub(super) fn settle_resolved_fixture(
         expected.data = post.data().to_vec();
         assert_eq!(rpc.get_account(key).unwrap(), expected);
     }
-    let summary = serde_json::json!({"schema_version":1, "phase":"proof_to_settlement", "wall_ms":started.elapsed().as_millis(), "slot_warps":false, "settled":true, "bond_released":true, "changed_accounts":accounts.len(), "genesis_delegation_fixtures":true});
+    let summary = serde_json::json!({"schema_version":1, "phase":"proof_to_settlement", "wall_ms":started.elapsed().as_millis(), "slot_warps":false, "settled":true, "bond_released":true, "changed_accounts":accounts.len(), "genesis_delegation_fixtures":env::var_os("NORTHSTAR_LIVE_OWNER_SBF").is_none()});
     fs::write(
         directory.join("settlement.json"),
+        serde_json::to_vec_pretty(&summary).unwrap(),
+    )
+    .unwrap();
+    println!("NORTHSTAR_TIMING {summary}");
+}
+
+#[test]
+#[ignore = "observes automatic settlement after the proof driver exits and the validator restarts"]
+fn observe_manager_recovery_after_proof() {
+    let directory = env::var("NORTHSTAR_LIVE_PROOF_DIR").unwrap();
+    let directory = Path::new(&directory);
+    let (session, slot, original_lamports, bond, accounts): (
+        Pubkey,
+        u64,
+        u64,
+        u64,
+        Vec<(Pubkey, solana_account::Account)>,
+    ) = bincode::deserialize(&fs::read(directory.join("manager-observation.bin")).unwrap())
+        .unwrap();
+    let rpc = RpcClient::new_with_commitment(
+        env::var("NORTHSTAR_LIVE_RPC_URL").unwrap(),
+        CommitmentConfig::finalized(),
+    );
+    let checkpoint_key = northstar_portal::find_checkpoint_pda(&PORTAL, &session, slot).0;
+    let cursor_key = northstar_portal::find_checkpoint_cursor_pda(&PORTAL, &session).0;
+    let started = Instant::now();
+    let settled = loop {
+        let account = rpc.get_account(&checkpoint_key).unwrap();
+        let checkpoint = northstar_portal::Checkpoint::try_from_slice(&account.data).unwrap();
+        if checkpoint.status == northstar_portal::CheckpointStatus::Settled {
+            assert_eq!(
+                checkpoint.bond_status,
+                northstar_portal::CheckpointBondStatus::Released
+            );
+            assert!(checkpoint.challenge_resolved);
+            assert_eq!(account.lamports + bond, original_lamports);
+            break checkpoint;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(600),
+            "manager must finish without a transaction-submitting test driver"
+        );
+        sleep(Duration::from_millis(200));
+    };
+    let session_state =
+        northstar_portal::Session::try_from_slice(&rpc.get_account(&session).unwrap().data)
+            .unwrap();
+    assert_eq!(session_state.last_settled_er_slot, slot);
+    let cursor = northstar_portal::CheckpointCursor::try_from_slice(
+        &rpc.get_account(&cursor_key).unwrap().data,
+    )
+    .unwrap();
+    assert_eq!(cursor.active_er_slot, 0);
+    assert_eq!(cursor.latest_finalized_er_slot, slot);
+    assert_eq!(cursor.latest_finalized_state_root, settled.new_state_root);
+    for (key, expected) in accounts {
+        assert_eq!(rpc.get_account(&key).unwrap(), expected);
+    }
+    let summary = serde_json::json!({"phase":"automatic_manager_recovery", "wall_ms":started.elapsed().as_millis(), "settled":true, "bond_released":true, "observer_submits_transactions":false, "genesis_delegation_fixtures":false, "slot_warps":false});
+    fs::write(
+        directory.join("manager-recovery.json"),
         serde_json::to_vec_pretty(&summary).unwrap(),
     )
     .unwrap();

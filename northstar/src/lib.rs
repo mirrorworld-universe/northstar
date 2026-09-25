@@ -29,6 +29,15 @@ pub mod ephemeral_runtime;
 pub mod ephemeral_tpu;
 pub mod ephemeral_tx_client;
 pub mod portal_state;
+#[cfg(feature = "proof-coordinator")]
+pub mod proof_coordinator;
+pub mod proof_jobs;
+#[cfg(feature = "proof-coordinator")]
+mod proof_process;
+#[cfg(any(test, feature = "proof-coordinator"))]
+pub mod proof_upload;
+#[cfg(any(test, feature = "proof-coordinator"))]
+pub mod proof_verification;
 #[cfg(any(test, feature = "replay"))]
 pub mod replay;
 pub mod settlement;
@@ -392,6 +401,8 @@ pub struct Manager {
     /// `init_runtime()`, stays alive for the validator's lifetime.
     /// The `active` flag inside gates transaction acceptance.
     runtime: Option<EphemeralRuntime>,
+    #[cfg(feature = "proof-coordinator")]
+    proof_coordinator: Option<proof_coordinator::ProofCoordinator>,
 }
 
 impl Manager {
@@ -404,7 +415,34 @@ impl Manager {
             er_history_max_retained_slots: DEFAULT_MAX_RETAINED_SLOTS,
             checkpoint_plans: std::sync::RwLock::new(HashMap::new()),
             runtime: None,
+            #[cfg(feature = "proof-coordinator")]
+            proof_coordinator: None,
         }
+    }
+
+    #[cfg(feature = "proof-coordinator")]
+    pub fn configure_proof_coordinator(&mut self) -> std::io::Result<()> {
+        if let Some(config) = proof_coordinator::CoordinatorConfig::from_environment(
+            self.config.manager_account.pubkey(),
+        )? {
+            self.proof_coordinator = Some(proof_coordinator::ProofCoordinator::start(
+                config,
+                self.config.portal_program_id,
+            )?);
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "proof-coordinator")]
+    pub fn update_proof_banks(&self, latest: Arc<Bank>, root: Arc<Bank>) {
+        if let Some(coordinator) = &self.proof_coordinator {
+            coordinator.update_banks(latest, root);
+        }
+    }
+
+    #[cfg(feature = "proof-coordinator")]
+    pub fn take_proof_transaction(&self) -> Option<Transaction> {
+        self.proof_coordinator.as_ref()?.take_transaction()
     }
 
     pub fn set_slot_duration(&mut self, slot_duration: Duration) {
@@ -1053,6 +1091,13 @@ impl Manager {
         challenge_window_slots: u64,
         recent_blockhash: Hash,
     ) -> Option<Vec<Transaction>> {
+        #[cfg(feature = "proof-coordinator")]
+        let challenge_window_slots = self
+            .proof_coordinator
+            .as_ref()
+            .map_or(challenge_window_slots, |coordinator| {
+                coordinator.challenge_window_slots
+            });
         let challenge_window_slots = challenge_window_slots.clamp(
             DEFAULT_CHECKPOINT_CHALLENGE_WINDOW_SLOTS,
             MAX_CHALLENGE_WINDOW_SLOTS,
@@ -1083,9 +1128,33 @@ impl Manager {
             );
             return None;
         }
+        #[cfg(feature = "proof-coordinator")]
+        let ready_to_propose = || {
+            let Some(coordinator) = &self.proof_coordinator else {
+                return Some(true);
+            };
+            let account = l1_bank.get_account(&session_pda)?;
+            if account.owner() != &self.config.portal_program_id {
+                return None;
+            }
+            let PortalAccount::Session(session) = try_parse_raw_portal_account(account.data())?
+            else {
+                return None;
+            };
+            Some(coordinator.prepare(
+                artifact.clone(),
+                session,
+                self.runtime.as_ref()?.replay_history(),
+                l1_bank.slot(),
+            ))
+        };
         let (checkpoint_pda, _) =
             find_checkpoint_pda(&self.config.portal_program_id, &session_pda, plan.er_slot);
         let Some(checkpoint_account) = l1_bank.get_account(&checkpoint_pda) else {
+            #[cfg(feature = "proof-coordinator")]
+            if !ready_to_propose()? {
+                return None;
+            }
             info!(
                 "Portal checkpoint propose: er_slot={} checksum={:?} challenge_window_slots={}",
                 plan.er_slot, plan.checksum, challenge_window_slots,
@@ -1115,6 +1184,10 @@ impl Manager {
             checkpoint.status,
             CheckpointStatus::Settled | CheckpointStatus::Cancelled | CheckpointStatus::Invalid
         ) {
+            #[cfg(feature = "proof-coordinator")]
+            if !ready_to_propose()? {
+                return None;
+            }
             info!(
                 "Portal checkpoint re-propose over terminal account: er_slot={} checksum={:?}",
                 plan.er_slot, plan.checksum,

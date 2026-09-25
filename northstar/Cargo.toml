@@ -4,9 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
+proof-coordinator-test-hooks = ["proof-coordinator"]
 replay = ["dep:northstar-transaction-proof", "dep:northstar-replay-harness"]
+proof-coordinator = ["replay", "dep:sp1-verifier", "dep:serde_json", "dep:libc"]
 
 [dependencies]
+libc = { workspace = true, optional = true }
+sp1-verifier = { version = "=6.8.0", default-features = false, features = ["std"], optional = true }
+serde_json = { workspace = true, optional = true }
 northstar-replay-harness = { workspace = true, optional = true }
 northstar-transaction-proof = { workspace = true, optional = true }
 solana-account.workspace = true
