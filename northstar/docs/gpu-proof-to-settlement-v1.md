@@ -44,7 +44,7 @@ bash northstar/scripts/live-gpu-settlement.sh crash-settling
 bash northstar/scripts/live-gpu-settlement.sh crash-upload
 ```
 
-These three modes export trusted genesis delegation fixtures before launch. The runner refuses occupied RPC endpoints, passes environment explicitly to tmux, bounds readiness waits, retains private launch/log files only in its fresh evidence directory, and cleans up validator/test sessions. Only reviewed public artifacts should be copied into the repository. Do not deploy the prototype program or enable the production verifier outside the isolated test.
+These three modes export trusted genesis delegation fixtures before launch. The runner refuses occupied RPC endpoints, passes environment explicitly to tmux, bounds readiness waits, retains private launch/log files only in its fresh evidence directory, and cleans up validator/test sessions. Retain reports and bulk measurements outside the repository; commit only reviewed fixtures consumed by automated tests. Do not deploy the prototype program or enable the production verifier outside the isolated test.
 
 ## Fresh delegation and automatic manager recovery
 
@@ -62,4 +62,4 @@ export NORTHSTAR_LIVE_OWNER_SBF="$PWD/target/deploy/northstar_replay_owner.so"
 bash northstar/scripts/live-gpu-settlement.sh manager-recovery
 ```
 
-The validator must include the explicit-Portal override fix; `--portal` must not replace the supplied prototype with its fail-closed default bundle. The default bundle remains unchanged. [Current measurements and architectural boundaries](weekly-proof-recovery-v1.md) cover the 16-account run, snapshot fence, manager outcome, and remaining limits. This mode proves post-resolution manager recovery, not automatic partial proof-upload recovery.
+The validator must include the explicit-Portal override fix; `--portal` must not replace the supplied prototype with its fail-closed default bundle. The default bundle remains unchanged. This mode proves post-resolution manager recovery, not automatic partial proof-upload recovery.

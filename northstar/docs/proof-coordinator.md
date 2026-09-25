@@ -48,9 +48,9 @@ Set `NORTHSTAR_LIVE_PORTAL_SBF`, `NORTHSTAR_LIVE_OWNER_SBF`, `NORTHSTAR_GPU_SERV
 
 Only the harness's `public/` directory is eligible for retained evidence. Its parent includes signing keys and private job state and must not be published.
 
-## Validation
+## Validation commands
 
-[Retained evidence](../zkvm-replay/evidence/proof-coordinator-v1/README.md) includes real-ER proving interruption and worker-offline upload recovery, with confirmed resolution in **70.937s** and **72.783s** from challenge opening, followed by automatic settlement and bond release. Both observers submit no transactions. These are measured runs, not a universal latency guarantee.
+[Regression fixtures](../zkvm-replay/evidence/proof-coordinator-v1/README.md) retain only the inputs consumed by host and Portal tests. Live-run reports, lifecycle logs, and bulk performance measurements are not repository fixtures. The harness writes them to its selected output directory.
 
 `gpu-worker-stress.py OUTPUT --requests 30` exercises an already warmed local worker using `NORTHSTAR_GPU_WORKER_SOCKET`. It records serial proving, busy rejection, cancellation, and immediate restart/retry without provisioning or starting services. Its output directory must not already exist.
 
@@ -60,7 +60,7 @@ Host verification also has an ignored CPU-only timing check:
 cargo test -p northstar --features proof-coordinator benchmark_frozen_host_verification -- --ignored --nocapture
 ```
 
-Development builds optimize only the existing BN254 arithmetic and verifier dependencies, retaining debug assertions. Same-host first verification fell from 5.923s to 305ms; no verifier algorithm or release defaults changed.
+Development builds optimize only the existing BN254 arithmetic and verifier dependencies, retaining debug assertions. No verifier algorithm or release defaults change.
 
 Portal's `zk-verifier-profile` feature emits diagnostic compute-unit markers around authenticated account loading, binding, verification, and storage. Use an uninstrumented `zk-verifier-prototype` build for the 130K CU acceptance check; marker-inclusive measurements are not interchangeable with normal costs.
 
