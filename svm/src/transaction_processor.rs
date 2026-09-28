@@ -431,7 +431,8 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             slot,
             epoch,
             sysvar_cache: RwLock::<SysvarCache>::default(),
-            epoch_boundary_preparation: self.epoch_boundary_preparation.clone(),
+            // Sonic: ER epochs must not overwrite L1's upcoming deployment environment.
+            epoch_boundary_preparation: Arc::new(RwLock::new(EpochBoundaryPreparation::new(epoch))),
             global_program_cache,
             program_runtime_environment: environments,
             builtin_program_ids: RwLock::new(builtin_program_ids),
@@ -3370,11 +3371,14 @@ mod tests {
     #[test_case(ProgramCacheEntryOwner::LoaderV4)]
     #[test_case(ProgramCacheEntryOwner::NativeLoader)]
     fn test_replenish_program_cache_program_account_not_found(loader: ProgramCacheEntryOwner) {
+        const BATCH_SLOT: u64 = 200;
+        const DEPLOYMENT_SLOT: u64 = 10;
+
         let mock_bank = MockBankCallback::default();
         let account_loader = (&mock_bank).into();
         let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
         let batch_processor =
-            TransactionBatchProcessor::new(0, 0, Arc::downgrade(&fork_graph), None);
+            TransactionBatchProcessor::new(BATCH_SLOT, 0, Arc::downgrade(&fork_graph), None);
         let environment = batch_processor.program_runtime_environment_for_epoch(0);
         let program_id = Pubkey::new_unique();
 
@@ -3389,26 +3393,27 @@ mod tests {
         );
         assert!(missing_programs.is_empty());
 
-        // But still, even if we did happen to try to extract this program, it
-        // should panic.
-        let panicked = catch_panic(|| {
-            batch_processor.replenish_program_cache(
-                &account_loader,
-                vec![ProgramToLoad {
-                    program_id: &program_id,
-                    loader,
-                    deployment_slot: 0,
-                }],
-                &environment,
-                &mut program_cache_for_tx_batch,
-                &mut ExecuteTimings::default(),
-                true,
-                true,
-            )
-        });
+        // Sonic: Sparse ER hydration produces a tombstone matching the requested loader and slot.
+        batch_processor.replenish_program_cache(
+            &account_loader,
+            vec![ProgramToLoad {
+                program_id: &program_id,
+                loader,
+                deployment_slot: DEPLOYMENT_SLOT,
+            }],
+            &environment,
+            &mut program_cache_for_tx_batch,
+            &mut ExecuteTimings::default(),
+            true,
+            true,
+        );
+        let entry = program_cache_for_tx_batch.find(&program_id).unwrap();
         assert_eq!(
-            panicked.as_deref(),
-            Some("called load_program_with_pubkey() with nonexistent account")
+            entry,
+            Arc::new(ProgramCacheEntry::new_closed_tombstone(
+                DEPLOYMENT_SLOT,
+                loader
+            ))
         );
     }
 
@@ -3501,12 +3506,12 @@ mod tests {
                 );
             }
             ProgramCacheEntryOwner::NativeLoader => {
-                // Native loader-owned accounts panic, since the call to
-                // `load_program_with_pubkey` just returns an error which gets
-                // unwrapped via `expect` in `replenish_program_cache`.
+                // Sonic: Missing native entrypoints use the same sparse-hydration fallback.
+                assert_eq!(panicked, None);
+                let entry = program_cache_for_tx_batch.find(&program_id).unwrap();
                 assert_eq!(
-                    panicked.as_deref(),
-                    Some("called load_program_with_pubkey() with nonexistent account")
+                    entry,
+                    Arc::new(ProgramCacheEntry::new_closed_tombstone(0, loader))
                 );
             }
         }

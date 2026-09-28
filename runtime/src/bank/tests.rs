@@ -1,4 +1,156 @@
 #![cfg(test)]
+
+// Sonic: Compare replay hashes with and without ER writes, rotation, and cleanup.
+#[test]
+fn test_er_rotation_preserves_l1_replay_hashes() {
+    let (genesis_config, mint_keypair) = create_genesis_config(1_000_000_000);
+    let mut control = Arc::new(Bank::new_for_tests(&genesis_config));
+    let mut l1 = Arc::new(Bank::new_for_tests(&genesis_config));
+    let recipient = Pubkey::new_unique();
+    for slot in 1..=256 {
+        let er_epoch = l1.epoch_schedule().get_epoch(1u64 << 40);
+        let er_start = l1.epoch_schedule().get_last_slot_in_epoch(er_epoch) - 4 + (slot - 1) * 16;
+        let mut er = Arc::new(Bank::new_from_parent_ephemeral_isolated(
+            l1.clone(),
+            SlotLeader::default(),
+            er_start,
+        ));
+        for step in 1..=8 {
+            er.store_account(
+                &recipient,
+                &AccountSharedData::new(step, 0, &system_program::id()),
+            );
+            let next = Arc::new(Bank::new_from_parent_ephemeral(
+                er.clone(),
+                SlotLeader::default(),
+                er_start + step,
+            ));
+            next.disconnect_from_parent();
+            drop(er);
+            er = next;
+        }
+        drop(er);
+        control = Arc::new(Bank::new_from_parent(control, SlotLeader::default(), slot));
+        l1 = Arc::new(Bank::new_from_parent(l1, SlotLeader::default(), slot));
+        let tx =
+            system_transaction::transfer(&mint_keypair, &recipient, slot, control.last_blockhash());
+        assert_eq!(
+            control.process_transaction(&tx),
+            l1.process_transaction(&tx)
+        );
+        control.freeze();
+        l1.freeze();
+        assert_eq!(control.hash(), l1.hash(), "L1 diverged at slot {slot}");
+        control.squash();
+        l1.squash();
+    }
+}
+
+// Sonic: A future ER epoch must not change L1 deployment verification.
+#[test]
+fn test_er_epoch_preparation_preserves_l1_deployment_result() {
+    let (mut genesis_config, mint_keypair) = create_genesis_config(1_000_000 * LAMPORTS_PER_SOL);
+    for feature_id in [
+        feature_set::disable_sbpf_v0_execution::id(),
+        feature_set::reenable_sbpf_v0_execution::id(),
+        feature_set::disable_sbpf_v0_v1_v2_deployment::id(),
+    ] {
+        genesis_config.accounts.remove(&feature_id);
+    }
+    let program_keypair = Keypair::new();
+    let buffer_address = Pubkey::new_unique();
+    let elf = include_bytes!("../../../programs/bpf_loader/test_elfs/out/noop_aligned.so");
+    let mut outcomes = Vec::new();
+    for with_er in [false, true] {
+        let (root, forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
+        root.store_account(
+            &feature_set::disable_sbpf_v0_execution::id(),
+            &feature::create_account(
+                &Feature { activated_at: None },
+                root.get_minimum_balance_for_rent_exemption(Feature::size_of()),
+            ),
+        );
+        if with_er {
+            let epoch = root.epoch_schedule().get_epoch(1u64 << 40);
+            let slot = root.epoch_schedule().get_last_slot_in_epoch(epoch);
+            let _er =
+                Bank::new_from_parent_ephemeral_isolated(root.clone(), SlotLeader::default(), slot);
+        }
+        let last_slot = root.epoch_schedule().get_last_slot_in_epoch(root.epoch());
+        let bank =
+            Bank::new_from_parent_with_bank_forks(&forks, root, SlotLeader::default(), last_slot);
+        let buffer_len = UpgradeableLoaderState::size_of_buffer(elf.len());
+        let mut buffer = AccountSharedData::new(
+            bank.get_minimum_balance_for_rent_exemption(buffer_len),
+            buffer_len,
+            &bpf_loader_upgradeable::id(),
+        );
+        bincode::serialize_into(
+            buffer.data_as_mut_slice(),
+            &UpgradeableLoaderState::Buffer {
+                authority_address: Some(mint_keypair.pubkey()),
+            },
+        )
+        .unwrap();
+        buffer.data_as_mut_slice()[UpgradeableLoaderState::size_of_buffer_metadata()..]
+            .copy_from_slice(elf);
+        bank.store_account(&buffer_address, &buffer);
+        #[allow(deprecated)]
+        let instructions = solana_loader_v3_interface::instruction::deploy_with_max_program_len(
+            &mint_keypair.pubkey(),
+            &program_keypair.pubkey(),
+            &buffer_address,
+            &mint_keypair.pubkey(),
+            bank.get_minimum_balance_for_rent_exemption(UpgradeableLoaderState::size_of_program()),
+            elf.len(),
+        )
+        .unwrap();
+        let tx = Transaction::new_signed_with_payer(
+            &instructions,
+            Some(&mint_keypair.pubkey()),
+            &[&mint_keypair, &program_keypair],
+            bank.last_blockhash(),
+        );
+        let result = bank.process_transaction(&tx);
+        bank.freeze();
+        outcomes.push((result, bank.hash()));
+    }
+    assert_eq!(
+        outcomes[0].0,
+        Err(TransactionError::InstructionError(
+            1,
+            InstructionError::InvalidAccountData
+        ))
+    );
+    assert_eq!(
+        outcomes[0], outcomes[1],
+        "ER changed L1 deployment result or bank hash"
+    );
+}
+
+// Sonic: ER epoch preparation must not change the L1 replay environment.
+#[test]
+fn test_er_epoch_preparation_preserves_l1_state() {
+    let (genesis_config, _) = create_genesis_config(1_000_000_000);
+    let l1 = Arc::new(Bank::new_for_tests(&genesis_config));
+    let before = l1
+        .transaction_processor
+        .epoch_boundary_preparation
+        .read()
+        .unwrap()
+        .upcoming_epoch;
+    let er_epoch = l1.epoch_schedule().get_epoch(1u64 << 40);
+    let er_slot = l1.epoch_schedule().get_last_slot_in_epoch(er_epoch);
+    let _er = Bank::new_from_parent_ephemeral_isolated(l1.clone(), SlotLeader::default(), er_slot);
+    let after = l1
+        .transaction_processor
+        .epoch_boundary_preparation
+        .read()
+        .unwrap()
+        .upcoming_epoch;
+    assert_eq!(after, before, "ER preparation changed L1's upcoming epoch");
+}
+
 use {
     super::{
         test_utils::{goto_end_of_slot, update_vote_account_timestamp},
