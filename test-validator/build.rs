@@ -32,6 +32,11 @@ fn main() {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
 
     println!("cargo:rerun-if-changed=build.rs");
+    // Sonic: Rebuild bundled programs when the pinned SBF toolchain changes.
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root.join("cargo-build-sbf").display()
+    );
     println!(
         "cargo:rerun-if-changed={}",
         workspace_root.join("Cargo.toml").display()
@@ -97,9 +102,10 @@ fn run_cargo_build_sbf(
     target_dir: &Path,
     force_tools_install: bool,
 ) -> Output {
-    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut command = Command::new(cargo);
-    command.arg("build-sbf");
+    // Sonic: Bundled programs use the same SBF ABI/compiler as CI and deployment.
+    let wrapper = find_workspace_root(manifest.parent().unwrap()).join("cargo-build-sbf");
+    let mut command = Command::new("bash");
+    command.arg(wrapper);
     if force_tools_install {
         command.arg("--force-tools-install");
     }

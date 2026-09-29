@@ -12,7 +12,7 @@ Build the validator with `agave-validator/proof-coordinator` (or `solana-core/pr
 
 `NORTHSTAR_PROOF_CHALLENGE_WINDOW_SLOTS` optionally selects the proposal's challenge window, from 10 through 9,000 slots; the experimental default is 750. Session cadence remains separately bounded by Portal. A future policy can use live validator membership and recent dispute activity; this implementation does not invent that policy. The performance target remains proof submission within two minutes, not merely before the longer protocol deadline. Existing deadlines are never extended during recovery. Validators without this opt-in retain their existing window selection.
 
-Use an explicitly deployed Portal built with `zk-verifier-prototype` for local validation. Neither this feature nor the coordinator enables production acceptance. A validator built without coordinator support rejects coordinator configuration when starting its Northstar service.
+Use an explicitly deployed Portal built with `zk-verifier-prototype` for challenged proof-resolution validation. The CPU-only `smoke` and `settlement` modes also support the default, fail-closed Portal build. Neither this feature nor the coordinator enables production acceptance. A validator built without coordinator support rejects coordinator configuration when starting its Northstar service.
 
 ## Architectural decisions
 
@@ -38,15 +38,46 @@ Recovery retains the finalized snapshot boundary. Durable jobs do not restore mi
 
 `northstar/scripts/live-proof-coordinator.sh` supports:
 
-- `smoke`: fresh delegation, a real ER RPC transaction, native witness preparation, and automatic proposal. Uses a no-op preflight adapter; this is not GPU evidence.
+- `smoke`: fresh delegation, a real ER RPC transaction, native witness preparation, and automatic proposal. Uses a preflight-only adapter; this is not GPU evidence.
+- `settlement`: the same GPU-independent flow, followed by a finalized snapshot fence, validator termination, and snapshot-only restart. A read-only observer checks automatic unchallenged settlement, bond release, account data and lamports, and the cleared checkpoint cursor. The adapter rejects proof requests; no challenge is opened.
 - `proving`: the driver opens the challenge and reveals the isolated runtime step, then exits. Fence on a finalized snapshot, start GPU work, terminate the validator, and observe manager-owned recovery.
 - `upload`: fence after an initial upload chunk, terminate the validator and GPU worker, and resume the remaining upload from L1 without another proof request or GPU preflight.
 
-The crash harness requires `agave-validator/proof-coordinator-test-hooks`. That separate feature can pause uploads using `NORTHSTAR_PROOF_TEST_UPLOAD_FENCE` and records resolver input snapshots for offline checks. It is not needed for ordinary coordination. The proving fixture uses an external adapter gate to establish the snapshot fence before releasing GPU work; this is deliberate test control, not a deadline extension.
+The GPU crash modes (`proving` and `upload`) require `agave-validator/proof-coordinator-test-hooks`. The CPU-only `settlement` mode needs only `agave-validator/proof-coordinator`. That separate feature can pause uploads using `NORTHSTAR_PROOF_TEST_UPLOAD_FENCE` and records resolver input snapshots for offline checks. It is not needed for ordinary coordination. The proving fixture uses an external adapter gate to establish the snapshot fence before releasing GPU work; this is deliberate test control, not a deadline extension.
 
 Set `NORTHSTAR_LIVE_PORTAL_SBF`, `NORTHSTAR_LIVE_OWNER_SBF`, `NORTHSTAR_GPU_SERVER_WRAPPER`, and `NORTHSTAR_GPU_PROVER` to the explicit local artifacts. `NORTHSTAR_COORDINATOR_CONTENTION=1` adds six serial GPU proofs while the validator and freshly delegated ER session are running. The transaction is submitted afterward so this auxiliary workload cannot consume its challenge deadline.
 
 Only the harness's `public/` directory is eligible for retained evidence. Its parent includes signing keys and private job state and must not be published.
+
+## GPU-independent validation
+
+No GPU or external prover is needed for these checks:
+
+```sh
+cargo test -p solana-runtime test_er_
+cargo test -p northstar --features proof-coordinator --lib
+```
+
+The bank tests require successful transfers while checking L1 replay parity and isolation between ER sessions across epoch rotation. The coordinator tests reopen durable jobs and cryptographically verify retained proofs on the CPU. With an unavailable prover, they cover creating a missing upload, resuming empty and partial uploads, sealing a complete upload, and resolving a sealed proof. The manager tests also cover persisted settlement plans and finalized-checkpoint gating.
+
+For a live local check, build the test validator with `agave-validator/proof-coordinator`, deploy explicit Portal and replay-owner SBF artifacts, and run `northstar/scripts/live-proof-coordinator.sh smoke`. This checks fresh delegation, confirmed ER account visibility, execution, and automatic checkpoint proposal using a preflight-only adapter. It does not prove a new transaction, restart the validator, or validate end-to-end settlement. Use `settlement` instead of `smoke` to exercise snapshot-fenced restart and unchallenged settlement without a GPU. This does not validate challenged proof resolution. Follow the [build environment guidance](agave-4.4-upgrade.md#build-environment) when system RocksDB overrides are present.
+
+### Broader CPU regression suites
+
+```sh
+cargo test -p solana-svm --lib
+cargo test -p solana-runtime --lib
+```
+
+The full runtime suite includes upstream snapshot tests using registered io_uring buffers. Those tests need sufficient locked-memory allowance (`ulimit -l`), not just free RAM. An 8 MiB hard limit rejects a single 16 MiB buffer registration with `ENOMEM`; serial execution does not fix that limit. Provision an appropriately sized test environment rather than changing production snapshot defaults or suppressing these tests. The local test validator uses unregistered buffers, so the live snapshot-restart check can still run under that limit.
+
+Portal's default tests and retained-proof verifier tests are also CPU-only. Build their SBF artifacts separately and pass an absolute `BPF_OUT_DIR`; the verifier suite requires `zk-verifier-prototype`, while default tests use the default build:
+
+```sh
+BPF_OUT_DIR=/absolute/path/to/default-artifacts cargo test -p northstar-portal
+BPF_OUT_DIR=/absolute/path/to/prototype-artifacts cargo test -p northstar-portal \
+  --features zk-verifier-prototype --test zk_verifier
+```
 
 ## Validation commands
 

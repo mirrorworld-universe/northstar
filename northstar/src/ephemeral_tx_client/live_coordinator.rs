@@ -229,6 +229,14 @@ fn live_coordinator_drive_er_checkpoint() {
     )
     .unwrap();
     if smoke {
+        let fence = rpc.get_slot().unwrap();
+        poll("finalized checkpoint fence", 90, || {
+            (rpc.get_slot_with_commitment(CommitmentConfig::finalized())
+                .ok()?
+                >= fence)
+                .then_some(())
+        });
+        fs::write(directory().join("driver-fence"), fence.to_string()).unwrap();
         return;
     }
     let challenge = northstar_portal::find_challenge_pda(&PORTAL, &cursor.active_checkpoint).0;
@@ -327,29 +335,36 @@ fn live_coordinator_observe_settlement() {
         solana_signature::Signature,
     ) = bincode::deserialize(&fs::read(directory().join("observation.bin")).unwrap()).unwrap();
     let started = Instant::now();
-    poll("coordinator proof resolution", 300, || {
-        let state =
-            Checkpoint::try_from_slice(&rpc.get_account(&checkpoint_key).ok()?.data).ok()?;
-        (state.challenge_resolved && state.status != CheckpointStatus::Invalid).then_some(())
-    });
-    let resolved_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    let timing: serde_json::Value =
-        serde_json::from_slice(&fs::read(directory().join("challenge-start.json")).unwrap())
-            .unwrap();
-    let challenge_to_resolution_ms =
-        resolved_ms - u128::from(timing["challenge_started_unix_ms"].as_u64().unwrap());
-    assert!(
-        challenge_to_resolution_ms <= 120_000,
-        "challenge-to-confirmed-resolution exceeded two minutes: {challenge_to_resolution_ms}ms"
-    );
-    crate::proof_coordinator::copy_test_evidence(
-        &PathBuf::from(env::var_os("NORTHSTAR_PROOF_JOB_DIR").unwrap()),
-        &directory(),
-        checkpoint_key,
-    );
+    let unchallenged = env::var_os("NORTHSTAR_COORDINATOR_SMOKE").is_some();
+    let (resolved_ms, challenge_to_resolution_ms) = if unchallenged {
+        (None, None)
+    } else {
+        poll("coordinator proof resolution", 300, || {
+            let state =
+                Checkpoint::try_from_slice(&rpc.get_account(&checkpoint_key).ok()?.data).ok()?;
+            (state.challenge_resolved && state.status != CheckpointStatus::Invalid).then_some(())
+        });
+        let resolved_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let timing: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory().join("challenge-start.json")).unwrap())
+                .unwrap();
+        let challenge_to_resolution_ms =
+            resolved_ms - u128::from(timing["challenge_started_unix_ms"].as_u64().unwrap());
+        assert!(
+            challenge_to_resolution_ms <= 120_000,
+            "challenge-to-confirmed-resolution exceeded two minutes: \
+             {challenge_to_resolution_ms}ms"
+        );
+        crate::proof_coordinator::copy_test_evidence(
+            &PathBuf::from(env::var_os("NORTHSTAR_PROOF_JOB_DIR").unwrap()),
+            &directory(),
+            checkpoint_key,
+        );
+        (Some(resolved_ms), Some(challenge_to_resolution_ms))
+    };
     let checkpoint = poll("automatic settlement and bond release", 480, || {
         let state =
             Checkpoint::try_from_slice(&rpc.get_account(&checkpoint_key).ok()?.data).ok()?;
@@ -357,6 +372,15 @@ fn live_coordinator_observe_settlement() {
             && state.bond_status == CheckpointBondStatus::Released)
             .then_some(state)
     });
+    if unchallenged {
+        assert!(!checkpoint.challenge_resolved);
+        let challenge = northstar_portal::find_challenge_pda(&PORTAL, &checkpoint_key).0;
+        assert!(rpc
+            .get_account_with_commitment(&challenge, CommitmentConfig::confirmed())
+            .unwrap()
+            .value
+            .is_none());
+    }
     let account = rpc.get_account(&target).unwrap();
     assert_eq!(account.owner, PORTAL);
     assert_eq!(account.data, vec![100, 0, 0, 0, 0, 0, 0, 0]);
@@ -373,7 +397,7 @@ fn live_coordinator_observe_settlement() {
     .unwrap();
     assert_eq!(cursor.latest_finalized_er_slot, er_slot);
     assert_eq!(cursor.active_checkpoint, Pubkey::default());
-    let report = serde_json::json!({"schema":"northstar-coordinator-recovery-v1", "settled":true, "bond_released":checkpoint.bond_status == CheckpointBondStatus::Released, "observer_submits_transactions":false, "slot_warps":false, "fresh_delegation":true, "runtime_transaction_signature":signature.to_string(), "synthetic_checkpoint":false, "challenge_to_resolution_ms":challenge_to_resolution_ms, "resolve_observed_unix_ms":resolved_ms, "wall_ms":started.elapsed().as_millis()});
+    let report = serde_json::json!({"schema":"northstar-coordinator-recovery-v1", "unchallenged":unchallenged, "settled":true, "bond_released":checkpoint.bond_status == CheckpointBondStatus::Released, "observer_submits_transactions":false, "slot_warps":false, "fresh_delegation":true, "runtime_transaction_signature":signature.to_string(), "synthetic_checkpoint":false, "challenge_to_resolution_ms":challenge_to_resolution_ms, "resolve_observed_unix_ms":resolved_ms, "wall_ms":started.elapsed().as_millis()});
     fs::write(
         directory().join("recovery.json"),
         serde_json::to_vec_pretty(&report).unwrap(),

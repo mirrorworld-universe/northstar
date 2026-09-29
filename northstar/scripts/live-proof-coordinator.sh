@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 umask 077
-mode=${1:?usage: live-proof-coordinator.sh smoke|proving|upload}
-[[ $mode == smoke || $mode == proving || $mode == upload ]]
-: "${NORTHSTAR_LIVE_PORTAL_SBF:?prototype Portal SBF required}"
+mode=${1:?usage: live-proof-coordinator.sh smoke|settlement|proving|upload}
+[[ $mode == smoke || $mode == settlement || $mode == proving || $mode == upload ]]
+if [[ $mode == smoke || $mode == settlement ]]; then
+    [[ ${NORTHSTAR_COORDINATOR_CONTENTION:-0} == 0 ]] || { echo 'CPU-only modes do not run GPU contention' >&2; exit 2; }
+fi
+: "${NORTHSTAR_LIVE_PORTAL_SBF:?explicit Portal SBF required}"
 : "${NORTHSTAR_LIVE_OWNER_SBF:?replay-owner SBF required}"
 root=$(cd "$(dirname "$0")/../.." && pwd)
 target=$(realpath "${CARGO_TARGET_DIR:-$root/target}")
@@ -52,8 +55,8 @@ health() {
 cd "$root"
 cargo test --locked -p northstar --features proof-coordinator live_coordinator_ --no-run > "$work/build.log" 2>&1
 export NORTHSTAR_PROOF_PROVER="$work/prover"
-if [[ $mode == smoke ]]; then
-    printf '#!/bin/sh\nexit 0\n' > "$work/prover"
+if [[ $mode == smoke || $mode == settlement ]]; then
+    printf '#!/bin/sh\n[ "$1" = preflight ]\n' > "$work/prover"
     export NORTHSTAR_COORDINATOR_SMOKE=1
 else
     : "${NORTHSTAR_GPU_SERVER_WRAPPER:?with-gpu-server executable required}"
@@ -74,7 +77,7 @@ start_validator() {
     local extra=()
     if [[ ${1:-initial} == restart ]]; then extra+=(NORTHSTAR_TEST_VALIDATOR_LOAD_ONLY_SNAPSHOTS=1);
     elif [[ $mode == upload ]]; then extra+=(NORTHSTAR_PROOF_TEST_UPLOAD_FENCE="$work/upload-fence"); fi
-    printf -v command '%q ' env "NORTHSTAR_PROOF_CHALLENGE_WINDOW_SLOTS=${NORTHSTAR_PROOF_CHALLENGE_WINDOW_SLOTS:-750}" "NORTHSTAR_PROOF_JOB_DIR=$NORTHSTAR_PROOF_JOB_DIR" "NORTHSTAR_PROOF_PROVER=$NORTHSTAR_PROOF_PROVER" "NORTHSTAR_PROOF_CHALLENGER_KEYPAIR=$NORTHSTAR_PROOF_CHALLENGER_KEYPAIR" "NORTHSTAR_GPU_WORKER_SOCKET=$NORTHSTAR_GPU_WORKER_SOCKET" "NORTHSTAR_GPU_REPLAY_DIR=$NORTHSTAR_GPU_REPLAY_DIR" RUST_LOG=warn,northstar=info,solana_runtime::bank::er_replay=debug "${extra[@]}" "$validator" --log --ledger "$work/ledger" --rpc-port 18999 --faucet-port 19900 --bind-address 127.0.0.1 --portal 5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf --bpf-program 5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf "$NORTHSTAR_LIVE_PORTAL_SBF" --bpf-program FpuSfMKs3Bf5bxFZJ8UDDVYTbCGnZURDuLBmhjb5u9XC "$NORTHSTAR_LIVE_OWNER_SBF"
+    printf -v command '%q ' env "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}" "NORTHSTAR_PROOF_CHALLENGE_WINDOW_SLOTS=${NORTHSTAR_PROOF_CHALLENGE_WINDOW_SLOTS:-750}" "NORTHSTAR_PROOF_JOB_DIR=$NORTHSTAR_PROOF_JOB_DIR" "NORTHSTAR_PROOF_PROVER=$NORTHSTAR_PROOF_PROVER" "NORTHSTAR_PROOF_CHALLENGER_KEYPAIR=$NORTHSTAR_PROOF_CHALLENGER_KEYPAIR" "NORTHSTAR_GPU_WORKER_SOCKET=$NORTHSTAR_GPU_WORKER_SOCKET" "NORTHSTAR_GPU_REPLAY_DIR=$NORTHSTAR_GPU_REPLAY_DIR" RUST_LOG=warn,northstar=info,solana_runtime::bank::er_replay=debug "${extra[@]}" "$validator" --log --ledger "$work/ledger" --rpc-port 18999 --faucet-port 19900 --bind-address 127.0.0.1 --portal 5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf --bpf-program 5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf "$NORTHSTAR_LIVE_PORTAL_SBF" --bpf-program FpuSfMKs3Bf5bxFZJ8UDDVYTbCGnZURDuLBmhjb5u9XC "$NORTHSTAR_LIVE_OWNER_SBF"
     tmux new-session -d -s "$validator_session" "exec $command >> '$work/validator.log' 2>&1"
     wait_for 120 health
 }
@@ -83,10 +86,11 @@ export NORTHSTAR_LIVE_PAYER="$work/ledger/validator-keypair.json"
 launch_test() {
     local test=$1 output=$2
     local test_env=()
-    for key in PATH HOME CARGO_TARGET_DIR LD_LIBRARY_PATH NORTHSTAR_LIVE_RPC_URL NORTHSTAR_LIVE_ER_RPC_URL NORTHSTAR_LIVE_PAYER NORTHSTAR_COORDINATOR_EVIDENCE NORTHSTAR_PROOF_JOB_DIR NORTHSTAR_PROOF_CHALLENGER_KEYPAIR NORTHSTAR_CHECKPOINT_PLAN_DIR NORTHSTAR_COORDINATOR_SMOKE NORTHSTAR_COORDINATOR_ER_GATE; do
+    for key in PATH HOME CARGO_TARGET_DIR LD_LIBRARY_PATH ROCKSDB_LIB_DIR ROCKSDB_INCLUDE_DIR NORTHSTAR_LIVE_RPC_URL NORTHSTAR_LIVE_ER_RPC_URL NORTHSTAR_LIVE_PAYER NORTHSTAR_COORDINATOR_EVIDENCE NORTHSTAR_PROOF_JOB_DIR NORTHSTAR_PROOF_CHALLENGER_KEYPAIR NORTHSTAR_CHECKPOINT_PLAN_DIR NORTHSTAR_COORDINATOR_SMOKE NORTHSTAR_COORDINATOR_ER_GATE; do
         if [[ -v $key ]]; then test_env+=("$key=${!key}"); fi
     done
-    printf -v command '%q ' env "${test_env[@]}" cargo test --locked -p northstar --features proof-coordinator "$test" -- --ignored --nocapture
+    # tmux may retain system RocksDB overrides that the caller explicitly removed.
+    printf -v command '%q ' env -u ROCKSDB_LIB_DIR -u ROCKSDB_INCLUDE_DIR "${test_env[@]}" cargo test --locked -p northstar --features proof-coordinator "$test" -- --ignored --nocapture
     printf 'cd %q; %s > %q 2>&1; echo $? > %q\n' "$root" "$command" "$work/$output.log" "$work/$output.exit" > "$work/$output-launch.sh"
     tmux new-session -d -s "$driver_session" "exec bash '$work/$output-launch.sh'"
 }
@@ -124,7 +128,7 @@ if [[ $mode == upload ]]; then
     wait_for 180 test -f "$work/upload-fence"
     upload_fence=$(<"$work/upload-fence")
     ((upload_fence <= fence)) || fence=$upload_fence
-else
+elif [[ $mode == proving ]]; then
     wait_for 60 test -f "$work/prover-entered"
 fi
 snapshot_ready() {
@@ -165,4 +169,5 @@ wait_for 800 test -f "$work/observer.exit"
 cp "$work/driver.log" "$work/observer.log" "$work/public/"
 grep -E 'Proof (coordinator|checkpoint|job|upload)' "$work/validator.log" > "$work/public/coordinator-events.log"
 if [[ $mode == upload ]]; then [[ $(grep -c 'Proof job proving:' "$work/public/coordinator-events.log") == 1 ]]; fi
+if [[ $mode == settlement ]]; then ! grep -q 'Proof job proving:' "$work/public/coordinator-events.log"; fi
 printf '0\n' > "$work/public/result"
