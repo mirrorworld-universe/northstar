@@ -32,18 +32,85 @@ fn test_er_rotation_preserves_l1_replay_hashes() {
         drop(er);
         control = Arc::new(Bank::new_from_parent(control, SlotLeader::default(), slot));
         l1 = Arc::new(Bank::new_from_parent(l1, SlotLeader::default(), slot));
-        let tx =
-            system_transaction::transfer(&mint_keypair, &recipient, slot, control.last_blockhash());
-        assert_eq!(
-            control.process_transaction(&tx),
-            l1.process_transaction(&tx)
+        let tx = system_transaction::transfer(
+            &mint_keypair,
+            &recipient,
+            control.get_minimum_balance_for_rent_exemption(0) + slot,
+            control.last_blockhash(),
         );
+        assert_eq!(control.process_transaction(&tx), Ok(()));
+        assert_eq!(l1.process_transaction(&tx), Ok(()));
         control.freeze();
         l1.freeze();
         assert_eq!(control.hash(), l1.hash(), "L1 diverged at slot {slot}");
         control.squash();
         l1.squash();
     }
+}
+
+// Sonic: Separate ER roots must not share epoch preparation or program caches.
+#[test]
+fn test_er_epoch_rotation_preserves_sibling_session_state() {
+    let (genesis_config, mint_keypair) = create_genesis_config(1_000_000_000);
+    let l1 = Arc::new(Bank::new_for_tests(&genesis_config));
+    let epoch = l1.epoch_schedule().get_epoch(1u64 << 40);
+    let boundary = l1.epoch_schedule().get_last_slot_in_epoch(epoch);
+    let sibling = Arc::new(Bank::new_from_parent_ephemeral_isolated(
+        l1.clone(),
+        SlotLeader::default(),
+        boundary - 2,
+    ));
+    let mut rotating = Arc::new(Bank::new_from_parent_ephemeral_isolated(
+        l1.clone(),
+        SlotLeader::default(),
+        boundary - 1,
+    ));
+    let upcoming_epoch = |bank: &Bank| {
+        bank.transaction_processor
+            .epoch_boundary_preparation
+            .read()
+            .unwrap()
+            .upcoming_epoch
+    };
+    let l1_epoch_before = upcoming_epoch(&l1);
+    let sibling_epoch_before = upcoming_epoch(&sibling);
+    let recipient = Pubkey::new_unique();
+    let rent = l1.get_minimum_balance_for_rent_exemption(0);
+    for slot in boundary..=boundary + 2 {
+        let next = Arc::new(Bank::new_from_parent_ephemeral(
+            rotating.clone(),
+            SlotLeader::default(),
+            slot,
+        ));
+        rotating = next;
+        let tx = system_transaction::transfer(
+            &mint_keypair,
+            &recipient,
+            rent + slot - boundary + 1,
+            rotating.last_blockhash(),
+        );
+        assert_eq!(rotating.process_transaction(&tx), Ok(()));
+        assert_eq!(upcoming_epoch(&l1), l1_epoch_before);
+        assert_eq!(upcoming_epoch(&sibling), sibling_epoch_before);
+        assert_eq!(l1.get_balance(&recipient), 0);
+        assert_eq!(sibling.get_balance(&recipient), 0);
+        assert!(!Arc::ptr_eq(
+            &rotating.transaction_processor.global_program_cache,
+            &sibling.transaction_processor.global_program_cache,
+        ));
+    }
+    assert!(rotating.epoch() > sibling.epoch());
+    assert_eq!(rotating.get_balance(&recipient), 3 * rent + 6);
+    drop(rotating);
+    let tx = system_transaction::transfer(
+        &mint_keypair,
+        &recipient,
+        rent + 7,
+        sibling.last_blockhash(),
+    );
+    assert_eq!(sibling.process_transaction(&tx), Ok(()));
+    assert_eq!(sibling.get_balance(&recipient), rent + 7);
+    assert_eq!(l1.get_balance(&recipient), 0);
 }
 
 // Sonic: A future ER epoch must not change L1 deployment verification.

@@ -48,6 +48,19 @@ Set `NORTHSTAR_LIVE_PORTAL_SBF`, `NORTHSTAR_LIVE_OWNER_SBF`, `NORTHSTAR_GPU_SERV
 
 Only the harness's `public/` directory is eligible for retained evidence. Its parent includes signing keys and private job state and must not be published.
 
+## GPU-independent validation
+
+No GPU or external prover is needed for these checks:
+
+```sh
+cargo test -p solana-runtime test_er_
+cargo test -p northstar --features proof-coordinator --lib
+```
+
+The bank tests require successful transfers while checking L1 replay parity and isolation between ER sessions across epoch rotation. The coordinator tests reopen durable jobs and cryptographically verify retained proofs on the CPU. With an unavailable prover, they cover creating a missing upload, resuming empty and partial uploads, sealing a complete upload, and resolving a sealed proof. The manager tests also cover persisted settlement plans and finalized-checkpoint gating.
+
+For a live local check, build the test validator with `agave-validator/proof-coordinator`, deploy explicit Portal and replay-owner SBF artifacts, and run `northstar/scripts/live-proof-coordinator.sh smoke`. This checks fresh delegation, confirmed ER account visibility, execution, and automatic checkpoint proposal using a no-op preflight adapter. It does not prove a new transaction, restart the validator, or validate end-to-end settlement. Follow the [build environment guidance](agave-4.4-upgrade.md#build-environment) when system RocksDB overrides are present.
+
 ## Validation commands
 
 [Regression fixtures](../zkvm-replay/evidence/proof-coordinator-v1/README.md) retain only the inputs consumed by host and Portal tests. Live-run reports, lifecycle logs, and bulk performance measurements are not repository fixtures. The harness writes them to its selected output directory.

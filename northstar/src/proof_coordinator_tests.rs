@@ -68,7 +68,19 @@ fn durable_preparation_gates_admission_and_survives_restart_without_history() {
 
 #[test]
 fn completed_proof_resumes_without_starting_an_unavailable_worker() {
-    use northstar_portal::StepProofAccount;
+    for (upload_exists, written_len, sealed) in [
+        (false, 0, false),
+        (true, 0, false),
+        (true, 128, false),
+        (true, 356, false),
+        (true, 356, true),
+    ] {
+        check_completed_proof_recovery(upload_exists, written_len, sealed);
+    }
+}
+
+fn check_completed_proof_recovery(upload_exists: bool, written_len: u32, sealed: bool) {
+    use northstar_portal::{PortalInstruction, StepProofAccount};
     agave_logger::setup_with_default("northstar=info,solana_runtime=error");
     let directory = tempfile::tempdir().unwrap();
     let config = config(directory.path());
@@ -88,8 +100,17 @@ fn completed_proof_resumes_without_starting_an_unavailable_worker() {
     accounts[2].1.data = borsh::to_vec(&challenge).unwrap();
     let mut upload = StepProofAccount::try_from_slice(&accounts[4].1.data).unwrap();
     upload.authority = challenger;
+    upload.written_len = written_len;
+    upload.sealed = sealed;
+    if !sealed {
+        upload.data[written_len as usize..].fill(0);
+        upload.proof_hash = [0; 32];
+    }
     accounts[4].1.data = borsh::to_vec(&upload).unwrap();
     accounts[5].0 = challenger;
+    if !upload_exists {
+        accounts.remove(4);
+    }
     let genesis = solana_runtime::genesis_utils::create_genesis_config(1_000_000);
     let bank = Arc::new(Bank::new_from_parent(
         Arc::new(Bank::new_for_tests(&genesis.genesis_config)),
@@ -159,12 +180,27 @@ fn completed_proof_resumes_without_starting_an_unavailable_worker() {
             return false;
         };
         assert_eq!(transaction.message.account_keys[0], challenger);
-        assert!(matches!(
-            northstar_portal::PortalInstruction::try_from_slice(
-                &transaction.message.instructions[0].data
-            ),
-            Ok(northstar_portal::PortalInstruction::ResolveChallenge(_))
-        ));
+        let instruction =
+            PortalInstruction::try_from_slice(&transaction.message.instructions[0].data).unwrap();
+        match instruction {
+            PortalInstruction::CreateStepProof(_) if !upload_exists => {}
+            PortalInstruction::WriteStepProof(write)
+                if upload_exists && written_len < 356 && !sealed =>
+            {
+                assert_eq!(write.offset, written_len);
+                let proof = include_bytes!(
+                    "../zkvm-replay/evidence/proof-coordinator-v1/proving/\
+                     northstar-sp1-groth16-onchain.bin"
+                );
+                let start = written_len as usize;
+                let end = (start + northstar_portal::MAX_STEP_PROOF_CHUNK).min(proof.len());
+                assert_eq!(usize::from(write.chunk_len), end - start);
+                assert_eq!(&write.chunk[..end - start], &proof[start..end]);
+            }
+            PortalInstruction::SealStepProof(_) if written_len == 356 && !sealed => {}
+            PortalInstruction::ResolveChallenge(_) if written_len == 356 && sealed => {}
+            _ => panic!("unexpected recovery action for {written_len} bytes, sealed={sealed}"),
+        }
         true
     });
 }

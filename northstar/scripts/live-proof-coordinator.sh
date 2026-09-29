@@ -74,7 +74,7 @@ start_validator() {
     local extra=()
     if [[ ${1:-initial} == restart ]]; then extra+=(NORTHSTAR_TEST_VALIDATOR_LOAD_ONLY_SNAPSHOTS=1);
     elif [[ $mode == upload ]]; then extra+=(NORTHSTAR_PROOF_TEST_UPLOAD_FENCE="$work/upload-fence"); fi
-    printf -v command '%q ' env "NORTHSTAR_PROOF_CHALLENGE_WINDOW_SLOTS=${NORTHSTAR_PROOF_CHALLENGE_WINDOW_SLOTS:-750}" "NORTHSTAR_PROOF_JOB_DIR=$NORTHSTAR_PROOF_JOB_DIR" "NORTHSTAR_PROOF_PROVER=$NORTHSTAR_PROOF_PROVER" "NORTHSTAR_PROOF_CHALLENGER_KEYPAIR=$NORTHSTAR_PROOF_CHALLENGER_KEYPAIR" "NORTHSTAR_GPU_WORKER_SOCKET=$NORTHSTAR_GPU_WORKER_SOCKET" "NORTHSTAR_GPU_REPLAY_DIR=$NORTHSTAR_GPU_REPLAY_DIR" RUST_LOG=warn,northstar=info,solana_runtime::bank::er_replay=debug "${extra[@]}" "$validator" --log --ledger "$work/ledger" --rpc-port 18999 --faucet-port 19900 --bind-address 127.0.0.1 --portal 5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf --bpf-program 5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf "$NORTHSTAR_LIVE_PORTAL_SBF" --bpf-program FpuSfMKs3Bf5bxFZJ8UDDVYTbCGnZURDuLBmhjb5u9XC "$NORTHSTAR_LIVE_OWNER_SBF"
+    printf -v command '%q ' env "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}" "NORTHSTAR_PROOF_CHALLENGE_WINDOW_SLOTS=${NORTHSTAR_PROOF_CHALLENGE_WINDOW_SLOTS:-750}" "NORTHSTAR_PROOF_JOB_DIR=$NORTHSTAR_PROOF_JOB_DIR" "NORTHSTAR_PROOF_PROVER=$NORTHSTAR_PROOF_PROVER" "NORTHSTAR_PROOF_CHALLENGER_KEYPAIR=$NORTHSTAR_PROOF_CHALLENGER_KEYPAIR" "NORTHSTAR_GPU_WORKER_SOCKET=$NORTHSTAR_GPU_WORKER_SOCKET" "NORTHSTAR_GPU_REPLAY_DIR=$NORTHSTAR_GPU_REPLAY_DIR" RUST_LOG=warn,northstar=info,solana_runtime::bank::er_replay=debug "${extra[@]}" "$validator" --log --ledger "$work/ledger" --rpc-port 18999 --faucet-port 19900 --bind-address 127.0.0.1 --portal 5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf --bpf-program 5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf "$NORTHSTAR_LIVE_PORTAL_SBF" --bpf-program FpuSfMKs3Bf5bxFZJ8UDDVYTbCGnZURDuLBmhjb5u9XC "$NORTHSTAR_LIVE_OWNER_SBF"
     tmux new-session -d -s "$validator_session" "exec $command >> '$work/validator.log' 2>&1"
     wait_for 120 health
 }
@@ -83,10 +83,11 @@ export NORTHSTAR_LIVE_PAYER="$work/ledger/validator-keypair.json"
 launch_test() {
     local test=$1 output=$2
     local test_env=()
-    for key in PATH HOME CARGO_TARGET_DIR LD_LIBRARY_PATH NORTHSTAR_LIVE_RPC_URL NORTHSTAR_LIVE_ER_RPC_URL NORTHSTAR_LIVE_PAYER NORTHSTAR_COORDINATOR_EVIDENCE NORTHSTAR_PROOF_JOB_DIR NORTHSTAR_PROOF_CHALLENGER_KEYPAIR NORTHSTAR_CHECKPOINT_PLAN_DIR NORTHSTAR_COORDINATOR_SMOKE NORTHSTAR_COORDINATOR_ER_GATE; do
+    for key in PATH HOME CARGO_TARGET_DIR LD_LIBRARY_PATH ROCKSDB_LIB_DIR ROCKSDB_INCLUDE_DIR NORTHSTAR_LIVE_RPC_URL NORTHSTAR_LIVE_ER_RPC_URL NORTHSTAR_LIVE_PAYER NORTHSTAR_COORDINATOR_EVIDENCE NORTHSTAR_PROOF_JOB_DIR NORTHSTAR_PROOF_CHALLENGER_KEYPAIR NORTHSTAR_CHECKPOINT_PLAN_DIR NORTHSTAR_COORDINATOR_SMOKE NORTHSTAR_COORDINATOR_ER_GATE; do
         if [[ -v $key ]]; then test_env+=("$key=${!key}"); fi
     done
-    printf -v command '%q ' env "${test_env[@]}" cargo test --locked -p northstar --features proof-coordinator "$test" -- --ignored --nocapture
+    # tmux may retain system RocksDB overrides that the caller explicitly removed.
+    printf -v command '%q ' env -u ROCKSDB_LIB_DIR -u ROCKSDB_INCLUDE_DIR "${test_env[@]}" cargo test --locked -p northstar --features proof-coordinator "$test" -- --ignored --nocapture
     printf 'cd %q; %s > %q 2>&1; echo $? > %q\n' "$root" "$command" "$work/$output.log" "$work/$output.exit" > "$work/$output-launch.sh"
     tmux new-session -d -s "$driver_session" "exec bash '$work/$output-launch.sh'"
 }
