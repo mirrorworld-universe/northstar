@@ -12,7 +12,7 @@ Build the validator with `agave-validator/proof-coordinator` (or `solana-core/pr
 
 `NORTHSTAR_PROOF_CHALLENGE_WINDOW_SLOTS` optionally selects the proposal's challenge window, from 10 through 9,000 slots; the experimental default is 750. Session cadence remains separately bounded by Portal. A future policy can use live validator membership and recent dispute activity; this implementation does not invent that policy. The performance target remains proof submission within two minutes, not merely before the longer protocol deadline. Existing deadlines are never extended during recovery. Validators without this opt-in retain their existing window selection.
 
-Use an explicitly deployed Portal built with `zk-verifier-prototype` for local validation. Neither this feature nor the coordinator enables production acceptance. A validator built without coordinator support rejects coordinator configuration when starting its Northstar service.
+Use an explicitly deployed Portal built with `zk-verifier-prototype` for challenged proof-resolution validation. The CPU-only `smoke` and `settlement` modes also support the default, fail-closed Portal build. Neither this feature nor the coordinator enables production acceptance. A validator built without coordinator support rejects coordinator configuration when starting its Northstar service.
 
 ## Architectural decisions
 
@@ -61,6 +61,23 @@ cargo test -p northstar --features proof-coordinator --lib
 The bank tests require successful transfers while checking L1 replay parity and isolation between ER sessions across epoch rotation. The coordinator tests reopen durable jobs and cryptographically verify retained proofs on the CPU. With an unavailable prover, they cover creating a missing upload, resuming empty and partial uploads, sealing a complete upload, and resolving a sealed proof. The manager tests also cover persisted settlement plans and finalized-checkpoint gating.
 
 For a live local check, build the test validator with `agave-validator/proof-coordinator`, deploy explicit Portal and replay-owner SBF artifacts, and run `northstar/scripts/live-proof-coordinator.sh smoke`. This checks fresh delegation, confirmed ER account visibility, execution, and automatic checkpoint proposal using a preflight-only adapter. It does not prove a new transaction, restart the validator, or validate end-to-end settlement. Use `settlement` instead of `smoke` to exercise snapshot-fenced restart and unchallenged settlement without a GPU. This does not validate challenged proof resolution. Follow the [build environment guidance](agave-4.4-upgrade.md#build-environment) when system RocksDB overrides are present.
+
+### Broader CPU regression suites
+
+```sh
+cargo test -p solana-svm --lib
+cargo test -p solana-runtime --lib
+```
+
+The full runtime suite includes upstream snapshot tests using registered io_uring buffers. Those tests need sufficient locked-memory allowance (`ulimit -l`), not just free RAM. An 8 MiB hard limit rejects a single 16 MiB buffer registration with `ENOMEM`; serial execution does not fix that limit. Provision an appropriately sized test environment rather than changing production snapshot defaults or suppressing these tests. The local test validator uses unregistered buffers, so the live snapshot-restart check can still run under that limit.
+
+Portal's default tests and retained-proof verifier tests are also CPU-only. Build their SBF artifacts separately and pass an absolute `BPF_OUT_DIR`; the verifier suite requires `zk-verifier-prototype`, while default tests use the default build:
+
+```sh
+BPF_OUT_DIR=/absolute/path/to/default-artifacts cargo test -p northstar-portal
+BPF_OUT_DIR=/absolute/path/to/prototype-artifacts cargo test -p northstar-portal \
+  --features zk-verifier-prototype --test zk_verifier
+```
 
 ## Validation commands
 

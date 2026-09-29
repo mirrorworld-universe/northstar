@@ -6,7 +6,7 @@ mode=${1:?usage: live-proof-coordinator.sh smoke|settlement|proving|upload}
 if [[ $mode == smoke || $mode == settlement ]]; then
     [[ ${NORTHSTAR_COORDINATOR_CONTENTION:-0} == 0 ]] || { echo 'CPU-only modes do not run GPU contention' >&2; exit 2; }
 fi
-: "${NORTHSTAR_LIVE_PORTAL_SBF:?prototype Portal SBF required}"
+: "${NORTHSTAR_LIVE_PORTAL_SBF:?explicit Portal SBF required}"
 : "${NORTHSTAR_LIVE_OWNER_SBF:?replay-owner SBF required}"
 root=$(cd "$(dirname "$0")/../.." && pwd)
 target=$(realpath "${CARGO_TARGET_DIR:-$root/target}")
