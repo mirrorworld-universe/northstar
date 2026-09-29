@@ -405,6 +405,63 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_result_publication_preserves_queued_job_after_restart() {
+        for published_bytes in [
+            0,
+            SP1_GROTH16_PROOF_V1_LEN / 2,
+            SP1_GROTH16_PROOF_V1_LEN + 32,
+        ] {
+            let directory = private_directory();
+            let store = ProofJobStore::open(directory.path()).unwrap();
+            let id = store.enqueue(binding(), b"witness").unwrap();
+            let mut result = proof();
+            result.extend_from_slice(hashv(&[&id, &result]).as_ref());
+            let mut temporary = tempfile::NamedTempFile::new_in(store.job_directory(&id)).unwrap();
+            temporary.write_all(&result[..published_bytes]).unwrap();
+            temporary.as_file().sync_all().unwrap();
+            let (file, _path) = temporary.keep().unwrap();
+            drop(file);
+            drop(store);
+
+            let store = ProofJobStore::open(directory.path()).unwrap();
+            assert_eq!(store.ids().unwrap(), vec![id]);
+            let job = store.load(&id).unwrap();
+            assert_eq!(job.binding, binding());
+            assert_eq!(job.witness, b"witness");
+            assert!(job.proof.is_none());
+            store
+                .complete(&id, &proof(), &binding().public_inputs)
+                .unwrap();
+            drop(store);
+
+            let store = ProofJobStore::open(directory.path()).unwrap();
+            assert_eq!(store.load(&id).unwrap().proof.unwrap().as_slice(), proof());
+        }
+    }
+
+    #[test]
+    fn mismatched_result_inputs_preserve_queued_job_after_restart() {
+        let directory = private_directory();
+        let store = ProofJobStore::open(directory.path()).unwrap();
+        let id = store.enqueue(binding(), b"witness").unwrap();
+        let mut public_inputs = binding().public_inputs;
+        public_inputs[0] ^= 1;
+        assert!(store.complete(&id, &proof(), &public_inputs).is_err());
+        drop(store);
+
+        let store = ProofJobStore::open(directory.path()).unwrap();
+        assert_eq!(store.ids().unwrap(), vec![id]);
+        let job = store.load(&id).unwrap();
+        assert_eq!(job.binding, binding());
+        assert_eq!(job.witness, b"witness");
+        assert!(job.proof.is_none());
+        store
+            .complete(&id, &proof(), &binding().public_inputs)
+            .unwrap();
+        assert_eq!(store.load(&id).unwrap().proof.unwrap().as_slice(), proof());
+    }
+
+    #[test]
     fn changed_witness_or_result_is_rejected_after_restart() {
         for artifact in ["witness", "proof", "manifest"] {
             let directory = private_directory();

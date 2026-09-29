@@ -223,6 +223,49 @@ fn l1_upload_progress_drives_create_append_seal_and_resolve() {
 }
 
 #[test]
+fn upload_recovery_rejects_out_of_bounds_progress_and_changed_sealed_hash() {
+    let mut fixture = Fixture::new();
+    for length in [fixture.proof.len() as u32 + 1, u32::MAX] {
+        fixture.upload.written_len = length;
+        fixture.store_upload();
+        assert_eq!(fixture.action(true), Err("proof uploaded prefix mismatch"));
+    }
+    fixture.publish_upload(fixture.proof.len(), true);
+    fixture.upload.proof_hash[0] ^= 1;
+    fixture.store_upload();
+    assert_eq!(fixture.action(true), Err("proof sealed result mismatch"));
+}
+
+#[test]
+fn cached_proof_requires_the_current_authenticated_checkpoint_cursor() {
+    let mut fixture = Fixture::new();
+    fixture.publish_upload(fixture.proof.len(), true);
+    let cursor_key = northstar_portal::find_checkpoint_cursor_pda(
+        &PORTAL,
+        &Pubkey::new_from_array(fixture.binding.session),
+    )
+    .0;
+    let original =
+        CheckpointCursor::try_from_slice(fixture.bank.get_account(&cursor_key).unwrap().data())
+            .unwrap();
+    for field in 0..3 {
+        let mut cursor = original;
+        match field {
+            0 => cursor.session = Pubkey::new_unique(),
+            1 => cursor.active_checkpoint = Pubkey::new_unique(),
+            _ => cursor.active_er_slot += 1,
+        }
+        put(&fixture.bank, cursor_key, &cursor);
+        assert_eq!(fixture.action(true), Err("proof active checkpoint binding"));
+    }
+    put(&fixture.bank, cursor_key, &original);
+    assert!(matches!(
+        fixture.instruction(),
+        PortalInstruction::ResolveChallenge(_)
+    ));
+}
+
+#[test]
 fn deadline_boundary_matches_portal() {
     for hard_deadline in [false, true] {
         let mut fixture = Fixture::new();

@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 umask 077
-mode=${1:?usage: live-proof-coordinator.sh smoke|proving|upload}
-[[ $mode == smoke || $mode == proving || $mode == upload ]]
+mode=${1:?usage: live-proof-coordinator.sh smoke|settlement|proving|upload}
+[[ $mode == smoke || $mode == settlement || $mode == proving || $mode == upload ]]
+if [[ $mode == smoke || $mode == settlement ]]; then
+    [[ ${NORTHSTAR_COORDINATOR_CONTENTION:-0} == 0 ]] || { echo 'CPU-only modes do not run GPU contention' >&2; exit 2; }
+fi
 : "${NORTHSTAR_LIVE_PORTAL_SBF:?prototype Portal SBF required}"
 : "${NORTHSTAR_LIVE_OWNER_SBF:?replay-owner SBF required}"
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -52,8 +55,8 @@ health() {
 cd "$root"
 cargo test --locked -p northstar --features proof-coordinator live_coordinator_ --no-run > "$work/build.log" 2>&1
 export NORTHSTAR_PROOF_PROVER="$work/prover"
-if [[ $mode == smoke ]]; then
-    printf '#!/bin/sh\nexit 0\n' > "$work/prover"
+if [[ $mode == smoke || $mode == settlement ]]; then
+    printf '#!/bin/sh\n[ "$1" = preflight ]\n' > "$work/prover"
     export NORTHSTAR_COORDINATOR_SMOKE=1
 else
     : "${NORTHSTAR_GPU_SERVER_WRAPPER:?with-gpu-server executable required}"
@@ -125,7 +128,7 @@ if [[ $mode == upload ]]; then
     wait_for 180 test -f "$work/upload-fence"
     upload_fence=$(<"$work/upload-fence")
     ((upload_fence <= fence)) || fence=$upload_fence
-else
+elif [[ $mode == proving ]]; then
     wait_for 60 test -f "$work/prover-entered"
 fi
 snapshot_ready() {
@@ -166,4 +169,5 @@ wait_for 800 test -f "$work/observer.exit"
 cp "$work/driver.log" "$work/observer.log" "$work/public/"
 grep -E 'Proof (coordinator|checkpoint|job|upload)' "$work/validator.log" > "$work/public/coordinator-events.log"
 if [[ $mode == upload ]]; then [[ $(grep -c 'Proof job proving:' "$work/public/coordinator-events.log") == 1 ]]; fi
+if [[ $mode == settlement ]]; then ! grep -q 'Proof job proving:' "$work/public/coordinator-events.log"; fi
 printf '0\n' > "$work/public/result"

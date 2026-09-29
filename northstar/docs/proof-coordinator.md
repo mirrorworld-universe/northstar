@@ -38,11 +38,12 @@ Recovery retains the finalized snapshot boundary. Durable jobs do not restore mi
 
 `northstar/scripts/live-proof-coordinator.sh` supports:
 
-- `smoke`: fresh delegation, a real ER RPC transaction, native witness preparation, and automatic proposal. Uses a no-op preflight adapter; this is not GPU evidence.
+- `smoke`: fresh delegation, a real ER RPC transaction, native witness preparation, and automatic proposal. Uses a preflight-only adapter; this is not GPU evidence.
+- `settlement`: the same GPU-independent flow, followed by a finalized snapshot fence, validator termination, and snapshot-only restart. A read-only observer checks automatic unchallenged settlement, bond release, account data and lamports, and the cleared checkpoint cursor. The adapter rejects proof requests; no challenge is opened.
 - `proving`: the driver opens the challenge and reveals the isolated runtime step, then exits. Fence on a finalized snapshot, start GPU work, terminate the validator, and observe manager-owned recovery.
 - `upload`: fence after an initial upload chunk, terminate the validator and GPU worker, and resume the remaining upload from L1 without another proof request or GPU preflight.
 
-The crash harness requires `agave-validator/proof-coordinator-test-hooks`. That separate feature can pause uploads using `NORTHSTAR_PROOF_TEST_UPLOAD_FENCE` and records resolver input snapshots for offline checks. It is not needed for ordinary coordination. The proving fixture uses an external adapter gate to establish the snapshot fence before releasing GPU work; this is deliberate test control, not a deadline extension.
+The GPU crash modes (`proving` and `upload`) require `agave-validator/proof-coordinator-test-hooks`. The CPU-only `settlement` mode needs only `agave-validator/proof-coordinator`. That separate feature can pause uploads using `NORTHSTAR_PROOF_TEST_UPLOAD_FENCE` and records resolver input snapshots for offline checks. It is not needed for ordinary coordination. The proving fixture uses an external adapter gate to establish the snapshot fence before releasing GPU work; this is deliberate test control, not a deadline extension.
 
 Set `NORTHSTAR_LIVE_PORTAL_SBF`, `NORTHSTAR_LIVE_OWNER_SBF`, `NORTHSTAR_GPU_SERVER_WRAPPER`, and `NORTHSTAR_GPU_PROVER` to the explicit local artifacts. `NORTHSTAR_COORDINATOR_CONTENTION=1` adds six serial GPU proofs while the validator and freshly delegated ER session are running. The transaction is submitted afterward so this auxiliary workload cannot consume its challenge deadline.
 
@@ -59,7 +60,7 @@ cargo test -p northstar --features proof-coordinator --lib
 
 The bank tests require successful transfers while checking L1 replay parity and isolation between ER sessions across epoch rotation. The coordinator tests reopen durable jobs and cryptographically verify retained proofs on the CPU. With an unavailable prover, they cover creating a missing upload, resuming empty and partial uploads, sealing a complete upload, and resolving a sealed proof. The manager tests also cover persisted settlement plans and finalized-checkpoint gating.
 
-For a live local check, build the test validator with `agave-validator/proof-coordinator`, deploy explicit Portal and replay-owner SBF artifacts, and run `northstar/scripts/live-proof-coordinator.sh smoke`. This checks fresh delegation, confirmed ER account visibility, execution, and automatic checkpoint proposal using a no-op preflight adapter. It does not prove a new transaction, restart the validator, or validate end-to-end settlement. Follow the [build environment guidance](agave-4.4-upgrade.md#build-environment) when system RocksDB overrides are present.
+For a live local check, build the test validator with `agave-validator/proof-coordinator`, deploy explicit Portal and replay-owner SBF artifacts, and run `northstar/scripts/live-proof-coordinator.sh smoke`. This checks fresh delegation, confirmed ER account visibility, execution, and automatic checkpoint proposal using a preflight-only adapter. It does not prove a new transaction, restart the validator, or validate end-to-end settlement. Use `settlement` instead of `smoke` to exercise snapshot-fenced restart and unchallenged settlement without a GPU. This does not validate challenged proof resolution. Follow the [build environment guidance](agave-4.4-upgrade.md#build-environment) when system RocksDB overrides are present.
 
 ## Validation commands
 
