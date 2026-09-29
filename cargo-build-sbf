@@ -7,4 +7,5 @@ found=$?
 if [[ $found -ne 0 ]]; then
   cargo install cargo-build-sbf
 fi
-exec cargo build-sbf "$@"
+# Sonic: Keep Northstar's validated SBF ABI/compiler independent of CLI release defaults.
+exec cargo build-sbf --arch v0 --tools-version v1.56 "$@"

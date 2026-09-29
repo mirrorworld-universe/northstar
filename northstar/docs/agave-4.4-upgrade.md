@@ -16,6 +16,8 @@ The baseline witness and public inputs remain byte-identical. SP1's Groth16 wrap
 
 ## Build environment
 
+Use `./cargo-build-sbf` for Northstar programs. The wrapper pins SBPF v0 and platform-tools v1.56 for local, CI, bundled test-validator, and deployment builds. The host validator's Agave version does not select the on-chain program ABI. Unqualified `cargo build-sbf` follows the installed CLI defaults: cargo-build-sbf 4.4.0 selects SBPF v3 and platform-tools v1.57, which fail to link the current Portal's `sol_poseidon` and allocation error handler. Adopting that ABI/compiler requires a separate compatibility update, not a floating CI tool upgrade.
+
 Upstream now uses Anza's rust-rocksdb fork with bundled RocksDB 10.4.2. An arbitrary system RocksDB is not ABI-compatible. If a shell exports system-library overrides, build with:
 
 ```bash
