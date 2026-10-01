@@ -7,7 +7,8 @@ use {
     borsh::BorshDeserialize,
     clap::{App, AppSettings, Arg, ArgMatches, SubCommand},
     northstar_portal::{
-        DelegationRecord, OpenSession, PortalInstruction, UndelegationRequest, WITHDRAWAL_SINK,
+        DelegationRecord, MAX_CHECKPOINT_CADENCE_L1_SLOTS, OpenSession, PortalInstruction,
+        UndelegationRequest, WITHDRAWAL_SINK,
     },
     solana_account::Account,
     solana_clap_utils::{
@@ -38,7 +39,7 @@ const LOCALNET_DEFAULT_PORTAL_PROGRAM_ID: &str = "5TeWSsjg2gbxCyWVniXeCmwM7UtHTC
 const DEVNET_DEFAULT_PORTAL_PROGRAM_ID: &str = "HgNMJoLwbhLHwXgdfSQEL2xY1Uqr4995ffn4Sb3gW4af";
 const DEFAULT_GRID_ID: &str = "0";
 const DEFAULT_SESSION_TTL_SLOTS: &str = "78840000";
-const DEFAULT_SETTLEMENT_INTERVAL_SLOTS: &str = "150";
+const DEFAULT_SETTLEMENT_INTERVAL_SLOTS: &str = "75";
 const DEFAULT_FEE_CAP_SOL: &str = "1000000";
 
 #[derive(Debug, PartialEq)]
@@ -240,8 +241,17 @@ fn settlement_interval_slots_arg<'a, 'b>() -> Arg<'a, 'b> {
         .value_name("SLOTS")
         .takes_value(true)
         .default_value(DEFAULT_SETTLEMENT_INTERVAL_SLOTS)
-        .validator(is_parsable::<u64>)
-        .help("L1 slot interval between permissioned settlements [default: 150]")
+        .validator(|value| {
+            let slots = value.parse::<u64>().map_err(|error| error.to_string())?;
+            if !(1..=MAX_CHECKPOINT_CADENCE_L1_SLOTS).contains(&slots) {
+                return Err(format!(
+                    "settlement interval must be between 1 and {MAX_CHECKPOINT_CADENCE_L1_SLOTS} \
+                     L1 slots"
+                ));
+            }
+            Ok(())
+        })
+        .help("L1 slot interval between permissioned settlements [default: 75]")
 }
 
 fn validator_arg<'a, 'b>() -> Arg<'a, 'b> {
@@ -1403,6 +1413,84 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn test_parse_portal_open_session_default_cadence_matches_portal_limit() {
+        let (default_signer, keypair, _tmp) = make_default_signer();
+        let portal = Pubkey::new_unique().to_string();
+        let validator = keypair.pubkey().to_string();
+        let matches = get_clap_app("test", "desc", "version").get_matches_from(vec![
+            "test",
+            "portal",
+            "open-session",
+            "--portal",
+            &portal,
+            "--validator",
+            &validator,
+        ]);
+        let command = parse_command(&matches, &default_signer, &mut None)
+            .unwrap()
+            .command;
+        let CliCommand::Portal(PortalCliCommand::OpenSession {
+            settlement_interval_slots,
+            ..
+        }) = command
+        else {
+            panic!("expected Portal OpenSession command");
+        };
+        assert_eq!(
+            settlement_interval_slots,
+            northstar_portal::MAX_CHECKPOINT_CADENCE_L1_SLOTS
+        );
+    }
+
+    #[test]
+    fn test_parse_portal_open_session_rejects_invalid_cadence() {
+        for interval in [
+            "0".to_string(),
+            (northstar_portal::MAX_CHECKPOINT_CADENCE_L1_SLOTS + 1).to_string(),
+            "150".to_string(),
+            u64::MAX.to_string(),
+            "invalid".to_string(),
+        ] {
+            let error = get_clap_app("test", "desc", "version")
+                .get_matches_from_safe(vec![
+                    "test",
+                    "portal",
+                    "open-session",
+                    "--settlement-interval-slots",
+                    &interval,
+                ])
+                .expect_err("invalid settlement cadence must be rejected before submission");
+            assert_eq!(error.kind, clap::ErrorKind::ValueValidation);
+        }
+    }
+
+    #[test]
+    fn test_parse_portal_open_session_accepts_cadence_boundaries() {
+        let (default_signer, _keypair, _tmp) = make_default_signer();
+        for interval in [1, northstar_portal::MAX_CHECKPOINT_CADENCE_L1_SLOTS] {
+            let value = interval.to_string();
+            let matches = get_clap_app("test", "desc", "version").get_matches_from(vec![
+                "test",
+                "portal",
+                "open-session",
+                "--settlement-interval-slots",
+                &value,
+            ]);
+            let command = parse_command(&matches, &default_signer, &mut None)
+                .unwrap()
+                .command;
+            let CliCommand::Portal(PortalCliCommand::OpenSession {
+                settlement_interval_slots,
+                ..
+            }) = command
+            else {
+                panic!("expected Portal OpenSession command");
+            };
+            assert_eq!(settlement_interval_slots, interval);
+        }
     }
 
     #[test]
