@@ -2,7 +2,7 @@ use {
     super::initialize_pda_account,
     crate::{
         find_fee_vault_pda, find_session_pda, FeeVault, OpenSession, PortalError, Session,
-        SettlementStatus,
+        SettlementStatus, MAX_CHECKPOINT_CADENCE_L1_SLOTS,
     },
     borsh::BorshSerialize,
     pinocchio::{
@@ -60,6 +60,10 @@ pub fn process_open_session(
     if !payer.is_signer() {
         pinocchio_log::log!("ERROR: OpenSession failed: payer is not signer");
         return Err(PortalError::Unauthorized.into());
+    }
+    if settlement_interval_slots == 0 || settlement_interval_slots > MAX_CHECKPOINT_CADENCE_L1_SLOTS
+    {
+        return Err(ProgramError::InvalidInstructionData);
     }
 
     let (expected_session_key, session_bump) = find_session_pda(program_id);

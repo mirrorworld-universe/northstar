@@ -5,6 +5,7 @@
 //! - newly constructed certificates and standstill refreshes are queued for broadcast;
 //! - pending intrawindow `SafeToNotar` blocks are repaired and rechecked;
 
+pub(crate) mod staked_status;
 mod stats;
 
 use {
@@ -14,19 +15,21 @@ use {
             ConsensusPool,
             parent_ready_tracker::{BlockProductionParent, ParentReady},
         },
+        consensus_pool_service::staked_status::StakedStatus,
         event::{LeaderWindowInfo, RepairEvent, RepairEventSender, VotorEvent, VotorEventSender},
         voting_service::BLSOp,
+        votor::ExitOnDrop,
     },
     agave_bls_sigverify::generated_cert_types::GeneratedCertTypes,
     agave_votor_messages::{
         certificate::Certificate,
         consensus_message::{Block, VoteMessage},
         migration::MigrationStatus,
-        own_message::OwnMessage,
         sig_verified_messages::{SigVerifiedBatch, VoteAggregate},
         vote::Vote,
     },
     crossbeam_channel::{Receiver, RecvError, Sender, TrySendError, select_biased},
+    smallvec::SmallVec,
     solana_clock::Slot,
     solana_gossip::cluster_info::ClusterInfo,
     solana_ledger::{blockstore::Blockstore, leader_schedule_cache::LeaderScheduleCache},
@@ -36,6 +39,7 @@ use {
         leader_schedule_utils::last_of_consecutive_leader_slots,
         validated_block_finalization::ValidatedBlockFinalizationCert,
     },
+    solana_validator_exit::Exit,
     stats::ConsensusPoolServiceStats,
     std::{
         collections::HashSet,
@@ -70,15 +74,16 @@ pub(crate) enum PoolMessage {
 /// Maximum number of messages to process from a selected message channel before
 /// returning to channel selection. This keeps a continuously busy channel from
 /// starving the other consensus pool input channel.
-const MAX_MESSAGES_PER_RECEIVE: usize = 128;
+const MAX_MESSAGES_PER_RECEIVE: u64 = 128;
 
 /// Number of additional messages to drain from the selected message channel
 /// after receiving the first message.
-const ADDITIONAL_MESSAGES_PER_RECEIVE: usize = MAX_MESSAGES_PER_RECEIVE - 1;
+const ADDITIONAL_MESSAGES_PER_RECEIVE: u64 = MAX_MESSAGES_PER_RECEIVE - 1;
 
 /// Inputs for the consensus pool and consensus pool service
 pub(crate) struct ConsensusPoolContext {
     pub(crate) exit: Arc<AtomicBool>,
+    pub(crate) validator_exit: Arc<RwLock<Exit>>,
     pub(crate) migration_status: Arc<MigrationStatus>,
     pub(crate) generated_cert_types: Arc<GeneratedCertTypes>,
 
@@ -89,11 +94,13 @@ pub(crate) struct ConsensusPoolContext {
     pub(crate) vote_history_highest_parent_ready: Option<(Slot, Block)>,
 
     pub(crate) consensus_message_receiver: Receiver<SigVerifiedBatch>,
-    pub(crate) own_message_receiver: Receiver<OwnMessage>,
+    pub(crate) footer_certs_receiver: Receiver<SmallVec<[Certificate; 2]>>,
+    pub(crate) own_votes_receiver: Receiver<VoteMessage>,
 
     pub(crate) bls_sender: Sender<BLSOp>,
     pub(crate) event_sender: VotorEventSender,
     pub(crate) repair_event_sender: RepairEventSender,
+    pub(crate) staked_status: StakedStatus,
 
     /// Used to communicate the highest finalization cert the pool has observed to the block creation loop.
     pub(crate) highest_finalized: Arc<RwLock<Option<ValidatedBlockFinalizationCert>>>,
@@ -158,6 +165,8 @@ impl ConsensusPoolService {
         let t_consensus_pool_service = Builder::new()
             .name("solVotorPoolSvc".to_string())
             .spawn(move || {
+                // Dropped before `ctx`, so the channel senders it owns outlive the shutdown.
+                let _exit_on_drop = ExitOnDrop::new(ctx.validator_exit.clone());
                 // Unlike the other votor threads, consensus pool starts even before Alpenglow is enabled
                 // because it must track the genesis vote.
                 let mut consensus_pool = ctx.new_consensus_pool();
@@ -172,7 +181,6 @@ impl ConsensusPoolService {
                 }
                 consensus_pool.do_report();
                 stats.do_report();
-                ctx.exit.store(true, Ordering::Relaxed);
                 info!("consensus pool service exited.");
             })
             .unwrap();
@@ -182,14 +190,13 @@ impl ConsensusPoolService {
         }
     }
 
-    fn maybe_update_root_and_send_new_certificates(
+    fn handle_new_finalized(
         ctx: &ConsensusPoolContext,
         consensus_pool: &mut ConsensusPool,
         new_finalized_slot: Option<Slot>,
-        new_certificates_to_send: Vec<Arc<Certificate>>,
         standstill_timer: &mut Instant,
         stats: &mut ConsensusPoolServiceStats,
-    ) -> Result<(), &'static str> {
+    ) {
         // If we have a new finalized slot, update the root and send new certificates
         if new_finalized_slot.is_some() {
             // Reset standstill timer
@@ -202,58 +209,48 @@ impl ConsensusPoolService {
         let bank = ctx.sharable_banks.root();
         consensus_pool.maybe_prune(bank.slot());
         stats.prune_old_state_called += 1;
-        // Send new certificates to peers
-        Self::send_certificates(
-            ctx,
-            BLSOp::PushCertificates {
-                certificates: new_certificates_to_send,
-            },
-            stats,
-        )
     }
 
-    fn send_certificates(
-        ctx: &ConsensusPoolContext,
-        op: BLSOp,
+    fn send_certs(
+        ctx: &mut ConsensusPoolContext,
+        certificates: Vec<Arc<Certificate>>,
         stats: &mut ConsensusPoolServiceStats,
     ) -> Result<(), &'static str> {
-        let num_certs = Self::num_certificates(&op);
+        let num_certs = certificates.len();
+        let op = BLSOp::PushCertificates { certificates };
+        Self::enqueue_certificates(ctx, op, num_certs, stats)
+    }
+
+    fn refresh_certs(
+        ctx: &mut ConsensusPoolContext,
+        certificates: Vec<Arc<Certificate>>,
+        stats: &mut ConsensusPoolServiceStats,
+    ) -> Result<(), &'static str> {
+        let num_certs = certificates.len();
+        let op = BLSOp::RefreshCertificates { certificates };
+        Self::enqueue_certificates(ctx, op, num_certs, stats)
+    }
+
+    fn enqueue_certificates(
+        ctx: &mut ConsensusPoolContext,
+        op: BLSOp,
+        num_certs: usize,
+        stats: &mut ConsensusPoolServiceStats,
+    ) -> Result<(), &'static str> {
         if num_certs == 0 {
             return Ok(());
         }
         // If we are not a staked identity (hot spare / RPC / new validator / failed VAT)
         // we should not send out the certificate. A2A quic only accepts connections
         // from staked identities
-        if !Self::is_current_identity_staked(ctx) {
+        if !ctx
+            .staked_status
+            .is_staked(&ctx.sharable_banks.root(), &ctx.cluster_info)
+        {
             stats.certificates_skipped_unstaked += num_certs;
             return Ok(());
         }
-        Self::enqueue_certificates(ctx, op, stats)
-    }
-
-    fn is_current_identity_staked(ctx: &ConsensusPoolContext) -> bool {
-        ctx.sharable_banks
-            .root()
-            .current_epoch_staked_nodes()
-            .get(&ctx.cluster_info.id())
-            .is_some_and(|stake| *stake > 0)
-    }
-
-    fn num_certificates(op: &BLSOp) -> usize {
-        match op {
-            BLSOp::PushCertificates { certificates }
-            | BLSOp::RefreshCertificates { certificates } => certificates.len(),
-            _ => unreachable!("expected a certificate BLSOp"),
-        }
-    }
-
-    fn enqueue_certificates(
-        ctx: &ConsensusPoolContext,
-        op: BLSOp,
-        stats: &mut ConsensusPoolServiceStats,
-    ) -> Result<(), &'static str> {
         let channel_name = "bls_sender";
-        let num_certs = Self::num_certificates(&op);
         match ctx.bls_sender.try_send(op) {
             Ok(()) => {
                 stats.certificates_sent += num_certs;
@@ -326,13 +323,7 @@ impl ConsensusPoolService {
                 }
                 stats.standstill = true;
                 standstill_timer = Instant::now();
-                Self::send_certificates(
-                    ctx,
-                    BLSOp::RefreshCertificates {
-                        certificates: consensus_pool.get_certs_for_standstill(),
-                    },
-                    stats,
-                )?;
+                Self::refresh_certs(ctx, consensus_pool.get_certs_for_standstill(), stats)?;
             }
 
             // Process pending safe-to-notar blocks for intrawindow slots
@@ -554,37 +545,30 @@ impl ConsensusPoolService {
         self.t_consensus_pool_service.join()
     }
 
-    fn receive_own_msgs(
+    fn receive_own_votes(
         ctx: &mut ConsensusPoolContext,
         consensus_pool: &mut ConsensusPool,
         events: &mut Vec<VotorEvent>,
         standstill_timer: &mut Instant,
         stats: &mut ConsensusPoolServiceStats,
-        msg: Result<OwnMessage, RecvError>,
+        msg: Result<VoteMessage, RecvError>,
     ) -> Result<(), &'static str> {
         let Ok(first) = msg else {
-            return Err("own_message_receiver");
+            return Err("own_vote_receiver");
         };
 
-        let mut received_messages: usize = 0;
+        let mut own_votes_received = 0u64;
+        let mut finalized_slot = None;
+        let mut certs_to_send = vec![];
         for msg in std::iter::once(first).chain(
-            ctx.own_message_receiver
+            ctx.own_votes_receiver
                 .try_iter()
-                .take(ADDITIONAL_MESSAGES_PER_RECEIVE),
+                .take(ADDITIONAL_MESSAGES_PER_RECEIVE as usize),
         ) {
-            received_messages = received_messages.saturating_add(1);
-            let pool_msg = match msg {
-                OwnMessage::Vote(vote_msg) => {
-                    stats.received_vote_aggregates += 1;
-                    PoolMessage::Votes(vec![PoolVote::Own(vote_msg)])
-                }
-                OwnMessage::Certificate(cert) => {
-                    stats.received_certificates += 1;
-                    PoolMessage::Certificates(vec![cert])
-                }
-            };
+            own_votes_received = own_votes_received.saturating_add(1);
+            let pool_msg = PoolMessage::Votes(vec![PoolVote::Own(msg)]);
             let root_bank = ctx.sharable_banks.root();
-            let (new_finalized_slot, new_certificates_to_send) = Self::add_pool_msg(
+            let (new_finalized_slot, mut new_certs_to_send) = Self::add_pool_msg(
                 &root_bank,
                 &ctx.cluster_info.id(),
                 pool_msg,
@@ -592,17 +576,60 @@ impl ConsensusPoolService {
                 events,
                 stats,
             );
-            Self::maybe_update_root_and_send_new_certificates(
-                ctx,
-                consensus_pool,
-                new_finalized_slot,
-                new_certificates_to_send,
-                standstill_timer,
-                stats,
-            )?;
+            certs_to_send.append(&mut new_certs_to_send);
+            if new_finalized_slot.is_some() {
+                finalized_slot = new_finalized_slot;
+            }
         }
-        stats.received_own_messages += received_messages;
-        if received_messages == MAX_MESSAGES_PER_RECEIVE {
+        Self::handle_new_finalized(ctx, consensus_pool, finalized_slot, standstill_timer, stats);
+        Self::send_certs(ctx, certs_to_send, stats)?;
+        stats.own_votes_received += own_votes_received;
+        if own_votes_received >= MAX_MESSAGES_PER_RECEIVE {
+            stats.own_message_receive_limit_reached += 1;
+        }
+        Ok(())
+    }
+
+    fn receive_footer_certs(
+        ctx: &mut ConsensusPoolContext,
+        consensus_pool: &mut ConsensusPool,
+        events: &mut Vec<VotorEvent>,
+        standstill_timer: &mut Instant,
+        stats: &mut ConsensusPoolServiceStats,
+        msg: Result<SmallVec<[Certificate; 2]>, RecvError>,
+    ) -> Result<(), &'static str> {
+        let Ok(first) = msg else {
+            return Err("footer_certs_receiver");
+        };
+
+        let mut footer_certs_received = 0u64;
+        let mut finalized_slot = None;
+        let mut certs_to_send = vec![];
+        for certs in std::iter::once(first).chain(
+            ctx.footer_certs_receiver
+                .try_iter()
+                .take(ADDITIONAL_MESSAGES_PER_RECEIVE as usize),
+        ) {
+            footer_certs_received = footer_certs_received.saturating_add(1);
+            let pool_msg = PoolMessage::Certificates(certs.to_vec());
+            let root_bank = ctx.sharable_banks.root();
+            let (new_finalized_slot, mut new_certs_to_send) = Self::add_pool_msg(
+                &root_bank,
+                &ctx.cluster_info.id(),
+                pool_msg,
+                consensus_pool,
+                events,
+                stats,
+            );
+            certs_to_send.append(&mut new_certs_to_send);
+            if new_finalized_slot.is_some() {
+                finalized_slot = new_finalized_slot;
+            }
+        }
+        Self::handle_new_finalized(ctx, consensus_pool, finalized_slot, standstill_timer, stats);
+        Self::send_certs(ctx, certs_to_send, stats)?;
+        stats.footer_certs_received += footer_certs_received;
+        if footer_certs_received >= MAX_MESSAGES_PER_RECEIVE {
             stats.own_message_receive_limit_reached += 1;
         }
         Ok(())
@@ -620,25 +647,24 @@ impl ConsensusPoolService {
             return Err("consensus_message_receiver");
         };
 
-        let mut received_batches: usize = 0;
-        for batch in std::iter::once(first).chain(
-            ctx.consensus_message_receiver
-                .try_iter()
-                .take(ADDITIONAL_MESSAGES_PER_RECEIVE),
-        ) {
-            received_batches = received_batches.saturating_add(1);
+        let mut msgs_received = 0u64;
+        let mut finalized_slot = None;
+        let mut certs_to_send = vec![];
+        for batch in std::iter::once(first).chain(ctx.consensus_message_receiver.try_iter()) {
             let msg = match batch {
                 SigVerifiedBatch::Votes(votes) => {
-                    stats.received_vote_aggregates += votes.len();
+                    stats.vote_aggregates_received += votes.len() as u64;
+                    msgs_received = msgs_received.saturating_add(votes.len() as u64);
                     PoolMessage::Votes(votes.into_iter().map(PoolVote::External).collect())
                 }
                 SigVerifiedBatch::Certificates(certs) => {
-                    stats.received_certificates += certs.len();
+                    stats.certs_received += certs.len() as u64;
+                    msgs_received = msgs_received.saturating_add(certs.len() as u64);
                     PoolMessage::Certificates(certs)
                 }
             };
             let root_bank = ctx.sharable_banks.root();
-            let (new_finalized_slot, new_certificates_to_send) = Self::add_pool_msg(
+            let (new_finalized_slot, mut new_certs_to_send) = Self::add_pool_msg(
                 &root_bank,
                 &ctx.cluster_info.id(),
                 msg,
@@ -646,19 +672,17 @@ impl ConsensusPoolService {
                 events,
                 stats,
             );
-            Self::maybe_update_root_and_send_new_certificates(
-                ctx,
-                consensus_pool,
-                new_finalized_slot,
-                new_certificates_to_send,
-                standstill_timer,
-                stats,
-            )?;
+            certs_to_send.append(&mut new_certs_to_send);
+            if new_finalized_slot.is_some() {
+                finalized_slot = new_finalized_slot;
+            }
+            if msgs_received >= MAX_MESSAGES_PER_RECEIVE {
+                stats.consensus_message_batch_receive_limit_reached += 1;
+                break;
+            }
         }
-        stats.received_consensus_message_batches += received_batches;
-        if received_batches == MAX_MESSAGES_PER_RECEIVE {
-            stats.consensus_message_batch_receive_limit_reached += 1;
-        }
+        Self::handle_new_finalized(ctx, consensus_pool, finalized_slot, standstill_timer, stats);
+        Self::send_certs(ctx, certs_to_send, stats)?;
         Ok(())
     }
 
@@ -671,11 +695,14 @@ impl ConsensusPoolService {
         wait_timeout: Duration,
     ) -> Result<(), &'static str> {
         select_biased! {
-            recv(ctx.own_message_receiver) -> msg => {
-                Self::receive_own_msgs(ctx, consensus_pool, events, standstill_timer, stats,  msg)
+            recv(ctx.own_votes_receiver) -> msg => {
+                Self::receive_own_votes(ctx, consensus_pool, events, standstill_timer, stats, msg)
             }
             recv(ctx.consensus_message_receiver) -> msg => {
                 Self::receive_consensus_msgs(ctx, consensus_pool, events, standstill_timer, stats, msg)
+            }
+            recv(ctx.footer_certs_receiver) -> msg => {
+                Self::receive_footer_certs(ctx, consensus_pool, events, standstill_timer, stats,  msg)
             }
             default(wait_timeout) => Ok(()),
         }
@@ -704,6 +731,7 @@ mod tests {
             wire::get_vote_payload_to_sign,
         },
         crossbeam_channel::{bounded, unbounded},
+        smallvec::smallvec,
         solana_bls_signatures::{
             BLS_SIGNATURE_AFFINE_SIZE, keypair::Keypair as BLSKeypair,
             signature::Signature as BLSSignature,
@@ -720,15 +748,16 @@ mod tests {
         std::sync::Arc,
     };
 
-    struct TestContext {
-        consensus_pool: ConsensusPool,
-        ctx: ConsensusPoolContext,
-        bls_receiver: Receiver<BLSOp>,
-        consensus_message_sender: Sender<SigVerifiedBatch>,
-        own_message_sender: Sender<OwnMessage>,
-        event_receiver: Receiver<VotorEvent>,
-        _repair_event_receiver: Receiver<RepairEvent>,
-        validator_keypairs: Vec<ValidatorVoteKeypairs>,
+    pub struct TestContext {
+        pub consensus_pool: ConsensusPool,
+        pub ctx: ConsensusPoolContext,
+        pub bls_receiver: Receiver<BLSOp>,
+        pub consensus_message_sender: Sender<SigVerifiedBatch>,
+        pub own_votes_sender: Sender<VoteMessage>,
+        pub footer_certs_sender: Sender<SmallVec<[Certificate; 2]>>,
+        pub event_receiver: Receiver<VotorEvent>,
+        pub _repair_event_receiver: Receiver<RepairEvent>,
+        pub validator_keypairs: Vec<ValidatorVoteKeypairs>,
     }
 
     impl Default for TestContext {
@@ -762,25 +791,30 @@ mod tests {
             let generated_cert_types = Arc::new(GeneratedCertTypes::default());
             let migration_status = Arc::new(MigrationStatus::post_migration_status());
             let (consensus_message_sender, consensus_message_receiver) = unbounded();
-            let (own_message_sender, own_message_receiver) = unbounded();
+            let (own_votes_sender, own_votes_receiver) = unbounded();
+            let (footer_certs_sender, footer_certs_receiver) = unbounded();
             let (event_sender, event_receiver) = unbounded();
             let (repair_event_sender, repair_event_receiver) = unbounded();
 
+            let root_bank = sharable_banks.root();
             let ctx = ConsensusPoolContext {
                 exit: Arc::new(AtomicBool::new(false)),
+                validator_exit: Arc::default(),
                 migration_status,
                 generated_cert_types,
-                cluster_info,
+                cluster_info: cluster_info.clone(),
                 blockstore,
                 sharable_banks,
                 leader_schedule_cache,
                 vote_history_highest_parent_ready: None,
                 consensus_message_receiver,
-                own_message_receiver,
+                own_votes_receiver,
+                footer_certs_receiver,
                 bls_sender,
                 event_sender,
                 repair_event_sender,
                 highest_finalized: Arc::new(RwLock::new(None)),
+                staked_status: StakedStatus::new(&root_bank, &cluster_info),
             };
             let consensus_pool = ctx.new_consensus_pool();
 
@@ -789,7 +823,8 @@ mod tests {
                 ctx,
                 bls_receiver,
                 consensus_message_sender,
-                own_message_sender,
+                own_votes_sender,
+                footer_certs_sender,
                 event_receiver,
                 _repair_event_receiver: repair_event_receiver,
                 validator_keypairs,
@@ -856,12 +891,16 @@ mod tests {
 
             // Send certificates if any were produced
             if !new_certificates_to_send.is_empty() || new_finalized_slot.is_some() {
-                ConsensusPoolService::maybe_update_root_and_send_new_certificates(
+                ConsensusPoolService::handle_new_finalized(
                     &ctx.ctx,
                     &mut ctx.consensus_pool,
                     new_finalized_slot,
-                    new_certificates_to_send,
                     &mut standstill_timer,
+                    &mut stats,
+                );
+                ConsensusPoolService::send_certs(
+                    &mut ctx.ctx,
+                    new_certificates_to_send,
                     &mut stats,
                 )
                 .unwrap();
@@ -915,15 +954,15 @@ mod tests {
 
         let mut standstill_timer = Instant::now();
 
-        ConsensusPoolService::maybe_update_root_and_send_new_certificates(
+        ConsensusPoolService::handle_new_finalized(
             &ctx.ctx,
             &mut ctx.consensus_pool,
             new_finalized_slot,
-            new_certificates_to_send,
             &mut standstill_timer,
             &mut stats,
-        )
-        .unwrap();
+        );
+        ConsensusPoolService::send_certs(&mut ctx.ctx, new_certificates_to_send, &mut stats)
+            .unwrap();
 
         // Verify skip certificate was forwarded
         let mut found_skip = false;
@@ -940,50 +979,141 @@ mod tests {
     }
 
     #[test]
-    fn test_receive_msgs_limits_consensus_batches_per_call() {
+    fn test_receive_own_votes_limits_messages_per_call() {
         let mut ctx = TestContext::default();
+        let vote = Vote::new_unique_notar(1);
+        let root_bank = ctx.ctx.sharable_banks.root();
+        let rank_map = root_bank.get_rank_map(vote.slot()).unwrap();
+        let stake = rank_map.get_pubkey_stake_entry(0).unwrap().stake;
+        let bls_keypair = BLSKeypair::derive_from_signer(
+            &ctx.validator_keypairs[0].vote_keypair,
+            BLS_KEYPAIR_DERIVE_SEED,
+        )
+        .unwrap();
+        let vote_message = VoteMessage {
+            vote,
+            signature: bls_keypair
+                .sign(&get_vote_payload_to_sign(
+                    vote,
+                    ctx.ctx.cluster_info.my_shred_version(),
+                ))
+                .into(),
+            rank: 0,
+            stake,
+        };
 
         for _ in 0..MAX_MESSAGES_PER_RECEIVE + 1 {
+            ctx.own_votes_sender.send(vote_message.clone()).unwrap();
+        }
+
+        let mut events = vec![];
+        let mut standstill_timer = Instant::now();
+        let mut stats = ConsensusPoolServiceStats::new();
+        let msg = ctx.ctx.own_votes_receiver.recv();
+
+        ConsensusPoolService::receive_own_votes(
+            &mut ctx.ctx,
+            &mut ctx.consensus_pool,
+            &mut events,
+            &mut standstill_timer,
+            &mut stats,
+            msg,
+        )
+        .unwrap();
+
+        assert_eq!(ctx.ctx.own_votes_receiver.len(), 1);
+        assert_eq!(stats.own_votes_received.0, MAX_MESSAGES_PER_RECEIVE);
+        assert_eq!(stats.own_message_receive_limit_reached.0, 1);
+    }
+
+    #[test]
+    fn test_receive_consensus_msgs_limits_messages_per_call() {
+        let mut ctx = TestContext::default();
+
+        for slot in 0..MAX_MESSAGES_PER_RECEIVE + 1 {
             ctx.consensus_message_sender
-                .send(SigVerifiedBatch::Votes(vec![]))
+                .send(SigVerifiedBatch::Certificates(vec![Certificate {
+                    cert_type: CertificateType::Skip(slot),
+                    signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
+                    bitmap: vec![],
+                }]))
                 .unwrap();
         }
 
         let mut events = vec![];
         let mut standstill_timer = Instant::now();
         let mut stats = ConsensusPoolServiceStats::new();
+        let msg = ctx.ctx.consensus_message_receiver.recv();
 
-        ConsensusPoolService::receive_msgs(
+        ConsensusPoolService::receive_consensus_msgs(
             &mut ctx.ctx,
             &mut ctx.consensus_pool,
             &mut events,
             &mut standstill_timer,
             &mut stats,
-            Duration::ZERO,
+            msg,
         )
         .unwrap();
 
         assert_eq!(ctx.ctx.consensus_message_receiver.len(), 1);
-        assert_eq!(stats.received_own_messages.0, 0);
-        assert_eq!(
-            stats.received_consensus_message_batches.0,
-            MAX_MESSAGES_PER_RECEIVE
-        );
-        assert_eq!(stats.own_message_receive_limit_reached.0, 0);
+        assert_eq!(stats.certs_received.0, MAX_MESSAGES_PER_RECEIVE);
         assert_eq!(stats.consensus_message_batch_receive_limit_reached.0, 1);
     }
 
     #[test]
-    fn test_receive_msgs_limits_own_messages_per_call() {
+    fn test_receive_consensus_msgs_stops_after_crossing_message_limit() {
+        for batch_sizes in [
+            vec![MAX_MESSAGES_PER_RECEIVE + 1, 1],
+            vec![MAX_MESSAGES_PER_RECEIVE - 28, 29, 1],
+        ] {
+            let mut ctx = TestContext::default();
+            let mut slot = 0;
+            for batch_size in batch_sizes {
+                let certs = (slot..slot + batch_size)
+                    .map(|slot| Certificate {
+                        cert_type: CertificateType::Skip(slot),
+                        signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
+                        bitmap: vec![],
+                    })
+                    .collect();
+                ctx.consensus_message_sender
+                    .send(SigVerifiedBatch::Certificates(certs))
+                    .unwrap();
+                slot += batch_size;
+            }
+
+            let mut events = vec![];
+            let mut standstill_timer = Instant::now();
+            let mut stats = ConsensusPoolServiceStats::new();
+            let msg = ctx.ctx.consensus_message_receiver.recv();
+
+            ConsensusPoolService::receive_consensus_msgs(
+                &mut ctx.ctx,
+                &mut ctx.consensus_pool,
+                &mut events,
+                &mut standstill_timer,
+                &mut stats,
+                msg,
+            )
+            .unwrap();
+
+            assert_eq!(ctx.ctx.consensus_message_receiver.len(), 1);
+            assert_eq!(stats.certs_received.0, MAX_MESSAGES_PER_RECEIVE + 1);
+            assert_eq!(stats.consensus_message_batch_receive_limit_reached.0, 1);
+        }
+    }
+
+    #[test]
+    fn test_receive_footer_certs_limits_messages_per_call() {
         let mut ctx = TestContext::default();
 
         for slot in 0..MAX_MESSAGES_PER_RECEIVE + 1 {
-            ctx.own_message_sender
-                .send(OwnMessage::Certificate(Certificate {
-                    cert_type: CertificateType::Skip(slot.try_into().unwrap()),
+            ctx.footer_certs_sender
+                .send(smallvec![Certificate {
+                    cert_type: CertificateType::Skip(slot),
                     signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
                     bitmap: vec![],
-                }))
+                }])
                 .unwrap();
         }
 
@@ -991,21 +1121,21 @@ mod tests {
         let mut standstill_timer = Instant::now();
         let mut stats = ConsensusPoolServiceStats::new();
 
-        ConsensusPoolService::receive_msgs(
+        let msg = ctx.ctx.footer_certs_receiver.recv();
+
+        ConsensusPoolService::receive_footer_certs(
             &mut ctx.ctx,
             &mut ctx.consensus_pool,
             &mut events,
             &mut standstill_timer,
             &mut stats,
-            Duration::ZERO,
+            msg,
         )
         .unwrap();
 
-        assert_eq!(ctx.ctx.own_message_receiver.len(), 1);
-        assert_eq!(stats.received_own_messages.0, MAX_MESSAGES_PER_RECEIVE);
-        assert_eq!(stats.received_consensus_message_batches.0, 0);
+        assert_eq!(ctx.ctx.footer_certs_receiver.len(), 1);
+        assert_eq!(stats.footer_certs_received.0, MAX_MESSAGES_PER_RECEIVE);
         assert_eq!(stats.own_message_receive_limit_reached.0, 1);
-        assert_eq!(stats.consensus_message_batch_receive_limit_reached.0, 0);
     }
 
     #[test]
@@ -1053,10 +1183,7 @@ mod tests {
         // Add a ParentReady event for the slot before our leader slot
         events.push(VotorEvent::ParentReady {
             slot: next_leader_slot.0,
-            parent_block: Block {
-                slot: next_leader_slot.0 - 1,
-                block_id: Hash::new_unique(),
-            },
+            parent_block: Block::new_unique(next_leader_slot.0 - 1),
         });
 
         ConsensusPoolService::add_produce_block_event(
@@ -1094,10 +1221,7 @@ mod tests {
             .0;
         let restored_parent_ready = (
             next_leader_slot,
-            Block {
-                slot: next_leader_slot.checked_sub(1).unwrap(),
-                block_id: Hash::new_unique(),
-            },
+            Block::new_unique(next_leader_slot.checked_sub(1).unwrap()),
         );
         ctx.ctx.vote_history_highest_parent_ready = Some(restored_parent_ready);
         let mut consensus_pool = ctx.ctx.new_consensus_pool();
@@ -1143,38 +1267,20 @@ mod tests {
 
     #[test]
     fn test_kick_off_parent_ready_uses_restored_vote_history() {
-        let genesis_block = Some(Block {
-            slot: 10,
-            block_id: Hash::new_unique(),
-        });
-        let root_block = Block {
-            slot: 12,
-            block_id: Hash::new_unique(),
-        };
+        let genesis_block = Some(Block::new_unique(10));
+        let root_block = Block::new_unique(12);
         assert_eq!(
             ConsensusPoolContext::_initial_parent_ready(genesis_block, root_block, None),
             (13, root_block)
         );
 
-        let restored = (
-            16,
-            Block {
-                slot: 15,
-                block_id: Hash::new_unique(),
-            },
-        );
+        let restored = (16, Block::new_unique(15));
         assert_eq!(
             ConsensusPoolContext::_initial_parent_ready(genesis_block, root_block, Some(restored)),
             restored
         );
 
-        let stale = (
-            12,
-            Block {
-                slot: 11,
-                block_id: Hash::new_unique(),
-            },
-        );
+        let stale = (12, Block::new_unique(11));
         assert_eq!(
             ConsensusPoolContext::_initial_parent_ready(genesis_block, root_block, Some(stale)),
             (13, root_block)
@@ -1183,7 +1289,7 @@ mod tests {
 
     #[test]
     fn test_send_certificates() {
-        let ctx = TestContext::default();
+        let mut ctx = TestContext::default();
 
         let certificates = vec![
             Arc::new(Certificate {
@@ -1199,14 +1305,7 @@ mod tests {
         ];
 
         let mut stats = ConsensusPoolServiceStats::new();
-        let result = ConsensusPoolService::send_certificates(
-            &ctx.ctx,
-            BLSOp::PushCertificates {
-                certificates: certificates.clone(),
-            },
-            &mut stats,
-        );
-        assert!(result.is_ok());
+        ConsensusPoolService::send_certs(&mut ctx.ctx, certificates.clone(), &mut stats).unwrap();
         assert_eq!(stats.certificates_sent.0, 2);
 
         // Verify certificates were received
@@ -1227,7 +1326,7 @@ mod tests {
 
     #[test]
     fn test_send_certificates_refresh() {
-        let ctx = TestContext::default();
+        let mut ctx = TestContext::default();
 
         let certificates = vec![Arc::new(Certificate {
             cert_type: CertificateType::Skip(1),
@@ -1236,14 +1335,8 @@ mod tests {
         })];
 
         let mut stats = ConsensusPoolServiceStats::new();
-        ConsensusPoolService::send_certificates(
-            &ctx.ctx,
-            BLSOp::RefreshCertificates {
-                certificates: certificates.clone(),
-            },
-            &mut stats,
-        )
-        .unwrap();
+        ConsensusPoolService::refresh_certs(&mut ctx.ctx, certificates.clone(), &mut stats)
+            .unwrap();
         assert_eq!(stats.certificates_sent.0, 1);
 
         let BLSOp::RefreshCertificates { certificates } = ctx.bls_receiver.try_recv().unwrap()
@@ -1276,12 +1369,7 @@ mod tests {
         let cluster_info = get_cluster_info(unstaked_identity);
         ctx.ctx.cluster_info = cluster_info;
         let mut stats = ConsensusPoolServiceStats::new();
-        ConsensusPoolService::send_certificates(
-            &ctx.ctx,
-            BLSOp::PushCertificates { certificates },
-            &mut stats,
-        )
-        .unwrap();
+        ConsensusPoolService::send_certs(&mut ctx.ctx, certificates, &mut stats).unwrap();
         assert_eq!(stats.certificates_sent.0, 0);
         assert_eq!(stats.certificates_skipped_unstaked.0, 2);
         assert!(ctx.bls_receiver.try_recv().is_err());
@@ -1289,7 +1377,7 @@ mod tests {
 
     #[test]
     fn test_send_certificates_channel_disconnected() {
-        let ctx = TestContext::default();
+        let mut ctx = TestContext::default();
         drop(ctx.bls_receiver); // Disconnect channel
 
         let certificates = vec![Arc::new(Certificate {
@@ -1299,11 +1387,7 @@ mod tests {
         })];
 
         let mut stats = ConsensusPoolServiceStats::new();
-        let result = ConsensusPoolService::send_certificates(
-            &ctx.ctx,
-            BLSOp::PushCertificates { certificates },
-            &mut stats,
-        );
+        let result = ConsensusPoolService::send_certs(&mut ctx.ctx, certificates, &mut stats);
         result.unwrap_err();
     }
 
@@ -1321,16 +1405,15 @@ mod tests {
         let mut standstill_timer = Instant::now();
 
         // Test with new_finalized_slot = Some
-        let result = ConsensusPoolService::maybe_update_root_and_send_new_certificates(
+        ConsensusPoolService::handle_new_finalized(
             &ctx.ctx,
             &mut ctx.consensus_pool,
             Some(5), // new finalized slot
-            certificates,
             &mut standstill_timer,
             &mut stats,
         );
+        ConsensusPoolService::send_certs(&mut ctx.ctx, certificates, &mut stats).unwrap();
 
-        assert!(result.is_ok());
         assert_eq!(stats.new_finalized_slot.0, 1);
         assert_eq!(stats.prune_old_state_called.0, 1);
         assert_eq!(stats.certificates_sent.0, 1);

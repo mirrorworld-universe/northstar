@@ -574,6 +574,23 @@ impl NorthStarService {
         // Sonic: Initialize NorthStar manager with always-on ephemeral RPC
         let portal_program_id = cfg.portal_program_id;
         let mut manager = northstar::Manager::new(cfg);
+        // Sonic: Configuration failures must not silently disable requested proof recovery.
+        #[cfg(feature = "proof-coordinator")]
+        manager
+            .configure_proof_coordinator()
+            .expect("invalid proof coordinator configuration");
+        #[cfg(not(feature = "proof-coordinator"))]
+        assert!(
+            [
+                "NORTHSTAR_PROOF_JOB_DIR",
+                "NORTHSTAR_PROOF_PROVER",
+                "NORTHSTAR_PROOF_CHALLENGER_KEYPAIR",
+                "NORTHSTAR_PROOF_CHALLENGE_WINDOW_SLOTS"
+            ]
+            .iter()
+            .all(|name| std::env::var_os(name).is_none()),
+            "proof coordinator configuration requires the proof-coordinator build feature",
+        );
         manager.set_slot_duration(config.slot_duration);
         manager.set_er_history_max_retained_slots(config.er_history_max_retained_slots);
         {
@@ -728,14 +745,14 @@ impl NorthStarService {
                                     bridge_program,
                                     session_bridge,
                                     er_token_account,
-                                    delta,
+                                    amount,
                                     ..
                                 } => {
                                     manager.credit_token_deposit(
                                         &bridge_program,
                                         &session_bridge,
                                         &er_token_account,
-                                        delta,
+                                        amount,
                                     );
                                 }
                                 other => {
@@ -781,6 +798,26 @@ impl NorthStarService {
                         );
                     }
 
+                    // Sonic: Proof work runs off-thread; only bounded signed output enters banking.
+                    #[cfg(feature = "proof-coordinator")]
+                    {
+                        manager.update_proof_banks(
+                            latest_bank.clone(),
+                            bank_forks.read().unwrap().root_bank(),
+                        );
+                        if let (Some(sender), Some(transaction)) =
+                            (settlement_sender.as_ref(), manager.take_proof_transaction())
+                            && let Err(error) = submit_settlement_transactions(
+                                sender,
+                                settlement_forward_sender.as_ref(),
+                                &[transaction],
+                            )
+                        {
+                            warn!(
+                                "Proof submission enqueue failed; coordinator will retry: {error}"
+                            );
+                        }
+                    }
                     manager.mark_synced_through(latest_bank.slot());
                 }
 

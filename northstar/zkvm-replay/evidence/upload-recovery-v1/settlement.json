@@ -1,0 +1,10 @@
+{
+  "bond_released": true,
+  "changed_accounts": 16,
+  "genesis_delegation_fixtures": true,
+  "phase": "proof_to_settlement",
+  "schema_version": 1,
+  "settled": true,
+  "slot_warps": false,
+  "wall_ms": 173915
+}

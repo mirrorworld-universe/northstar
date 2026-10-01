@@ -1,0 +1,143 @@
+[
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "open_session",
+    "schema_version": 1,
+    "signature": "5c6PmUwEudA6PvivBUExE39jD1TDe48maWW5yPzojbHY9m9u91z2xdxP4aCrimf4KAe45zZxncFZNYdoLv5wDSJk",
+    "step": null,
+    "transaction_ms": 559.702426
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "propose_checkpoint",
+    "schema_version": 1,
+    "signature": "24wbjMEikzDovZJC7QZVHHGxPBoaKNB8khwKScAm3PkX57V3Ws9CKZigY1trh9c8B3eoSWy76op8Ymt15qdtcy5N",
+    "step": null,
+    "transaction_ms": 517.941109
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "open_challenge",
+    "schema_version": 1,
+    "signature": "2yFyvT7LoLYFeSQDDXCNMXpdKvdAK6oXazPH9jWoSGKZfE16MXKiUdfvFoEVXwyEzuqL765fFtsiXsKYKdJFe4nb",
+    "step": null,
+    "transaction_ms": 526.859406
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "respond_or_reveal",
+    "schema_version": 1,
+    "signature": "zZYJPHiFXQwrKRXhHCKMi7oaaTin1v7m7Q5SUpouxKRWRx6w1CrguQaEWrKhgfLMb1WSEzhzmD6ZDUMboGkukwE",
+    "step": 1,
+    "transaction_ms": 515.79803
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "select_half",
+    "schema_version": 1,
+    "signature": "gHqs71rN2NH6Pm5CEsnfiebxdWx9eKhcWJKWSobgUr7FCzfu5PuEVugj4Jgxu1XoCKt24qzLbAnVZh7LdySWJv7",
+    "step": null,
+    "transaction_ms": 524.465035
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "respond_or_reveal",
+    "schema_version": 1,
+    "signature": "5uzNi11xLqYeGV94dRARHQYTurbYEptsxYXZ4ZBo9YHk7PrSbXcCyWqqckUY1d7avGK6sZvBJrvv5BN3DsT3P4FS",
+    "step": 2,
+    "transaction_ms": 517.049082
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "select_half",
+    "schema_version": 1,
+    "signature": "24Q6ojQWEcYKNiaCFa9VHQnCkXnc6nLWnTCrZfXtfYx6W1EYU4LGeQKFeViRqibKmE9GqZu8QEY6VfJns1VxtsKA",
+    "step": null,
+    "transaction_ms": 525.045737
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "respond_or_reveal",
+    "schema_version": 1,
+    "signature": "5yyMGkZCeavsfn66UJ8eoAEAkgcL9RiduJEofdK7XBRcj2EnuiN1FuvnxoGkiKNp4h5wsGYcQ4C5rA7ECA3oponn",
+    "step": 2,
+    "transaction_ms": 515.514266
+  },
+  {
+    "clock": "wall",
+    "elapsed_ms": 94.141026,
+    "phase": "witness_extraction",
+    "proving_ms": null,
+    "recovery_ms": null,
+    "resolved": false,
+    "schema_version": 1,
+    "step": 2,
+    "verification_ms": null
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "other",
+    "schema_version": 1,
+    "signature": "PPVhDvn3yG3GvwC65rv5Yse1WhYV9BtM5qTuh5Xjtx33osJ4x4tuA36rL6iA4itVYMyYzeZhwH9fgrazSQ2o9oU",
+    "step": null,
+    "transaction_ms": 529.324692
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "other",
+    "schema_version": 1,
+    "signature": "66oVTbqCZTZt8otBZnPbwRYuV7tvicczb4bDsiH9NPDLfwrKHBy2vcMjJBmeDXmgZWZFpZVQJNnCM5a5MgAt9vyN",
+    "step": null,
+    "transaction_ms": 524.824771
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "other",
+    "schema_version": 1,
+    "signature": "57q22kTLEULXJrzQ6bFghTDgEjMvasdP5xxLbhREctboW3YweYDuS5q1LxGGhBvkojo5hiRoNJCenKJ6N6o1EJzw",
+    "step": null,
+    "transaction_ms": 525.972028
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "other",
+    "schema_version": 1,
+    "signature": "5enYc716T7u2iQzXgPHP7MpD5YpokZQdTPCRa9Ubh7asg5cUXoG9iCKRwFP55f33hb8pzdhTriLa7wXtZe8132Xg",
+    "step": null,
+    "transaction_ms": 525.915011
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "other",
+    "schema_version": 1,
+    "signature": "55AaVW2BaeqC1e2npvmFVdZ42sNfC6gzrcaHjN41kWABXKLcWY7Tm9hzxquMEja1odJkfQbMYk8ZzN8KcD5SUqVo",
+    "step": null,
+    "transaction_ms": 524.165352
+  },
+  {
+    "challenge_to_outcome_ms": 120147.066089,
+    "clock": "wall",
+    "phase": "proof_resolution",
+    "proving_ms": 113506.445524,
+    "resolution_ms": 568.7794309999999,
+    "resolved": true,
+    "resolver_cu": 127976,
+    "schema_version": 1,
+    "slot_warps": false,
+    "step": 2,
+    "upload_ms": 2630.536614
+  }
+]

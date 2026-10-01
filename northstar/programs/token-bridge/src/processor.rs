@@ -1,3 +1,5 @@
+mod token_deposit;
+
 use {
     crate::{
         instruction::TokenBridgeInstruction,
@@ -122,6 +124,9 @@ pub fn process_instruction(
         ),
         TokenBridgeInstruction::RequestUndelegation => {
             process_request_undelegation(program_id, accounts)
+        }
+        TokenBridgeInstruction::ApplyTokenDeposit { balance } => {
+            token_deposit::apply(program_id, accounts, balance)
         }
     }
 }
@@ -290,6 +295,19 @@ fn process_deposit(
             delegation_record,
             portal_program,
         )?;
+        let request = next_account_info(account_info_iter)?;
+        let expected = Pubkey::find_program_address(
+            &[b"undelegation_request", er_token_account.address().as_ref()],
+            portal_program.address(),
+        )
+        .0;
+        if request.address() != &expected {
+            return Err(ProgramError::InvalidSeeds);
+        }
+        // Freeze L1 deposits too: approval must not race a later receipt increment.
+        if !request.owned_by(&pinocchio_system::ID) || !request.is_data_empty() {
+            return Err(ProgramError::InvalidAccountData);
+        }
     }
 
     let (expected_receipt, receipt_bump) = find_token_deposit_receipt_pda(
@@ -707,6 +725,17 @@ fn process_delegate_er_token_account(
         return Err(ProgramError::InvalidSeeds);
     }
 
+    let receipt = next_account_info(account_info_iter)?;
+    let origin = next_account_info(account_info_iter)?;
+    token_deposit::initialize_origin(
+        program_id,
+        payer,
+        session_bridge,
+        er_token_account,
+        receipt,
+        origin,
+        system_program_info,
+    )?;
     create_buffer(
         program_id,
         payer,

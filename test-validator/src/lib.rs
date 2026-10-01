@@ -33,7 +33,7 @@ use {
         GeyserPluginManagerRequest, geyser_plugin_manager::GeyserPluginManager,
     },
     solana_gossip::{
-        cluster_info::{ClusterInfo, NodeConfig},
+        cluster_info::{ClusterInfo, DEFAULT_NUM_VOTOR_QUIC_ENDPOINTS, NodeConfig},
         contact_info::Protocol,
         node::Node,
     },
@@ -1096,11 +1096,14 @@ impl TestValidator {
 
         // Northstar: Load Portal and its SPL token bridge into genesis when configured.
         if let Some(portal_program_id) = config.portal {
-            insert_upgradeable_program_accounts(
-                &mut accounts,
-                portal_program_id,
-                PORTAL_PROGRAM_BINARY,
-            );
+            // Sonic: Explicit Portal programs take precedence over the bundled default.
+            if !accounts.contains_key(&portal_program_id) {
+                insert_upgradeable_program_accounts(
+                    &mut accounts,
+                    portal_program_id,
+                    PORTAL_PROGRAM_BINARY,
+                );
+            }
             insert_upgradeable_program_accounts(
                 &mut accounts,
                 DEFAULT_TOKEN_BRIDGE_PROGRAM_ID,
@@ -1230,6 +1233,7 @@ impl TestValidator {
                 num_tvu_retransmit_sockets: NonZero::new(1).unwrap(),
                 num_quic_endpoints: NonZero::new(DEFAULT_QUIC_ENDPOINTS)
                     .expect("Number of QUIC endpoints can not be zero"),
+                num_votor_quic_endpoints: DEFAULT_NUM_VOTOR_QUIC_ENDPOINTS,
             };
             let mut node =
                 Node::new_with_external_ip(&validator_identity.pubkey(), validator_node_config);
@@ -1626,6 +1630,28 @@ mod test {
     fn bundled_northstar_programs_are_elf_binaries() {
         assert!(PORTAL_PROGRAM_BINARY.starts_with(b"\x7fELF"));
         assert!(TOKEN_BRIDGE_PROGRAM_BINARY.starts_with(b"\x7fELF"));
+    }
+
+    // Sonic: --portal must not replace an explicitly configured SBF program.
+    #[test]
+    fn portal_configuration_preserves_explicit_program() {
+        let portal = Pubkey::new_unique();
+        let (validator, _) = TestValidatorGenesis::default_for_tests()
+            .portal(portal)
+            .add_program(concat!(env!("OUT_DIR"), "/northstar_token_bridge"), portal)
+            .start();
+        let programdata = Pubkey::find_program_address(
+            &[portal.as_ref()],
+            &solana_sdk_ids::bpf_loader_upgradeable::id(),
+        )
+        .0;
+        let bank = validator.bank_forks().read().unwrap().root_bank();
+        let account = bank.get_account(&programdata).unwrap();
+        assert!(
+            &account.data()[UpgradeableLoaderState::size_of_programdata_metadata()..]
+                == TOKEN_BRIDGE_PROGRAM_BINARY,
+            "explicit Portal SBF was replaced by the bundled program",
+        );
     }
 
     #[test]

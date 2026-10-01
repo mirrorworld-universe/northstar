@@ -18,6 +18,9 @@ all-features = true
 rustdoc-args = ["--cfg=docsrs"]
 
 [features]
+# Sonic: Forward opt-in proof coordination to the Northstar service.
+proof-coordinator = ["solana-core/proof-coordinator"]
+proof-coordinator-test-hooks = ["proof-coordinator", "solana-core/proof-coordinator-test-hooks"]
 agave-unstable-api = []
 
 [dependencies]
@@ -26,7 +29,9 @@ agave-feature-set = { workspace = true }
 agave-logger = { workspace = true }
 agave-snapshots = { workspace = true }
 agave-votor = { workspace = true }
+agave-votor-transport = { workspace = true }
 agave-xdp = { workspace = true }
+arc-swap = { workspace = true }
 bytesize = { workspace = true }
 chrono = { workspace = true, features = ["default", "serde"] }
 clap = { workspace = true }

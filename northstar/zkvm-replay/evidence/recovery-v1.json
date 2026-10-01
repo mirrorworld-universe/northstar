@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "slot_warps": false,
+  "signal": "SIGKILL",
+  "same_ledger": true,
+  "runs": [
+    {"mode": "crash", "exit_code": 0, "old_pid": 2320368, "new_pid": 2322671, "wall_ms": 110615, "admission_resumed": true, "second_payout_lamports": 500000},
+    {"mode": "crash-no-effects", "exit_code": 0, "old_pid": 2326551, "new_pid": 2328843, "wall_ms": 51023, "admission_resumed": true, "receipt_unchanged": true},
+    {"mode": "crash-challenged", "exit_code": 0, "old_pid": 2330959, "new_pid": 2333272, "wall_ms": 46120, "receipt_unchanged": true, "checkpoint_status": "Invalid", "bond_status": "Slashed"},
+    {"mode": "crash-settled", "exit_code": 0, "old_pid": 2305366, "new_pid": 2309196, "wall_ms": 113111, "finalized_fence": 161, "snapshot_slot": 200, "admission_resumed": true, "second_payout_lamports": 500000}
+  ]
+}

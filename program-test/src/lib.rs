@@ -11,7 +11,9 @@ use {
     chrono_humanize::{Accuracy, HumanTime, Tense},
     log::*,
     serde::Serialize,
-    solana_account::{Account, AccountSharedData, ReadableAccount, state_traits::StateMut},
+    solana_account::{
+        Account, AccountSharedData, ReadableAccount, state_traits::StateMutWincode as _,
+    },
     solana_account_info::AccountInfo,
     solana_accounts_db::accounts_db::ACCOUNTS_DB_CONFIG_FOR_TESTING,
     solana_address::Address,
@@ -25,10 +27,8 @@ use {
     solana_fee_calculator::{DEFAULT_TARGET_LAMPORTS_PER_SIGNATURE, FeeRateGovernor},
     solana_genesis_config::GenesisConfig,
     solana_hash::Hash,
-    solana_instruction::{
-        Instruction,
-        error::{InstructionError, UNSUPPORTED_SYSVAR},
-    },
+    solana_instruction::Instruction,
+    solana_instruction_error::{InstructionError, UNSUPPORTED_SYSVAR},
     solana_keypair::Keypair,
     solana_native_token::LAMPORTS_PER_SOL,
     solana_poh_config::PohConfig,
@@ -991,7 +991,7 @@ impl ProgramTest {
         self.builtin_programs.push((
             program_id,
             program_name,
-            ProgramCacheEntry::new_builtin(0, builtin),
+            ProgramCacheEntry::new_builtin(builtin),
         ));
     }
 

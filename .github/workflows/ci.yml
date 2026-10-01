@@ -25,6 +25,7 @@ jobs:
       # Pin rustfmt so nightly style changes do not invalidate unchanged upstream files.
       - run: rustup toolchain install nightly-2026-07-20 --component rustfmt
       - run: cargo +nightly-2026-07-20 fmt --all -- --check
+      - run: cargo +nightly-2026-07-20 fmt --manifest-path northstar/zkvm-replay/Cargo.toml --all -- --check
 
   clippy:
     name: Clippy
@@ -47,6 +48,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler libprotobuf-dev libudev-dev libclang-dev
       - run: cargo clippy --locked --all --tests -- -D warnings
+      # Sonic: Check opt-in paths without enabling them in deployment builds.
+      - run: cargo clippy --locked --all --tests --features northstar/proof-coordinator-test-hooks,agave-validator/proof-coordinator-test-hooks,northstar-portal/zk-verifier-profile -- -D warnings
 
   test:
     name: Test
@@ -69,16 +72,26 @@ jobs:
           sudo apt-get install -y protobuf-compiler libprotobuf-dev libudev-dev libclang-dev
       - name: Test SOL smoke restart finalization guard
         run: bash .github/scripts/test-devnet-e2e-smoke.sh
+      - name: Test pinned SBF build arguments
+        run: bash .github/scripts/test-sbf-toolchain.sh
+      - name: Test bounded GPU runner without GPU
+        run: |
+          python3 -B northstar/scripts/test_gpu_prover.py
+          python3 -B northstar/scripts/test_gpu_worker.py
+          bash -n northstar/scripts/gpu-prover-ssh.sh
+          bash -n northstar/scripts/live-cadence-recovery.sh
+          bash -n northstar/scripts/live-gpu-settlement.sh
+          bash -n northstar/scripts/live-proof-coordinator.sh
+          python3 -B northstar/scripts/gpu-worker-stress.py --help >/dev/null
+          bash -n northstar/scripts/provision-gpu-userspace.sh
+          bash -n northstar/scripts/provision-gpu-server.sh
+          bash northstar/scripts/test-gpu-provision.sh
       - name: Install Solana tools
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
-      - name: Read Solana platform-tools version
-        id: solana_tools
-        run: |
-          cargo build-sbf --version
-          version=$(cargo build-sbf --version | awk '/platform-tools/{print $2}')
-          echo "platform_tools_version=$version" >> "$GITHUB_OUTPUT"
+      - name: Read Solana builder version
+        run: cargo build-sbf --version
       - name: Restore Solana platform tools
         id: solana_platform_tools_cache
         uses: actions/cache/restore@v4
@@ -86,13 +99,23 @@ jobs:
           path: |
             ~/.cache/solana
             ~/.local/share/solana/install/active_release/bin/platform-tools-sdk/sbf/dependencies/platform-tools
-          key: ${{ runner.os }}-solana-platform-tools-v3-${{ steps.solana_tools.outputs.platform_tools_version }}-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-solana-platform-tools-v4-${{ hashFiles('cargo-build-sbf') }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-solana-platform-tools-v3-${{ steps.solana_tools.outputs.platform_tools_version }}-
+            ${{ runner.os }}-solana-platform-tools-v4-${{ hashFiles('cargo-build-sbf') }}-
+      - name: Verify retained L40S proofs against prototype Portal SBF
+        run: |
+          ./cargo-build-sbf --manifest-path northstar/programs/portal/Cargo.toml --features zk-verifier-prototype -- --locked
+          BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar-portal --features zk-verifier-prototype --test zk_verifier
+          cargo test --locked -p northstar-portal --features zk-verifier-prototype --lib
+      - name: Verify fresh delegation fixture against the frozen replay relation
+        run: |
+          ./cargo-build-sbf --manifest-path northstar/programs/replay-owner/Cargo.toml -- --locked
+          NORTHSTAR_LIVE_OWNER_SBF="$PWD/target/deploy/northstar_replay_owner.so" \
+            cargo test --locked -p northstar fresh_delegation_owner_preserves_frozen_replay_relation -- --ignored
       - name: Build Portal SBF program
-        run: cargo build-sbf --manifest-path northstar/programs/portal/Cargo.toml -- --locked
+        run: ./cargo-build-sbf --manifest-path northstar/programs/portal/Cargo.toml -- --locked
       - name: Build Token Bridge SBF program
-        run: cargo build-sbf --manifest-path northstar/programs/token-bridge/Cargo.toml -- --locked
+        run: ./cargo-build-sbf --manifest-path northstar/programs/token-bridge/Cargo.toml -- --locked
       - name: Save Solana platform tools
         if: env.SAVE_CI_CACHE == 'true' && steps.solana_platform_tools_cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -100,7 +123,7 @@ jobs:
           path: |
             ~/.cache/solana
             ~/.local/share/solana/install/active_release/bin/platform-tools-sdk/sbf/dependencies/platform-tools
-          key: ${{ runner.os }}-solana-platform-tools-v3-${{ steps.solana_tools.outputs.platform_tools_version }}-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-solana-platform-tools-v4-${{ hashFiles('cargo-build-sbf') }}-${{ hashFiles('Cargo.lock') }}
       - name: Build test validator
         run: cargo build --locked --bin solana-test-validator
       - name: Test devnet SPL smoke state format
@@ -111,6 +134,11 @@ jobs:
         run: BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar-token-bridge --test validator_e2e -- --nocapture
       - name: Run Northstar crate tests
         run: BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar -p northstar-portal --no-fail-fast
+      # Sonic: Coordinator and mature-capture regressions need no GPU service.
+      - name: Test opt-in proof coordination
+        run: cargo test --locked -p northstar --features proof-coordinator-test-hooks proof_ --no-fail-fast
+      - name: Test mature ER replay capture
+        run: cargo test --locked -p solana-runtime --lib bank::er_replay::tests --no-fail-fast
       - name: Run Northstar SVM regression tests
         run: cargo test --locked -p solana-svm northstar --no-fail-fast
       - name: Run Northstar core service tests

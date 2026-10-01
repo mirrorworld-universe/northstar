@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "source_commit": "19200c46a66b59eba84c3e3447027b3e10f53bce",
+  "sp1_sdk": "6.1.0",
+  "host_rust": "1.97.1",
+  "icicle_commit": "b62bbbe518a73214da10ece26969ad55e6fa0cd0",
+  "cuda_toolkit": "13.1.115",
+  "cuda_runtime_wheel": "12.9.79",
+  "cuda_runtime_wheel_sha256": "25bba2dfb01d48a9b59ca474a1ac43c6ebf7011f1b0b8cc44f54eb6ac48a96c3",
+  "gpu": "NVIDIA L40S",
+  "driver": "595.91.07",
+  "go": "1.26.0",
+  "private_icicle_linkage_verified": true,
+  "library_sha256": {
+    "libicicle_curve_bls12_377.so": "887a4129bdf9465bc399fae27ced02c52ac7a8df2acd6b27c1c00aa80a24e60c",
+    "libicicle_curve_bls12_381.so": "0c83de29833d4271eddab783ec49bd6e13ad95163440bc271e225fe4b9c388c1",
+    "libicicle_curve_bn254.so": "964a6b01720d123b7163cd4219e11644bb4c46cd70aa030f95eab072e53246a7",
+    "libicicle_curve_bw6_761.so": "58e5625110df79358387379357c3fc89a149aa1150c041c7012380958d555bf3",
+    "libicicle_device.so": "e039267322328fa08d3982aafdf4882c2296e895ded19378b99a713d25c5be93",
+    "libicicle_field_bls12_377.so": "5f2234859c0042659cdb5d22a8dab44a7e9def4503f9e407dfff1728196494b3",
+    "libicicle_field_bls12_381.so": "aa62a213d64ec42660cacd1dbbfd2b6c46412096fda9457c5ead77854814ed87",
+    "libicicle_field_bn254.so": "5253819df4370e8bae1f9c00c1ee118c3519256c87e92c92be64a959978ec747",
+    "libicicle_field_bw6_761.so": "eb4e29ca0301f0d0459e88a8f2996f1c7cc5e33fa9a807b8562b6f7a1c31140f"
+  },
+  "host_prover_sha256": "aa24d20e150a0294e175e14f835c80399c18525019c225b841b0c4bc00db607d",
+  "sdk_lockfile_sha256": "ff4557cde4853cf195d91961a019348b3548b76bebe887e39e3ee03f8b9595ed",
+  "system_headers_modified": false,
+  "guest_rebuilt": false,
+  "shared_sp1_circuit_cache": true
+}

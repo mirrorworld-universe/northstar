@@ -3,10 +3,9 @@ use {
     ark_serialize::{CanonicalSerialize, Compress},
     ark_std::rand::SeedableRng,
     northstar_zk_prover::{
-        constraint_count, proof_to_solana, prove, sample_circuit, setup, verifying_key_to_solana,
-        ACCOUNT_TREE_DEPTH,
+        constraint_count, proof_to_solana, prove, rng::ChaCha20Rng, sample_circuit, setup,
+        verifying_key_to_solana, ACCOUNT_TREE_DEPTH,
     },
-    rand_chacha::ChaCha20Rng,
     serde_json::json,
     std::{
         env, fs,

@@ -32,6 +32,10 @@ impl NorthStarSyncStatus {
         self.latest_l1_slot.fetch_max(slot, Ordering::Relaxed);
     }
 
+    pub fn latest_l1_slot(&self) -> Slot {
+        self.latest_l1_slot.load(Ordering::Relaxed)
+    }
+
     pub fn mark_synced_through(&self, slot: Slot) {
         self.latest_synced_slot.fetch_max(slot, Ordering::Relaxed);
     }

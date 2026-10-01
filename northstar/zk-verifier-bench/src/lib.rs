@@ -53,7 +53,10 @@ fn verify<const N: usize>(
         return Err(ProgramError::InvalidInstructionData);
     }
     let mut public_inputs = [[0; 32]; N];
-    for (output, input) in public_inputs.iter_mut().zip(payload.chunks_exact(32)) {
+    for (output, input) in public_inputs
+        .iter_mut()
+        .zip(payload.as_chunks::<32>().0.iter())
+    {
         output.copy_from_slice(input);
     }
     let mut verifier =

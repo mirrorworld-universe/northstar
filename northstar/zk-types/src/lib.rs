@@ -11,6 +11,12 @@ use borsh::{
 
 pub const ER_STEP_PUBLIC_INPUTS_V1: usize = 8;
 pub const GROTH16_PROOF_RAW_LEN: usize = 256;
+pub const SP1_GROTH16_PROOF_V1_LEN: usize = 356;
+pub const SP1_GROTH16_VK_HASH_PREFIX: [u8; 4] = [0x43, 0x88, 0xa2, 0x1c];
+pub const SP1_GROTH16_VK_ROOT: [u8; 32] = [
+    0x00, 0x2f, 0x85, 0x0e, 0xe9, 0x98, 0x97, 0x4d, 0x6c, 0xc0, 0x0e, 0x50, 0xcd, 0x08, 0x14, 0xb0,
+    0x98, 0xc0, 0x5b, 0xfa, 0xde, 0x46, 0x6d, 0x28, 0x57, 0x32, 0x40, 0xd0, 0x57, 0xf2, 0x53, 0x52,
+];
 pub const ER_STEP_PROOF_KIND_ONE_ACCOUNT: u8 = 1;
 pub const ER_STEP_PROOF_KIND_FULL_TRANSACTION: u8 = 2;
 pub const ER_STEP_PROOF_VERSION_V1: u8 = 1;
@@ -27,6 +33,9 @@ pub enum ZkTypeError {
     InvalidProofLength,
     InvalidProofDomain,
     MissingPublicCommitment,
+    InvalidProofVerifyingKey,
+    InvalidProofExitCode,
+    InvalidProofVerifierRoot,
 }
 
 /// Canonical BN254 scalar-field element encoded as 32-byte big-endian bytes.
@@ -147,6 +156,38 @@ impl Groth16ProofRaw {
         bytes[64..192].copy_from_slice(&self.b);
         bytes[192..].copy_from_slice(&self.c);
         bytes
+    }
+}
+
+/// SP1 6.1 Groth16 envelope used by its on-chain verifiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sp1Groth16ProofV1 {
+    pub proof_nonce: FrBytes,
+    pub proof: Groth16ProofRaw,
+}
+
+impl Sp1Groth16ProofV1 {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ZkTypeError> {
+        if bytes.len() != SP1_GROTH16_PROOF_V1_LEN {
+            return Err(ZkTypeError::InvalidProofLength);
+        }
+        if bytes[..4] != SP1_GROTH16_VK_HASH_PREFIX {
+            return Err(ZkTypeError::InvalidProofVerifyingKey);
+        }
+        if bytes[4..36] != [0; 32] {
+            return Err(ZkTypeError::InvalidProofExitCode);
+        }
+        if bytes[36..68] != SP1_GROTH16_VK_ROOT {
+            return Err(ZkTypeError::InvalidProofVerifierRoot);
+        }
+
+        let proof_nonce = FrBytes::new(
+            bytes[68..100]
+                .try_into()
+                .expect("SP1 proof nonce has fixed length"),
+        )?;
+        let proof = Groth16ProofRaw::from_bytes(&bytes[100..])?;
+        Ok(Self { proof_nonce, proof })
     }
 }
 
@@ -282,6 +323,67 @@ mod tests {
         assert_eq!(bytes.len(), GROTH16_PROOF_RAW_LEN);
         assert_eq!(Groth16ProofRaw::from_bytes(&bytes), Ok(proof));
         assert_eq!(borsh::to_vec(&proof).unwrap(), bytes);
+    }
+
+    fn sp1_proof_bytes() -> [u8; SP1_GROTH16_PROOF_V1_LEN] {
+        let mut bytes = [0; SP1_GROTH16_PROOF_V1_LEN];
+        bytes[..4].copy_from_slice(&SP1_GROTH16_VK_HASH_PREFIX);
+        bytes[36..68].copy_from_slice(&SP1_GROTH16_VK_ROOT);
+        bytes[99] = 1;
+        bytes[100..].copy_from_slice(
+            &Groth16ProofRaw {
+                a: [1; 64],
+                b: [2; 128],
+                c: [3; 64],
+            }
+            .to_bytes(),
+        );
+        bytes
+    }
+
+    #[test]
+    fn parses_sp1_groth16_envelope() {
+        let proof = Sp1Groth16ProofV1::from_bytes(&sp1_proof_bytes()).unwrap();
+        assert_eq!(proof.proof_nonce, FrBytes::from_u64(1));
+        assert_eq!(proof.proof.a, [1; 64]);
+        assert_eq!(proof.proof.b, [2; 128]);
+        assert_eq!(proof.proof.c, [3; 64]);
+    }
+
+    #[test]
+    fn sp1_groth16_envelope_fails_closed() {
+        assert_eq!(
+            Sp1Groth16ProofV1::from_bytes(&sp1_proof_bytes()[..355]),
+            Err(ZkTypeError::InvalidProofLength)
+        );
+
+        let mut proof = sp1_proof_bytes();
+        proof[0] ^= 1;
+        assert_eq!(
+            Sp1Groth16ProofV1::from_bytes(&proof),
+            Err(ZkTypeError::InvalidProofVerifyingKey)
+        );
+
+        let mut proof = sp1_proof_bytes();
+        proof[35] = 1;
+        assert_eq!(
+            Sp1Groth16ProofV1::from_bytes(&proof),
+            Err(ZkTypeError::InvalidProofExitCode)
+        );
+
+        let mut proof = sp1_proof_bytes();
+        proof[67] ^= 1;
+        assert_eq!(
+            Sp1Groth16ProofV1::from_bytes(&proof),
+            Err(ZkTypeError::InvalidProofVerifierRoot)
+        );
+
+        let mut proof = sp1_proof_bytes();
+        proof[68..100].copy_from_slice(&BN254_FR_MODULUS_BE);
+        assert_eq!(
+            Sp1Groth16ProofV1::from_bytes(&proof),
+            Err(ZkTypeError::NonCanonicalFieldElement)
+        );
     }
 
     #[test]

@@ -1,0 +1,52 @@
+[package]
+name = "northstar-replay-harness"
+version = "0.1.0"
+edition = { workspace = true }
+license = { workspace = true }
+publish = false
+
+[features]
+default = ["conformance"]
+conformance = []
+
+[dependencies]
+agave-feature-set = { workspace = true }
+bincode = { workspace = true }
+northstar-zk-types = { workspace = true }
+serde = { workspace = true }
+solana-rent = { workspace = true }
+wincode = { workspace = true }
+solana-account = { workspace = true }
+solana-accounts-db = { workspace = true }
+solana-clock = { workspace = true }
+solana-epoch-schedule = { workspace = true }
+solana-fee-calculator = { workspace = true }
+solana-fee-structure = { workspace = true }
+solana-hash = { workspace = true }
+solana-instruction = { workspace = true }
+solana-instruction-error = { workspace = true }
+solana-keypair = { workspace = true }
+solana-loader-v3-interface = { workspace = true }
+solana-program-runtime = { workspace = true }
+solana-pubkey = { workspace = true }
+solana-runtime = { workspace = true, features = ["northstar-replay"] }
+solana-sdk-ids = { workspace = true }
+solana-sha256-hasher = { workspace = true }
+solana-signer = { workspace = true }
+solana-slot-hashes = { workspace = true }
+solana-svm = { workspace = true }
+solana-svm-transaction = { workspace = true }
+solana-transaction = { workspace = true }
+solana-transaction-error = { workspace = true }
+
+[dev-dependencies]
+solana-address-lookup-table-interface = { workspace = true }
+solana-message = { workspace = true }
+solana-program-option = { workspace = true }
+solana-program-pack = { workspace = true }
+solana-signature = { workspace = true }
+solana-system-interface = { workspace = true }
+spl-token-2022-interface = { workspace = true }
+
+[lints]
+workspace = true

@@ -209,6 +209,7 @@ pub struct StepProofAccount {
     pub proof_kind: u8,
     pub proof_version: u8,
     pub step_index: u64,
+    pub session_context: Hash32,
     pub tx_effect_root: Hash32,
     pub readonly_l1_root: Hash32,
     pub settlement_effect_root: Hash32,
@@ -218,7 +219,7 @@ pub struct StepProofAccount {
     pub proof_hash: Hash32,
     pub bump: u8,
     // IDL schemas require literal array lengths.
-    pub data: [u8; 256],
+    pub data: [u8; 356],
 }
 
 impl StepProofAccount {
@@ -539,6 +540,7 @@ mod tests {
             proof_kind: 1,
             proof_version: 1,
             step_index: 3,
+            session_context: [0x38; 32],
             tx_effect_root: [0x34; 32],
             readonly_l1_root: [0x35; 32],
             settlement_effect_root: [0x36; 32],
@@ -550,7 +552,7 @@ mod tests {
             data: [0xAB; crate::MAX_STEP_PROOF_BYTES],
         };
         let serialized = borsh::to_vec(&proof).unwrap();
-        assert_eq!(serialized.len(), 536);
+        assert_eq!(serialized.len(), 668);
     }
 
     #[test]

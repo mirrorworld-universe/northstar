@@ -33,4 +33,7 @@ pub enum TokenBridgeInstruction {
         decimals: u8,
     },
     RequestUndelegation,
+    ApplyTokenDeposit {
+        balance: u64,
+    },
 }

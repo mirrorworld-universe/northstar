@@ -1,5 +1,8 @@
+mod token_deposit;
+
 use {
     crate::{
+        checkpoint::CheckpointArtifactV1,
         ephemeral_tpu::EphemeralTpu,
         ephemeral_tx_client::{EphemeralTransactionClient, EphemeralTransactionClientOptions},
         settlement::{
@@ -224,6 +227,7 @@ pub struct EphemeralRuntime {
     portal_program_id: Pubkey,
 
     _tx_client: EphemeralTransactionClient,
+    manager_keypair: Arc<Keypair>,
     settings: EphemeralRollupSettings,
     slot_duration: Duration,
     _ledger_dir: TempDir,
@@ -610,6 +614,12 @@ impl EphemeralRuntime {
                 })
                 .collect::<HashMap<_, _>>(),
         ));
+        if let Some(account) = initial_bank.get_account(&manager_keypair.pubkey()) {
+            er_account_overlay
+                .write()
+                .unwrap()
+                .insert(manager_keypair.pubkey(), account);
+        }
         let bank_operation_lock = Arc::new(Mutex::new(()));
         // Sonic: Starts inactive — transactions rejected until activate() is called
         let active = Arc::new(AtomicBool::new(false));
@@ -653,7 +663,8 @@ impl EphemeralRuntime {
                 withdrawal_payout_events.clone(),
                 token_withdrawal_payout_events.clone(),
             )
-            .with_unsettled_state_store(unsettled_state_store.clone()),
+            .with_unsettled_state_store(unsettled_state_store.clone())
+            .with_sync_status(sync_status.clone()),
         );
 
         let optimistically_confirmed_bank = Arc::new(RwLock::new(OptimisticallyConfirmedBank {
@@ -844,6 +855,7 @@ impl EphemeralRuntime {
             settings,
             slot_duration,
             _tx_client: tx_client,
+            manager_keypair,
             _ledger_dir: ledger_dir,
             _runtime: runtime,
         })
@@ -1021,6 +1033,28 @@ impl EphemeralRuntime {
         self.bank_forks.read().unwrap().working_bank()
     }
 
+    pub fn checkpoint_artifact_v1(&self) -> Option<CheckpointArtifactV1> {
+        self._tx_client.checkpoint_artifact_v1()
+    }
+
+    #[cfg(feature = "proof-coordinator")]
+    pub(crate) fn replay_history(&self) -> Arc<ErHistoryStore> {
+        self.er_history_store.clone()
+    }
+
+    pub fn seal_checkpoint_if_nonempty(&self) -> bool {
+        self._tx_client.seal_checkpoint_if_nonempty()
+    }
+
+    pub fn consume_checkpoint_artifact_v1(&self, er_slot: Slot) -> bool {
+        self._tx_client.consume_checkpoint_artifact_v1(er_slot)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_checkpoint_artifact_v1(&self, artifact: CheckpointArtifactV1) {
+        self._tx_client.install_checkpoint_artifact_v1(artifact);
+    }
+
     pub fn shutdown(&mut self) {
         info!("Shutting down EphemeralRuntime at {}", self.rpc_addr);
         // Stop slot advancer first
@@ -1053,6 +1087,14 @@ impl EphemeralRuntime {
     /// clears session state, and starts a new SlotAdvancer.
     /// Called when a new session opens to get a fresh L1 snapshot.
     pub fn reset_to_new_parent(&mut self, parent_bank: Arc<Bank>) {
+        self.reset_to_new_parent_with_slot_floor(parent_bank, 0);
+    }
+
+    pub(crate) fn reset_to_new_parent_with_slot_floor(
+        &mut self,
+        parent_bank: Arc<Bank>,
+        slot_floor: Slot,
+    ) {
         self.sync_status.update_latest_l1_slot(parent_bank.slot());
         self.sync_status.mark_synced_through(parent_bank.slot());
 
@@ -1069,8 +1111,9 @@ impl EphemeralRuntime {
             // 2. Create new ephemeral bank from current L1 root
             let old_er_bank = self.bank_forks.read().unwrap().working_bank();
             let current_er_tip = old_er_bank.slot();
-            let ephemeral_slot =
-                Self::er_slot_for(&parent_bank).max(current_er_tip.saturating_add(1));
+            let ephemeral_slot = Self::er_slot_for(&parent_bank)
+                .max(current_er_tip.saturating_add(1))
+                .max(slot_floor.saturating_add(1));
             info!(
                 "reset_to_new_parent: parent_slot={}, ephemeral_slot={}, parent_epoch={}",
                 parent_bank.slot(),
@@ -2173,6 +2216,7 @@ impl EphemeralRuntime {
             .iter()
             .filter(|(account, request)| {
                 !request.approved
+                    && !self.has_pending_token_deposit(account)
                     && (last_settled_er_slot >= request.frozen_at
                         || !changed_accounts.contains(account))
             })
@@ -2275,7 +2319,7 @@ impl EphemeralRuntime {
             inner_instructions: None,
             log_messages: Some(vec![
                 format!("Program {} invoke [1]", self.portal_program_id),
-                format!("Program log: Instruction: NorthstarDeposit"),
+                "Program log: Instruction: NorthstarDeposit".to_string(),
                 format!(
                     "Program log: NorthstarTransferEvent kind={} from={from} to={depositor} \
                      lamports={lamports} pre_balance={base_balance} post_balance={new_balance} \
@@ -2369,80 +2413,6 @@ impl EphemeralRuntime {
             "Credited {} lamports to {} on ER (base: {}, new balance: {})",
             lamports, depositor, base_balance, new_balance
         );
-    }
-    pub fn credit_token_deposit(
-        &self,
-        bridge_program: &Pubkey,
-        session_bridge: &Pubkey,
-        er_token_account: &Pubkey,
-        amount: u64,
-    ) -> bool {
-        let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
-        if !self
-            .delegated_accounts
-            .read()
-            .unwrap()
-            .contains(er_token_account)
-        {
-            warn!(
-                "Ignoring token deposit for non-delegated ER account {}",
-                er_token_account
-            );
-            return false;
-        }
-
-        let bank = self.bank();
-        let Some(mut account) = bank.get_account(er_token_account) else {
-            warn!("Ignoring token deposit for missing ER account {er_token_account}");
-            return false;
-        };
-        if account.owner() != bridge_program {
-            warn!(
-                "Ignoring token deposit for {} owned by {}, expected {}",
-                er_token_account,
-                account.owner(),
-                bridge_program
-            );
-            return false;
-        }
-        let Ok(mut state) =
-            borsh::from_slice::<northstar_token_bridge::state::ErTokenAccount>(account.data())
-        else {
-            warn!("Ignoring token deposit for invalid ER token account {er_token_account}");
-            return false;
-        };
-        if !state.is_valid() || state.session_bridge != session_bridge.to_bytes() {
-            return false;
-        }
-        let Some(new_amount) = state.amount.checked_add(amount) else {
-            warn!("Ignoring overflowing token deposit for {er_token_account}");
-            return false;
-        };
-        state.amount = new_amount;
-        let Ok(data) = borsh::to_vec(&state) else {
-            return false;
-        };
-        if data.len() != account.data().len() {
-            return false;
-        }
-        account.data_as_mut_slice().copy_from_slice(&data);
-
-        bank.store_account(er_token_account, &account);
-        self.er_account_overlay
-            .write()
-            .unwrap()
-            .insert(*er_token_account, account.clone());
-        self.touched_accounts
-            .write()
-            .unwrap()
-            .insert(*er_token_account);
-        self.persist_unsettled_update(&[(*er_token_account, account)], &[*er_token_account], None);
-        self.publish_bank_for_rpc();
-        info!(
-            "Credited {} tokens to {} on ER (new amount: {})",
-            amount, er_token_account, new_amount
-        );
-        true
     }
 }
 
@@ -2878,7 +2848,7 @@ mod tests {
     }
 
     #[test]
-    fn test_token_deposit_credits_delegated_er_account() {
+    fn test_token_deposit_requires_authenticated_origin() {
         let parent_bank = create_test_bank();
         let bridge_program = Pubkey::new_unique();
         let er_token_account = Pubkey::new_unique();
@@ -2895,6 +2865,26 @@ mod tests {
         let mut account = AccountSharedData::new(1_000_000, data.len(), &bridge_program);
         account.data_as_mut_slice().copy_from_slice(&data);
         parent_bank.store_account(&er_token_account, &account);
+        let (receipt_key, bump) = northstar_token_bridge::find_token_deposit_receipt_pda(
+            &bridge_program,
+            &session_bridge,
+            &er_token_account,
+        );
+        let receipt = northstar_token_bridge::state::TokenDepositReceipt {
+            discriminator: northstar_token_bridge::state::TokenDepositReceipt::DISCRIMINATOR,
+            session_bridge: session_bridge.to_bytes(),
+            er_token_account: er_token_account.to_bytes(),
+            balance: 600_000_000,
+            withdrawn: 0,
+            bump,
+        };
+        let receipt_data = borsh::to_vec(&receipt).unwrap();
+        let mut receipt_account =
+            AccountSharedData::new(1_000_000, receipt_data.len(), &bridge_program);
+        receipt_account
+            .data_as_mut_slice()
+            .copy_from_slice(&receipt_data);
+        parent_bank.store_account(&receipt_key, &receipt_account);
         parent_bank.freeze();
 
         let settings = EphemeralRollupSettings {
@@ -2918,7 +2908,8 @@ mod tests {
         .unwrap();
         runtime.handle_delegation(&er_token_account, account.clone());
 
-        assert!(runtime.credit_token_deposit(
+        runtime.active.store(true, Ordering::Relaxed);
+        assert!(!runtime.credit_token_deposit(
             &bridge_program,
             &session_bridge,
             &er_token_account,
@@ -2928,17 +2919,17 @@ mod tests {
         let credited_state =
             borsh::from_slice::<northstar_token_bridge::state::ErTokenAccount>(credited.data())
                 .unwrap();
-        assert_eq!(credited_state.amount, 600_000_000);
+        assert_eq!(credited_state.amount, 0);
+        assert!(runtime.checkpoint_artifact_v1().is_none());
+        runtime.handle_undelegation_request(&er_token_account, Pubkey::new_unique(), false);
+        assert!(runtime.ready_undelegation_approvals(u64::MAX).is_empty());
 
         runtime.handle_delegation(&er_token_account, account);
         let rehydrated = runtime.bank().get_account(&er_token_account).unwrap();
         let rehydrated_state =
             borsh::from_slice::<northstar_token_bridge::state::ErTokenAccount>(rehydrated.data())
                 .unwrap();
-        assert_eq!(
-            rehydrated_state.amount, 600_000_000,
-            "duplicate L1 delegation hydration must preserve unsettled ER state",
-        );
+        assert_eq!(rehydrated_state.amount, 0);
 
         runtime.shutdown();
     }
@@ -5246,6 +5237,40 @@ mod tests {
     }
 
     #[test]
+    fn test_reset_respects_persisted_checkpoint_slot_floor() {
+        let parent = create_test_bank();
+        parent.freeze();
+        let parent = Arc::new(parent);
+        let settings = EphemeralRollupSettings {
+            session_pda: Pubkey::new_unique(),
+            grid_id: 0,
+            ttl_slots: 100,
+            fee_cap: 1000,
+            er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            delegated_accounts: vec![],
+        };
+        let mut runtime = EphemeralRuntime::new(
+            parent.clone(),
+            create_test_cluster_info(),
+            settings,
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+            Pubkey::new_unique(),
+            Arc::new(Keypair::new()),
+        )
+        .unwrap();
+        let floor = runtime.bank_forks.read().unwrap().working_bank().slot() + 10_000;
+        runtime.reset_to_new_parent_with_slot_floor(parent, floor);
+        let root = runtime.bank_forks.read().unwrap().root();
+        runtime.shutdown();
+        assert!(
+            root > floor,
+            "restart must advance beyond persisted checkpoints"
+        );
+    }
+
+    #[test]
     fn test_reset_to_new_parent_preserves_er_recent_blockhashes() {
         agave_logger::setup();
 
@@ -6296,7 +6321,6 @@ mod tests {
         agave_logger::setup();
 
         let (parent_bank, mut runtime) = create_runtime();
-        runtime.activate();
 
         let program_bytes = std::fs::read("../programs/bpf_loader/test_elfs/out/noop_aligned.so")
             .expect("noop ELF should exist");

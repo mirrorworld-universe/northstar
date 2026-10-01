@@ -167,6 +167,8 @@ impl SlotAdvancer {
             initial_bank.slot(),
             bank_forks.read().unwrap().root()
         );
+        drop(initial_bank);
+        let mut retired_banks = Vec::new();
 
         while !exit.load(Ordering::Relaxed) {
             thread::sleep(config.slot_duration);
@@ -290,14 +292,30 @@ impl SlotAdvancer {
                 bank: frozen_bank.clone(),
             };
 
-            let removed_slots = removed_banks
-                .iter()
-                .map(|bank| (bank.slot(), bank.bank_id()))
-                .collect::<Vec<_>>();
-            if !removed_slots.is_empty() {
-                frozen_bank.remove_unrooted_slots(&removed_slots);
+            retired_banks.extend(removed_banks);
+            let mut removable_slots = Vec::new();
+            retired_banks.retain(|bank| {
+                if Arc::strong_count(bank) == 1 {
+                    removable_slots.push((bank.slot(), bank.bank_id()));
+                    false
+                } else {
+                    true
+                }
+            });
+            removable_slots.retain(|(slot, _)| {
+                frozen_bank
+                    .rc
+                    .accounts
+                    .accounts_db
+                    .accounts_cache
+                    .contains(*slot)
+            });
+            if !removable_slots.is_empty() {
+                // Sonic: AccountsDb cache entries outlive BankForks membership while RPC
+                // requests still hold the removed bank. Purging sooner makes those snapshots
+                // fall through to stale L1 ancestors.
+                frozen_bank.remove_unrooted_slots(&removable_slots);
             }
-            drop(removed_banks);
 
             debug!(
                 "SlotAdvancer: advanced to slot {}, new blockhash {}",
@@ -871,6 +889,69 @@ mod tests {
             Some((deleted_pubkey, solana_account::AccountSharedData::default()))
         );
         assert_eq!(deleted_account, None);
+    }
+
+    #[test]
+    fn rpc_bank_snapshot_keeps_account_state_during_pruning() {
+        let parent_bank = create_test_bank();
+        parent_bank.freeze();
+        let initial_slot = 1u64 << 40;
+        let initial_bank = Bank::new_from_parent_ephemeral_isolated(
+            Arc::new(parent_bank),
+            SlotLeader::default(),
+            initial_slot,
+        );
+        let account_key = Pubkey::new_unique();
+        let account = solana_account::AccountSharedData::new(42, 0, &Pubkey::new_unique());
+        initial_bank.store_account(&account_key, &account);
+        let ticks_per_slot = initial_bank.ticks_per_slot();
+        initial_bank.set_tick_height(initial_bank.max_tick_height() - ticks_per_slot);
+
+        let bank_forks = BankForks::new_rw_arc_ephemeral(initial_bank);
+        let initial_bank = bank_forks.read().unwrap().root_bank();
+        let exit = Arc::new(AtomicBool::new(false));
+        let optimistically_confirmed_bank =
+            create_optimistically_confirmed_bank(initial_bank.clone());
+        let advancer = SlotAdvancer::new(
+            bank_forks.clone(),
+            Arc::new(Mutex::new(())),
+            create_block_commitment_cache(initial_slot),
+            optimistically_confirmed_bank.clone(),
+            initial_bank,
+            Config {
+                slot_duration: Duration::from_millis(5),
+                manager_account: Pubkey::default(),
+                er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+            },
+            exit.clone(),
+            None,
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let held_bank = loop {
+            let bank = optimistically_confirmed_bank.read().unwrap().bank.clone();
+            if bank.slot() >= initial_slot + 2 {
+                break bank;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "slot advancer did not publish RPC bank"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(held_bank.get_account(&account_key), Some(account.clone()));
+
+        while bank_forks.read().unwrap().working_bank().slot() < held_bank.slot() + 4 {
+            assert!(
+                Instant::now() < deadline,
+                "slot advancer did not prune past held RPC bank"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        exit.store(true, Ordering::Relaxed);
+        advancer.join();
+        assert_eq!(held_bank.get_account(&account_key), Some(account));
     }
 
     #[test]

@@ -1,0 +1,179 @@
+[
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "open_session",
+    "schema_version": 1,
+    "signature": "5qEWZnnTUcZyEjGEZEgajJE9zkfc2pFKCx7iF8sjreQ4dpbnpCM8eGDehZLXexoJi8jsggXFPSqqKPN1EghmgQ8Q",
+    "step": null,
+    "transaction_ms": 553.040428
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "propose_checkpoint",
+    "schema_version": 1,
+    "signature": "5nrZsmEKieGrURCZdekxUpJv6RSVWZ1J7tajGAiq2FbiFniQirDBFntvSi9p3BBXmm4Cav62Ws3jv2Hhjn7BdXtA",
+    "step": null,
+    "transaction_ms": 516.476724
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "open_challenge",
+    "schema_version": 1,
+    "signature": "HLxJy7oHgvsHtdMouNyzN6P9oQSXSz1rQ5oHVkbWT9RAZ3KkZFqG3btQXH4TJ6G5w78UMSuorHNX3Fe3JfsTSwN",
+    "step": null,
+    "transaction_ms": 527.202129
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "respond_or_reveal",
+    "schema_version": 1,
+    "signature": "2QU8eXKwrbQLHhHCRm36ZyQqjtumf5AWVhtwd7pCCkLNLunEH5HpFsSU6cuvUCej19DHE3jM88H6mUL95x14PSPp",
+    "step": 8,
+    "transaction_ms": 517.3279640000001
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "select_half",
+    "schema_version": 1,
+    "signature": "3EtCFCLasPnxAvusptw9FiDwTDRdNyHJ3MCVZv2BqTHdk9sF5Hnq9VFHYqBR9HQQR4Fu1y8pCg7FCcx5zVeGgRP1",
+    "step": null,
+    "transaction_ms": 523.774716
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "respond_or_reveal",
+    "schema_version": 1,
+    "signature": "58d8RpWfS9djp9R3dRRy7K5wNatgZXVnqchLi6cYxWhPw4pJ6BgDszHLabVjWgDQA7KKedPRGQQkp2CDGAZQ3MWn",
+    "step": 12,
+    "transaction_ms": 524.370606
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "select_half",
+    "schema_version": 1,
+    "signature": "3F2fvya3Q4xQ9AHKLDv8BAM23AssV2v5DAH5H5hxCst6QdDp9Zdnam4VhjcXki3ERnLWJfsf1XkLitJ7BpnA83n6",
+    "step": null,
+    "transaction_ms": 529.096581
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "respond_or_reveal",
+    "schema_version": 1,
+    "signature": "5mg9vnMQbsoiFzM9uAYYvZurgMjLfZ2N8by1TNk8FKwhpnPKWxHKjgmzqcNtwJ4wMZqK2yD98oF3r4kSYY5RbV3H",
+    "step": 10,
+    "transaction_ms": 519.455835
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "select_half",
+    "schema_version": 1,
+    "signature": "3HCbRvWuZPqQNWRdFqTjovyoJCrZ6Babu3TkB5VFazFavi19VoUCGGkUVgDst12R4tJkur5F87eC2x1woRURmet9",
+    "step": null,
+    "transaction_ms": 525.542048
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "respond_or_reveal",
+    "schema_version": 1,
+    "signature": "2P1MyBR34WLbfNVhZdm5jcVxoNia5hj7WDioHUUdG4J5apojhjBkmicP746dFTqNUn1oSYYh37zpFphFTZakWaj7",
+    "step": 11,
+    "transaction_ms": 517.094515
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "select_half",
+    "schema_version": 1,
+    "signature": "4kAw7qdFZ2RKjZ7Bap222qddDZeHutCVNpCyCaepC7deJASMJZ6bAjQ13tENCPG8hgX526YnqK73Dovb8jh5LFuK",
+    "step": null,
+    "transaction_ms": 524.368642
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "respond_or_reveal",
+    "schema_version": 1,
+    "signature": "54gdCitjC9hFX7DjTxX5n9Lqo64jovgk52xBMNS3QzDJwwitF1gfGWpfkLJeC5bM4es6xvXaUE8x2vZtaP9fVMa5",
+    "step": 10,
+    "transaction_ms": 520.441198
+  },
+  {
+    "clock": "wall",
+    "elapsed_ms": 141.349513,
+    "phase": "witness_extraction",
+    "proving_ms": null,
+    "recovery_ms": null,
+    "resolved": false,
+    "schema_version": 1,
+    "step": 10,
+    "verification_ms": null
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "other",
+    "schema_version": 1,
+    "signature": "2Bmmu27FFDpPN9tts284Y2G3E8Sn9YV2nbJZ7y5j8SDyDCxXaA7NepYAipj9LSVfmrEwGHpCqYR3wk2j4N6Se8kP",
+    "step": null,
+    "transaction_ms": 546.623865
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "other",
+    "schema_version": 1,
+    "signature": "2g6afF6uNrXKeYy3TxfuoMEUaYaLkmENUXhZBizYpwMdrXPgijjSYPoSxJxLgBfe9oHfTmkwp6zGLBRbW9tW8Wtb",
+    "step": null,
+    "transaction_ms": 530.245191
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "other",
+    "schema_version": 1,
+    "signature": "TD4pxyYr9C73PvhHgKaE4o3gfjSMtBkqc7CbaRhq7FJZXhHRmJttKdqPhCXkUjJ4yECDsgDfcYsDiWP1zKiUiXk",
+    "step": null,
+    "transaction_ms": 544.4212739999999
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "other",
+    "schema_version": 1,
+    "signature": "5BHuWfC1qs2kBXxbNbR1fvLkswee9syA5GwFNAdi5PZKoKFxkBUxqoJTEd782zyYtLxo6wKbBfE7jz2f83H6Wzcy",
+    "step": null,
+    "transaction_ms": 542.109738
+  },
+  {
+    "clock": "wall",
+    "includes_rpc_confirmation": true,
+    "phase": "other",
+    "schema_version": 1,
+    "signature": "2eN38iHcRqnJHZCFw9Pt9wdXUuymi2CQEowWirTD5jndYamyoJZ15no6ZTfZEzdtHWgeaaYJeCb89NQJht6zg9we",
+    "step": null,
+    "transaction_ms": 533.103285
+  },
+  {
+    "challenge_to_outcome_ms": 124373.402863,
+    "clock": "wall",
+    "phase": "proof_resolution",
+    "proving_ms": 115417.390411,
+    "resolution_ms": 591.3448850000001,
+    "resolved": true,
+    "resolver_cu": 127977,
+    "schema_version": 1,
+    "slot_warps": false,
+    "step": 10,
+    "upload_ms": 2697.0071089999997
+  }
+]

@@ -66,7 +66,7 @@ pub use {
         process_bisect_challenge, process_cancel_checkpoint, process_commit_checkpoint,
         process_create_step_proof, process_open_challenge, process_propose_checkpoint,
         process_resolve_challenge, process_respond_challenge, process_seal_step_proof,
-        process_timeout_challenge, process_write_step_proof,
+        process_timeout_challenge, process_write_step_proof, step_proof_public_input_hash,
     },
     close_session::process_close_session,
     delegate::process_delegate,

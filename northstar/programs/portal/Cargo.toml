@@ -12,6 +12,7 @@ default = []
 no-entrypoint = []
 bpf-entrypoint = []
 test-verifier = []
+zk-verifier-profile = ["zk-verifier-prototype"]
 zk-verifier-prototype = ["dep:groth16-solana", "dep:northstar-zk-types"]
 
 [dependencies]
@@ -25,13 +26,16 @@ groth16-solana = { git = "https://github.com/Lightprotocol/groth16-solana", rev 
 northstar-zk-types = { workspace = true, optional = true }
 solana-sha256-hasher = { workspace = true, features = ["sha2"] }
 pinocchio-idl-macros = "=0.1.1"
-solana-address = { version = "=2.6.1", default-features = false, features = ["borsh"] }
+solana-address = { version = "2.7.0", default-features = false, features = ["borsh"] }
 
 [target.'cfg(not(target_os = "solana"))'.dependencies]
 solana-pubkey = { workspace = true, features = ["curve25519"] }
+solana-poseidon = { workspace = true }
 
 [dev-dependencies]
+solana-bn254 = { workspace = true }
 bincode = { workspace = true }
+northstar-transaction-proof.workspace = true
 hex = "0.4"
 serde_json = "1"
 solana-program-test = { workspace = true }
@@ -41,6 +45,7 @@ solana-pubkey = { workspace = true }
 solana-signature = { workspace = true }
 solana-signer = { workspace = true }
 solana-instruction = { workspace = true }
+solana-instruction-error = { workspace = true }
 solana-transaction = { workspace = true }
 solana-keypair = { workspace = true }
 solana-account = { workspace = true }

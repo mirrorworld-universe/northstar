@@ -15,6 +15,8 @@ all-features = true
 rustdoc-args = ["--cfg=docsrs"]
 
 [features]
+# Sonic: Keep local validator proof coordination opt-in as well.
+proof-coordinator = ["solana-core/proof-coordinator"]
 agave-unstable-api = []
 dev-context-only-utils = [
     "solana-core/dev-context-only-utils",
@@ -32,7 +34,7 @@ bincode = { workspace = true }
 crossbeam-channel = { workspace = true }
 log = { workspace = true }
 serde_json = { workspace = true }
-solana-account = { workspace = true }
+solana-account = { workspace = true, features = ["bincode"] }
 solana-accounts-db = { workspace = true }
 solana-bls-signatures = { workspace = true }
 solana-cli-output = { workspace = true }

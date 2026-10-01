@@ -1,5 +1,4 @@
 #![cfg(feature = "agave-unstable-api")]
-#![cfg_attr(feature = "frozen-abi", feature(min_specialization))]
 #![allow(clippy::arithmetic_side_effects)]
 #![recursion_limit = "2048"]
 
@@ -30,6 +29,7 @@ mod shredder;
 pub mod sigverify_shreds;
 pub mod slot_stats;
 mod staking_utils;
+mod thread_pool;
 mod transaction_address_lookup_table_scanner;
 pub mod use_snapshot_archives_at_startup;
 

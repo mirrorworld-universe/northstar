@@ -403,6 +403,14 @@ fn deposit_ix(
             AccountMeta::new(deposit_receipt, false),
             AccountMeta::new_readonly(delegation_record, false),
             AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new_readonly(
+                Pubkey::find_program_address(
+                    &[b"undelegation_request", er_account.as_ref()],
+                    &portal_program,
+                )
+                .0,
+                false,
+            ),
         ],
         data: borsh::to_vec(&TokenBridgeInstruction::Deposit {
             amount,
@@ -467,6 +475,23 @@ fn delegate_er_ix(
             AccountMeta::new(delegation_record, false),
             AccountMeta::new(buffer, false),
             AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new_readonly(
+                northstar_token_bridge::find_token_deposit_receipt_pda(
+                    &bridge_program,
+                    &session_bridge,
+                    &er_account,
+                )
+                .0,
+                false,
+            ),
+            AccountMeta::new(
+                Pubkey::find_program_address(
+                    &[b"token_deposit_origin", er_account.as_ref()],
+                    &bridge_program,
+                )
+                .0,
+                false,
+            ),
         ],
         data: borsh::to_vec(&TokenBridgeInstruction::DelegateErTokenAccount { grid_id }).unwrap(),
     }
