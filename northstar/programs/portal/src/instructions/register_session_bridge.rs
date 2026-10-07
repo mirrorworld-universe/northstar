@@ -1,4 +1,5 @@
 use {
+    super::initialize_pda_account,
     crate::{
         find_session_bridge_pda, find_session_pda, PortalError, RegisterSessionBridge, Session,
         SessionBridge,
@@ -11,7 +12,6 @@ use {
         AccountView as AccountInfo, Address as Pubkey, ProgramResult,
     },
     pinocchio_idl_macros::p_instruction,
-    pinocchio_system::instructions::CreateAccount,
 };
 
 const TOKEN_VAULT_SEED_PREFIX: &[u8] = b"token_vault";
@@ -126,7 +126,7 @@ pub fn process_register_session_bridge(
         bump: bridge_bump,
     };
 
-    if session_bridge.lamports() == 0 {
+    if session_bridge.is_data_empty() {
         let rent = Rent::get()?;
         let bridge_size = crate::account_size(&bridge_state);
         let lamports = rent.try_minimum_balance(bridge_size)?;
@@ -139,14 +139,14 @@ pub fn process_register_session_bridge(
         ];
         let signer = Signer::from(signer_seeds);
 
-        CreateAccount {
-            from: payer,
-            to: session_bridge,
+        initialize_pda_account(
+            payer,
+            session_bridge,
             lamports,
-            space: bridge_size as u64,
-            owner: program_id,
-        }
-        .invoke_signed(&[signer])?;
+            bridge_size as u64,
+            program_id,
+            signer,
+        )?;
     } else {
         if !session_bridge.owned_by(program_id) {
             return Err(PortalError::InvalidAccountData.into());

@@ -389,7 +389,7 @@ pub(super) fn settle_resolved_fixture(
         payer,
         rpc.get_latest_blockhash().unwrap(),
         artifact.checkpoint.effect_commitment,
-        true,
+        None,
     );
     assert!(initial.len() > 1);
     fees += rpc.get_fee_for_message(&initial[0].message).unwrap();
@@ -406,7 +406,11 @@ pub(super) fn settle_resolved_fixture(
         payer,
         rpc.get_latest_blockhash().unwrap(),
         artifact.checkpoint.effect_commitment,
-        false,
+        Some(
+            northstar_portal::Session::try_from_slice(&rpc.get_account(&session).unwrap().data)
+                .unwrap()
+                .settlement_accumulator,
+        ),
     );
     for transaction in retries {
         fees += rpc.get_fee_for_message(&transaction.message).unwrap();
