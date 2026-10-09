@@ -104,6 +104,13 @@ pub struct SettleAccountLamports {
     pub lamports: [u64; 7],
 }
 
+impl SettleAccountLamports {
+    /// Payload size excluding the enum tag. A trailing 32-byte previous accumulator
+    /// enables surplus reconciliation and requires the canonical FeeVault as the last account.
+    /// Without the extension, the legacy exact-conservation behavior is unchanged.
+    pub const SERIALIZED_LEN: usize = 8 + 32 + 1 + 7 * 8;
+}
+
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
 pub struct ProposeCheckpoint {
     pub er_slot: u64,

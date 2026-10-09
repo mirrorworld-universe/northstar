@@ -394,6 +394,44 @@ impl RunningScenario {
 // ---- Delegate ----
 
 #[tokio::test]
+async fn invariant_prefunded_delegation_record_initializes_and_preserves_excess() {
+    for prefunding in [1, 10_000_000] {
+        let mut inner = DelegateScenario::new();
+        inner.owner_program = system_program::id();
+        let mut staged = StagedScenario::new(inner).with_delegated(vec![], PORTAL_PROGRAM_ID);
+        let (record, _) = find_delegation_record_pda(&staged.inner.delegated.pubkey());
+        staged.program_test.add_account(
+            record,
+            Account {
+                lamports: prefunding,
+                data: vec![],
+                owner: system_program::id(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        );
+        let mut scenario = staged.start().await;
+        scenario.delegate().await.unwrap();
+        let initialized = scenario
+            .context
+            .banks_client
+            .get_account(record)
+            .await
+            .unwrap()
+            .unwrap();
+        let state = DelegationRecord::try_from_slice(&initialized.data).unwrap();
+        assert!(state.is_valid());
+        assert_eq!(state.owner_program, scenario.inner.owner_program);
+        assert_eq!(initialized.owner, PORTAL_PROGRAM_ID);
+        let rent = scenario.context.banks_client.get_rent().await.unwrap();
+        assert_eq!(
+            initialized.lamports,
+            prefunding.max(rent.minimum_balance(initialized.data.len()))
+        );
+    }
+}
+
+#[tokio::test]
 async fn delegate_keypair_wallet_succeeds() {
     let mut scenario =
         StagedScenario::new(DelegateScenario::new()).with_delegated(vec![], PORTAL_PROGRAM_ID);

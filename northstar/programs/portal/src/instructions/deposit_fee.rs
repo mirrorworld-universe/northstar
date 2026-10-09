@@ -68,6 +68,14 @@ pub fn process_deposit_fee(
         return Err(PortalError::SessionExpired.into());
     }
 
+    // Receipt escrow must not be mixed with lamports already held by a delegated account.
+    if !recipient.owned_by(&pinocchio_system::ID)
+        || !recipient.is_data_empty()
+        || recipient.executable()
+    {
+        return Err(PortalError::InvalidAccountData.into());
+    }
+
     if lamports == 0 {
         pinocchio_log::log!("WARN: Deposited 0 lamports");
         return Ok(());

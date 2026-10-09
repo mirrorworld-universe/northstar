@@ -737,7 +737,7 @@ impl Manager {
                     session_pda,
                     recent_blockhash,
                     effect_commitment,
-                    false,
+                    Some(session_state.settlement_accumulator),
                 );
                 (plan, transactions)
             }
@@ -1262,7 +1262,7 @@ impl Manager {
         session_pda: Pubkey,
         recent_blockhash: Hash,
         effect_commitment: [u8; 32],
-        include_begin: bool,
+        resume_accumulator: Option<[u8; 32]>,
     ) -> Vec<Transaction> {
         let mut transactions = plan.portal_transactions_with_effect_commitment(
             self.config.portal_program_id,
@@ -1270,7 +1270,7 @@ impl Manager {
             self.config.manager_account.as_ref(),
             recent_blockhash,
             effect_commitment,
-            include_begin,
+            resume_accumulator,
         );
         let Some(finish_transaction) = transactions.pop() else {
             return vec![];
@@ -1343,7 +1343,7 @@ impl Manager {
                     session_pda,
                     recent_blockhash,
                     checkpoint.effect_commitment,
-                    true,
+                    None,
                 ));
                 Some(transactions)
             }
@@ -1357,7 +1357,7 @@ impl Manager {
                     session_pda,
                     recent_blockhash,
                     checkpoint.effect_commitment,
-                    true,
+                    None,
                 ))
             }
             CheckpointStatus::Challenged => {
@@ -4107,7 +4107,7 @@ mod portal_e2e_tests {
             Pubkey::new_unique(),
             Hash::new_unique(),
             [8; 32],
-            true,
+            None,
         );
         let program_id = |transaction: &Transaction| {
             let instruction = &transaction.message.instructions[0];
