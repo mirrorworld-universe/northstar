@@ -7,7 +7,9 @@ use {
         create_custom_loader, deploy_program_with_upgrade_authority, load_program, program_address,
         program_data_size, register_builtins,
     },
-    solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
+    solana_account::{
+        AccountSharedData, ReadableAccount, WritableAccount, state_traits::StateMutWincode as _,
+    },
     solana_clock::Slot,
     solana_compute_budget::compute_budget_limits::ComputeBudgetLimits,
     solana_compute_budget_interface::ComputeBudgetInstruction,
@@ -41,10 +43,7 @@ use {
         nonce_info::NonceInfo,
         program_loader::filter_executable_program_accounts,
         transaction_execution_result::TransactionExecutionDetails,
-        transaction_processing_result::{
-            ProcessedTransaction, TransactionProcessingResult,
-            TransactionProcessingResultExtensions,
-        },
+        transaction_processing_result::{ProcessedTransaction, TransactionProcessingResult},
         transaction_processor::{
             ExecutionRecordingConfig, LoadAndExecuteSanitizedTransactionsOutput,
             TransactionBatchProcessor, TransactionProcessingConfig,
@@ -166,6 +165,7 @@ impl SvmTestEnvironment<'_> {
             drop_on_failure: test_entry.drop_on_failure,
             all_or_nothing: test_entry.all_or_nothing,
             drop_noop_transactions: test_entry.drop_noop_transactions,
+            drop_bail_out_transactions: test_entry.drop_bail_out_transactions,
             ..Default::default()
         };
 
@@ -331,26 +331,6 @@ impl SvmTestEnvironment<'_> {
         let mut mock_bank_accounts = self.mock_bank.account_shared_data.write().unwrap();
         mock_bank_accounts.extend(final_accounts_actual);
 
-        // update global program cache
-        for processing_result in batch_output.processing_results.iter() {
-            if let Some(ProcessedTransaction::Executed(executed_tx)) =
-                processing_result.processed_transaction()
-            {
-                let programs_modified_by_tx = &executed_tx.programs_modified_by_tx;
-                if executed_tx.was_successful() && !programs_modified_by_tx.is_empty() {
-                    self.batch_processor
-                        .global_program_cache
-                        .write()
-                        .unwrap()
-                        .merge(
-                            &self.batch_processor.program_runtime_environment,
-                            self.batch_processor.slot,
-                            programs_modified_by_tx,
-                        );
-                }
-            }
-        }
-
         batch_output
     }
 
@@ -409,6 +389,9 @@ pub struct SvmTestEntry {
     // enables transformation of no-op result into error. false in replay, true in block production
     pub drop_noop_transactions: bool,
 
+    // enables dropping of transactions which bailed out in the program runtime. false in replay, true in block production
+    pub drop_bail_out_transactions: bool,
+
     // programs to deploy to the new svm
     pub initial_programs: Vec<(String, Slot, Option<Pubkey>)>,
 
@@ -432,6 +415,7 @@ impl Default for SvmTestEntry {
             all_or_nothing: false,
             drop_on_failure: false,
             drop_noop_transactions: false,
+            drop_bail_out_transactions: false,
             initial_programs: Vec::new(),
             initial_accounts: HashMap::new(),
             transaction_batch: Vec::new(),
@@ -2896,7 +2880,7 @@ fn program_cache_loaderv3_update_tombstone(upgrade_program: bool, invoke_changed
 
     // upgrade or close a deployed program
     let change_instruction = if upgrade_program {
-        let mut data = bincode::serialize(&UpgradeableLoaderState::Buffer {
+        let mut data = wincode::serialize(&UpgradeableLoaderState::Buffer {
             authority_address: Some(fee_payer),
         })
         .unwrap();
@@ -3004,7 +2988,7 @@ fn program_cache_loaderv3_buffer_swap(invoke_changed_program: bool) {
     let deploy_keypair = Keypair::new();
     let deploy = deploy_keypair.pubkey();
 
-    let mut buffer_data = bincode::serialize(&UpgradeableLoaderState::Buffer {
+    let mut buffer_data = wincode::serialize(&UpgradeableLoaderState::Buffer {
         authority_address: Some(fee_payer),
     })
     .unwrap();
@@ -3022,7 +3006,7 @@ fn program_cache_loaderv3_buffer_swap(invoke_changed_program: bool) {
     test_entry.add_initial_account(target, &buffer_account);
     test_entry.add_initial_account(deploy, &buffer_account);
 
-    let program_data = bincode::serialize(&UpgradeableLoaderState::Program {
+    let program_data = wincode::serialize(&UpgradeableLoaderState::Program {
         programdata_address,
     })
     .unwrap();
@@ -3134,7 +3118,7 @@ fn program_cache_stats() {
     // set up a future upgrade after the first batch
     let buffer_address = Pubkey::new_unique();
     {
-        let mut data = bincode::serialize(&UpgradeableLoaderState::Buffer {
+        let mut data = wincode::serialize(&UpgradeableLoaderState::Buffer {
             authority_address: Some(fee_payer),
         })
         .unwrap();
@@ -3299,7 +3283,6 @@ fn program_cache_stats() {
         &[&fee_payer_keypair],
         Hash::default(),
     ));
-    noop_tx_usage += 1;
 
     test_entry.drop_expected_account(buffer_address);
 
@@ -3332,6 +3315,7 @@ fn program_cache_stats() {
     );
 
     // third batch, this creates a delayed visibility tombstone
+    let mut noop_tx_usage = 0;
     let mut test_entry = SvmTestEntry {
         initial_accounts: env.test_entry.final_accounts.clone(),
         final_accounts: env.test_entry.final_accounts.clone(),

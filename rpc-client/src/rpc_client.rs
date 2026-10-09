@@ -19,7 +19,7 @@ use {
     },
     agave_votor_messages::wire::WireBlockCertMessage,
     serde_json::Value,
-    solana_account::{Account, ReadableAccount},
+    solana_account::{Account, state_traits::StateMutWincode as _},
     solana_account_decoder::UiAccount,
     solana_account_decoder_client_types::token::{UiTokenAccount, UiTokenAmount},
     solana_clock::{Epoch, Slot, UnixTimestamp},
@@ -28,7 +28,7 @@ use {
     solana_epoch_schedule::EpochSchedule,
     solana_feature_gate_interface::Feature,
     solana_hash::Hash,
-    solana_message::{Message as LegacyMessage, v0, v1},
+    solana_message::{Message as LegacyMessage, VersionedMessage, v0, v1},
     solana_pubkey::Pubkey,
     solana_rpc_client_api::{
         client_error::{Error as ClientError, ErrorKind, Result as ClientResult},
@@ -79,19 +79,23 @@ impl RpcClientConfig {
 
 /// Trait used to add support for versioned messages to RPC APIs while
 /// retaining backwards compatibility
+#[deprecated(since = "4.5.0", note = "Use VersionedMessage instead")]
 pub trait SerializableMessage {
     fn serialize(&self) -> Vec<u8>;
 }
+#[allow(deprecated)]
 impl SerializableMessage for LegacyMessage {
     fn serialize(&self) -> Vec<u8> {
         self.serialize()
     }
 }
+#[allow(deprecated)]
 impl SerializableMessage for v0::Message {
     fn serialize(&self) -> Vec<u8> {
         self.serialize()
     }
 }
+#[allow(deprecated)]
 impl SerializableMessage for v1::Message {
     fn serialize(&self) -> Vec<u8> {
         self.serialize()
@@ -1868,6 +1872,80 @@ impl RpcClient {
     /// ```
     pub fn get_ag_genesis_cert(&self) -> ClientResult<Option<WireBlockCertMessage>> {
         self.invoke((self.rpc_client.as_ref()).get_ag_genesis_cert())
+    }
+
+    /// Returns the Alpenglow validator rank map for the epoch containing `slot`.
+    ///
+    /// Always queries finalized state, regardless of the client's default commitment.
+    ///
+    /// Returns `None` if the epoch is unavailable.
+    ///
+    /// # RPC Reference
+    ///
+    /// This method corresponds directly to the [`getRankMap`] RPC method.
+    ///
+    /// [`getRankMap`]: https://solana.com/docs/rpc/http/getrankmap
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use solana_rpc_client_api::client_error::Error;
+    /// # use solana_rpc_client::rpc_client::RpcClient;
+    /// # let rpc_client = RpcClient::new_mock("succeeds".to_string());
+    /// let certificate_slot = 100;
+    /// let response = rpc_client.get_rank_map(certificate_slot)?;
+    /// if let Some(rank_map) = response.value {
+    ///     for validator in rank_map.validators {
+    ///         println!("rank {}: {}", validator.rank, validator.node_pubkey);
+    ///     }
+    /// }
+    /// # Ok::<(), Error>(())
+    /// ```
+    pub fn get_rank_map(&self, slot: Slot) -> RpcResult<Option<RpcRankMap>> {
+        self.invoke((self.rpc_client.as_ref()).get_rank_map(slot))
+    }
+
+    /// Returns the Alpenglow validator rank map with an optional identity filter.
+    ///
+    /// Always queries finalized state. There is no commitment parameter.
+    ///
+    /// The filter preserves the validator's rank and the full map's total stake.
+    /// An unknown identity returns an empty validator list when the map is available.
+    ///
+    /// # RPC Reference
+    ///
+    /// This method corresponds directly to the [`getRankMap`] RPC method.
+    ///
+    /// [`getRankMap`]: https://solana.com/docs/rpc/http/getrankmap
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use solana_rpc_client_api::{client_error::Error, config::RpcRankMapConfig};
+    /// # use solana_rpc_client::rpc_client::RpcClient;
+    /// # let rpc_client = RpcClient::new_mock("succeeds".to_string());
+    /// let certificate_slot = 100;
+    /// let identity = "67omRD8GkXTi8daWceprtQABkDeEm3SZYHUCrthQGB9D";
+    /// let response = rpc_client.get_rank_map_with_config(
+    ///     certificate_slot,
+    ///     RpcRankMapConfig {
+    ///         identity: Some(identity.to_string()),
+    ///         ..RpcRankMapConfig::default()
+    ///     },
+    /// )?;
+    /// if let Some(rank_map) = response.value {
+    ///     if let Some(validator) = rank_map.validators.first() {
+    ///         println!("rank {}: {}", validator.rank, validator.node_pubkey);
+    ///     }
+    /// }
+    /// # Ok::<(), Error>(())
+    /// ```
+    pub fn get_rank_map_with_config(
+        &self,
+        slot: Slot,
+        config: RpcRankMapConfig,
+    ) -> RpcResult<Option<RpcRankMap>> {
+        self.invoke((self.rpc_client.as_ref()).get_rank_map_with_config(slot, config))
     }
 
     /// Get block production for the current epoch.
@@ -4296,8 +4374,23 @@ impl RpcClient {
     /// This method corresponds directly to the [`getFeeForMessage`] RPC method.
     ///
     /// [`getFeeForMessage`]: https://solana.com/docs/rpc/http/getfeeformessage
+    #[deprecated(since = "4.5.0", note = "Use get_fee_for_versioned_message instead")]
+    #[allow(deprecated)]
     pub fn get_fee_for_message(&self, message: &impl SerializableMessage) -> ClientResult<u64> {
         self.invoke((self.rpc_client.as_ref()).get_fee_for_message(message))
+    }
+
+    /// Returns the fee that the cluster would charge to process the provided message.
+    ///
+    /// Supports legacy, v0, and v1 messages through [`VersionedMessage`].
+    ///
+    /// # RPC Reference
+    ///
+    /// This method corresponds directly to the [`getFeeForMessage`] RPC method.
+    ///
+    /// [`getFeeForMessage`]: https://solana.com/docs/rpc/http/getfeeformessage
+    pub fn get_fee_for_versioned_message(&self, message: &VersionedMessage) -> ClientResult<u64> {
+        self.invoke((self.rpc_client.as_ref()).get_fee_for_versioned_message(message))
     }
 
     /// Fetches a fresh latest blockhash, retrying until it differs from the provided value.
@@ -4325,7 +4418,7 @@ impl RpcClient {
                 maybe_feature_account
                     .value
                     .map(|feature_account| {
-                        bincode::deserialize(feature_account.data()).map_err(|_| {
+                        feature_account.state().map_err(|_| {
                             ClientError::from(ErrorKind::Custom(
                                 "Failed to deserialize feature account".to_string(),
                             ))
@@ -4394,9 +4487,7 @@ mod tests {
         solana_hash::Hash,
         solana_instruction_error::InstructionError,
         solana_keypair::Keypair,
-        solana_message::{
-            MessageHeader, VersionedMessage, compiled_instruction::CompiledInstruction,
-        },
+        solana_message::{MessageHeader, compiled_instruction::CompiledInstruction},
         solana_rpc_client_api::client_error::ErrorKind,
         solana_signer::Signer,
         solana_system_interface::instruction as system_instruction,
@@ -4641,6 +4732,27 @@ mod tests {
             })
             .unwrap();
         assert_eq!(leader_with_config, expected_leader);
+    }
+
+    #[test]
+    fn test_get_rank_map_variants() {
+        let rpc_client = RpcClient::new_mock("succeeds".to_string());
+
+        let response = rpc_client.get_rank_map(0).unwrap();
+        assert_eq!(response.context.slot, 1);
+        assert!(response.value.is_none());
+
+        let response = rpc_client
+            .get_rank_map_with_config(
+                0,
+                RpcRankMapConfig {
+                    identity: None,
+                    min_context_slot: Some(1),
+                },
+            )
+            .unwrap();
+        assert_eq!(response.context.slot, 1);
+        assert!(response.value.is_none());
     }
 
     #[test]
@@ -5139,7 +5251,7 @@ mod tests {
         }
     }
 
-    #[test_case(LegacyMessage {
+    #[test_case(VersionedMessage::Legacy(LegacyMessage {
         header: MessageHeader {
             num_required_signatures: 1,
             num_readonly_signed_accounts: 0,
@@ -5152,8 +5264,8 @@ mod tests {
             accounts: vec![0],
             data: vec![],
         }],
-    }; "legacy message")]
-    #[test_case(v0::Message {
+    }); "legacy message")]
+    #[test_case(VersionedMessage::V0(v0::Message {
             header: MessageHeader {
                 num_required_signatures: 1,
                 num_readonly_signed_accounts: 0,
@@ -5167,17 +5279,18 @@ mod tests {
                 data: vec![],
             }],
             address_table_lookups: vec![],
-        }; "v0 message")]
-    #[test_case(v1::Message::try_compile_with_config(
-        &Pubkey::new_unique(),
-        &[],
-        Hash::new_unique(),
-        v1::TransactionConfig::empty(),
-    ).unwrap(); "v1 message")]
-    fn test_get_fee_for_message_sends_properly_serialized_message<M>(message: M)
-    where
-        M: SerializableMessage,
-    {
+        }); "v0 message")]
+    #[test_case(VersionedMessage::V1(
+        v1::Message::try_compile_with_config(
+            &Pubkey::new_unique(),
+            &[],
+            Hash::new_unique(),
+            v1::TransactionConfig::empty(),
+        ).unwrap()
+    ); "v1 message")]
+    fn test_get_fee_for_versioned_message_sends_properly_serialized_message(
+        message: VersionedMessage,
+    ) {
         let serialized_message = message.serialize();
         let serialized_message_base64 = BASE64_STANDARD.encode(serialized_message);
 
@@ -5222,8 +5335,33 @@ mod tests {
         let rpc_addr = receiver.recv().unwrap();
         let rpc_client = RpcClient::new_socket(rpc_addr);
 
-        let fee: u64 = rpc_client.get_fee_for_message(&message).unwrap();
+        let fee: u64 = rpc_client.get_fee_for_versioned_message(&message).unwrap();
         assert_eq!(fee, 42);
+    }
+
+    #[test_case(Some(0); "zero fee")]
+    #[test_case(None; "invalid blockhash")]
+    fn test_get_fee_for_versioned_message_response(fee: Option<u64>) {
+        let mocks = Mocks::from([(
+            RpcRequest::GetFeeForMessage,
+            json!(Response {
+                context: RpcResponseContext {
+                    slot: 1,
+                    api_version: None
+                },
+                value: fee,
+            }),
+        )]);
+        let rpc_client = RpcClient::new_mock_with_mocks("succeeds".to_string(), mocks);
+        let message = VersionedMessage::Legacy(LegacyMessage::default());
+        let result = rpc_client.get_fee_for_versioned_message(&message);
+        match fee {
+            Some(fee) => assert_eq!(result.unwrap(), fee),
+            None => assert_matches!(
+                result.unwrap_err().kind(),
+                ErrorKind::Custom(message) if message == "Invalid blockhash"
+            ),
+        }
     }
 
     #[test]

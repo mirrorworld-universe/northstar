@@ -7,12 +7,12 @@ use {
     crossbeam_channel::{unbounded, Receiver},
     log::{debug, info, warn},
     solana_keypair::Keypair,
+    solana_net_utils::quic_socket::QuicSocket,
     solana_perf::packet::PacketBatch,
     solana_send_transaction_service::send_transaction_service_stats::SendTransactionServiceStats,
     solana_streamer::{
         nonblocking::simple_qos::SimpleQosConfig,
         quic::{spawn_simple_qos_server, QuicStreamerConfig, SpawnServerResult},
-        quic_socket::QuicSocket,
         streamer::StakedNodes,
     },
     std::{

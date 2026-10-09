@@ -133,7 +133,7 @@ use {
     crate::entry::{Entry, EntryView, MaxDataShredsLen},
     agave_votor_messages::{
         certificate::{CertSignature, CertificateType, GenesisCert},
-        consensus_message::Block,
+        consensus_message::{Block, BlockId},
         reward_certificate::{NotarRewardCertificate, SkipRewardCertificate},
         unverified_vote_message::UnverifiedCertificate,
     },
@@ -257,14 +257,14 @@ pub struct BlockHeaderV1 {
 #[derive(Clone, PartialEq, Eq, Debug, SchemaWrite, SchemaRead)]
 pub struct UpdateParentV1 {
     pub new_parent_slot: Slot,
-    pub new_parent_block_id: Hash,
+    pub new_parent_block_id: BlockId,
 }
 
 /// Attests to genesis block finalization with a BLS aggregate signature.
 #[derive(Clone, PartialEq, Eq, Debug, SchemaWrite, SchemaRead)]
 pub struct GenesisCertBlockMarker {
     pub slot: Slot,
-    pub block_id: Hash,
+    pub block_id: BlockId,
     #[wincode(with = "PodBLSSignature")]
     pub bls_signature: BLSSignature,
     #[wincode(with = "WincodeVec<u8, BincodeLen>")]
@@ -693,7 +693,10 @@ pub fn finalization_certificates_from_footer(
         final_aggregate,
         notar_aggregate,
     } = block_final_cert;
-    let block = Block { slot, block_id };
+    let block = Block {
+        slot,
+        block_id: BlockId::from(block_id),
+    };
 
     let final_signature = final_aggregate.uncompress_signature().ok()?;
     let final_bitmap = final_aggregate.into_bitmap();
@@ -759,7 +762,7 @@ mod tests {
     #[test]
     fn parse_genesis_certificate_from_shred() {
         let parent_slot = 41;
-        let block_id = Hash::new_unique();
+        let block_id = BlockId::new_unique();
         let shred_version = 123;
         let signature: BlsSignature = BlsKeypair::new().sign(b"genesis").into();
         let bitmap = vec![0xa5; 64];
@@ -817,7 +820,10 @@ mod tests {
         };
         assert_eq!(
             certificate.cert_type,
-            CertificateType::FinalizeFast(Block { slot, block_id })
+            CertificateType::FinalizeFast(Block {
+                slot,
+                block_id: BlockId::from(block_id)
+            })
         );
         assert_eq!(certificate.signature, final_signature);
         assert_eq!(certificate.bitmap, final_bitmap);
@@ -851,7 +857,10 @@ mod tests {
         };
         assert_eq!(
             notarize.cert_type,
-            CertificateType::Notarize(Block { slot, block_id })
+            CertificateType::Notarize(Block {
+                slot,
+                block_id: BlockId::from(block_id)
+            })
         );
         assert_eq!(notarize.signature, notar_signature);
         assert_eq!(notarize.bitmap, notar_bitmap);
@@ -883,7 +892,7 @@ mod tests {
 
         let marker = GenesisCertBlockMarker {
             slot: 999,
-            block_id: Hash::new_unique(),
+            block_id: BlockId::new_unique(),
             bls_signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
             bitmap: vec![1, 2, 3],
         };
@@ -934,7 +943,7 @@ mod tests {
     fn length_prefixed_rejects_oversized_deserialized_inner() {
         let marker = GenesisCertBlockMarker {
             slot: 999,
-            block_id: Hash::new_unique(),
+            block_id: BlockId::new_unique(),
             bls_signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
             bitmap: vec![0xAB; usize::from(u16::MAX) + 1],
         };

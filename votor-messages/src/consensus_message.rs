@@ -1,14 +1,13 @@
 //! Put Alpenglow consensus messages here so all clients can agree on the format.
+#[cfg(feature = "stable-abi")]
+use solana_frozen_abi_macro::{StableAbi, StableAbiSample};
 use {
-    crate::{
-        certificate::{Certificate, CertificateType},
-        vote::Vote,
-    },
+    crate::{certificate::Certificate, vote::Vote},
     serde::{Deserialize, Serialize},
     solana_bls_signatures::{Signature as BLSSignature, signature::SignatureAffine},
     solana_clock::Slot,
-    solana_hash::Hash,
-    std::num::NonZero,
+    solana_hash::{HASH_BYTES, Hash},
+    std::{fmt::Display, num::NonZero},
     wincode::{SchemaRead, SchemaWrite, pod_wrapper},
 };
 
@@ -21,14 +20,66 @@ pod_wrapper! {
 /// The seed used to derive the BLS keypair
 pub const BLS_KEYPAIR_DERIVE_SEED: &[u8; 9] = b"alpenglow";
 
-#[cfg(feature = "frozen-abi")]
+#[cfg(feature = "stable-abi")]
 fn sample_hash(rng: &mut (impl solana_frozen_abi::rand::RngCore + ?Sized)) -> Hash {
     use solana_frozen_abi::stable_abi::StableAbi;
     Hash::new_from_array(<[u8; solana_hash::HASH_BYTES] as StableAbi>::random(rng))
 }
 
+#[cfg_attr(feature = "stable-abi", derive(StableAbi, StableAbiSample))]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    SchemaWrite,
+    SchemaRead,
+)]
+#[repr(transparent)]
+/// An alpenglow block id
+pub struct BlockId(
+    #[cfg_attr(feature = "stable-abi", stable_abi_sample(with = "sample_hash(rng)"))] Hash,
+);
+
+impl BlockId {
+    #[cfg(feature = "dev-context-only-utils")]
+    /// Creates a new BlockId
+    pub fn new_unique() -> Self {
+        Self(Hash::new_unique())
+    }
+
+    /// Returns a reference to the byte representation of the block id hash.
+    pub const fn as_bytes(&self) -> &[u8; HASH_BYTES] {
+        self.0.as_bytes()
+    }
+
+    /// Returns the hash of the block id consuming self.
+    pub const fn to_hash(self) -> Hash {
+        self.0
+    }
+}
+
+impl Display for BlockId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<Hash> for BlockId {
+    fn from(block_id: Hash) -> Self {
+        Self(block_id)
+    }
+}
+
 /// An alpenglow block
-#[cfg_attr(feature = "frozen-abi", derive(StableAbi, StableAbiSample))]
+#[cfg_attr(feature = "stable-abi", derive(StableAbi, StableAbiSample))]
 #[derive(
     Clone,
     Copy,
@@ -49,8 +100,7 @@ pub struct Block {
     /// The slot in the block.
     pub slot: Slot,
     /// The block_id of the block.
-    #[cfg_attr(feature = "frozen-abi", stable_abi_sample(with = "sample_hash(rng)"))]
-    pub block_id: Hash,
+    pub block_id: BlockId,
 }
 
 impl Block {
@@ -59,7 +109,7 @@ impl Block {
     pub fn new_unique(slot: Slot) -> Self {
         Self {
             slot,
-            block_id: Hash::new_unique(),
+            block_id: BlockId::new_unique(),
         }
     }
 }
@@ -85,48 +135,4 @@ pub enum ConsensusMessage {
     Vote(VoteMessage),
     /// A certificate aggregating votes from multiple parties.
     Certificate(Certificate),
-}
-
-impl ConsensusMessage {
-    /// Create a new vote message
-    pub fn new_vote(
-        vote: Vote,
-        signature: SignatureAffine,
-        rank: u16,
-        stake: NonZero<u64>,
-    ) -> Self {
-        Self::Vote(VoteMessage {
-            vote,
-            signature,
-            rank,
-            stake,
-        })
-    }
-
-    /// Create a new certificate.
-    pub fn new_certificate(
-        cert_type: CertificateType,
-        bitmap: Vec<u8>,
-        signature: BLSSignature,
-    ) -> Self {
-        Self::Certificate(Certificate {
-            cert_type,
-            signature,
-            bitmap,
-        })
-    }
-
-    /// Returns the slot this message is for.
-    pub fn slot(&self) -> Slot {
-        match self {
-            Self::Vote(vote) => vote.vote.slot(),
-            Self::Certificate(certificate) => certificate.cert_type.slot(),
-        }
-    }
-}
-
-impl From<Certificate> for ConsensusMessage {
-    fn from(cert: Certificate) -> Self {
-        Self::Certificate(cert)
-    }
 }

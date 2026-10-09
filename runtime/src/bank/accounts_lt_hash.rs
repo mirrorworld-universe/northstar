@@ -1122,8 +1122,6 @@ mod tests {
             None, // leader_for_tests
             None,
             false,
-            false,
-            false,
             accounts_db_config,
             None,
             Arc::default(),
@@ -1186,8 +1184,6 @@ mod tests {
             None,
             None, // leader_for_tests
             None,
-            false,
-            false,
             false,
             ACCOUNTS_DB_CONFIG_FOR_TESTING,
             None,

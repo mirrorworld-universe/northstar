@@ -1,7 +1,7 @@
 //! This module contains definitions of various types of signature verified messages.
 
 use {
-    crate::{
+    agave_votor_messages::{
         certificate::Certificate, consensus_message::VoteMessage, vote::Vote,
         wire::VotePayloadToSign,
     },
@@ -18,24 +18,6 @@ pub enum SigVerifiedBatch {
     Votes(Vec<VoteAggregate>),
     /// Batch of certs.
     Certificates(Vec<Certificate>),
-}
-
-impl SigVerifiedBatch {
-    /// Returns the length of the batch
-    pub fn len(&self) -> usize {
-        match self {
-            Self::Votes(aggregates) => aggregates.len(),
-            Self::Certificates(certs) => certs.len(),
-        }
-    }
-
-    /// Returns true if the batch is empty.
-    pub fn is_empty(&self) -> bool {
-        match self {
-            Self::Votes(aggregates) => aggregates.is_empty(),
-            Self::Certificates(certs) => certs.is_empty(),
-        }
-    }
 }
 
 /// A batch of identical votes that have been sigverified

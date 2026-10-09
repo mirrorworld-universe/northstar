@@ -9,6 +9,7 @@ use {
     solana_account::{AccountSharedData, ReadableAccount},
     solana_commitment_config::CommitmentConfig,
     solana_keypair::Keypair,
+    solana_message::VersionedMessage,
     solana_pubkey::Pubkey,
     solana_rpc::er_history::ErHistoryStore,
     solana_rpc_client::rpc_client::RpcClient,
@@ -375,7 +376,9 @@ pub(super) fn settle_resolved_fixture(
         payer,
         rpc.get_latest_blockhash().unwrap(),
     );
-    let mut fees = rpc.get_fee_for_message(&commit.message).unwrap();
+    let mut fees = rpc
+        .get_fee_for_versioned_message(&VersionedMessage::Legacy(commit.message.clone()))
+        .unwrap();
     rpc.send_and_confirm_transaction(&commit).unwrap();
     let plan_path = directory.join("settlement-plan.borsh");
     fs::write(
@@ -392,7 +395,9 @@ pub(super) fn settle_resolved_fixture(
         None,
     );
     assert!(initial.len() > 1);
-    fees += rpc.get_fee_for_message(&initial[0].message).unwrap();
+    fees += rpc
+        .get_fee_for_versioned_message(&VersionedMessage::Legacy(initial[0].message.clone()))
+        .unwrap();
     rpc.send_and_confirm_transaction(&initial[0]).unwrap();
     restart_after_account(rpc, &session, "SETTLEMENT");
     let restored: crate::DurableSettlementPlan =
@@ -413,7 +418,9 @@ pub(super) fn settle_resolved_fixture(
         ),
     );
     for transaction in retries {
-        fees += rpc.get_fee_for_message(&transaction.message).unwrap();
+        fees += rpc
+            .get_fee_for_versioned_message(&VersionedMessage::Legacy(transaction.message.clone()))
+            .unwrap();
         rpc.send_and_confirm_transaction(&transaction).unwrap();
     }
     let terminal = northstar_portal::Checkpoint::try_from_slice(

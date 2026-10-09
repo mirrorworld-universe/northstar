@@ -19,7 +19,7 @@ use {
     solana_instruction::{AccountMeta, Instruction},
     solana_keypair::{Keypair, read_keypair_file},
     solana_measure::measure::Measure,
-    solana_message::Message,
+    solana_message::{Message, VersionedMessage},
     solana_net_utils::SocketAddrSpace,
     solana_program_pack::Pack,
     solana_pubkey::Pubkey,
@@ -90,7 +90,8 @@ pub fn poll_get_latest_blockhash(client: &RpcClient) -> Option<Hash> {
 pub fn poll_get_fee_for_message(client: &RpcClient, message: &mut Message) -> (Option<u64>, Hash) {
     let mut num_retries = MAX_RPC_CALL_RETRIES;
     loop {
-        let response = client.get_fee_for_message(message);
+        let response =
+            client.get_fee_for_versioned_message(&VersionedMessage::Legacy(message.clone()));
 
         if let Ok(fee) = response {
             return (Some(fee), message.recent_blockhash);
@@ -1417,6 +1418,7 @@ fn main() {
 pub mod test {
     use {
         super::*,
+        serial_test::serial,
         solana_accounts_db::accounts_index::{AccountIndex, AccountSecondaryIndexes},
         solana_core::validator::ValidatorConfig,
         solana_faucet::faucet::run_local_faucet_for_tests,
@@ -1450,6 +1452,7 @@ pub mod test {
     const TEST_CLUSTER_MINT_LAMPORTS: u64 = 200 * LAMPORTS_PER_SOL;
 
     #[test]
+    #[serial]
     fn test_accounts_cluster_bench() {
         agave_logger::setup();
         let mut validator_config = ValidatorConfig::default_for_test();
@@ -1499,6 +1502,7 @@ pub mod test {
     }
 
     #[test]
+    #[serial]
     fn test_halt_accounts_creation_at_max() {
         agave_logger::setup();
         let mut validator_config = ValidatorConfig::default_for_test();
@@ -1511,7 +1515,7 @@ pub mod test {
             ..ClusterConfig::default()
         };
 
-        let cluster = LocalCluster::new(&mut config, SocketAddrSpace::Unspecified);
+        let cluster = LocalCluster::new_tower(&mut config, SocketAddrSpace::Unspecified);
         let iterations = 100;
         let maybe_space = None;
         let batch_size = 20;
@@ -1548,6 +1552,7 @@ pub mod test {
     }
 
     #[test]
+    #[serial]
     fn test_create_then_reclaim_spl_token_accounts() {
         agave_logger::setup();
         let mint_keypair = Keypair::new();

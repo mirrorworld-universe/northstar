@@ -50,6 +50,8 @@ pub struct SVMFeatureSet {
     pub relax_post_exec_min_balance_check: bool,
     pub define_ltds_fee_only_semantics: bool,
     pub relax_fee_payer_constraint: bool,
+    pub loader_v3_set_program_data_to_elf_length: bool,
+    pub early_instruction_trace_overflow_detection: bool,
 }
 
 impl SVMFeatureSet {
@@ -104,6 +106,8 @@ impl SVMFeatureSet {
             relax_post_exec_min_balance_check: true,
             define_ltds_fee_only_semantics: true,
             relax_fee_payer_constraint: true,
+            loader_v3_set_program_data_to_elf_length: true,
+            early_instruction_trace_overflow_detection: true,
         }
     }
 }

@@ -1,3 +1,5 @@
+#[cfg(feature = "stable-abi")]
+use solana_frozen_abi_macro::{StableAbi, StableAbiSample, frozen_abi};
 use {
     super::vote_history::*,
     log::trace,
@@ -28,7 +30,7 @@ fn vote_history_wincode_config() -> VoteHistoryWincodeConfig {
 }
 
 #[cfg_attr(
-    feature = "frozen-abi",
+    feature = "stable-abi",
     derive(StableAbi, StableAbiSample),
     frozen_abi(
         abi_digest = "4VVxd5brhUZgopYJ7zwAYC8J62zU2nUZSAV4kETb3m9q",
@@ -84,7 +86,7 @@ impl From<SavedVoteHistory> for SavedVoteHistoryVersions {
 }
 
 #[cfg_attr(
-    feature = "frozen-abi",
+    feature = "stable-abi",
     derive(StableAbi, StableAbiSample),
     frozen_abi(
         abi_digest = "Mhh4tHGaVTfWbkJ78sY1dDbYZHtQjXiVFBtC3BfQH5C",
@@ -96,7 +98,7 @@ pub struct SavedVoteHistory {
     signature: Signature,
     data: Vec<u8>,
     #[wincode(skip)]
-    #[cfg_attr(feature = "frozen-abi", stable_abi_sample(with = "Default::default()"))]
+    #[cfg_attr(feature = "stable-abi", stable_abi_sample(with = "Default::default()"))]
     node_pubkey: Pubkey,
 }
 

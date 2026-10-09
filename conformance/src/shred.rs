@@ -10,14 +10,14 @@ use {
     agave_votor_messages::migration::MigrationStatus,
     prost::Message,
     protosol::protos::{BlockParseResult, FecSetParseResult, ShredParseContext, ShredParseEffects},
-    solana_account::AccountSharedData,
+    solana_account::{AccountSharedData, state_traits::StateMutWincode as _},
     solana_accounts_db::{
         account_locks::validate_account_locks,
         accounts::Accounts,
         accounts_db::{ACCOUNTS_DB_CONFIG_FOR_TESTING, AccountsDb, AccountsDbConfig},
         ancestors::Ancestors,
     },
-    solana_clock::{BankId, DEFAULT_HASHES_PER_TICK, DEFAULT_TICKS_PER_SLOT, Slot},
+    solana_clock::{DEFAULT_HASHES_PER_TICK, DEFAULT_TICKS_PER_SLOT, Slot},
     solana_epoch_schedule::EpochSchedule,
     solana_ledger::{
         blockstore::{
@@ -26,8 +26,7 @@ use {
         },
         blockstore_processor::verify_ticks,
         shred::{
-            CODING_SHREDS_PER_FEC_BLOCK, DATA_SHREDS_PER_FEC_BLOCK, Payload, ReedSolomonCache,
-            Shred,
+            CODING_SHREDS_PER_FEC_BLOCK, DATA_SHREDS_PER_FEC_BLOCK, Payload, Shred,
             filter::{ShredFilterContext, ShredRecoveryContext},
             wire,
         },
@@ -168,12 +167,7 @@ pub fn execute_shred_parse(ctx: &ShredParseContext) -> ShredParseEffects {
         }
     };
     let (retransmit_sender, _retransmit_rx) = EvictingSender::<Vec<Payload>>::new_bounded(0);
-    let mut recovery = ShredRecoveryContext::new(
-        ReedSolomonCache::default(),
-        retransmit_sender,
-        bank.clone(),
-        shred_version,
-    );
+    let mut recovery = ShredRecoveryContext::new(retransmit_sender, bank.clone(), shred_version);
     let mut metrics = BlockstoreInsertionMetrics::default();
     let handle_duplicate = |duplicate: PossibleDuplicateShred| {
         let _duplicate_proof = handle_duplicate_shred(
@@ -328,16 +322,16 @@ fn build_root_bank(root_slot: Slot, feature_set: FeatureSet) -> Arc<Bank> {
     let epoch = epoch_schedule.get_epoch(root_slot);
     let parent_slot = root_slot.saturating_sub(1);
 
-    let accounts = create_accounts_db();
+    let bank_rc = BankRc::new(create_accounts_db());
+    let bank_id = bank_rc.next_bank_id();
     let rent_account = AccountSharedData::new_data(1, &Rent::default(), &sysvar::id()).unwrap();
-    accounts.store_accounts(
+    bank_rc.accounts.store_accounts(
         (parent_slot, &[(sysvar::rent::id(), rent_account)][..]),
-        BankId::default(),
+        bank_id,
         None,
         &Ancestors::default(),
     );
-    accounts.accounts_db.add_root(parent_slot);
-    let bank_rc = BankRc::new(accounts);
+    bank_rc.accounts.accounts_db.add_root(parent_slot);
 
     let epoch_stakes = [epoch, epoch.saturating_add(1)]
         .into_iter()

@@ -340,13 +340,13 @@ impl AccountsCache {
         // Exit early if the pubkey isn't in the cache
         let index_max_slot = self.index.max_slot_for_pubkey(pubkey)?;
 
-        // Northstar: ER banks can have sparse ancestry, so iterating min..=max may be intractable.
-        let mut ancestor_slots = ancestors.keys();
-        ancestor_slots.sort_unstable_by(|a, b| b.cmp(a));
-        for slot in ancestor_slots {
-            if slot > index_max_slot {
-                continue;
-            }
+        // Ancestors take priority over roots regardless of slot. Walk them in descending order,
+        // skipping those above the newest cached version, and return the first (highest) that has it.
+        for slot in ancestors
+            .iter()
+            .rev()
+            .skip_while(|slot| *slot > index_max_slot)
+        {
             if let Some(account) = self.load(slot, pubkey) {
                 return Some((account, slot));
             }

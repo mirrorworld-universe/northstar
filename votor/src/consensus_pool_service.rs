@@ -20,12 +20,14 @@ use {
         voting_service::BLSOp,
         votor::ExitOnDrop,
     },
-    agave_bls_sigverify::generated_cert_types::GeneratedCertTypes,
+    agave_bls_sigverify::{
+        generated_cert_types::GeneratedCertTypes,
+        sig_verified_messages::{SigVerifiedBatch, VoteAggregate},
+    },
     agave_votor_messages::{
         certificate::Certificate,
-        consensus_message::{Block, VoteMessage},
+        consensus_message::{Block, BlockId, VoteMessage},
         migration::MigrationStatus,
-        sig_verified_messages::{SigVerifiedBatch, VoteAggregate},
         vote::Vote,
     },
     crossbeam_channel::{Receiver, RecvError, Sender, TrySendError, select_biased},
@@ -206,9 +208,6 @@ impl ConsensusPoolService {
             *ctx.highest_finalized.write().unwrap() =
                 consensus_pool.get_highest_finalization_certs();
         }
-        let bank = ctx.sharable_banks.root();
-        consensus_pool.maybe_prune(bank.slot());
-        stats.prune_old_state_called += 1;
     }
 
     fn send_certs(
@@ -372,6 +371,9 @@ impl ConsensusPoolService {
         votor_events: &mut Vec<VotorEvent>,
         stats: &mut ConsensusPoolServiceStats,
     ) -> (Option<Slot>, Vec<Arc<Certificate>>) {
+        // pruning the consensus pool also updates its view of the root slot thereby minimising
+        // chances of handling stale messages and reducing the distance between root and slot in the message.
+        consensus_pool.maybe_prune(root_bank.slot());
         let (new_finalized_slot, new_certificates_to_send) =
             consensus_pool.add_pool_msg(root_bank, msg, votor_events);
         let Some(new_finalized_slot) = new_finalized_slot else {
@@ -512,7 +514,7 @@ impl ConsensusPoolService {
             // Check if we've received the full block in blockstore
             let Some((slot_meta, _location)) = ctx
                 .blockstore
-                .get_slot_meta_for_block_id(block.slot, block.block_id)
+                .get_slot_meta_for_block_id(block.slot, block.block_id.to_hash())
                 .expect("Blockstore operations must succeed")
             else {
                 // Block not yet received, keep waiting
@@ -523,7 +525,7 @@ impl ConsensusPoolService {
                 slot: slot_meta
                     .parent_slot
                     .expect("parent slot must exist for full blocks"),
-                block_id: slot_meta.parent_block_id,
+                block_id: BlockId::from(slot_meta.parent_block_id),
             };
 
             // Check if the parent has a NotarizeFallback certificate (or stronger)
@@ -630,7 +632,7 @@ impl ConsensusPoolService {
         Self::send_certs(ctx, certs_to_send, stats)?;
         stats.footer_certs_received += footer_certs_received;
         if footer_certs_received >= MAX_MESSAGES_PER_RECEIVE {
-            stats.own_message_receive_limit_reached += 1;
+            stats.footer_message_receive_limit_reached += 1;
         }
         Ok(())
     }
@@ -712,10 +714,12 @@ impl ConsensusPoolService {
 fn root_block(root_bank: &Bank) -> Block {
     Block {
         slot: root_bank.slot(),
-        block_id: root_bank
-            .block_id()
-            // Once SIMD-0333 is active we can hard unwrap here
-            .unwrap_or_default(),
+        block_id: BlockId::from(
+            root_bank
+                .block_id()
+                // Once SIMD-0333 is active we can hard unwrap here
+                .unwrap_or_default(),
+        ),
     }
 }
 
@@ -724,6 +728,7 @@ mod tests {
     use {
         super::*,
         crate::tests::{get_cluster_info, new_vote_aggregate},
+        agave_bls_sigverify::bls_sigverifier::MAX_VOTE_SLOT_DISTANCE_FROM_ROOT,
         agave_votor_messages::{
             certificate::CertificateType,
             consensus_message::{BLS_KEYPAIR_DERIVE_SEED, VoteMessage},
@@ -736,14 +741,13 @@ mod tests {
             BLS_SIGNATURE_AFFINE_SIZE, keypair::Keypair as BLSKeypair,
             signature::Signature as BLSSignature,
         },
-        solana_hash::Hash,
+        solana_epoch_schedule::EpochSchedule,
         solana_keypair::Keypair,
         solana_ledger::get_tmp_ledger_path_auto_delete,
         solana_runtime::{
+            bank::SlotLeader,
             bank_forks::BankForks,
-            genesis_utils::{
-                ValidatorVoteKeypairs, create_genesis_config_with_alpenglow_vote_accounts,
-            },
+            genesis_utils::{ValidatorVoteKeypairs, create_genesis_config_with_vote_accounts},
         },
         std::sync::Arc,
     };
@@ -758,10 +762,14 @@ mod tests {
         pub event_receiver: Receiver<VotorEvent>,
         pub _repair_event_receiver: Receiver<RepairEvent>,
         pub validator_keypairs: Vec<ValidatorVoteKeypairs>,
+        pub bank_forks: Arc<RwLock<BankForks>>,
     }
 
-    impl Default for TestContext {
-        fn default() -> Self {
+    impl TestContext {
+        fn new(
+            epoch_schedule: Option<EpochSchedule>,
+            migration_status: Arc<MigrationStatus>,
+        ) -> Self {
             let (bls_sender, bls_receiver) = bounded(1024);
             // Create 10 node validatorvotekeypairs vec
             let validator_keypairs = (0..10)
@@ -772,11 +780,11 @@ mod tests {
                 .rev()
                 .map(|i| (i.saturating_add(5).saturating_mul(100)) as u64)
                 .collect::<Vec<_>>();
-            let genesis = create_genesis_config_with_alpenglow_vote_accounts(
-                1_000_000_000,
-                &validator_keypairs,
-                stake,
-            );
+            let mut genesis =
+                create_genesis_config_with_vote_accounts(1_000_000_000, &validator_keypairs, stake);
+            if let Some(epoch_schedule) = epoch_schedule {
+                genesis.genesis_config.epoch_schedule = epoch_schedule;
+            }
             let my_keypair = validator_keypairs[0].node_keypair.insecure_clone();
             let bank0 = Bank::new_for_tests(&genesis.genesis_config);
             let bank_forks = BankForks::new_rw_arc(bank0);
@@ -789,7 +797,6 @@ mod tests {
 
             let cluster_info = get_cluster_info(my_keypair.insecure_clone());
             let generated_cert_types = Arc::new(GeneratedCertTypes::default());
-            let migration_status = Arc::new(MigrationStatus::post_migration_status());
             let (consensus_message_sender, consensus_message_receiver) = unbounded();
             let (own_votes_sender, own_votes_receiver) = unbounded();
             let (footer_certs_sender, footer_certs_receiver) = unbounded();
@@ -828,8 +835,72 @@ mod tests {
                 event_receiver,
                 _repair_event_receiver: repair_event_receiver,
                 validator_keypairs,
+                bank_forks,
             }
         }
+    }
+
+    impl Default for TestContext {
+        fn default() -> Self {
+            Self::new(None, Arc::new(MigrationStatus::post_migration_status()))
+        }
+    }
+
+    #[test]
+    fn test_first_vote_uses_current_root_after_delayed_activation() {
+        let migration_status = Arc::new(MigrationStatus::default());
+        let mut ctx = TestContext::new(
+            Some(EpochSchedule::without_warmup()),
+            migration_status.clone(),
+        );
+        assert!(migration_status.is_pre_feature_activation());
+        let startup_root = ctx.ctx.sharable_banks.root().slot();
+        let new_root_slot = startup_root + MAX_VOTE_SLOT_DISTANCE_FROM_ROOT + 1;
+        let parent = ctx.ctx.sharable_banks.root();
+        let new_root = Bank::new_from_parent(parent, SlotLeader::default(), new_root_slot);
+        new_root.freeze();
+        {
+            let mut bank_forks = ctx.bank_forks.write().unwrap();
+            bank_forks.insert(new_root);
+            bank_forks.set_root(new_root_slot, None, None);
+        }
+        let root_bank = ctx.ctx.sharable_banks.root();
+        assert_eq!(root_bank.slot(), new_root_slot);
+        migration_status.enable_alpenglow_for_tests();
+
+        let vote = Vote::new_skip_vote(new_root_slot);
+        let rank_map = root_bank.get_rank_map(new_root_slot).unwrap();
+        let mut generated_certificate = false;
+        for rank in 0..ctx.validator_keypairs.len() {
+            let vote_keypair = &ctx.validator_keypairs[rank].vote_keypair;
+            let bls_keypair =
+                BLSKeypair::derive_from_signer(vote_keypair, BLS_KEYPAIR_DERIVE_SEED).unwrap();
+            let vote_message = VoteMessage {
+                vote,
+                signature: bls_keypair
+                    .sign(&get_vote_payload_to_sign(
+                        vote,
+                        ctx.ctx.cluster_info.my_shred_version(),
+                    ))
+                    .into(),
+                rank: rank as u16,
+                stake: rank_map.get_pubkey_stake_entry(rank).unwrap().stake,
+            };
+            let (_, certificates) = ConsensusPoolService::add_pool_msg(
+                &root_bank,
+                &ctx.ctx.cluster_info.id(),
+                PoolMessage::Votes(vec![PoolVote::Own(vote_message)]),
+                &mut ctx.consensus_pool,
+                &mut vec![],
+                &mut ConsensusPoolServiceStats::new(),
+            );
+            generated_certificate |= !certificates.is_empty();
+        }
+
+        assert!(
+            generated_certificate,
+            "votes at the current root should not be rejected relative to the startup root"
+        );
     }
 
     /// Test the full consensus message flow:
@@ -844,7 +915,7 @@ mod tests {
         let mut ctx = TestContext::default();
 
         // validator 0 to 7 send Notarize on slot 2
-        let block_id = Hash::new_unique();
+        let block_id = BlockId::new_unique();
         let target_slot = 2;
         let notarize_vote = Vote::new_notarization_vote(Block {
             slot: target_slot,
@@ -1135,7 +1206,7 @@ mod tests {
 
         assert_eq!(ctx.ctx.footer_certs_receiver.len(), 1);
         assert_eq!(stats.footer_certs_received.0, MAX_MESSAGES_PER_RECEIVE);
-        assert_eq!(stats.own_message_receive_limit_reached.0, 1);
+        assert_eq!(stats.footer_message_receive_limit_reached.0, 1);
     }
 
     #[test]
@@ -1224,10 +1295,10 @@ mod tests {
             Block::new_unique(next_leader_slot.checked_sub(1).unwrap()),
         );
         ctx.ctx.vote_history_highest_parent_ready = Some(restored_parent_ready);
-        let mut consensus_pool = ctx.ctx.new_consensus_pool();
         let exit = ctx.ctx.exit.clone();
 
         let handle = thread::spawn(move || {
+            let mut consensus_pool = ctx.ctx.new_consensus_pool();
             let mut stats = ConsensusPoolServiceStats::new();
             let _ = ConsensusPoolService::main_loop(&mut ctx.ctx, &mut consensus_pool, &mut stats);
         });
@@ -1415,7 +1486,6 @@ mod tests {
         ConsensusPoolService::send_certs(&mut ctx.ctx, certificates, &mut stats).unwrap();
 
         assert_eq!(stats.new_finalized_slot.0, 1);
-        assert_eq!(stats.prune_old_state_called.0, 1);
         assert_eq!(stats.certificates_sent.0, 1);
 
         // Verify certificate was sent

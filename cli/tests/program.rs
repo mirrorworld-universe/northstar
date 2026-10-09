@@ -1,10 +1,13 @@
 #![allow(clippy::arithmetic_side_effects)]
 
 use {
-    agave_feature_set::{enable_alt_bn128_syscall, loader_v3_minimum_extend_program_size},
+    agave_feature_set::{
+        enable_alt_bn128_syscall, loader_v3_minimum_extend_program_size,
+        loader_v3_set_program_data_to_elf_length,
+    },
     assert_matches::assert_matches,
     serde_json::Value,
-    solana_account::ReadableAccount,
+    solana_account::{ReadableAccount, state_traits::StateMutWincode as _},
     solana_borsh::v1::try_from_slice_unchecked,
     solana_cli::{
         cli::{CliCommand, CliConfig, process_command},
@@ -22,7 +25,7 @@ use {
         instruction::{self as loader_v3_instruction, MINIMUM_EXTEND_PROGRAM_BYTES},
         state::UpgradeableLoaderState,
     },
-    solana_message::Message,
+    solana_message::{Message, VersionedMessage},
     solana_native_token::LAMPORTS_PER_SOL,
     solana_net_utils::SocketAddrSpace,
     solana_pubkey::Pubkey,
@@ -53,6 +56,7 @@ use {
 
 pub struct LoaderV3Features {
     pub minimum_extend_program_size: bool,
+    pub set_programdata_to_elf_length: bool,
 }
 
 fn test_validator_genesis(
@@ -72,9 +76,13 @@ fn test_validator_genesis(
 
     let LoaderV3Features {
         minimum_extend_program_size,
+        set_programdata_to_elf_length,
     } = features;
     if !minimum_extend_program_size {
         genesis.deactivate_features(&[loader_v3_minimum_extend_program_size::id()]);
+    }
+    if !set_programdata_to_elf_length {
+        genesis.deactivate_features(&[loader_v3_set_program_data_to_elf_length::id()]);
     }
 
     genesis
@@ -212,6 +220,7 @@ async fn test_cli_program_deploy_non_upgradeable() {
         &mint_keypair,
         LoaderV3Features {
             minimum_extend_program_size: false,
+            set_programdata_to_elf_length: false,
         },
     )
     .start_async_with_mint_address(&mint_keypair, SocketAddrSpace::Unspecified)
@@ -428,6 +437,7 @@ async fn test_cli_program_deploy_no_authority() {
         &mint_keypair,
         LoaderV3Features {
             minimum_extend_program_size: false,
+            set_programdata_to_elf_length: false,
         },
     )
     .start_async_with_mint_address(&mint_keypair, SocketAddrSpace::Unspecified)
@@ -537,6 +547,7 @@ async fn test_cli_program_deploy_feature(enable_feature: bool, skip_preflight: b
         &mint_keypair,
         LoaderV3Features {
             minimum_extend_program_size: false,
+            set_programdata_to_elf_length: false,
         },
     );
 
@@ -674,6 +685,7 @@ async fn test_cli_program_upgrade_with_feature(enable_feature: bool) {
         &mint_keypair,
         LoaderV3Features {
             minimum_extend_program_size: false,
+            set_programdata_to_elf_length: false,
         },
     );
 
@@ -843,6 +855,7 @@ async fn test_cli_program_deploy_local_verifier() {
         &mint_keypair,
         LoaderV3Features {
             minimum_extend_program_size: false,
+            set_programdata_to_elf_length: false,
         },
     );
 
@@ -982,6 +995,7 @@ async fn test_cli_program_deploy_with_authority() {
         &mint_keypair,
         LoaderV3Features {
             minimum_extend_program_size: false,
+            set_programdata_to_elf_length: false,
         },
     )
     .start_async_with_mint_address(&mint_keypair, SocketAddrSpace::Unspecified)
@@ -1343,7 +1357,7 @@ async fn test_cli_program_deploy_with_authority() {
     if let UpgradeableLoaderState::ProgramData {
         slot: _,
         upgrade_authority_address,
-    } = bincode::deserialize(&programdata_account.data).unwrap()
+    } = programdata_account.state().unwrap()
     {
         assert_eq!(upgrade_authority_address, None);
     } else {
@@ -1395,6 +1409,7 @@ async fn test_cli_program_upgrade_auto_extend(skip_preflight: bool) {
         &mint_keypair,
         LoaderV3Features {
             minimum_extend_program_size: false,
+            set_programdata_to_elf_length: false,
         },
     )
     .start_async_with_mint_address(&mint_keypair, SocketAddrSpace::Unspecified)
@@ -1546,7 +1561,7 @@ async fn test_cli_program_upgrade_auto_extend(skip_preflight: bool) {
     if let UpgradeableLoaderState::ProgramData {
         slot: _,
         upgrade_authority_address,
-    } = bincode::deserialize(&programdata_account.data).unwrap()
+    } = programdata_account.state().unwrap()
     {
         assert_eq!(upgrade_authority_address, None);
     } else {
@@ -1573,6 +1588,7 @@ async fn test_cli_program_close_program() {
         &mint_keypair,
         LoaderV3Features {
             minimum_extend_program_size: false,
+            set_programdata_to_elf_length: false,
         },
     )
     .start_async_with_mint_address(&mint_keypair, SocketAddrSpace::Unspecified)
@@ -1716,6 +1732,7 @@ async fn test_cli_program_extend_program() {
         &noop_path,
         LoaderV3Features {
             minimum_extend_program_size: false,
+            set_programdata_to_elf_length: false,
         },
     )
     .await;
@@ -1875,6 +1892,7 @@ async fn test_cli_program_extend_program_minimum_size() {
         &noop_path,
         LoaderV3Features {
             minimum_extend_program_size: true,
+            set_programdata_to_elf_length: false,
         },
     )
     .await;
@@ -1998,6 +2016,7 @@ async fn test_cli_program_write_buffer() {
         &mint_keypair,
         LoaderV3Features {
             minimum_extend_program_size: false,
+            set_programdata_to_elf_length: false,
         },
     )
     .start_async_with_mint_address(&mint_keypair, SocketAddrSpace::Unspecified)
@@ -2058,9 +2077,7 @@ async fn test_cli_program_write_buffer() {
     let buffer_account = rpc_client.get_account(&new_buffer_pubkey).await.unwrap();
     assert_eq!(buffer_account.lamports, minimum_balance_for_buffer_default);
     assert_eq!(buffer_account.owner, bpf_loader_upgradeable::id());
-    if let UpgradeableLoaderState::Buffer { authority_address } =
-        bincode::deserialize(&buffer_account.data).unwrap()
-    {
+    if let UpgradeableLoaderState::Buffer { authority_address } = buffer_account.state().unwrap() {
         assert_eq!(authority_address, Some(keypair.pubkey()));
     } else {
         panic!("not a buffer account");
@@ -2105,9 +2122,7 @@ async fn test_cli_program_write_buffer() {
         .unwrap();
     assert_eq!(buffer_account.lamports, minimum_balance_for_buffer);
     assert_eq!(buffer_account.owner, bpf_loader_upgradeable::id());
-    if let UpgradeableLoaderState::Buffer { authority_address } =
-        bincode::deserialize(&buffer_account.data).unwrap()
-    {
+    if let UpgradeableLoaderState::Buffer { authority_address } = buffer_account.state().unwrap() {
         assert_eq!(authority_address, Some(keypair.pubkey()));
     } else {
         panic!("not a buffer account");
@@ -2177,9 +2192,7 @@ async fn test_cli_program_write_buffer() {
         .unwrap();
     assert_eq!(buffer_account.lamports, minimum_balance_for_buffer_default);
     assert_eq!(buffer_account.owner, bpf_loader_upgradeable::id());
-    if let UpgradeableLoaderState::Buffer { authority_address } =
-        bincode::deserialize(&buffer_account.data).unwrap()
-    {
+    if let UpgradeableLoaderState::Buffer { authority_address } = buffer_account.state().unwrap() {
         assert_eq!(authority_address, Some(authority_keypair.pubkey()));
     } else {
         panic!("not a buffer account");
@@ -2219,9 +2232,7 @@ async fn test_cli_program_write_buffer() {
     let buffer_account = rpc_client.get_account(&buffer_pubkey).await.unwrap();
     assert_eq!(buffer_account.lamports, minimum_balance_for_buffer_default);
     assert_eq!(buffer_account.owner, bpf_loader_upgradeable::id());
-    if let UpgradeableLoaderState::Buffer { authority_address } =
-        bincode::deserialize(&buffer_account.data).unwrap()
-    {
+    if let UpgradeableLoaderState::Buffer { authority_address } = buffer_account.state().unwrap() {
         assert_eq!(authority_address, Some(authority_keypair.pubkey()));
     } else {
         panic!("not a buffer account");
@@ -2321,7 +2332,7 @@ async fn test_cli_program_write_buffer() {
     );
     close_message.recent_blockhash = rpc_client.get_latest_blockhash().await.unwrap();
     let close_fee = rpc_client
-        .get_fee_for_message(&close_message)
+        .get_fee_for_versioned_message(&VersionedMessage::Legacy(close_message))
         .await
         .unwrap();
     config.signers = vec![&keypair];
@@ -2418,6 +2429,7 @@ async fn test_cli_program_write_buffer_feature(enable_feature: bool) {
         &mint_keypair,
         LoaderV3Features {
             minimum_extend_program_size: false,
+            set_programdata_to_elf_length: false,
         },
     );
 
@@ -2517,6 +2529,7 @@ async fn test_cli_program_set_buffer_authority() {
         &mint_keypair,
         LoaderV3Features {
             minimum_extend_program_size: false,
+            set_programdata_to_elf_length: false,
         },
     )
     .start_async_with_mint_address(&mint_keypair, SocketAddrSpace::Unspecified)
@@ -2567,9 +2580,7 @@ async fn test_cli_program_set_buffer_authority() {
         .get_account(&buffer_keypair.pubkey())
         .await
         .unwrap();
-    if let UpgradeableLoaderState::Buffer { authority_address } =
-        bincode::deserialize(&buffer_account.data).unwrap()
-    {
+    if let UpgradeableLoaderState::Buffer { authority_address } = buffer_account.state().unwrap() {
         assert_eq!(authority_address, Some(keypair.pubkey()));
     } else {
         panic!("not a buffer account");
@@ -2601,9 +2612,7 @@ async fn test_cli_program_set_buffer_authority() {
         .get_account(&buffer_keypair.pubkey())
         .await
         .unwrap();
-    if let UpgradeableLoaderState::Buffer { authority_address } =
-        bincode::deserialize(&buffer_account.data).unwrap()
-    {
+    if let UpgradeableLoaderState::Buffer { authority_address } = buffer_account.state().unwrap() {
         assert_eq!(authority_address, Some(new_buffer_authority.pubkey()));
     } else {
         panic!("not a buffer account");
@@ -2664,9 +2673,7 @@ async fn test_cli_program_set_buffer_authority() {
         .get_account(&buffer_keypair.pubkey())
         .await
         .unwrap();
-    if let UpgradeableLoaderState::Buffer { authority_address } =
-        bincode::deserialize(&buffer_account.data).unwrap()
-    {
+    if let UpgradeableLoaderState::Buffer { authority_address } = buffer_account.state().unwrap() {
         assert_eq!(authority_address, Some(buffer_keypair.pubkey()));
     } else {
         panic!("not a buffer account");
@@ -2710,6 +2717,7 @@ async fn test_cli_program_mismatch_buffer_authority() {
         &mint_keypair,
         LoaderV3Features {
             minimum_extend_program_size: false,
+            set_programdata_to_elf_length: false,
         },
     )
     .start_async_with_mint_address(&mint_keypair, SocketAddrSpace::Unspecified)
@@ -2761,9 +2769,7 @@ async fn test_cli_program_mismatch_buffer_authority() {
         .get_account(&buffer_keypair.pubkey())
         .await
         .unwrap();
-    if let UpgradeableLoaderState::Buffer { authority_address } =
-        bincode::deserialize(&buffer_account.data).unwrap()
-    {
+    if let UpgradeableLoaderState::Buffer { authority_address } = buffer_account.state().unwrap() {
         assert_eq!(authority_address, Some(buffer_authority.pubkey()));
     } else {
         panic!("not a buffer account");
@@ -2848,6 +2854,7 @@ async fn test_cli_program_deploy_with_offline_signing(use_offline_signer_as_fee_
         &mint_keypair,
         LoaderV3Features {
             minimum_extend_program_size: false,
+            set_programdata_to_elf_length: false,
         },
     )
     .start_async_with_mint_address(&mint_keypair, SocketAddrSpace::Unspecified)
@@ -3047,6 +3054,7 @@ async fn test_cli_program_show() {
         &mint_keypair,
         LoaderV3Features {
             minimum_extend_program_size: false,
+            set_programdata_to_elf_length: false,
         },
     )
     .start_async_with_mint_address(&mint_keypair, SocketAddrSpace::Unspecified)
@@ -3141,6 +3149,36 @@ async fn test_cli_program_show() {
         .unwrap();
     assert_eq!(max_len, data_len as usize);
 
+    // Verify show --buffers
+    config.command = CliCommand::Program(ProgramCliCommand::Show {
+        account_pubkey: None,
+        authority_pubkey: authority_keypair.pubkey(),
+        get_programs: false,
+        get_buffers: true,
+        all: false,
+        use_lamports_unit: false,
+    });
+    let response = process_command(&config).await.unwrap();
+    let json: Value = serde_json::from_str(&response).unwrap();
+    let buffers = json
+        .as_object()
+        .unwrap()
+        .get("buffers")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    let buffer_address = buffer_keypair.pubkey().to_string();
+    let buffer = buffers
+        .iter()
+        .find(|buffer| {
+            buffer.get("address").and_then(Value::as_str) == Some(buffer_address.as_str())
+        })
+        .unwrap();
+    assert_eq!(
+        buffer.get("dataLen").unwrap().as_u64().unwrap(),
+        max_len as u64
+    );
+
     // Deploy
     let program_keypair = Keypair::new();
     config.signers = vec![&keypair, &authority_keypair, &program_keypair];
@@ -3232,6 +3270,36 @@ async fn test_cli_program_show() {
         .as_u64()
         .unwrap();
     assert_eq!(max_len, data_len as usize);
+
+    // Verify show --programs
+    config.command = CliCommand::Program(ProgramCliCommand::Show {
+        account_pubkey: None,
+        authority_pubkey: authority_keypair.pubkey(),
+        get_programs: true,
+        get_buffers: false,
+        all: false,
+        use_lamports_unit: false,
+    });
+    let response = process_command(&config).await.unwrap();
+    let json: Value = serde_json::from_str(&response).unwrap();
+    let programs = json
+        .as_object()
+        .unwrap()
+        .get("programs")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    let program_id = program_keypair.pubkey().to_string();
+    let program = programs
+        .iter()
+        .find(|program| {
+            program.get("programId").and_then(Value::as_str) == Some(program_id.as_str())
+        })
+        .unwrap();
+    assert_eq!(
+        program.get("dataLen").unwrap().as_u64().unwrap(),
+        max_len as u64
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -3249,6 +3317,7 @@ async fn test_cli_program_dump() {
         &mint_keypair,
         LoaderV3Features {
             minimum_extend_program_size: false,
+            set_programdata_to_elf_length: false,
         },
     )
     .start_async_with_mint_address(&mint_keypair, SocketAddrSpace::Unspecified)
@@ -3350,9 +3419,7 @@ async fn create_buffer_with_offline_authority<'a>(
         .get_account(&buffer_signer.pubkey())
         .await
         .unwrap();
-    if let UpgradeableLoaderState::Buffer { authority_address } =
-        bincode::deserialize(&buffer_account.data).unwrap()
-    {
+    if let UpgradeableLoaderState::Buffer { authority_address } = buffer_account.state().unwrap() {
         assert_eq!(authority_address, Some(online_signer.pubkey()));
     } else {
         panic!("not a buffer account");
@@ -3371,9 +3438,7 @@ async fn create_buffer_with_offline_authority<'a>(
         .get_account(&buffer_signer.pubkey())
         .await
         .unwrap();
-    if let UpgradeableLoaderState::Buffer { authority_address } =
-        bincode::deserialize(&buffer_account.data).unwrap()
-    {
+    if let UpgradeableLoaderState::Buffer { authority_address } = buffer_account.state().unwrap() {
         assert_eq!(authority_address, Some(offline_signer.pubkey()));
     } else {
         panic!("not a buffer account");

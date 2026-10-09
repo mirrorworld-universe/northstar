@@ -314,6 +314,7 @@ impl CompletedDataSetsService {
 pub mod test {
     use {
         super::*,
+        agave_votor_messages::consensus_message::BlockId,
         crossbeam_channel::bounded,
         solana_entry::{
             block_component::{
@@ -326,10 +327,9 @@ pub mod test {
         solana_instruction::Instruction,
         solana_keypair::Keypair,
         solana_ledger::{
-            blockstore,
-            blockstore::Blockstore,
+            blockstore::{self, Blockstore},
             get_tmp_ledger_path_auto_delete,
-            shred::{ProcessShredsStats, ReedSolomonCache, Shredder, max_ticks_per_n_shreds},
+            shred::{ProcessShredsStats, Shredder, max_ticks_per_n_shreds},
         },
         solana_message::{
             Message, VersionedMessage,
@@ -658,7 +658,6 @@ pub mod test {
                     Hash::new_unique(),
                     shred_index,
                     shred_index,
-                    &ReedSolomonCache::default(),
                     &mut ProcessShredsStats::default(),
                 )
         };
@@ -672,7 +671,7 @@ pub mod test {
         shreds.extend(make_marker_shreds(
             VersionedBlockMarker::from_update_parent(UpdateParentV1 {
                 new_parent_slot: update_parent.parent_slot,
-                new_parent_block_id: update_parent.parent_block_id,
+                new_parent_block_id: BlockId::from(update_parent.parent_block_id),
             }),
             update_parent.update_parent_fec_set_index,
         ));
