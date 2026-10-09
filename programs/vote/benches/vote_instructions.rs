@@ -2,7 +2,7 @@ use {
     agave_feature_set::{FeatureSet, deprecate_legacy_vote_ixs},
     bincode::serialize,
     criterion::{Criterion, criterion_group, criterion_main},
-    solana_account::{Account, AccountSharedData, WritableAccount},
+    solana_account::{Account, AccountSharedData, state_traits::StateMutWincode as _},
     solana_clock::{Clock, Slot},
     solana_epoch_schedule::EpochSchedule,
     solana_hash::Hash,
@@ -34,9 +34,12 @@ use {
 
 fn create_sysvar_account<T>(value: &T) -> AccountSharedData
 where
-    T: wincode::Serialize<Src = T> + SysvarId,
+    T: wincode::SchemaWrite<solana_account::WincodeConfig, Src = T>
+        + for<'de> wincode::SchemaRead<'de, solana_account::WincodeConfig, Dst = T>
+        + SysvarId,
 {
-    let serialized_len = wincode::serialized_size(value).unwrap() as usize;
+    let serialized_len =
+        wincode::config::serialized_size(value, solana_account::WINCODE_CONFIG).unwrap() as usize;
     let canonical_data_len = match T::id() {
         sysvar::clock::ID => solana_clock::SIZE,
         sysvar::epoch_schedule::ID => solana_epoch_schedule::SIZE,
@@ -45,9 +48,7 @@ where
         id => panic!("unsupported sysvar: {id}"),
     };
     let required_data_len = canonical_data_len.max(serialized_len);
-    let mut account = AccountSharedData::new(1, required_data_len, &sysvar::id());
-    wincode::serialize_into(account.data_as_mut_slice(), value).unwrap();
-    account
+    AccountSharedData::new_data_with_space(1, value, required_data_len, &sysvar::id()).unwrap()
 }
 
 fn create_default_rent_account() -> AccountSharedData {

@@ -5,13 +5,13 @@ use {
     solana_clock::Slot,
     solana_hash::Hash,
     solana_nohash_hasher::BuildNoHashHasher,
-    solana_perf::packet::{PacketBatch, PacketRef},
+    solana_perf::packet::{BytesPacket, PacketBatch},
     solana_pubkey::Pubkey,
     solana_signature::Signature,
     std::{collections::HashMap, sync::RwLock},
 };
 #[cfg(test)]
-use {solana_keypair::Keypair, solana_perf::packet::PacketRefMut, solana_signer::Signer};
+use {solana_keypair::Keypair, solana_signer::Signer};
 
 pub type LruCache = lazy_lru::LruCache<(Signature, Pubkey, /*merkle root:*/ Hash), ()>;
 
@@ -19,7 +19,7 @@ pub type SlotPubkeys = HashMap<Slot, Pubkey, BuildNoHashHasher<Slot>>;
 
 #[must_use]
 pub fn verify_shred_cpu(
-    packet: PacketRef,
+    packet: &BytesPacket,
     slot_leaders: &SlotPubkeys,
     cache: &RwLock<LruCache>,
 ) -> bool {
@@ -61,8 +61,8 @@ pub fn par_verify_shreds(
     cache: &RwLock<LruCache>,
 ) {
     batches.par_iter_mut().for_each(|batch| {
-        batch.par_iter_mut().for_each(|mut packet| {
-            if !packet.meta().discard() && !verify_shred_cpu(packet.as_ref(), slot_leaders, cache) {
+        batch.par_iter_mut().for_each(|packet| {
+            if !packet.meta().discard() && !verify_shred_cpu(packet, slot_leaders, cache) {
                 packet.meta_mut().set_discard(true);
             }
         });
@@ -70,9 +70,9 @@ pub fn par_verify_shreds(
 }
 
 #[cfg(test)]
-fn sign_shred_cpu(keypair: &Keypair, packet: &mut PacketRefMut) {
+fn sign_shred_cpu(keypair: &Keypair, packet: &mut BytesPacket) {
     let sig = shred::layout::SIGNATURE_RANGE;
-    let msg = shred::layout::get_shred(packet.as_ref())
+    let msg = shred::layout::get_shred(packet)
         .and_then(shred::layout::get_merkle_root)
         .unwrap();
     assert!(
@@ -95,7 +95,7 @@ mod tests {
         super::*,
         crate::{
             shred::{ProcessShredsStats, Shred},
-            shredder::{ReedSolomonCache, Shredder},
+            shredder::Shredder,
         },
         assert_matches::assert_matches,
         itertools::Itertools,
@@ -104,8 +104,7 @@ mod tests {
         solana_entry::entry::Entry,
         solana_hash::Hash,
         solana_keypair::Keypair,
-        solana_packet::Packet,
-        solana_perf::packet::RecycledPacketBatch,
+        solana_perf::packet::BytesPacketBatch,
         solana_signer::Signer,
         solana_system_transaction as system_transaction,
         solana_transaction::Transaction,
@@ -129,18 +128,16 @@ mod tests {
             batches.par_iter_mut().for_each(|batch| {
                 batch
                     .par_iter_mut()
-                    .for_each(|mut p| sign_shred_cpu(keypair, &mut p));
+                    .for_each(|p| sign_shred_cpu(keypair, p));
             });
         });
     }
 
     fn run_test_sigverify_shred_cpu(slot: Slot) {
         agave_logger::setup();
-        let mut packet = Packet::default();
         let cache = RwLock::new(LruCache::new(/*capacity:*/ 128));
         let shredder = Shredder::new(slot, slot.saturating_sub(1), 0, 0).unwrap();
         let keypair = Keypair::new();
-        let reed_solomon_cache = ReedSolomonCache::default();
         let (mut shreds, _) = shredder.entries_to_merkle_shreds_for_tests(
             &keypair,
             &[],
@@ -148,24 +145,22 @@ mod tests {
             Hash::default(),
             0,
             0,
-            &reed_solomon_cache,
             &mut ProcessShredsStats::default(),
         );
         let shred = shreds.pop().unwrap();
         assert_eq!(shred.slot(), slot);
         trace!("signature {}", shred.signature());
-        packet.buffer_mut()[..shred.payload().len()].copy_from_slice(shred.payload());
-        packet.meta_mut().size = shred.payload().len();
+        let packet = shred.payload().to_bytes_packet(None);
 
         let leader_slots: SlotPubkeys = [(slot, keypair.pubkey())].into_iter().collect();
-        assert!(verify_shred_cpu((&packet).into(), &leader_slots, &cache));
+        assert!(verify_shred_cpu(&packet, &leader_slots, &cache));
 
         let wrong_keypair = Keypair::new();
         let leader_slots: SlotPubkeys = [(slot, wrong_keypair.pubkey())].into_iter().collect();
-        assert!(!verify_shred_cpu((&packet).into(), &leader_slots, &cache));
+        assert!(!verify_shred_cpu(&packet, &leader_slots, &cache));
 
         let leader_slots: SlotPubkeys = HashMap::default();
-        assert!(!verify_shred_cpu((&packet).into(), &leader_slots, &cache));
+        assert!(!verify_shred_cpu(&packet, &leader_slots, &cache));
     }
 
     #[test]
@@ -211,9 +206,10 @@ mod tests {
 
         let mut batches = [make_packet_batch(&keypair, slot)];
         let leader_slots: SlotPubkeys = [(slot, keypair.pubkey())].into_iter().collect();
-        batches[0]
-            .iter_mut()
-            .for_each(|mut packet_ref| packet_ref.meta_mut().size = 0);
+        batches[0].iter_mut().for_each(|packet_ref| {
+            packet_ref.copy_from_slice(&[]);
+            packet_ref.meta_mut().size = 0;
+        });
         verify_shreds(thread_pool, &mut batches, &leader_slots, &cache);
         assert!(
             batches
@@ -273,9 +269,10 @@ mod tests {
         );
 
         let mut batches = [make_packet_batch(&keypair, slot)];
-        batches[0]
-            .iter_mut()
-            .for_each(|mut pr| pr.meta_mut().size = 0);
+        batches[0].iter_mut().for_each(|packet_ref| {
+            packet_ref.copy_from_slice(&[]);
+            packet_ref.meta_mut().size = 0;
+        });
         let leader_slots: SlotPubkeys = [(u64::MAX, Pubkey::default()), (slot, keypair.pubkey())]
             .into_iter()
             .collect();
@@ -289,9 +286,7 @@ mod tests {
     }
 
     fn make_packet_batch(keypair: &Keypair, slot: u64) -> PacketBatch {
-        let mut batch = RecycledPacketBatch::default();
         let shredder = Shredder::new(slot, slot.saturating_sub(1), 0, 0).unwrap();
-        let reed_solomon_cache = ReedSolomonCache::default();
         let (shreds, _) = shredder.entries_to_merkle_shreds_for_tests(
             keypair,
             &[],
@@ -299,15 +294,13 @@ mod tests {
             Hash::default(),
             0,
             0,
-            &reed_solomon_cache,
             &mut ProcessShredsStats::default(),
         );
-        batch.resize(shreds.len(), Packet::default());
-        for i in 0..shreds.len() {
-            batch[i].buffer_mut()[..shreds[i].payload().len()].copy_from_slice(shreds[i].payload());
-            batch[i].meta_mut().size = shreds[i].payload().len();
-        }
-        PacketBatch::from(batch)
+        shreds
+            .iter()
+            .map(|shred| shred.payload().to_bytes_packet(None))
+            .collect::<BytesPacketBatch>()
+            .into()
     }
 
     #[test]
@@ -350,7 +343,6 @@ mod tests {
         is_last_in_slot: bool,
         keypairs: &HashMap<Slot, Keypair>,
     ) -> Vec<Shred> {
-        let reed_solomon_cache = ReedSolomonCache::default();
         let mut shreds: Vec<_> = keypairs
             .iter()
             .flat_map(|(&slot, keypair)| {
@@ -370,7 +362,6 @@ mod tests {
                     Hash::new_from_array(rng.random()), // chained_merkle_root
                     rng.random_range(0..2671),          // next_shred_index
                     rng.random_range(0..2781),          // next_code_index
-                    &reed_solomon_cache,
                     &mut ProcessShredsStats::default(),
                 )
                 .into_iter()
@@ -396,15 +387,12 @@ mod tests {
     }
 
     fn make_packets<R: Rng>(rng: &mut R, shreds: &[Shred]) -> Vec<PacketBatch> {
-        let mut packets = shreds.iter().map(|shred| {
-            let mut packet = Packet::default();
-            shred.copy_to_packet(&mut packet);
-            packet
-        });
+        let mut packets = shreds
+            .iter()
+            .map(|shred| shred.payload().to_bytes_packet(None));
         let packets: Vec<PacketBatch> = repeat_with(|| {
             let size = rng.random_range(0..16);
-            let packets = packets.by_ref().take(size).collect();
-            let batch = RecycledPacketBatch::new(packets);
+            let batch = packets.by_ref().take(size).collect::<BytesPacketBatch>();
             (size == 0 || !batch.is_empty()).then_some(batch.into())
         })
         .while_some()
@@ -444,9 +432,6 @@ mod tests {
         let expected_discards = packets
             .iter_mut()
             .map(|packets| {
-                let PacketBatch::Pinned(packets) = packets else {
-                    unreachable!()
-                };
                 packets
                     .iter_mut()
                     .map(|packet| {
@@ -509,7 +494,7 @@ mod tests {
         packets.iter_mut().for_each(|batch| {
             batch
                 .iter_mut()
-                .for_each(|mut packet| packet.meta_mut().set_discard(false));
+                .for_each(|packet| packet.meta_mut().set_discard(false));
         });
         sign_shreds(&thread_pool, &keypair, &mut packets);
         verify_shreds(&thread_pool, &mut packets, &pubkeys, &cache);

@@ -18,8 +18,8 @@ use {
         },
         next_slots_iterator::NextSlotsIterator,
         shred::{
-            self, DATA_SHREDS_PER_FEC_BLOCK, ErasureSetId, Payload, ProcessShredsStats,
-            ReedSolomonCache, Shred, ShredFlags, ShredId, ShredType, Shredder,
+            self, DATA_SHREDS_PER_FEC_BLOCK, ErasureSetId, Payload, ProcessShredsStats, Shred,
+            ShredFlags, ShredId, ShredType, Shredder,
             filter::ShredRecoveryContext,
             merkle_tree::{MerkleTree, SIZE_OF_MERKLE_PROOF_ENTRY, get_proof_size},
         },
@@ -143,6 +143,22 @@ struct SignalUpdates {
     should_signal: bool,
     newly_completed_slots_with_last_index: Vec<(u64, u64)>,
     update_parent_signals: Vec<UpdateParentSignal>,
+}
+
+/// Effects produced while preparing SlotMeta chaining updates.
+///
+/// The caller must publish any reported topology change only after the write batch containing the
+/// corresponding metadata changes commits successfully.
+#[derive(Default)]
+struct ChainingEffects {
+    slot_meta_topology_changed: bool,
+}
+
+impl ChainingEffects {
+    #[inline]
+    fn merge(&mut self, other: Self) {
+        self.slot_meta_topology_changed |= other.slot_meta_topology_changed;
+    }
 }
 
 #[derive(Debug)]
@@ -434,6 +450,7 @@ pub struct Blockstore {
     switch_block_lock: SwitchBlockLock,
     new_shreds_signals: Mutex<Vec<Sender<bool>>>,
     completed_slots_senders: Mutex<Vec<CompletedSlotsSender>>,
+    slot_meta_topology_generation: AtomicU64,
     update_parent_signals: Mutex<Vec<UpdateParentSender>>,
     /// Stable shred-header parent for recent UpdateParent slots.
     ///
@@ -789,6 +806,7 @@ impl Blockstore {
 
             new_shreds_signals: Mutex::default(),
             completed_slots_senders: Mutex::default(),
+            slot_meta_topology_generation: AtomicU64::default(),
             update_parent_signals: Mutex::default(),
             update_parent_shred_parent_cache: Mutex::new(LruCache::new(
                 UPDATE_PARENT_SHRED_PARENT_CACHE_CAPACITY,
@@ -839,7 +857,6 @@ impl Blockstore {
         let mut walk = TreeWalk::from(forks);
         let mut blockhashes = HashMap::new();
         let mut merkle_roots: HashMap<Slot, Hash> = HashMap::new();
-        let reed_solomon_cache = shred::ReedSolomonCache::default();
         while let Some(visit) = walk.get() {
             let slot = *visit.node().data();
             if self.meta(slot).unwrap().is_some() && self.orphan(slot).unwrap().is_none() {
@@ -877,7 +894,6 @@ impl Blockstore {
                         chained_merkle_root,
                         0,
                         0,
-                        &reed_solomon_cache,
                         &mut ProcessShredsStats::default(),
                     )
                     .into_iter()
@@ -1300,7 +1316,7 @@ impl Blockstore {
 
         Some(ParentInfo {
             parent_slot: update_parent.new_parent_slot,
-            parent_block_id: update_parent.new_parent_block_id,
+            parent_block_id: update_parent.new_parent_block_id.to_hash(),
             replay_fec_set_index: target_fec_set_index,
         })
     }
@@ -2336,7 +2352,7 @@ impl Blockstore {
         }
         // Handle chaining for the members of the slot_meta_working_set that
         // were inserted into, drop the others.
-        self.handle_chaining(
+        let chaining_effects = self.handle_chaining(
             shred_insertion_tracker.write_batch,
             &mut shred_insertion_tracker.slot_meta_working_set,
             metrics,
@@ -2358,6 +2374,10 @@ impl Blockstore {
         self.write_batch(&mut *shred_insertion_tracker.write_batch)?;
         start.stop();
         metrics.write_batch_elapsed_us += start.as_us();
+
+        if chaining_effects.slot_meta_topology_changed {
+            self.advance_slot_meta_topology_generation();
+        }
 
         if let Some(forwarder) = self.certificate_forwarder.get() {
             for (slot, last_index) in newly_completed_slots_with_last_index.iter() {
@@ -2461,6 +2481,18 @@ impl Blockstore {
 
     pub fn add_completed_slots_signal(&self, s: CompletedSlotsSender) {
         self.completed_slots_senders.lock().unwrap().push(s);
+    }
+
+    /// Returns the generation of structural changes to slot metadata.
+    #[inline]
+    pub fn slot_meta_topology_generation(&self) -> u64 {
+        self.slot_meta_topology_generation.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    fn advance_slot_meta_topology_generation(&self) {
+        self.slot_meta_topology_generation
+            .fetch_add(1, Ordering::Release);
     }
 
     pub fn add_update_parent_signal(&self, s: UpdateParentSender) {
@@ -3928,7 +3960,6 @@ impl Blockstore {
         let mut shredder = Shredder::new(current_slot, parent_slot, 0, version).unwrap();
         let mut all_shreds = vec![];
         let mut slot_entries = vec![];
-        let reed_solomon_cache = ReedSolomonCache::default();
         let mut chained_merkle_root = self
             .get_last_shred_merkle_root(parent_slot)
             .unwrap()
@@ -3955,7 +3986,6 @@ impl Blockstore {
                         chained_merkle_root,
                         start_index, // next_shred_index
                         start_index, // next_code_index
-                        &reed_solomon_cache,
                         &mut ProcessShredsStats::default(),
                     );
                 let next_chained_merkle_root = coding_shreds
@@ -3988,7 +4018,6 @@ impl Blockstore {
                 chained_merkle_root,
                 0, // next_shred_index
                 0, // next_code_index
-                &reed_solomon_cache,
                 &mut ProcessShredsStats::default(),
             ));
         }
@@ -4044,7 +4073,9 @@ impl Blockstore {
     /// Can interfere with automatic meta update and potentially break chaining.
     /// Dangerous. Use with care.
     pub fn put_meta_bytes(&self, slot: Slot, bytes: &[u8]) -> Result<()> {
-        self.meta_cf.put_bytes(slot, bytes)
+        self.meta_cf.put_bytes(slot, bytes)?;
+        self.advance_slot_meta_topology_generation();
+        Ok(())
     }
 
     /// Manually update the meta for a slot.
@@ -5792,21 +5823,26 @@ impl Blockstore {
     /// https://github.com/solana-labs/solana/pull/2253
     ///
     /// Arguments:
-    /// - `db`: the blockstore db that stores both shreds and their metadata.
-    /// - `write_batch`: the write batch which includes all the updates of the
-    ///   the current write and ensures their atomicity.
-    /// - `working_set`: a (location, slot-id) to SlotMetaWorkingSetEntry map.  This function
+    /// - `write_batch`: the write batch containing all updates from the current write and ensuring
+    ///   their atomicity.
+    /// - `working_set`: a (location, slot-id) to SlotMetaWorkingSetEntry map. This function
     ///   will remove all entries which insertion did not actually occur.
+    /// - `metrics`: insertion metrics updated with the time spent handling chaining.
+    ///
+    /// Returns the combined effects of all chaining updates staged in `write_batch`. A reported
+    /// topology change means at least one parent/child relationship changed. The caller must wait
+    /// until `write_batch` commits successfully before advancing the topology generation.
     fn handle_chaining(
         &self,
         write_batch: &mut WriteBatch,
         working_set: &mut HashMap<(BlockLocation, u64), SlotMetaWorkingSetEntry>,
         metrics: &mut BlockstoreInsertionMetrics,
-    ) -> Result<()> {
+    ) -> Result<ChainingEffects> {
         let mut start = Measure::start("Shred chaining");
         // Handle chaining for all the SlotMetas that were inserted into
         working_set.retain(|_, entry| entry.did_insert_occur);
         let mut new_chained_slots = HashMap::new();
+        let mut effects = ChainingEffects::default();
         for (location, slot) in working_set.keys() {
             if !matches!(location, BlockLocation::Original) {
                 // We do not perform SlotMeta chaining for alternate versions of slots.
@@ -5816,15 +5852,20 @@ impl Blockstore {
                 // handled separately.
                 continue;
             }
-            self.handle_chaining_for_slot(write_batch, working_set, &mut new_chained_slots, *slot)?;
+            effects.merge(self.handle_chaining_for_slot(
+                write_batch,
+                working_set,
+                &mut new_chained_slots,
+                *slot,
+            )?);
         }
 
         // Handle reparenting from UpdateParent markers
-        self.update_chaining_for_updated_parent_slots(
+        effects.merge(self.update_chaining_for_updated_parent_slots(
             write_batch,
             working_set,
             &mut new_chained_slots,
-        )?;
+        )?);
 
         // Write all the newly changed slots in new_chained_slots to the write_batch
         for (slot, meta) in new_chained_slots.iter() {
@@ -5833,7 +5874,7 @@ impl Blockstore {
         }
         start.stop();
         metrics.chaining_elapsed_us += start.as_us();
-        Ok(())
+        Ok(effects)
     }
 
     /// A helper function of handle_chaining which handles the chaining based
@@ -5861,26 +5902,29 @@ impl Blockstore {
     /// alternate versions is not supported.
     ///
     /// Arguments:
-    /// `db`: the underlying db for blockstore
-    /// `write_batch`: the write batch which includes all the updates of the
-    ///   the current write and ensures their atomicity.
-    /// `working_set`: the working set which include the specified `slot`
-    /// `new_chained_slots`: an output parameter which includes all the slots
-    ///   which connectivity have been updated.
-    /// `slot`: the slot which we want to handle its chaining effect.
+    /// - `write_batch`: the write batch containing all updates from the current write and ensuring
+    ///   their atomicity.
+    /// - `working_set`: the working set containing the specified `slot`.
+    /// - `new_chained_slots`: an output parameter containing all slots whose connectivity has
+    ///   changed.
+    /// - `slot`: the slot which we want to handle its chaining effect.
+    ///
+    /// Reports a topology change when `slot` is newly attached to its parent, which adds `slot` to
+    /// the parent's `next_slots`. Connectivity-only updates do not report a topology change.
     fn handle_chaining_for_slot(
         &self,
         write_batch: &mut WriteBatch,
         working_set: &HashMap<(BlockLocation, u64), SlotMetaWorkingSetEntry>,
         new_chained_slots: &mut HashMap<u64, Rc<RefCell<SlotMeta>>>,
         slot: Slot,
-    ) -> Result<()> {
+    ) -> Result<ChainingEffects> {
         let slot_meta_entry = working_set
             .get(&(BlockLocation::Original, slot))
             .expect("Slot must exist in the working_set hashmap");
 
         let meta = &slot_meta_entry.new_slot_meta;
         let meta_backup = &slot_meta_entry.old_slot_meta;
+        let mut effects = ChainingEffects::default();
         {
             let mut meta_mut = meta.borrow_mut();
             let was_orphan_slot =
@@ -5907,6 +5951,7 @@ impl Blockstore {
                         slot,
                         &mut meta_mut,
                     );
+                    effects.slot_meta_topology_changed = true;
 
                     // If the parent of `slot` is a newly inserted orphan, insert it into the orphans
                     // column family
@@ -5935,7 +5980,7 @@ impl Blockstore {
             self.propagate_parent_connected_to_children(meta, working_set, new_chained_slots)?;
         }
 
-        Ok(())
+        Ok(effects)
     }
 
     /// Propagate `parent_connected` to children. Requires `slot_meta` to be connected.
@@ -5956,12 +6001,16 @@ impl Blockstore {
 
     /// Handles chaining updates when an `UpdateParent` marker overrides a
     /// previously set parent in `SlotMeta`.
+    ///
+    /// Reports a topology change when at least one slot is reparented because reparenting updates
+    /// both the old and new parents' `next_slots`.
     fn update_chaining_for_updated_parent_slots(
         &self,
         write_batch: &mut WriteBatch,
         working_set: &HashMap<(BlockLocation, u64), SlotMetaWorkingSetEntry>,
         new_chained_slots: &mut HashMap<u64, Rc<RefCell<SlotMeta>>>,
-    ) -> Result<()> {
+    ) -> Result<ChainingEffects> {
+        let mut effects = ChainingEffects::default();
         // Process only existing slots in Original whose parent was updated by UpdateParent.
         for (slot, slot_meta, old_parent_slot, new_parent_slot) in
             working_set
@@ -5996,6 +6045,7 @@ impl Blockstore {
                 .borrow_mut()
                 .next_slots
                 .retain(|s| *s != slot);
+            effects.slot_meta_topology_changed = true;
 
             // Add slot to new parent's next_slots.
             let new_parent_meta =
@@ -6036,7 +6086,7 @@ impl Blockstore {
             }
         }
 
-        Ok(())
+        Ok(effects)
     }
 
     /// Traverse all the children (direct and indirect) of `slot_meta`, and apply
@@ -6571,7 +6621,6 @@ pub fn create_new_ledger(
         chained_merkle_root,
         0, // next_shred_index
         0, // next_code_index
-        &ReedSolomonCache::default(),
         &mut ProcessShredsStats::default(),
     );
     assert!(shreds.last().unwrap().last_in_slot());
@@ -6788,7 +6837,6 @@ pub fn entries_to_test_shreds(
             Hash::new_from_array(rand::rng().random()), // chained_merkle_root
             0,                                          // next_shred_index,
             0,                                          // next_code_index
-            &ReedSolomonCache::default(),
             &mut ProcessShredsStats::default(),
         )
         .into_iter()

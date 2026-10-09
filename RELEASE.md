@@ -119,14 +119,19 @@ backport is needed. To release the override, open a PR on master that clears the
    Note: if `ci/channel-overrides` on master has `PINNED_BETA_CHANNEL` /
    `PINNED_STABLE_CHANNEL` set, those values override auto-detect everywhere.
 
-### Update the Changelog
+### Miscellaneous Cleanup
 
-Create a PR that makes the following updates to [CHANGELOG.md](https://github.com/anza-xyz/agave/blob/master/CHANGELOG.md) in master:
+#### Configure backporting
+
+1. Update [mergify.yml](https://github.com/anza-xyz/agave/blob/master/.mergify.yml) to add backport actions for the new branch, remove actions for the obsolete branch and update the list of non EoL version branches.
+1. Adjust the [Github backport labels](https://github.com/anza-xyz/agave/labels) to add the new branch label and remove the label for the obsolete branch.
+
+#### Master Branch
+
+Create a PR that makes the following updates to [CHANGELOG.md](https://github.com/anza-xyz/agave/blob/master/CHANGELOG.md):
 * Advance the channel links with the newly created branch becoming beta.
 * Add a new section `X.Y.0-Unreleased` for the new master version.
 * Remove the `Unreleased` annotation for the section that has now become beta.
-
-### Miscellaneous Clean up
 
 #### Newly Promoted Stable (Former Beta) Branch
 
@@ -137,8 +142,9 @@ Create a PR that makes the following updates to [CHANGELOG.md](https://github.co
 
 1. Update [CHANGELOG.md](https://github.com/anza-xyz/agave/blob/master/CHANGELOG.md) to remove the channel links on the new branch. Additionally, remove any wording about the new branch being unreleased.
 1. Update [CODEOWNERS](https://github.com/anza-xyz/agave/blob/master/.github/CODEOWNERS) to `* @anza-xyz/backport-reviewers` on the new branch.
-1. Update [mergify.yml](https://github.com/anza-xyz/agave/blob/master/.mergify.yml) to add backport actions for the new branch, remove actions for the obsolete branch and update the list of non EoL version branches.
-1. Adjust the [Github backport labels](https://github.com/anza-xyz/agave/labels) to add the new branch label and remove the label for the obsolete branch.
+
+#### Announcing
+
 1. Announce on Discord #development that the release branch exists so people know to use the new backport labels.
 
 ## Steps to Create a Release

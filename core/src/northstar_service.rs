@@ -101,7 +101,7 @@ fn submit_settlement_transactions(
     }
 
     for mut packet_batch in to_packet_batches(transactions, NUM_PACKETS) {
-        for mut packet in packet_batch.iter_mut() {
+        for packet in packet_batch.iter_mut() {
             packet.meta_mut().flags |= PacketFlags::FROM_STAKED_NODE;
         }
         let batch = BankingPacketBatch::new(packet_batch);

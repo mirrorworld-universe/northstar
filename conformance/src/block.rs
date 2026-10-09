@@ -12,7 +12,7 @@ use {
     },
     solana_account::{AccountSharedData, ReadableAccount},
     solana_accounts_db::{accounts_hash::AccountsLtHash, ancestors::Ancestors},
-    solana_clock::{BankId, DEFAULT_TICKS_PER_SLOT, Epoch},
+    solana_clock::{DEFAULT_TICKS_PER_SLOT, Epoch},
     solana_cost_model::cost_model::CostModel,
     solana_epoch_schedule::EpochSchedule,
     solana_feature_gate_interface::{self as feature, Feature},
@@ -84,7 +84,7 @@ pub fn execute_block_proto(context: &ProtoBlockContext) -> ProtoBlockEffects {
     let blockhash_queue = restore_blockhash_queue(&bank_ctx.blockhash_queue);
 
     // Accounts DB config and initialization
-    let accounts = new_accounts_for_tests_single_threaded();
+    let bank_rc = BankRc::new(new_accounts_for_tests_single_threaded());
 
     // Create feature gate accounts for all feature gates that are present in the protobuf
     // feature set.
@@ -99,19 +99,14 @@ pub fn execute_block_proto(context: &ProtoBlockContext) -> ProtoBlockEffects {
         .chain(acct_states_from_proto.iter().cloned())
         .collect();
 
-    accounts.store_accounts(
+    let bank_id = bank_rc.next_bank_id();
+    bank_rc.accounts.store_accounts(
         (parent_slot, &accounts_to_store[..]),
-        BankId::default(),
+        bank_id,
         None,
         &Ancestors::default(),
     );
-    accounts.store_accounts(
-        (current_slot, &accounts_to_store[..]),
-        BankId::default(),
-        None,
-        &Ancestors::default(),
-    );
-    accounts.accounts_db.add_root(parent_slot);
+    bank_rc.accounts.accounts_db.add_root(parent_slot);
     let accounts_data_size_initial = accounts_to_store
         .iter()
         .map(|(_, account)| account.data().len() as u64)
@@ -212,7 +207,6 @@ pub fn execute_block_proto(context: &ProtoBlockContext) -> ProtoBlockEffects {
         ..BankFieldsToDeserialize::default()
     };
 
-    let bank_rc = BankRc::new(accounts);
     let bank = Bank::new_for_block_tests(
         bank_rc,
         bank_fields,
@@ -344,6 +338,30 @@ pub fn execute_block_proto(context: &ProtoBlockContext) -> ProtoBlockEffects {
 
     let capitalization = if has_err { 0 } else { bank.capitalization() };
 
+    let stake_delegations = if has_err {
+        Vec::new()
+    } else {
+        let stakes = bank.stakes();
+        let mut entries = stakes.stake_delegations_vec();
+        entries.sort_unstable_by_key(|(pubkey, _)| **pubkey);
+        entries
+            .into_iter()
+            .map(|(pubkey, stake_account)| {
+                let delegation = stake_account.delegation();
+                protos::StakeDelegation {
+                    stake_account: pubkey.to_bytes().to_vec(),
+                    vote_account: delegation.voter_pubkey.to_bytes().to_vec(),
+                    stake: delegation.stake,
+                    activation_epoch: delegation.activation_epoch,
+                    deactivation_epoch: delegation.deactivation_epoch,
+                    credits_observed: stake_account.stake().credits_observed,
+                    lamports: stake_account.lamports(),
+                    data_len: stake_account.data_len() as u64,
+                }
+            })
+            .collect()
+    };
+
     // Then include in the output
     ProtoBlockEffects {
         has_error: has_err,
@@ -353,6 +371,7 @@ pub fn execute_block_proto(context: &ProtoBlockContext) -> ProtoBlockEffects {
             block_cost: cost_tracker.block_cost(),
         }),
         leader_schedule: Some(leader_schedule_effects),
+        stake_delegations,
     }
 }
 
@@ -400,15 +419,9 @@ fn build_latest_stake_delegations(
             .iter()
             .filter(|(_, account)| account.lamports() > 0)
             .filter_map(|(pubkey, account)| {
-                if let Ok(stake_account) =
-                    stake_account::StakeAccount::<Delegation>::try_from(account.clone())
-                {
-                    // Skip zero-stake delegations
-                    if stake_account.delegation().stake > 0 {
-                        return Some((*pubkey, *stake_account.delegation()));
-                    }
-                }
-                None
+                stake_account::StakeAccount::<Delegation>::try_from(account.clone())
+                    .ok()
+                    .map(|stake_account| (*pubkey, *stake_account.delegation()))
             })
             .collect(),
         unused: 0,
@@ -540,7 +553,7 @@ fn validate_transaction_message(message: &protos::TransactionMessage) {
     if !message.recent_blockhash.is_empty() {
         let _: [u8; 32] = message.recent_blockhash.as_slice().try_into().unwrap();
     }
-    if !message.is_legacy {
+    if message.version() != protos::TransactionVersion::Legacy {
         for lookup in &message.address_table_lookups {
             let _: [u8; 32] = lookup.account_key.as_slice().try_into().unwrap();
         }
@@ -971,7 +984,7 @@ mod tests {
 
         ProtoSanitizedTransaction {
             message: Some(ProtoTransactionMessage {
-                is_legacy: true,
+                version: protosol::protos::TransactionVersion::Legacy as i32,
                 header: Some(ProtoMessageHeader {
                     num_required_signatures: 1,
                     num_readonly_signed_accounts: 0,
@@ -989,6 +1002,7 @@ mod tests {
                     data: instruction_data,
                 }],
                 address_table_lookups: Vec::new(),
+                v1_config: None,
             }),
             message_hash: Vec::new(),
             signatures: vec![vec![0x99; 64]],
@@ -1159,7 +1173,7 @@ mod tests {
     fn malformed_transaction_message_lookup_key_panics() {
         let mut context = transfer_context(1);
         let message = context.txns[0].message.as_mut().unwrap();
-        message.is_legacy = false;
+        message.set_version(protosol::protos::TransactionVersion::V0);
         message
             .address_table_lookups
             .push(ProtoMessageAddressTableLookup {

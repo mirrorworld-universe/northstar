@@ -6,10 +6,12 @@ use {
         vote_history_storage::{SavedVoteHistory, SavedVoteHistoryVersions, VoteHistoryStorage},
         voting_service::BLSOp,
     },
-    agave_bls_sigverify::rewards::{RewardInput, rewards_wants_vote},
+    agave_bls_sigverify::{
+        metric_types::ConsensusMetricsEventSender,
+        rewards::{RewardInput, rewards_wants_vote},
+    },
     agave_votor_messages::{
         consensus_message::{BLS_KEYPAIR_DERIVE_SEED, VoteMessage},
-        metric_types::ConsensusMetricsEventSender,
         vote::Vote,
         wire::get_vote_payload_to_sign,
     },
@@ -370,18 +372,15 @@ mod tests {
     use {
         super::*,
         crate::vote_history_storage::NullVoteHistoryStorage,
-        agave_votor_messages::consensus_message::Block,
+        agave_votor_messages::consensus_message::{Block, BlockId},
         crossbeam_channel::{Receiver, bounded},
         solana_gossip::contact_info::ContactInfo,
-        solana_hash::Hash,
         solana_net_utils::SocketAddrSpace,
         solana_runtime::{
             bank::{Bank, SlotLeader},
             bank_forks::BankForks,
             epoch_stakes::VersionedEpochStakes,
-            genesis_utils::{
-                ValidatorVoteKeypairs, create_genesis_config_with_alpenglow_vote_accounts,
-            },
+            genesis_utils::{ValidatorVoteKeypairs, create_genesis_config_with_vote_accounts},
         },
         std::sync::{Arc, RwLock},
     };
@@ -425,11 +424,8 @@ mod tests {
     ) -> (VotingContext, Arc<RwLock<BankForks>>, Receiver<RewardInput>) {
         // Can't have stake of 0, so start at 1 and go to 10. In descending order, so 0 has largest stake.
         let stakes: Vec<u64> = (1u64..=10).rev().map(|x| x.saturating_mul(100)).collect();
-        let genesis = create_genesis_config_with_alpenglow_vote_accounts(
-            1_000_000_000,
-            validator_keypairs,
-            stakes,
-        );
+        let genesis =
+            create_genesis_config_with_vote_accounts(1_000_000_000, validator_keypairs, stakes);
         let bank0 = Bank::new_for_tests(&genesis.genesis_config);
         let bank_forks = BankForks::new_rw_arc(bank0);
 
@@ -485,7 +481,7 @@ mod tests {
         .unwrap();
 
         // Generate a normal notarization vote and check it's sent out correctly.
-        let block_id = Hash::new_unique();
+        let block_id = BlockId::new_unique();
         let vote_slot = 2;
         let block = Block {
             slot: vote_slot,

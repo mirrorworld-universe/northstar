@@ -34,7 +34,7 @@ struct RewardEpochDelegatedStake {
 
 /// The off-curve account where we store the bounded reward-epoch delegated stake
 /// denominators used for non-Tower reward recalculation after snapshot restore.
-static REWARD_EPOCH_DELEGATED_STAKES_ACCOUNT: LazyLock<Pubkey> = LazyLock::new(|| {
+pub(crate) static REWARD_EPOCH_DELEGATED_STAKES_ACCOUNT: LazyLock<Pubkey> = LazyLock::new(|| {
     let (pubkey, _) = Pubkey::find_program_address(
         &[b"reward_epoch_delegated_stakes"],
         &agave_feature_set::alpenglow::id(),
@@ -134,6 +134,10 @@ impl RewardEpochDelegatedStakes {
             epoch,
             delegated_stakes: HashMap::new(),
         }
+    }
+
+    pub(crate) fn account_lamports_for_tests(bank: &Bank) -> u64 {
+        bank.get_balance(&REWARD_EPOCH_DELEGATED_STAKES_ACCOUNT)
     }
 }
 

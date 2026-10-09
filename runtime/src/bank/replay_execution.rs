@@ -14,10 +14,10 @@ use {
     bytes::Bytes,
     solana_account::AccountSharedData,
     solana_accounts_db::{
-        accounts::Accounts, accounts_db::AccountsDb, ancestors::Ancestors,
+        accounts::Accounts, accounts_db::AccountsDb, ancestors::Ancestors, bank_id::BankId,
         blockhash_queue::BlockhashQueue,
     },
-    solana_clock::{BankId, Clock, Epoch, MAX_PROCESSING_AGE},
+    solana_clock::{Clock, Epoch, MAX_PROCESSING_AGE},
     solana_epoch_schedule::EpochSchedule,
     solana_fee_calculator::FeeRateGovernor,
     solana_pubkey::Pubkey,
@@ -151,7 +151,7 @@ fn execute_txn_inner(
 
     // Populate the accounts DB with the input accounts at the parent slot.
     let bank_accounts = Accounts::new(Arc::new(AccountsDb::default_for_tests()));
-    let ancestors = Ancestors::from(vec![parent_slot]);
+    let ancestors = Ancestors::from(vec![(parent_slot, BankId::default())]);
     bank_accounts.store_accounts((parent_slot, accounts), BankId::default(), None, &ancestors);
     bank_accounts.accounts_db.add_root(parent_slot);
     let bank_rc = BankRc::new(bank_accounts);

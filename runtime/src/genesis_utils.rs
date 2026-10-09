@@ -1,3 +1,5 @@
+#[cfg(feature = "stable-abi")]
+use solana_frozen_abi_macro::{StableAbi, StableAbiSample, frozen_abi};
 #[expect(deprecated)]
 use solana_stake_interface::config::Config as StakeConfig;
 use {
@@ -9,14 +11,12 @@ use {
     agave_feature_set::{FEATURE_NAMES, FeatureSet},
     agave_votor_messages::{
         self,
-        consensus_message::{BLS_KEYPAIR_DERIVE_SEED, Block},
+        consensus_message::{BLS_KEYPAIR_DERIVE_SEED, Block, BlockId},
         migration::GENESIS_CERTIFICATE_ACCOUNT,
         wire::{WireBlockCertMessage, WireCertSignature},
     },
-    bincode::serialize,
     bitvec::vec::BitVec,
     log::*,
-    serde::{Deserialize, Serialize},
     solana_account::{
         Account, AccountSharedData, ReadableAccount, state_traits::StateMutWincode as _,
     },
@@ -30,7 +30,6 @@ use {
     solana_feature_gate_interface::{self as feature, Feature},
     solana_fee_calculator::FeeRateGovernor,
     solana_genesis_config::GenesisConfig,
-    solana_hash::Hash,
     solana_keypair::Keypair,
     solana_native_token::LAMPORTS_PER_SOL,
     solana_pubkey::Pubkey,
@@ -154,24 +153,24 @@ pub fn create_genesis_config_with_vote_accounts(
         voting_keypairs,
         stakes,
         ClusterType::Development,
-        &FeatureSet::all_enabled(),
-        false,
+        FeatureSet::all_enabled(),
     )
 }
 
 #[cfg(feature = "dev-context-only-utils")]
-pub fn create_genesis_config_with_alpenglow_vote_accounts(
+pub fn create_genesis_config_with_tower_vote_accounts(
     mint_lamports: u64,
     voting_keypairs: &[impl Borrow<ValidatorVoteKeypairs>],
     stakes: Vec<u64>,
 ) -> GenesisConfigInfo {
+    let mut feature_set = FeatureSet::all_enabled();
+    feature_set.deactivate(&agave_feature_set::alpenglow::id());
     create_genesis_config_with_vote_accounts_and_cluster_type(
         mint_lamports,
         voting_keypairs,
         stakes,
         ClusterType::Development,
-        &FeatureSet::all_enabled(),
-        true,
+        feature_set,
     )
 }
 
@@ -180,8 +179,7 @@ pub fn create_genesis_config_with_vote_accounts_and_cluster_type(
     voting_keypairs: &[impl Borrow<ValidatorVoteKeypairs>],
     stakes: Vec<u64>,
     cluster_type: ClusterType,
-    feature_set: &FeatureSet,
-    is_alpenglow: bool,
+    feature_set: FeatureSet,
 ) -> GenesisConfigInfo {
     assert!(!voting_keypairs.is_empty());
     assert_eq!(voting_keypairs.len(), stakes.len());
@@ -198,7 +196,8 @@ pub fn create_genesis_config_with_vote_accounts_and_cluster_type(
             .public
             .to_bytes_compressed(),
     );
-    let mut genesis_config = create_genesis_config_with_leader_ex(
+
+    let genesis_config = create_genesis_config_with_leader_ex(
         mint_lamports,
         &mint_keypair.pubkey(),
         &validator_pubkey,
@@ -210,13 +209,9 @@ pub fn create_genesis_config_with_vote_accounts_and_cluster_type(
         FeeRateGovernor::new(0, 0), // most tests can't handle transaction fees
         Rent::free(),               // most tests don't expect rent
         cluster_type,
-        feature_set,
+        &feature_set,
         vec![],
     );
-
-    if is_alpenglow {
-        activate_all_features_alpenglow(&mut genesis_config);
-    }
 
     let mut genesis_config_info = GenesisConfigInfo {
         genesis_config,
@@ -285,11 +280,45 @@ pub fn create_genesis_config_with_leader(
     )
 }
 
+#[cfg(feature = "dev-context-only-utils")]
+pub fn create_genesis_config_with_tower_leader(
+    mint_lamports: u64,
+    validator_pubkey: &Pubkey,
+    validator_stake_lamports: u64,
+) -> GenesisConfigInfo {
+    let mint_keypair = Keypair::from_seed(&MINT_KEYPAIR_SEED).unwrap();
+    let mut feature_set = FeatureSet::all_enabled();
+    feature_set.deactivate(&agave_feature_set::alpenglow::id());
+    create_genesis_config_with_leader_with_mint_keypair_and_feature_set(
+        mint_keypair,
+        mint_lamports,
+        validator_pubkey,
+        validator_stake_lamports,
+        &feature_set,
+    )
+}
+
 pub fn create_genesis_config_with_leader_with_mint_keypair(
     mint_keypair: Keypair,
     mint_lamports: u64,
     validator_pubkey: &Pubkey,
     validator_stake_lamports: u64,
+) -> GenesisConfigInfo {
+    create_genesis_config_with_leader_with_mint_keypair_and_feature_set(
+        mint_keypair,
+        mint_lamports,
+        validator_pubkey,
+        validator_stake_lamports,
+        &FeatureSet::all_enabled(),
+    )
+}
+
+fn create_genesis_config_with_leader_with_mint_keypair_and_feature_set(
+    mint_keypair: Keypair,
+    mint_lamports: u64,
+    validator_pubkey: &Pubkey,
+    validator_stake_lamports: u64,
+    feature_set: &FeatureSet,
 ) -> GenesisConfigInfo {
     // Use deterministic keypair so we don't get confused by randomness in tests
     let voting_keypair = Keypair::from_seed(&[
@@ -317,7 +346,7 @@ pub fn create_genesis_config_with_leader_with_mint_keypair(
         FeeRateGovernor::new(0, 0), // most tests can't handle transaction fees
         Rent::free(),               // most tests don't expect rent
         ClusterType::Development,
-        &FeatureSet::all_enabled(),
+        feature_set,
         vec![],
     );
 
@@ -329,7 +358,7 @@ pub fn create_genesis_config_with_leader_with_mint_keypair(
     }
 }
 
-pub fn activate_all_features_alpenglow(genesis_config: &mut GenesisConfig) {
+pub fn activate_all_features(genesis_config: &mut GenesisConfig) {
     do_activate_all_features::<true>(genesis_config);
     configure_alpenglow_at_genesis(genesis_config);
 }
@@ -348,14 +377,14 @@ fn configure_alpenglow_at_genesis(genesis_config: &mut GenesisConfig) {
     let cert = WireBlockCertMessage {
         block: Block {
             slot: 0,
-            block_id: Hash::default(),
+            block_id: BlockId::default(),
         },
         signature: WireCertSignature {
             signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
             bitmap: encode_base2(&BitVec::new()).unwrap(),
         },
     };
-    let cert_size = bincode::serialized_size(&cert).unwrap();
+    let cert_size = wincode::serialized_size(&cert).unwrap();
     let lamports = Rent::default().minimum_balance(cert_size as usize);
     let certificate_account = Account::new_data(lamports, &cert, &system_program::ID).unwrap();
 
@@ -365,7 +394,7 @@ fn configure_alpenglow_at_genesis(genesis_config: &mut GenesisConfig) {
     EpochInflationAccountState::insert_into_genesis_config(genesis_config);
 }
 
-pub fn activate_all_features(genesis_config: &mut GenesisConfig) {
+pub fn activate_all_features_tower(genesis_config: &mut GenesisConfig) {
     do_activate_all_features::<false>(genesis_config);
 }
 
@@ -411,7 +440,7 @@ pub fn bls_pubkey_to_compressed_bytes(
     bls_pubkey: &BLSPubkey,
 ) -> [u8; BLS_PUBLIC_KEY_COMPRESSED_SIZE] {
     let key = BLSPubkeyCompressed::try_from(bls_pubkey).unwrap();
-    bincode::serialize(&key).unwrap().try_into().unwrap()
+    wincode::serialize(&key).unwrap().try_into().unwrap()
 }
 
 pub(crate) fn create_validator(
@@ -563,19 +592,18 @@ pub fn create_genesis_config_with_leader_ex(
     );
 
     for feature_id in feature_set.active().keys() {
-        // Skip alpenglow (existing behavior)
-        if *feature_id == agave_feature_set::alpenglow::id() {
-            continue;
-        }
         activate_feature(&mut genesis_config, *feature_id);
+    }
+    if feature_set.is_active(&agave_feature_set::alpenglow::id()) {
+        configure_alpenglow_at_genesis(&mut genesis_config);
     }
 
     genesis_config
 }
 
 /// Wincode mirror of the deprecated [`StakeConfig`], since that type has no wincode schema.
-#[cfg_attr(feature = "frozen-abi", derive(StableAbi, StableAbiSample))]
-#[derive(Serialize, Deserialize, SchemaRead, SchemaWrite)]
+#[cfg_attr(feature = "stable-abi", derive(StableAbi, StableAbiSample))]
+#[derive(SchemaRead, SchemaWrite)]
 struct SerializableStakeConfig {
     warmup_cooldown_rate: f64,
     slash_penalty: u8,
@@ -584,29 +612,28 @@ struct SerializableStakeConfig {
 /// Data of the stake program's config account at genesis: a `ConfigKeys` prefix, then the
 /// stake config.
 ///
-/// The digest freezes this layout, since genesis writes it on chain. Both codecs digest it,
-/// so their agreement proves the mirror below.
+/// The digest freezes this layout, since genesis writes it on chain.
 #[cfg_attr(
-    feature = "frozen-abi",
+    feature = "stable-abi",
     derive(StableAbi, StableAbiSample),
     frozen_abi(
         abi_digest = "FrxVmDThystn6yVz3PjV9BTxGKocrq7LcKfk4VYk5efq",
-        abi_serializer = ["bincode", "wincode"],
+        abi_serializer = "wincode",
         test_roundtrip = "wire_only"
     )
 )]
-#[derive(Serialize, Deserialize, SchemaRead, SchemaWrite)]
+#[derive(SchemaRead, SchemaWrite)]
 struct GenesisStakeConfigAccount {
     /// `ConfigKeys` has no `StableAbi` of its own, so sample the key list directly.
     #[cfg_attr(
-        feature = "frozen-abi",
+        feature = "stable-abi",
         stable_abi_sample(with = "sample_config_keys(rng)")
     )]
     keys: ConfigKeys,
     config: SerializableStakeConfig,
 }
 
-#[cfg(feature = "frozen-abi")]
+#[cfg(feature = "stable-abi")]
 fn sample_config_keys(rng: &mut (impl solana_frozen_abi::rand::RngCore + ?Sized)) -> ConfigKeys {
     use solana_frozen_abi::stable_abi::{context::SequenceLenMax, sample_collection_sized};
     ConfigKeys {
@@ -620,7 +647,7 @@ pub fn add_genesis_stake_config_account(genesis_config: &mut GenesisConfig) -> u
         warmup_cooldown_rate,
         slash_penalty,
     } = StakeConfig::default();
-    let data = serialize(&GenesisStakeConfigAccount {
+    let data = wincode::serialize(&GenesisStakeConfigAccount {
         keys: ConfigKeys { keys: vec![] },
         config: SerializableStakeConfig {
             warmup_cooldown_rate,
@@ -690,27 +717,100 @@ pub fn create_lockup_stake_account(
 mod tests {
     use super::*;
 
-    /// The mirror must encode exactly like `StakeConfig`. Naming the two halves as one
-    /// struct must not move any bytes.
+    /// Naming the two halves as one struct must not move any bytes. The frozen digest
+    /// covers their agreement with `StakeConfig`.
     #[test]
     #[expect(deprecated)]
     fn test_genesis_stake_config_account_layout() {
         let config = StakeConfig::default();
-        assert_eq!(
-            serialize(&config).unwrap(),
-            serialize(&SerializableStakeConfig {
+        let mut expected = wincode::serialize(&ConfigKeys { keys: vec![] }).unwrap();
+        expected.extend_from_slice(
+            &wincode::serialize(&SerializableStakeConfig {
                 warmup_cooldown_rate: config.warmup_cooldown_rate,
                 slash_penalty: config.slash_penalty,
             })
             .unwrap(),
         );
 
-        let mut expected = serialize(&ConfigKeys { keys: vec![] }).unwrap();
-        expected.extend_from_slice(&serialize(&config).unwrap());
-
         let mut genesis_config = GenesisConfig::default();
         add_genesis_stake_config_account(&mut genesis_config);
         let account = &genesis_config.accounts[&solana_stake_interface::config::id()];
         assert_eq!(account.data, expected);
+    }
+
+    fn assert_alpenglow_genesis(genesis_config: &GenesisConfig) {
+        assert!(
+            genesis_config
+                .accounts
+                .contains_key(&agave_feature_set::alpenglow::id())
+        );
+        assert!(
+            genesis_config
+                .accounts
+                .contains_key(&agave_feature_set::alpenglow_fast_leader_handover::id())
+        );
+        assert!(
+            genesis_config
+                .accounts
+                .contains_key(&GENESIS_CERTIFICATE_ACCOUNT)
+        );
+        assert!(genesis_config.poh_config.hashes_per_tick.is_none());
+    }
+
+    fn assert_tower_genesis(genesis_config: &GenesisConfig) {
+        assert!(
+            !genesis_config
+                .accounts
+                .contains_key(&agave_feature_set::alpenglow::id())
+        );
+        assert!(
+            genesis_config
+                .accounts
+                .contains_key(&agave_feature_set::alpenglow_fast_leader_handover::id())
+        );
+        assert!(
+            !genesis_config
+                .accounts
+                .contains_key(&GENESIS_CERTIFICATE_ACCOUNT)
+        );
+    }
+
+    #[test]
+    fn test_default_genesis_is_alpenglow() {
+        assert_alpenglow_genesis(&create_genesis_config(1_000_000).genesis_config);
+    }
+
+    #[test]
+    fn test_default_vote_account_genesis_is_alpenglow() {
+        let validator = ValidatorVoteKeypairs::new_rand();
+        let genesis_config =
+            create_genesis_config_with_vote_accounts(1_000_000, &[validator], vec![1])
+                .genesis_config;
+        assert_alpenglow_genesis(&genesis_config);
+    }
+
+    #[test]
+    fn test_activate_all_features_includes_alpenglow() {
+        let mut genesis_config = GenesisConfig::default();
+        activate_all_features(&mut genesis_config);
+        assert_alpenglow_genesis(&genesis_config);
+    }
+
+    #[test]
+    fn test_tower_genesis_helpers_disable_alpenglow() {
+        let validator = ValidatorVoteKeypairs::new_rand();
+        let vote_account_genesis =
+            create_genesis_config_with_tower_vote_accounts(1_000_000, &[validator], vec![1])
+                .genesis_config;
+        assert_tower_genesis(&vote_account_genesis);
+
+        let leader_genesis =
+            create_genesis_config_with_tower_leader(1_000_000, &Pubkey::new_unique(), 1)
+                .genesis_config;
+        assert_tower_genesis(&leader_genesis);
+
+        let mut activated_genesis = GenesisConfig::default();
+        activate_all_features_tower(&mut activated_genesis);
+        assert_tower_genesis(&activated_genesis);
     }
 }

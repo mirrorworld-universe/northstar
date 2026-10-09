@@ -22,9 +22,9 @@ pub(super) struct ConsensusPoolServiceStats {
     pub(super) vote_aggregates_received: Saturating<u64>,
     pub(super) certs_received: Saturating<u64>,
     pub(super) own_message_receive_limit_reached: Saturating<u64>,
+    pub(super) footer_message_receive_limit_reached: Saturating<u64>,
     pub(super) consensus_message_batch_receive_limit_reached: Saturating<u64>,
     pub(super) standstill: bool,
-    pub(super) prune_old_state_called: Saturating<usize>,
     pub(crate) pending_safe_to_notar_repair_sent: Saturating<usize>,
     pub(crate) pending_safe_to_notar_resolved: Saturating<usize>,
 
@@ -42,13 +42,13 @@ impl ConsensusPoolServiceStats {
             parent_ready_missed_window: Saturating(0),
             parent_ready_produce_window: Saturating(0),
             own_message_receive_limit_reached: Saturating(0),
+            footer_message_receive_limit_reached: Saturating(0),
             consensus_message_batch_receive_limit_reached: Saturating(0),
             own_votes_received: Saturating(0),
             vote_aggregates_received: Saturating(0),
             certs_received: Saturating(0),
             footer_certs_received: Saturating(0),
             standstill: false,
-            prune_old_state_called: Saturating(0),
             pending_safe_to_notar_repair_sent: Saturating(0),
             pending_safe_to_notar_resolved: Saturating(0),
             last_request_time: Instant::now(),
@@ -69,9 +69,9 @@ impl ConsensusPoolServiceStats {
             vote_aggregates_received,
             certs_received,
             own_message_receive_limit_reached,
+            footer_message_receive_limit_reached,
             consensus_message_batch_receive_limit_reached,
             standstill,
-            prune_old_state_called,
             pending_safe_to_notar_repair_sent,
             pending_safe_to_notar_resolved,
             last_request_time: _,
@@ -106,13 +106,17 @@ impl ConsensusPoolServiceStats {
                 i64
             ),
             (
+                "footer_message_receive_limit_reached",
+                footer_message_receive_limit_reached.0,
+                i64
+            ),
+            (
                 "consensus_message_batch_receive_limit_reached",
                 consensus_message_batch_receive_limit_reached.0,
                 i64
             ),
             ("footer_certs_received", footer_certs_received.0, i64),
             ("in_standstill_bool", standstill, bool),
-            ("prune_old_state_called", prune_old_state_called.0, i64),
             (
                 "pending_safe_to_notar_repair_sent",
                 pending_safe_to_notar_repair_sent.0,

@@ -1,6 +1,8 @@
 //! Definitions for the base of all Gossip protocol messages
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::{field_qualifiers, qualifiers};
+#[cfg(feature = "stable-abi")]
+use solana_frozen_abi_macro::{StableAbi, StableAbiSample, frozen_abi};
 use {
     crate::{
         crds_data::{CrdsData, MAX_WALLCLOCK},
@@ -47,18 +49,18 @@ const GOSSIP_PING_TOKEN_SIZE: usize = 32;
 pub(crate) const PULL_RESPONSE_MIN_SERIALIZED_SIZE: usize = 161;
 const MIN_CRDS_VALUE_SERIALIZED_SIZE: usize =
     PULL_RESPONSE_MIN_SERIALIZED_SIZE - (PACKET_DATA_SIZE - PULL_RESPONSE_MAX_PAYLOAD_SIZE);
-const MAX_CRDS_VALUES_PER_PACKET: usize =
+pub(crate) const MAX_CRDS_VALUES_PER_PACKET: usize =
     (PULL_RESPONSE_MAX_PAYLOAD_SIZE / MIN_CRDS_VALUE_SERIALIZED_SIZE) + 1;
 // Wincode's preallocation limit is decoded collection memory, not input bytes.
 // Bound it to the largest CRDS value vector that can fit in one gossip packet.
 const GOSSIP_PROTOCOL_PREALLOC_LIMIT: usize =
     MAX_CRDS_VALUES_PER_PACKET * std::mem::size_of::<CrdsValue>();
-type GossipProtocolWincodeConfig =
+pub(crate) type GossipProtocolWincodeConfig =
     wincode::config::Configuration<true, GOSSIP_PROTOCOL_PREALLOC_LIMIT>;
 
 /// Gossip protocol messages base enum
 #[cfg_attr(
-    feature = "frozen-abi",
+    feature = "stable-abi",
     derive(StableAbi, StableAbiSample),
     frozen_abi(
         abi_digest = "D3Hqum16i1KHnejUD65odaQSbQnJtTQnTJSUoUrjzY2a",
@@ -84,7 +86,7 @@ pub(crate) enum Protocol {
 }
 
 #[cfg_attr(
-    feature = "frozen-abi",
+    feature = "stable-abi",
     frozen_abi(
         abi_digest = "Gab1D5ug6ZAB5sRNmBpoM8JyxsixccLLaWxYZwmueVYA",
         abi_serializer = ["wincode"],
@@ -104,7 +106,7 @@ pub(crate) fn deserialize_protocol(input: &[u8]) -> wincode::ReadResult<Protocol
 }
 
 #[cfg_attr(
-    feature = "frozen-abi",
+    feature = "stable-abi",
     derive(StableAbi, StableAbiSample),
     frozen_abi(
         abi_digest = "GomZf5rFL743zPKH71UShh64JfNvrDBBEC2o2VehinsT",
@@ -406,16 +408,18 @@ pub(crate) mod tests {
 
     #[test]
     fn test_deserialize_protocol_rejects_large_vec_preallocation() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&2u32.to_le_bytes()); // Protocol::PushMessage.
-        bytes.extend_from_slice(&Pubkey::new_unique().to_bytes());
-        bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // Vec<CrdsValue> length.
+        for num_values in [(MAX_CRDS_VALUES_PER_PACKET + 1) as u64, u64::MAX] {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&2u32.to_le_bytes()); // Protocol::PushMessage.
+            bytes.extend_from_slice(&Pubkey::new_unique().to_bytes());
+            bytes.extend_from_slice(&num_values.to_le_bytes()); // Vec<CrdsValue> length.
 
-        let err = deserialize_protocol(&bytes).unwrap_err();
-        assert!(matches!(
-            err,
-            wincode::ReadError::PreallocationSizeLimit { .. }
-        ));
+            let err = deserialize_protocol(&bytes).unwrap_err();
+            assert!(matches!(
+                err,
+                wincode::ReadError::PreallocationSizeLimit { .. }
+            ));
+        }
     }
 
     #[test]

@@ -1,7 +1,9 @@
+#[cfg(feature = "stable-abi")]
+use solana_frozen_abi_macro::{StableAbi, StableAbiSample, frozen_abi};
 use std::io::{self, BufReader, Read, Write};
 
 #[cfg_attr(
-    feature = "frozen-abi",
+    feature = "stable-abi",
     derive(StableAbi, StableAbiSample, PartialEq),
     frozen_abi(
         abi_digest = "6Mqz7t1A92unKc6Ngs1p2GhiRUdWwVSNLSifDDh4KcXv",

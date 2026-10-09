@@ -79,6 +79,9 @@ pub struct FeatureSnapshot {
     pub relax_post_exec_min_balance_check: bool,
     pub define_ltds_fee_only_semantics: bool,
     pub relax_fee_payer_constraint: bool,
+    pub remove_inactive_stakes: bool,
+    pub loader_v3_set_program_data_to_elf_length: bool,
+    pub early_instruction_trace_overflow_detection: bool,
 }
 
 impl From<&AHashMap<Pubkey, u64>> for FeatureSnapshot {
@@ -177,6 +180,13 @@ impl From<&AHashMap<Pubkey, u64>> for FeatureSnapshot {
             relax_post_exec_min_balance_check: is_active(&relax_post_exec_min_balance_check::ID),
             define_ltds_fee_only_semantics: is_active(&define_ltds_fee_only_semantics::ID),
             relax_fee_payer_constraint: is_active(&relax_fee_payer_constraint::ID),
+            remove_inactive_stakes: is_active(&remove_inactive_stakes::ID),
+            loader_v3_set_program_data_to_elf_length: is_active(
+                &loader_v3_set_program_data_to_elf_length::ID,
+            ),
+            early_instruction_trace_overflow_detection: is_active(
+                &early_instruction_trace_overflow_detection::ID,
+            ),
         }
     }
 }
@@ -336,6 +346,10 @@ impl FeatureSet {
             relax_post_exec_min_balance_check: snapshot.relax_post_exec_min_balance_check,
             define_ltds_fee_only_semantics: snapshot.define_ltds_fee_only_semantics,
             relax_fee_payer_constraint: snapshot.relax_fee_payer_constraint,
+            loader_v3_set_program_data_to_elf_length: snapshot
+                .loader_v3_set_program_data_to_elf_length,
+            early_instruction_trace_overflow_detection: snapshot
+                .early_instruction_trace_overflow_detection,
         }
     }
 }
@@ -1434,11 +1448,11 @@ pub mod limit_instruction_accounts {
 }
 
 pub mod block_revenue_sharing {
-    solana_pubkey::declare_id!("7MYx95UBiJufqnumyN7HfskJ9vKdcGMmhreVguqrE97K");
+    solana_pubkey::declare_id!("Crbnc267wkJvFhYakqwWWX57sx5bkrftJLekzy6yWKLT");
 }
 
 pub mod vote_account_initialize_v2 {
-    solana_pubkey::declare_id!("VoteAccount1nitia1izeV211111111111111111111");
+    solana_pubkey::declare_id!("9PtjteCDs5yLKwseLKVWgKwTBMfLBxZmTDBgmmws8vRt");
 }
 
 pub mod validate_chained_block_id {
@@ -1523,6 +1537,18 @@ pub mod double_disinflation_rate {
     solana_pubkey::declare_id!("55oikhjJ2LUi1xdgJ17ueRyHFURZEw32asT3iAKfh7gg");
     /// Taper (yearly disinflation rate) applied from activation onward.
     pub const TAPER: f64 = 0.30;
+}
+
+pub mod remove_inactive_stakes {
+    solana_pubkey::declare_id!("RMsTKfD6hZnBhhNvgGBeKNrqCNkeoP3DYYxNtcuWtRg");
+}
+
+pub mod loader_v3_set_program_data_to_elf_length {
+    solana_pubkey::declare_id!("EhisBfVtGvEA8bVCVN5VMaYEaX6iTfoUrmcDi8LY7Kxy");
+}
+
+pub mod early_instruction_trace_overflow_detection {
+    solana_pubkey::declare_id!("HeqqMQXVqavmiJsGTEXgCMydzMEWiiQTAgbs9KVKJVww");
 }
 
 pub static FEATURE_NAMES: LazyLock<AHashMap<Pubkey, &'static str>> = LazyLock::new(|| {
@@ -2610,6 +2636,18 @@ pub static FEATURE_NAMES: LazyLock<AHashMap<Pubkey, &'static str>> = LazyLock::n
         (
             double_disinflation_rate::id(),
             "SIMD-0550: Double disinflation rate",
+        ),
+        (
+            remove_inactive_stakes::id(),
+            "SIMD-0599: Remove inactive stakes from stake delegations",
+        ),
+        (
+            loader_v3_set_program_data_to_elf_length::id(),
+            "SIMD-0433: Loader V3 Set Program Data to ELF Length",
+        ),
+        (
+            early_instruction_trace_overflow_detection::id(),
+            "SIMD-582: Early detection of instruction trace overflow",
         ),
         /*************** ADD NEW FEATURES HERE ***************/
         /***** ADD NEW FEATURE BOOL TO `FeatureSnapshot` *****/

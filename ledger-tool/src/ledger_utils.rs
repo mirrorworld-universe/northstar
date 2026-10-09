@@ -30,7 +30,6 @@ use {
         leader_schedule_cache::LeaderScheduleCache,
         use_snapshot_archives_at_startup::UseSnapshotArchivesAtStartup,
     },
-    solana_pubkey::Pubkey,
     solana_rpc::transaction_status_service::TransactionStatusService,
     solana_runtime::{
         accounts_background_service::{
@@ -43,7 +42,6 @@ use {
         transaction_execution::TransactionStatusSender,
     },
     solana_shred_version::compute_shred_version,
-    solana_transaction::versioned::VersionedTransaction,
     solana_unified_scheduler_pool::DefaultSchedulerPool,
     std::{
         path::{Path, PathBuf},
@@ -419,6 +417,7 @@ pub fn load_and_process_ledger(
                 transaction_status_sender.clone(),
                 no_replay_vote_sender,
                 no_prioritization_fee_cache,
+                None,
             );
             bank_forks
                 .write()
@@ -604,16 +603,6 @@ pub fn open_genesis_config_by(ledger_path: &Path, matches: &ArgMatches<'_>) -> G
         eprintln!("Exiting. Failed to open genesis config: {err}");
         exit(1);
     })
-}
-
-pub fn get_program_ids(tx: &VersionedTransaction) -> impl Iterator<Item = &Pubkey> + '_ {
-    let message = &tx.message;
-    let account_keys = message.static_account_keys();
-
-    message
-        .instructions()
-        .iter()
-        .map(|ix| ix.program_id(account_keys))
 }
 
 /// Get the AccessType required, based on `process_options`

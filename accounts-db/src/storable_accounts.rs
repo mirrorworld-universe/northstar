@@ -399,12 +399,7 @@ impl<'a> StorableAccounts<'a> for StorableAccountsBySlot<'a> {
 mod tests {
     use {
         super::*,
-        crate::{
-            account_info::{AccountInfo, StorageLocation},
-            account_storage_entry::AccountStorageEntry,
-            accounts_db::get_temp_accounts_paths,
-            accounts_file::AccountsFileProvider,
-        },
+        crate::account_info::{AccountInfo, StorageLocation},
         rand::Rng,
         solana_account::{AccountSharedData, accounts_equal},
         std::{iter, sync::Arc},
@@ -644,10 +639,10 @@ mod tests {
 
                     let source_slot = starting_slot % max_slots;
 
-                    let storage = setup_sample_storage(&db, source_slot);
+                    let storage = Arc::new(db.create_store(source_slot, 10_000));
+                    db.storage.insert(storage.clone());
                     // store the accounts so they can be looked up later in `db`
-                    if let Some(offsets) =
-                        storage.accounts.write_accounts(&(source_slot, &three[..]))
+                    if let Ok(offsets) = storage.accounts.write_accounts(&(source_slot, &three[..]))
                     {
                         three_accounts_from_storage_byval
                             .iter_mut()
@@ -687,22 +682,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    fn setup_sample_storage(db: &AccountsDb, slot: Slot) -> Arc<AccountStorageEntry> {
-        let id = 2;
-        let file_size = 10_000;
-        let (_temp_dirs, paths) = get_temp_accounts_paths(1).unwrap();
-        let data = AccountStorageEntry::new(
-            &paths[0],
-            slot,
-            id,
-            file_size,
-            AccountsFileProvider::AppendVec,
-        );
-        let storage = Arc::new(data);
-        db.storage.insert(storage.clone());
-        storage
     }
 
     #[test]
@@ -773,8 +752,9 @@ mod tests {
                                     let mut result =
                                         raw2_accounts_from_storage[range.clone()].to_vec();
                                     // store the accounts so they can be looked up later in `db`
-                                    let storage = setup_sample_storage(&db, slot);
-                                    if let Some(offsets) = storage
+                                    let storage = Arc::new(db.create_store(slot, 10_000));
+                                    db.storage.insert(storage.clone());
+                                    if let Ok(offsets) = storage
                                         .accounts
                                         .write_accounts(&(slot, &raw2_refs[range.clone()]))
                                     {
