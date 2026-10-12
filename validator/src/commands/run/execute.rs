@@ -31,7 +31,7 @@ use {
         },
         partitioned_rewards::PartitionedEpochRewardsConfig,
         utils::{
-            create_all_accounts_run_and_snapshot_dirs, create_and_canonicalize_directories,
+            create_all_accounts_run_dirs, create_and_canonicalize_directories,
             create_and_canonicalize_directory,
         },
     },
@@ -498,7 +498,6 @@ pub fn execute(
     let restricted_repair_only_mode = matches.is_present("restricted_repair_only_mode");
     let accounts_shrink_optimize_total_space =
         value_t_or_exit!(matches, "accounts_shrink_optimize_total_space", bool);
-    let vote_use_quic = value_t_or_exit!(matches, "vote_use_quic", bool);
 
     let shrink_ratio = value_t_or_exit!(matches, "accounts_shrink_ratio", f64);
     if !(0.0..=1.0).contains(&shrink_ratio) {
@@ -713,9 +712,8 @@ pub fn execute(
         .map_err(|err| format!("unable to access account path: {err}"))?;
 
     // From now on, use run/ paths in the same way as the previous account_paths.
-    let (account_run_paths, account_snapshot_paths) =
-        create_all_accounts_run_and_snapshot_dirs(&account_paths)
-            .map_err(|err| format!("unable to create account directories: {err}"))?;
+    let account_run_paths = create_all_accounts_run_dirs(&account_paths)
+        .map_err(|err| format!("unable to create account directories: {err}"))?;
 
     let snapshot_config = new_snapshot_config(
         matches,
@@ -806,7 +804,6 @@ pub fn execute(
             .unwrap_or(poh_service::DEFAULT_HASHES_PER_BATCH),
         process_ledger_before_services: matches.is_present("process_ledger_before_services"),
         account_paths: account_run_paths,
-        account_snapshot_paths,
         accounts_db_config,
         snapshot_config,
         no_wait_for_vote_to_start_leader: matches.is_present("no_wait_for_vote_to_start_leader"),
@@ -1111,7 +1108,7 @@ pub fn execute(
         start_progress,
         run_args.socket_addr_space,
         ValidatorTpuConfig {
-            vote_use_quic,
+            vote_use_quic: false,
             tpu_quic_server_config,
             tpu_fwd_quic_server_config,
             vote_quic_server_config,

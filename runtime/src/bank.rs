@@ -188,7 +188,7 @@ use {
             TransactionProcessingConfig, TransactionProcessingEnvironment,
         },
     },
-    solana_svm_callback::{AccountState, InvokeContextCallback, TransactionProcessingCallback},
+    solana_svm_callback::{InvokeContextCallback, TransactionProcessingCallback},
     solana_svm_timings::{ExecuteTimingType, ExecuteTimings},
     solana_svm_transaction::svm_message::SVMMessage,
     solana_syscalls::create_program_runtime_environment,
@@ -643,7 +643,7 @@ pub struct BankFieldsToSerialize {
     pub accounts_data_len: u64,
     pub versioned_epoch_stakes: HashMap<u64, VersionedEpochStakes>,
     pub accounts_lt_hash: AccountsLtHash,
-    pub block_id: Hash,
+    pub block_id: BlockId,
 }
 
 // Can't derive PartialEq because RwLock doesn't implement PartialEq
@@ -805,7 +805,7 @@ impl BankFieldsToSerialize {
             accounts_data_len: u64::default(),
             versioned_epoch_stakes: HashMap::default(),
             accounts_lt_hash: AccountsLtHash(LtHash([0x7E57; LtHash::NUM_ELEMENTS])),
-            block_id: Hash::default(),
+            block_id: BlockId::default(),
         }
     }
 }
@@ -5401,6 +5401,7 @@ impl Bank {
         self.add_active_builtin_programs();
     }
 
+    #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
     fn create_program_runtime_environment(
         &self,
         feature_set: &FeatureSet,
@@ -6673,22 +6674,6 @@ impl Bank {
 
         self.apply_new_builtin_program_feature_transitions(&new_feature_activations);
 
-        if new_feature_activations.contains(&feature_set::replace_spl_token_with_p_token::id())
-            && let Err(e) = self.upgrade_loader_v2_program_with_loader_v3_program(
-                &feature_set::replace_spl_token_with_p_token::SPL_TOKEN_PROGRAM_ID,
-                &feature_set::replace_spl_token_with_p_token::PTOKEN_PROGRAM_BUFFER,
-                self.feature_set
-                    .snapshot()
-                    .relax_programdata_account_check_migration,
-                "replace_spl_token_with_p_token",
-            )
-        {
-            warn!(
-                "Failed to replace SPL Token with p-token buffer '{}': {e}",
-                feature_set::replace_spl_token_with_p_token::PTOKEN_PROGRAM_BUFFER,
-            );
-        }
-
         if new_feature_activations.contains(&feature_set::upgrade_bpf_stake_program_to_v5::id())
             && let Err(e) = self.upgrade_core_bpf_program(
                 &solana_sdk_ids::stake::id(),
@@ -6953,6 +6938,7 @@ impl Bank {
         &self.fee_structure
     }
 
+<<<<<<< HEAD
     /// Sonic: Configure Northstar Ephemeral Rollup bank parameters.
     pub fn configure_er(&mut self, fee_structure: &FeeStructure, blockhash_queue_max_age: usize) {
         self.fee_rate_governor = FeeRateGovernor::new(fee_structure.lamports_per_signature, 0);
@@ -6964,17 +6950,20 @@ impl Bank {
     }
 
     pub fn parent_block_id(&self) -> Option<Hash> {
+=======
+    pub fn parent_block_id(&self) -> Option<BlockId> {
+>>>>>>> upstream/master
         self.parent().and_then(|p| p.block_id())
     }
 
-    pub fn block_id(&self) -> Option<Hash> {
-        self.block_id.read().unwrap().map(|b| b.to_hash())
+    pub fn block_id(&self) -> Option<BlockId> {
+        self.block_id.read().unwrap().map(|b| b)
     }
 
-    pub fn set_block_id(&self, block_id: Option<Hash>) {
+    pub fn set_block_id(&self, block_id: Option<BlockId>) {
         let mut block_id_w = self.block_id.write().unwrap();
-        debug_assert!(block_id_w.is_none() || block_id_w.map(|b| b.to_hash()) == block_id);
-        *block_id_w = block_id.map(BlockId::from)
+        debug_assert!(block_id_w.is_none() || *block_id_w == block_id);
+        *block_id_w = block_id
     }
 
     pub fn compute_budget(&self) -> Option<ComputeBudget> {
@@ -7097,7 +7086,7 @@ impl Bank {
             // as parent's block id is not available for the calculation below.
             // Must freeze() to ensure bank hash has been calculated.
             bank.freeze();
-            bank.set_block_id(Some(bank.hash()));
+            bank.set_block_id(Some(BlockId::from(bank.hash())));
             return;
         };
 
@@ -7109,8 +7098,10 @@ impl Bank {
 
         // must freeze() to ensure bank hash has been calculated
         bank.freeze();
-        let block_id =
-            solana_sha256_hasher::hashv(&[parent_block_id.as_ref(), bank.hash().as_ref()]);
+        let block_id = BlockId::from(solana_sha256_hasher::hashv(&[
+            parent_block_id.as_bytes(),
+            bank.hash().as_ref(),
+        ]));
         bank.set_block_id(Some(block_id));
     }
 
@@ -7174,10 +7165,6 @@ impl TransactionProcessingCallback for Bank {
             .accounts
             .load_with_fixed_root(&self.ancestors, pubkey, None::<fn(_, &_, _) -> _>)
             .map(|(account, _slot)| account)
-    }
-
-    fn inspect_account(&self, _address: &Pubkey, _account_state: AccountState, _is_writable: bool) {
-        // nothing to do here
     }
 }
 

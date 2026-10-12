@@ -50,7 +50,7 @@ use {
     std::{
         alloc::Layout,
         borrow::Cow,
-        cell::{Cell, RefCell},
+        cell::RefCell,
         fmt::{self, Debug},
         ptr,
         rc::Rc,
@@ -110,7 +110,7 @@ macro_rules! declare_process_instruction {
 
                 let consumption_result = if $cu_to_consume > 0
                 {
-                    invoke_context.compute_meter.consume_checked($cu_to_consume)
+                    invoke_context.consume_checked($cu_to_consume)
                 } else {
                     Ok(())
                 };
@@ -128,16 +128,13 @@ macro_rules! declare_process_instruction {
 
 impl ContextObject for InvokeContext<'_, '_> {
     fn consume(&mut self, amount: u64) {
-        // 1 to 1 instruction to compute unit mapping
-        // ignore overflow, Ebpf will bail if exceeded
-        let compute_meter = self.compute_meter.0.get();
-        self.compute_meter
-            .0
-            .set(compute_meter.saturating_sub(amount));
+        self.transaction_context
+            .compute_meter
+            .consume_unchecked(amount);
     }
 
     fn get_remaining(&self) -> u64 {
-        self.compute_meter.0.get()
+        self.transaction_context.compute_meter.get_remaining()
     }
 
     fn active_mapping_ptr(&mut self) -> ptr::NonNull<MemoryMapping> {
@@ -221,29 +218,6 @@ impl<'a> EnvironmentConfig<'a> {
     }
 }
 
-pub struct ComputeMeter(Cell<u64>);
-
-impl ComputeMeter {
-    /// Consume compute units
-    pub fn consume_checked(&self, amount: u64) -> Result<(), Box<dyn std::error::Error>> {
-        let compute_meter = self.0.get();
-        let exceeded = compute_meter < amount;
-        self.0.set(compute_meter.saturating_sub(amount));
-        if exceeded {
-            return Err(Box::new(InstructionError::ComputationalBudgetExceeded));
-        }
-        Ok(())
-    }
-
-    /// Set compute units
-    ///
-    /// Only use for tests and benchmarks
-    #[cfg(feature = "dev-context-only-utils")]
-    pub fn mock_set_remaining(&self, remaining: u64) {
-        self.0.set(remaining);
-    }
-}
-
 /// Main pipeline from runtime to program execution.
 pub struct InvokeContext<'a, 'ix_data> {
     /// Information about the currently executing transaction.
@@ -256,9 +230,6 @@ pub struct InvokeContext<'a, 'ix_data> {
     compute_budget: SVMTransactionExecutionBudget,
     /// The compute cost for the current invocation.
     execution_cost: SVMTransactionExecutionCost,
-    /// Instruction compute meter, for tracking compute units consumed against
-    /// the designated compute budget during program execution.
-    pub compute_meter: ComputeMeter,
     log_collector: Option<Rc<RefCell<LogCollector>>>,
     /// Time spent so far executing nested program calls.
     pub total_nested_exec_time: Duration,
@@ -287,7 +258,6 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
             log_collector,
             compute_budget,
             execution_cost,
-            compute_meter: ComputeMeter(Cell::new(compute_budget.compute_unit_limit)),
             total_nested_exec_time: Duration::ZERO,
             timings: ExecuteDetailsTimings::default(),
             memory_contexts: MemoryContexts::new(),
@@ -787,6 +757,19 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
         result
     }
 
+    pub fn consume_checked(&self, amount: u64) -> Result<(), Box<dyn std::error::Error>> {
+        self.transaction_context
+            .compute_meter
+            .consume_checked(amount)
+    }
+
+    #[cfg(feature = "dev-context-only-utils")]
+    pub fn mock_set_remaining(&self, remaining: u64) {
+        self.transaction_context
+            .compute_meter
+            .mock_set_remaining(remaining)
+    }
+
     /// Get this invocation's LogCollector
     pub fn get_log_collector(&self) -> Option<Rc<RefCell<LogCollector>>> {
         self.log_collector.clone()
@@ -928,7 +911,9 @@ macro_rules! with_mock_invoke_context_with_feature_set {
             solana_svm_callback::InvokeContextCallback,
             solana_svm_log_collector::LogCollector,
             $crate::{
-                __private::{DropOnBailOut, Hash, ReadableAccount, Rent, TransactionContext},
+                __private::{
+                    ComputeMeter, DropOnBailOut, Hash, ReadableAccount, Rent, TransactionContext,
+                },
                 execution_budget::{SVMTransactionExecutionBudget, SVMTransactionExecutionCost},
                 invoke_context::{EnvironmentConfig, InvokeContext},
                 loaded_programs::{ProgramCacheForTxBatch, ProgramRuntimeEnvironments},
@@ -956,6 +941,7 @@ macro_rules! with_mock_invoke_context_with_feature_set {
             compute_budget.max_instruction_stack_depth,
             compute_budget.max_instruction_trace_length,
             $top_level_instructions,
+            ComputeMeter::new(compute_budget.compute_unit_limit),
             DropOnBailOut::Disabled,
         );
         let program_runtime_environments = ProgramRuntimeEnvironments::mock();
@@ -1330,7 +1316,6 @@ mod tests {
                         desired_result,
                     } => {
                         invoke_context
-                            .compute_meter
                             .consume_checked(compute_units_to_consume)
                             .map_err(|_| InstructionError::ComputationalBudgetExceeded)?;
                         return desired_result;

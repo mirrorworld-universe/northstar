@@ -113,7 +113,7 @@ fn test_far_future_optimistic_parent_requires_parent_window_ready() {
     let parent_bank =
         Bank::new_from_parent_with_bank_forks(&bank_forks, root_bank, parent_leader, parent_slot);
     let parent_block_id = BlockId::new_unique();
-    parent_bank.set_block_id(Some(parent_block_id.to_hash()));
+    parent_bank.set_block_id(Some(parent_block_id));
     parent_bank.freeze();
 
     let (sender, receiver) = bounded(1);
@@ -656,6 +656,7 @@ fn test_process_set_root_command_requires_matching_frozen_bank() {
     let root_bank = bank_forks.read().unwrap().root_bank();
     let leader_schedule_cache = Arc::new(LeaderScheduleCache::new_from_bank(&root_bank));
     let (drop_bank_sender, _drop_bank_receiver) = bounded(1024);
+    let (votor_commitment_sender, votor_commitment_receiver) = bounded(1024);
     let context = ProcessBankForksContext {
         bank_forks: bank_forks.clone(),
         blockstore: blockstore.clone(),
@@ -664,6 +665,7 @@ fn test_process_set_root_command_requires_matching_frozen_bank() {
         rpc_subscriptions: None,
         drop_bank_sender,
         leader_schedule_cache,
+        votor_commitment_sender,
     };
     let my_pubkey = Pubkey::new_unique();
 
@@ -693,7 +695,7 @@ fn test_process_set_root_command_requires_matching_frozen_bank() {
 
     let unfrozen_block_id = BlockId::new_unique();
     let unfrozen_bank = Bank::new_from_parent(root_bank, SlotLeader::default(), 2);
-    unfrozen_bank.set_block_id(Some(unfrozen_block_id.to_hash()));
+    unfrozen_bank.set_block_id(Some(unfrozen_block_id));
     bank_forks.write().unwrap().insert(unfrozen_bank);
     let unfrozen_command = SetRootCommand {
         new_root: Block {
@@ -709,13 +711,12 @@ fn test_process_set_root_command_requires_matching_frozen_bank() {
     );
     assert_eq!(bank_forks.read().unwrap().root(), 0);
     assert!(!blockstore.is_root(2));
+    // A root replay didn't apply is never published to the commitment cache.
+    assert!(votor_commitment_receiver.is_empty());
 
     let block_id = bank_forks.read().unwrap().block_id(1).unwrap();
     let matching_command = SetRootCommand {
-        new_root: Block {
-            slot: 1,
-            block_id: BlockId::from(block_id),
-        },
+        new_root: Block { slot: 1, block_id },
     };
     ReplayStage::process_set_root_command(
         matching_command,
@@ -725,6 +726,14 @@ fn test_process_set_root_command_requires_matching_frozen_bank() {
     );
     assert_eq!(bank_forks.read().unwrap().root(), 1);
     assert!(blockstore.is_root(1));
+    assert_eq!(
+        votor_commitment_receiver.try_recv().unwrap(),
+        CommitmentAggregationData {
+            commitment_type: CommitmentType::Rooted,
+            slot: 1,
+        }
+    );
+    assert!(votor_commitment_receiver.is_empty());
 }
 
 #[test]
