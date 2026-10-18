@@ -3,6 +3,8 @@ pub mod commitment;
 #[cfg(feature = "host")]
 pub mod fixture;
 pub mod poseidon;
+#[cfg(not(target_os = "zkvm"))]
+pub mod readiness;
 
 use {
     borsh::{BorshDeserialize, BorshSerialize},
