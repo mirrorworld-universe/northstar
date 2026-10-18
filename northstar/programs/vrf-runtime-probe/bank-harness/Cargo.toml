@@ -1,0 +1,22 @@
+[package]
+name = "northstar-vrf-runtime-bank-harness"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+northstar-vrf-runtime-probe = { path = ".." }
+agave-feature-set = { path = "../../../../feature-set", features = ["agave-unstable-api"] }
+agave-transaction-view = "=7.0.0"
+serde_json = "=1.0.151"
+solana-account = "=5.1.0"
+solana-instruction = "=4.0.0"
+solana-instruction-error = "=3.1.0"
+solana-program-binaries = { path = "../../../../program-binaries", features = ["agave-unstable-api"] }
+solana-pubkey = { version = "=4.4.0", features = ["curve25519"] }
+solana-rent = "=4.5.0"
+solana-runtime = { path = "../../../../runtime", features = ["agave-unstable-api", "dev-context-only-utils"] }
+solana-signer = "=4.0.0"
+solana-transaction = "=5.1.0"
+solana-transaction-error = "=4.1.0"
+wincode = { version = "=0.6.2", features = ["derive"] }

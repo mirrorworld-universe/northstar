@@ -1,0 +1,41 @@
+[package]
+name = "northstar-vrf-runtime-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+members = ["bank-harness"]
+resolver = "2"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+solana-account-info = "=3.1.1"
+solana-cpi = "=3.1.0"
+solana-curve25519 = "=4.0.1"
+solana-instruction = "=4.0.0"
+solana-program-entrypoint = "=3.1.1"
+solana-program-error = "=3.0.1"
+solana-pubkey = { version = "=4.4.0", features = ["curve25519"] }
+solana-sha256-hasher = { version = "=3.1.0", features = ["sha2"] }
+
+[patch.crates-io]
+crossbeam-epoch = { git = "https://github.com/anza-xyz/crossbeam", rev = "5ee1c6ec671d94db14ed9238eb99e59a84555aad" }
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.solana-ed25519]
+opt-level = 3
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
