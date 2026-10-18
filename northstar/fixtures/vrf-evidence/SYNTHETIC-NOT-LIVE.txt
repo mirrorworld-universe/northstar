@@ -1,0 +1,3 @@
+SYNTHETIC CPU-DEVELOPMENT EXAMPLE ONLY.
+No ER execution, oracle randomness, execution proof, Portal receipt or independent review was captured.
+The two callback rows are invented to illustrate the interchange. They are not acceptance evidence.
