@@ -5493,6 +5493,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "northstar-vrf-oracle"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.21",
+ "vrf-r255",
+ "zeroize",
+]
+
+[[package]]
 name = "northstar-zk-prover"
 version = "0.1.0"
 dependencies = [
@@ -14254,6 +14268,18 @@ name = "void"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
+
+[[package]]
+name = "vrf-r255"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec2e7c083cc7b8fc3f6a4bc68f92af0e4ec0ec83b2d8a912eeced0aafa7a8379"
+dependencies = [
+ "curve25519-dalek 4.1.3",
+ "rand_core 0.6.4",
+ "sha2 0.10.9",
+ "subtle",
+]
 
 [[package]]
 name = "wait-timeout"

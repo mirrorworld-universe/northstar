@@ -137,6 +137,7 @@ members = [
     "northstar/transaction-proof",
     "northstar/replay-harness",
     "northstar/zk-verifier-bench",
+    "northstar/vrf-oracle",
 ]
 
 exclude = [

@@ -1,0 +1,57 @@
+{
+  "schema_version": "northstar-vrf-evidence/v1",
+  "evidence_class": "synthetic",
+  "window": {
+    "id": "synthetic-window-not-live", "collector": "invented documentation example, not a live collector",
+    "started_at": "2000-01-01T00:00:00Z", "ended_at": "2000-01-01T00:00:01Z",
+    "attempts_artifact": "synthetic-log"
+  },
+  "revisions": {
+    "source_commit": null, "oracle_revision": null, "application_revision": null,
+    "sdk_revision": null, "consumer_revision": null, "portal_program": null, "portal_binary_sha256": null
+  },
+  "environment": {
+    "id": "synthetic-cpu", "kind": "cpu", "er_genesis_hash": null, "l1_genesis_hash": null,
+    "runtime_revision": null, "feature_set_sha256": null, "oracle_public_key": null, "configuration_artifact": null
+  },
+  "profile": {
+    "id": null, "version": null, "relation_version": null, "profile_sha256": null,
+    "fixtures_sha256": null, "guest_sha256": null, "verification_key_sha256": null,
+    "rejection_corpus_sha256": null, "paths": []
+  },
+  "bindings": {"profile": null, "fixtures": null, "guest": null, "verification_key": null, "rejection_corpus": null},
+  "artifacts": [{
+    "id": "synthetic-log", "path": "SYNTHETIC-NOT-LIVE.txt",
+    "sha256": "6c0c37ad97c40753ae00f63bbcf011c140b4235469969c13d6e1a5dc880ae09b", "bytes": 244,
+    "source": "synthetic", "kind": "log", "producer": "documentation author",
+    "command": "none; invented example", "captured_at": "2000-01-01T00:00:00Z", "origin": "synthetic, never captured"
+  }],
+  "er_handoff": {
+    "identity_sha256": "1e003fe29ad4fc2fe0f05b05d46dcdc0e1dbd29a52cd296305c8da832ab8e422",
+    "clock_id": "synthetic-clock", "capture_artifact": "synthetic-log",
+    "requests": [
+      {"id": "synthetic-request-1", "sequence": 1, "submitted_ns": 0, "status": "fulfilled"},
+      {"id": "synthetic-request-2", "sequence": 2, "submitted_ns": 100, "status": "missing"}
+    ],
+    "callbacks": [{"id": "synthetic-callback-1", "request_id": "synthetic-request-1", "sequence": 1, "observed_ns": 50, "status": "success"}]
+  },
+  "application": {
+    "identity_sha256": "1e003fe29ad4fc2fe0f05b05d46dcdc0e1dbd29a52cd296305c8da832ab8e422",
+    "clock_id": "synthetic-clock", "capture_artifact": null, "requests": [], "callbacks": []
+  },
+  "resolutions": [{
+    "id": "synthetic-unsupported-run", "sequence": 1,
+    "identity_sha256": "1e003fe29ad4fc2fe0f05b05d46dcdc0e1dbd29a52cd296305c8da832ab8e422",
+    "checkpoint_id": "synthetic-no-checkpoint", "fixture_id": null, "status": "unsupported", "proof_kind": "none", "proof_origin": "missing", "paths": [],
+    "hardware": {"model": "CPU", "count": 0, "device_id": "synthetic-no-gpu"},
+    "timing": {"clock_id": "synthetic-clock", "witness_start_ns": null, "witness_ready_ns": null, "submitted_ns": null,
+      "core_done_ns": null, "wrapped_ns": null, "uploaded_ns": null, "resolve_submitted_ns": null, "resolved_ns": null},
+    "witness_artifact": null, "history_artifact": null, "checkpoint_artifact": null,
+    "isolation_artifact": null, "proof_artifact": null, "prover_log_artifact": null,
+    "resolve": {"instruction": "none", "verifier": "none", "status": "not_run", "compute_units": null,
+      "transaction": null, "receipt_artifact": null, "outcome_artifact": null}
+  }],
+  "lifecycle": {"startup_ms": null, "cold_start_ms": null, "recovery_ms": null, "capture_artifact": null, "notes": "No service was started."},
+  "rejection_cases": [], "reviews": [],
+  "limitations": ["SYNTHETIC: no live execution or proof; all live acceptance remains blocked.", "No pinned Bilal program/SDK ABI, guest/key or hosted environment has been supplied."]
+}
