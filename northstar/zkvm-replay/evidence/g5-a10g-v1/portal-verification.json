@@ -1,0 +1,99 @@
+{
+  "portal_elf_sha256": "765a634da79db41c9c8016646fa2869830f57622f553e9df435ba0adfc30ff80",
+  "native_harness_sha256": "41648e4bbab262263ec8c1f0a4415e9e06c3b459d4792bad9154aece52396df2",
+  "native_harness": "existing cached test binary with freshly built Portal ELF",
+  "changed_proof_control_rejected": true,
+  "changed_public_inputs_control_rejected": true,
+  "cases": [
+    {
+      "label": "baseline",
+      "accepted": true,
+      "compute_units": 84081
+    },
+    {
+      "label": "resolver",
+      "accepted": true,
+      "compute_units": 84081
+    },
+    {
+      "label": "partial",
+      "accepted": true,
+      "compute_units": 84082
+    },
+    {
+      "label": "coordinator",
+      "accepted": true,
+      "compute_units": 84080
+    },
+    {
+      "label": "combined-settlement",
+      "accepted": true,
+      "compute_units": 84081
+    },
+    {
+      "label": "hardened-runner",
+      "accepted": true,
+      "compute_units": 84081
+    },
+    {
+      "label": "live-01",
+      "accepted": true,
+      "compute_units": 84079
+    },
+    {
+      "label": "live-02",
+      "accepted": true,
+      "compute_units": 84081
+    },
+    {
+      "label": "live-03",
+      "accepted": true,
+      "compute_units": 84081
+    },
+    {
+      "label": "live-guards",
+      "accepted": true,
+      "compute_units": 84080
+    },
+    {
+      "label": "fast-live-1",
+      "accepted": true,
+      "compute_units": 84080
+    },
+    {
+      "label": "fast-live-2",
+      "accepted": true,
+      "compute_units": 84080
+    },
+    {
+      "label": "fast-live-3",
+      "accepted": true,
+      "compute_units": 84081
+    },
+    {
+      "label": "upload-recovery",
+      "accepted": true,
+      "compute_units": 84080
+    }
+  ],
+  "recommended_profile_samples": [
+    {
+      "sample": 0,
+      "accepted": true,
+      "compute_units": 84081,
+      "proof_sha256": "637ab37f95b310d4cf14f290a356d8d50f09bc4f7838d7ea1a4343e6dabca197"
+    },
+    {
+      "sample": 1,
+      "accepted": true,
+      "compute_units": 84081,
+      "proof_sha256": "c68ccabf938d07adf1e609822e675f17088c0189f9fbc28a3dbc3608687ca6e4"
+    },
+    {
+      "sample": 2,
+      "accepted": true,
+      "compute_units": 84081,
+      "proof_sha256": "1f8c3da725d251f86753b1a382a405a5261f4340e0f4a053e5a61593c963429a"
+    }
+  ]
+}

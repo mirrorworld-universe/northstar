@@ -81,7 +81,7 @@ else:
         import json
         replay = Path(__file__).resolve().parents[1] / "zkvm-replay"
         manifest = json.loads((replay / "partial-candidate-v1.json").read_text())
-        case = replay / "evidence/sp1-v6.8.0"
+        case = replay / manifest["evidence"]
         measurements = json.loads((case / "measurements.json").read_text())
         proof = (case / "northstar-sp1-groth16-onchain.bin").read_bytes()
         public = (case / "northstar-sp1-public-inputs.bin").read_bytes()

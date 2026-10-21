@@ -1,0 +1,11 @@
+{
+  "portal_elf_sha256": "474a6681fc7cde757e0920bc24ea83abc797094c37613bee25ecf9448f583c8a",
+  "native_harness_sha256": "41648e4bbab262263ec8c1f0a4415e9e06c3b459d4792bad9154aece52396df2",
+  "pilot_accepted": true,
+  "compute_units": 84082,
+  "rejected_controls": {
+    "proof": true,
+    "public-inputs": true,
+    "previous-guest-key": true
+  }
+}

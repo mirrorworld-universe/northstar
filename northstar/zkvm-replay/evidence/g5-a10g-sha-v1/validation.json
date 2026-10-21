@@ -1,0 +1,36 @@
+{
+  "schema": "northstar-g5-sha-validation-v1",
+  "production_acceptance": false,
+  "native_replay_and_sdk_corpus_cases": 14,
+  "portal_corpus_cases": 14,
+  "portal_mutation_controls_rejected": 28,
+  "previous_guest_rejected": true,
+  "final_client_baseline_proofs_verified_by_portal": 3,
+  "all_14_distinct_cases_have_warm_evidence_within_49_seconds": true,
+  "guest_invariant_controls_rejected": 3,
+  "cuda_memory_check_errors": 0,
+  "gpu_transcript_tests_block_counts": [
+    1,
+    128
+  ],
+  "gpu_grind_block_bounds_test": "passed",
+  "focused_native_clippy_warnings_denied": "passed",
+  "workspace_clippy_all_tests": "passed",
+  "cuda_client_clippy_all_targets_warnings_denied": "passed",
+  "cuda_client_unit_tests_passed": 2,
+  "native_transaction_proof_unit_tests_passed": 3,
+  "portal_verifier_unit_tests_passed": 7,
+  "native_proof_coordinator_verifier_tests_passed": 2,
+  "gpu_prover_python_tests_passed": 5,
+  "gpu_worker_python_tests_passed": 8,
+  "provisioning_guards": "passed",
+  "workspace_and_replay_formatting": "passed",
+  "client_features": [
+    "cuda",
+    "profiling"
+  ],
+  "source_patch_sha256": "16773cd1a50fbcc0819b21bad5d30cfaa7cfb6ab3992f4bbfd0213c0ba9a3f1c",
+  "guest_elf_sha256": "e49aef88f69f321331999be2b0a11f021a5d0f158bb2e2c1dc4825498cfffb62",
+  "portal_elf_sha256": "474a6681fc7cde757e0920bc24ea83abc797094c37613bee25ecf9448f583c8a",
+  "native_harness_sha256": "41648e4bbab262263ec8c1f0a4415e9e06c3b459d4792bad9154aece52396df2"
+}

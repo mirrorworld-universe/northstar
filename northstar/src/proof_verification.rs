@@ -70,7 +70,7 @@ mod tests {
             er_slot: 5,
             step: 6,
             public_inputs: *include_bytes!(
-                "../zkvm-replay/evidence/sp1-v6.8.0/northstar-sp1-public-inputs.bin"
+                "../zkvm-replay/evidence/g5-a10g-sha-v1/northstar-sp1-public-inputs.bin"
             ),
         }
     }
@@ -78,8 +78,9 @@ mod tests {
     #[test]
     #[ignore = "manual host verification timing, separate from proving and artifact I/O"]
     fn benchmark_frozen_host_verification() {
-        let proof =
-            include_bytes!("../zkvm-replay/evidence/sp1-v6.8.0/northstar-sp1-groth16-onchain.bin");
+        let proof = include_bytes!(
+            "../zkvm-replay/evidence/g5-a10g-sha-v1/northstar-sp1-groth16-onchain.bin"
+        );
         let mut samples = Vec::new();
         for _ in 0..5 {
             let binding = binding();
@@ -94,9 +95,17 @@ mod tests {
     }
 
     #[test]
-    fn verifies_frozen_candidate_and_rejects_changed_proof_or_public_inputs() {
+    fn rejects_previous_program_key() {
         let proof =
             include_bytes!("../zkvm-replay/evidence/sp1-v6.8.0/northstar-sp1-groth16-onchain.bin");
+        assert!(VerifiedProof::verify(binding(), proof).is_err());
+    }
+
+    #[test]
+    fn verifies_frozen_candidate_and_rejects_changed_proof_or_public_inputs() {
+        let proof = include_bytes!(
+            "../zkvm-replay/evidence/g5-a10g-sha-v1/northstar-sp1-groth16-onchain.bin"
+        );
         let mut binding = binding();
         let verified = VerifiedProof::verify(binding.clone(), proof).unwrap();
         assert_eq!(verified.bytes_for(&binding).unwrap(), proof);

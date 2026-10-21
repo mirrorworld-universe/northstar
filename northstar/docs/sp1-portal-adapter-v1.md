@@ -29,9 +29,9 @@ The adapter binds both layers of SP1 verification:
 - SP1 6.8.0 Groth16 key SHA-256 (unchanged from 6.1.0): `4388a21c687fdd5f218d7e3d13190cac4c5355818d3605fd5fb811df468ee696`.
 - Required proof prefix: `4388a21c`.
 - SP1 recursion key root: `002f850ee998974d6cc00e50cd0814b098c05bfade466d28573240d057f25352`.
-- Northstar replay program key hash: `0x00737c84091d0722e0884993f9e25b8c0f504636777329cbaeb36840933fa2a5` (partial-checkpoint candidate; see `../zkvm-replay/partial-candidate-v1.json`).
+- Northstar replay program key hash: `0x0063a10e31e90625b76d06bfa22cbf0a4a8fa0850ccf71e063d243bd1a7aa31b` (partial-checkpoint candidate; see `../zkvm-replay/partial-candidate-v1.json`).
 
-The compressed 492-byte SP1 key is retained in `programs/portal/keys/`. Portal embeds a fixed-input specialization of its converted Solana verifier points; the original key remains unchanged. Proof key prefix, exit code, recursion root, and all scalar encodings fail closed before pairing.
+The compressed 492-byte SP1 key is retained in `programs/portal/keys/`. Portal embeds a fixed-input specialization of its converted Solana verifier points; the original key remains unchanged. Rotating the guest pin also requires regenerating `FIXED_INPUTS_IC` in `verifier_key.rs`; `fixed_input_key_matches_original_linear_combination` checks their equivalence. Proof key prefix, exit code, recursion root, and all scalar encodings fail closed before pairing.
 
 ## Public-input mapping
 

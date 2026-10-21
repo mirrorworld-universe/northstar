@@ -7,6 +7,11 @@ if [[ $# != 2 || $1 != /* || $2 != /* ]]; then
 fi
 icicle=$1
 prefix=$2
+low_memory=${NORTHSTAR_GPU_LOW_MEMORY:-0}
+g5_optimized=${NORTHSTAR_GPU_G5_OPTIMIZED:-0}
+[[ $low_memory == 0 || $low_memory == 1 ]] || { echo 'NORTHSTAR_GPU_LOW_MEMORY must be 0 or 1.' >&2; exit 2; }
+[[ $g5_optimized == 0 || $g5_optimized == 1 ]] || { echo 'NORTHSTAR_GPU_G5_OPTIMIZED must be 0 or 1.' >&2; exit 2; }
+script_dir=$(cd "$(dirname "$0")" && pwd)
 [[ ! -e $prefix && ! -L $prefix ]] || { echo 'Refusing an existing server prefix.' >&2; exit 2; }
 [[ -f $icicle/READY && -f $icicle/lib/libicicle_curve_bn254.so ]] || { echo 'Complete provision-gpu-userspace.sh first.' >&2; exit 2; }
 grep -qx 'icicle_revision=b62bbbe518a73214da10ece26969ad55e6fa0cd0' "$icicle/READY" || { echo 'Unexpected Icicle revision.' >&2; exit 2; }
@@ -33,8 +38,35 @@ fi
 revision=58c4aeadbc504c274dd9fb82ed8130d0939ab756
 git clone --depth 1 --branch v6.8.0 https://github.com/succinctlabs/sp1.git "$prefix/src"
 [[ $(git -C "$prefix/src" rev-parse HEAD) == "$revision" ]]
+patch_sha256=none
+if [[ $low_memory == 1 || $g5_optimized == 1 ]]; then
+    patch=sp1-v6.8.0-low-memory.patch
+    if [[ $g5_optimized == 1 ]]; then patch=sp1-v6.8.0-g5-optimized.patch; fi
+    cp "$script_dir/patches/$patch" "$prefix/source.patch"
+    git -C "$prefix/src" apply --check "$prefix/source.patch"
+    git -C "$prefix/src" apply "$prefix/source.patch"
+    patch_sha256=$(sha256sum "$prefix/source.patch" | cut -d ' ' -f 1)
+fi
+build_jobs=${NORTHSTAR_GPU_BUILD_JOBS:-8}
+if [[ $g5_optimized == 1 ]]; then
+    build_jobs=${NORTHSTAR_GPU_BUILD_JOBS:-2}
+    (cd "$prefix/src/crates/recursion/gnark-ffi/go"; go test -tags debug,icicle \
+        sp1/groth16_diagnostics{,_test}.go sp1/groth16_domain_cache{,_test}.go)
+fi
 (cd "$prefix/src"; CARGO_TARGET_DIR="$prefix/target" cargo +1.98.1 build --release --locked \
-    -j "${NORTHSTAR_GPU_BUILD_JOBS:-8}" -p sp1-gpu-server --features groth16-cuda)
+    -j "$build_jobs" -p sp1-gpu-server --features groth16-cuda)
+if [[ $g5_optimized == 1 ]]; then
+    (
+        cd "$prefix/src"
+        export CARGO_TARGET_DIR="$prefix/target"
+        cargo +1.98.1 test --release --locked -j "$build_jobs" \
+            -p sp1-gpu-challenger bn254_grid_bounds
+        for blocks in 1 128; do
+            SP1_GPU_BN254_GRIND_BLOCKS=$blocks cargo +1.98.1 test --release --locked \
+                -j "$build_jobs" -p sp1-gpu-basefold test_grinding_multi_field32
+        done
+    )
+fi
 server="$prefix/home/.sp1/bin/sp1-gpu-server"
 cp "$prefix/target/release/sp1-gpu-server" "$server"
 ldd "$server" > "$prefix/linked-libraries.txt"
@@ -54,5 +86,5 @@ fi
 } > "$prefix/bin/with-gpu-server"
 chmod 700 "$prefix/bin/with-gpu-server"
 sha256sum "$server" > "$prefix/server.sha256"
-printf 'sp1_server_revision=%s\ngroth16_cuda=true\ncuda_archs=%s\n' "$revision" "$arch" > "$prefix/READY"
+printf 'sp1_server_revision=%s\ngroth16_cuda=true\ncuda_archs=%s\nsource_patch_sha256=%s\n' "$revision" "$arch" "$patch_sha256" > "$prefix/READY"
 echo "Built: $prefix/bin/with-gpu-server COMMAND [ARGS...]. Stop other GPU workers, then validate a compatibility proof before use."

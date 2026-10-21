@@ -25,6 +25,10 @@ echo 'GPU provisioning guards passed (no downloads or system changes).'
 script=$(cd "$(dirname "$0")" && pwd)/provision-gpu-server.sh
 expect_refusal
 expect_refusal relative-prefix "$work/new"
+NORTHSTAR_GPU_LOW_MEMORY=invalid expect_refusal "$work/missing" "$work/new"
+grep -q 'NORTHSTAR_GPU_LOW_MEMORY must be 0 or 1' "$work/output"
+NORTHSTAR_GPU_G5_OPTIMIZED=invalid expect_refusal "$work/missing" "$work/new"
+grep -q 'NORTHSTAR_GPU_G5_OPTIMIZED must be 0 or 1' "$work/output"
 expect_refusal "$work/missing" "$work/existing"
 [[ $(< "$work/existing/sentinel") == preserve ]]
 expect_refusal "$work/missing" "$work/link"

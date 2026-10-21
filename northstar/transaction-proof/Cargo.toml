@@ -33,7 +33,6 @@ borsh = { workspace = true, features = ["derive"] }
 ed25519-dalek = { version = "3.0", default-features = false, features = ["alloc", "fast", "zeroize"] }
 light-poseidon = "0.4"
 northstar-zk-types = { workspace = true }
-sha2 = "0.11"
 thiserror = { workspace = true }
 
 agave-feature-set = { workspace = true, optional = true }
@@ -45,6 +44,13 @@ northstar-replay-harness = { workspace = true, optional = true }
 solana-sha256-hasher = { workspace = true, optional = true }
 solana-svm = { workspace = true, optional = true }
 solana-svm-transaction = { workspace = true, optional = true }
+
+[target.'cfg(not(target_os = "zkvm"))'.dependencies]
+sha2 = "0.11"
+
+# SP1's precompile patch targets 0.10.9; native hashing stays on 0.11.
+[target.'cfg(target_os = "zkvm")'.dependencies]
+sha2-sp1 = { package = "sha2", git = "https://github.com/sp1-patches/RustCrypto-hashes", rev = "e48b656ebc806117554bb33c2f8687e4637e37ff" }
 
 [dev-dependencies]
 hex = "0.4"
