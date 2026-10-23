@@ -81,6 +81,10 @@ fn completed_proof_resumes_without_starting_an_unavailable_worker() {
 
 fn check_completed_proof_recovery(upload_exists: bool, written_len: u32, sealed: bool) {
     use northstar_portal::{PortalInstruction, StepProofAccount};
+    let proof = include_bytes!(
+        "../zkvm-replay/evidence/g5-a10g-sha-v1/corpus/coordinator/northstar-sp1-groth16-onchain.\
+         bin"
+    );
     agave_logger::setup_with_default("northstar=info,solana_runtime=error");
     let directory = tempfile::tempdir().unwrap();
     let config = config(directory.path());
@@ -102,6 +106,8 @@ fn check_completed_proof_recovery(upload_exists: bool, written_len: u32, sealed:
     upload.authority = challenger;
     upload.written_len = written_len;
     upload.sealed = sealed;
+    upload.data = *proof;
+    upload.proof_hash = hashv(&[&upload.data]).to_bytes();
     if !sealed {
         upload.data[written_len as usize..].fill(0);
         upload.proof_hash = [0; 32];
@@ -125,6 +131,13 @@ fn check_completed_proof_recovery(upload_exists: bool, written_len: u32, sealed:
     ))
     .unwrap();
     let binding = expected_binding(PORTAL, &session, &artifact, 0).unwrap();
+    assert_eq!(
+        binding.public_inputs.as_slice(),
+        include_bytes!(
+            "../zkvm-replay/evidence/g5-a10g-sha-v1/corpus/coordinator/\
+             northstar-sp1-public-inputs.bin"
+        )
+    );
     let store = ProofJobStore::open(&config.directory.join("jobs")).unwrap();
     let id = store
         .enqueue(
@@ -132,16 +145,7 @@ fn check_completed_proof_recovery(upload_exists: bool, written_len: u32, sealed:
             include_bytes!("../zkvm-replay/evidence/proof-coordinator-v1/proving/witness-v2.bin"),
         )
         .unwrap();
-    store
-        .complete(
-            &id,
-            include_bytes!(
-                "../zkvm-replay/evidence/proof-coordinator-v1/proving/\
-                 northstar-sp1-groth16-onchain.bin"
-            ),
-            &binding.public_inputs,
-        )
-        .unwrap();
+    store.complete(&id, proof, &binding.public_inputs).unwrap();
     let record = Prepared {
         version: 1,
         prepared_after_slot: 0,
@@ -188,10 +192,6 @@ fn check_completed_proof_recovery(upload_exists: bool, written_len: u32, sealed:
                 if upload_exists && written_len < 356 && !sealed =>
             {
                 assert_eq!(write.offset, written_len);
-                let proof = include_bytes!(
-                    "../zkvm-replay/evidence/proof-coordinator-v1/proving/\
-                     northstar-sp1-groth16-onchain.bin"
-                );
                 let start = written_len as usize;
                 let end = (start + northstar_portal::MAX_STEP_PROOF_CHUNK).min(proof.len());
                 assert_eq!(usize::from(write.chunk_len), end - start);
