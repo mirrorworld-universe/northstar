@@ -1,0 +1,184 @@
+diff --git a/crates/recursion/gnark-ffi/go/sp1/prove_groth16_icicle.go b/crates/recursion/gnark-ffi/go/sp1/prove_groth16_icicle.go
+index f3837e8..81f8f00 100644
+--- a/crates/recursion/gnark-ffi/go/sp1/prove_groth16_icicle.go
++++ b/crates/recursion/gnark-ffi/go/sp1/prove_groth16_icicle.go
+@@ -15,6 +15,7 @@ import (
+ 	"github.com/consensys/gnark/backend/groth16"
+ 	"github.com/consensys/gnark/constraint"
+ 	"github.com/consensys/gnark/frontend"
++	icicle_runtime "github.com/ingonyama-zk/icicle-gnark/v3/wrappers/golang/runtime"
+ )
+ 
+ var globalMutex sync.RWMutex
+@@ -29,6 +30,27 @@ func ProveGroth16(dataDir string, witnessPath string) Proof {
+ 		panic("dataDirStr is required")
+ 	}
+ 
++	if os.Getenv("SP1_CUDA_SYNC_BEFORE_GROTH16") == "1" {
++		if err := icicle_runtime.LoadBackendFromEnvOrDefault(); err != icicle_runtime.Success {
++			panic(fmt.Sprintf("load CUDA backend before Groth16: %s", err.AsString()))
++		}
++		device := icicle_runtime.CreateDevice("CUDA", 0)
++		done := make(chan struct{})
++		icicle_runtime.RunOnDevice(&device, func(args ...any) {
++			// SP1 polls events; an explicit synchronization applies the CUDA pool release threshold.
++			if err := icicle_runtime.DeviceSynchronize(); err != icicle_runtime.Success {
++				panic(fmt.Sprintf("synchronize CUDA before Groth16: %s", err.AsString()))
++			}
++			memory, err := icicle_runtime.GetAvailableMemory()
++			if err != icicle_runtime.Success {
++				panic(fmt.Sprintf("query CUDA memory before Groth16: %s", err.AsString()))
++			}
++			fmt.Printf("CUDA memory before Groth16: %+v\n", memory)
++			close(done)
++		})
++		<-done
++	}
++
+ 	start := time.Now()
+ 	os.Setenv("CONSTRAINTS_JSON", dataDir+"/"+constraintsJsonFile)
+ 	os.Setenv("GROTH16", "1")
+diff --git a/sp1-gpu/crates/prover_components/src/components.rs b/sp1-gpu/crates/prover_components/src/components.rs
+index f04c767..2c7196c 100644
+--- a/sp1-gpu/crates/prover_components/src/components.rs
++++ b/sp1-gpu/crates/prover_components/src/components.rs
+@@ -19,6 +19,15 @@ use sp1_prover::{CompressAir, ReadyWrapProverBuilder, SP1ProverComponents, WrapA
+ 
+ pub struct SP1CudaProverComponents;
+ 
++fn parse_trace_buffer_count(value: &str, maximum: usize) -> usize {
++    let count = value.parse::<usize>().expect("SP1_GPU_TRACE_BUFFER_COUNT must be an integer");
++    assert!(
++        (1..=maximum).contains(&count),
++        "SP1_GPU_TRACE_BUFFER_COUNT must be within the default pool size"
++    );
++    count
++}
++
+ impl SP1ProverComponents for SP1CudaProverComponents {
+     type CoreProver = CudaShardProver<SP1GlobalContext, CudaProverCoreComponents>;
+     type RecursionProver = CudaShardProver<SP1GlobalContext, CudaProverRecursionComponents>;
+@@ -96,6 +105,11 @@ where
+         all_interactions.insert(chip.name().to_string(), Arc::new(device_interactions));
+     }
+ 
++    let num_workers = match std::env::var("SP1_GPU_TRACE_BUFFER_COUNT") {
++        Ok(value) => parse_trace_buffer_count(&value, num_workers),
++        Err(std::env::VarError::NotPresent) => num_workers,
++        Err(error) => panic!("invalid SP1_GPU_TRACE_BUFFER_COUNT: {error}"),
++    };
+     let mut trace_buffers = Vec::with_capacity(num_workers);
+     for _ in 0..num_workers {
+         let pinned_buffer = PinnedBuffer::<GC::F>::with_capacity(max_trace_size);
+@@ -115,3 +129,32 @@ where
+         drop_ldes,
+     )
+ }
++
++#[cfg(test)]
++mod trace_buffer_count_tests {
++    use super::parse_trace_buffer_count;
++
++    #[test]
++    fn accepts_one_and_default_pool_size() {
++        assert_eq!(parse_trace_buffer_count("1", 4), 1);
++        assert_eq!(parse_trace_buffer_count("4", 4), 4);
++    }
++
++    #[test]
++    #[should_panic(expected = "within the default pool size")]
++    fn rejects_empty_pool() {
++        parse_trace_buffer_count("0", 4);
++    }
++
++    #[test]
++    #[should_panic(expected = "within the default pool size")]
++    fn rejects_pool_above_default() {
++        parse_trace_buffer_count("5", 4);
++    }
++
++    #[test]
++    #[should_panic(expected = "must be an integer")]
++    fn rejects_non_integer_pool_size() {
++        parse_trace_buffer_count("invalid", 4);
++    }
++}
+diff --git a/sp1-gpu/crates/server/src/main.rs b/sp1-gpu/crates/server/src/main.rs
+index 65e94f5..3e8b2f3 100644
+--- a/sp1-gpu/crates/server/src/main.rs
++++ b/sp1-gpu/crates/server/src/main.rs
+@@ -7,7 +7,7 @@ static GLOBAL: Jemalloc = Jemalloc;
+ 
+ use clap::Parser;
+ use server::Server;
+-use sp1_gpu_cudart::run_in_place;
++use sp1_gpu_cudart::{run_in_place, TaskPoolBuilder};
+ 
+ mod server;
+ 
+@@ -34,6 +34,15 @@ async fn main() {
+         .parse()
+         .expect("Expected only one CUDA device as a u32");
+ 
++    match std::env::var("SP1_CUDA_MEM_RELEASE_THRESHOLD") {
++        Ok(value) => {
++            let threshold = value.parse::<u64>().expect("SP1_CUDA_MEM_RELEASE_THRESHOLD must be a byte count");
++            TaskPoolBuilder::new().mem_release_threshold(threshold).build_global().unwrap();
++        }
++        Err(std::env::VarError::NotPresent) => {}
++        Err(error) => panic!("invalid SP1_CUDA_MEM_RELEASE_THRESHOLD: {error}"),
++    }
++
+     let server = Server { cuda_device_id };
+ 
+     if let Err(e) = run_in_place(|scope| server.run(scope)).await.await {
+diff --git a/sp1-gpu/crates/shard_prover/src/prover.rs b/sp1-gpu/crates/shard_prover/src/prover.rs
+index 067b073..0f09776 100644
+--- a/sp1-gpu/crates/shard_prover/src/prover.rs
++++ b/sp1-gpu/crates/shard_prover/src/prover.rs
+@@ -158,11 +158,43 @@ pub(crate) struct CudaShardProverInner<GC: IopCtx, PC: CudaShardProverComponents
+     pub _marker: PhantomData<GC>,
+ }
+ 
++pub(crate) struct TraceBufferGuard<F> {
++    buffer: Worker<PinnedBuffer<F>>,
++    release: bool,
++}
++
++impl<F> std::ops::Deref for TraceBufferGuard<F> {
++    type Target = Worker<PinnedBuffer<F>>;
++
++    fn deref(&self) -> &Self::Target {
++        &self.buffer
++    }
++}
++
++impl<F> Drop for TraceBufferGuard<F> {
++    fn drop(&mut self) {
++        if self.release {
++            // Gnark needs these host pages after STARK proving; idle pinned pages cannot swap.
++            *self.buffer = PinnedBuffer::with_capacity(0);
++        }
++    }
++}
++
+ impl<GC: IopCtx<F = Felt, EF = Ext>, PC: CudaShardProverComponents<GC>>
+     CudaShardProverInner<GC, PC>
+ {
+-    pub async fn get_buffer(&self) -> Worker<PinnedBuffer<GC::F>> {
+-        self.trace_buffers.clone().pop().await.expect("buffer pool exhausted")
++    pub async fn get_buffer(&self) -> TraceBufferGuard<GC::F> {
++        let release = match std::env::var("SP1_GPU_RELEASE_TRACE_BUFFERS") {
++            Ok(value) if value == "1" => true,
++            Ok(value) if value == "0" => false,
++            Err(std::env::VarError::NotPresent) => false,
++            _ => panic!("SP1_GPU_RELEASE_TRACE_BUFFERS must be 0 or 1"),
++        };
++        let mut buffer = self.trace_buffers.clone().pop().await.expect("buffer pool exhausted");
++        if buffer.capacity() < self.max_trace_size {
++            *buffer = PinnedBuffer::with_capacity(self.max_trace_size);
++        }
++        TraceBufferGuard { buffer, release }
+     }
+ 
+     fn machine(&self) -> &Machine<GC::F, PC::Air> {

@@ -1,0 +1,3 @@
+# Retained diffs preserve context prefixes, including blank lines and Go tabs.
+scripts/patches/*.patch -whitespace
+zkvm-replay/evidence/*/*.patch -whitespace

@@ -1,0 +1,35 @@
+{
+  "schema": "northstar-g5-validation-v1",
+  "native_corpus_preflight": {
+    "passed": 14,
+    "failed": 0
+  },
+  "sp1_sdk_verification": {
+    "passed": 14,
+    "failed": 0
+  },
+  "portal_sbf_verification": {
+    "passed": 14,
+    "failed": 0,
+    "max_compute_units": 84082
+  },
+  "changed_proof_control_rejected": true,
+  "changed_public_inputs_control_rejected": true,
+  "trace_buffer_count_unit_tests": {
+    "passed": 4,
+    "failed": 0
+  },
+  "provisioning_guard_tests": "passed",
+  "cmake_regeneration_regression": "original failed; fixed configure/configure/build/install passed",
+  "shell_syntax": "passed",
+  "cargo_nightly_fmt_all": "passed",
+  "corpus_binary_rustfmt": "passed",
+  "focused_clippy": "cargo +1.98.1 clippy --release --locked -p northstar-zkvm-replay-script --features cuda --bin northstar-proof-corpus -- -D warnings: passed",
+  "full_workspace_clippy": "cargo clippy --all --tests: incomplete; compilation exceeded 590-second timeout",
+  "production_acceptance": false,
+  "recommended_profile_sbf_verification": {
+    "passed": 3,
+    "failed": 0,
+    "max_compute_units": 84081
+  }
+}

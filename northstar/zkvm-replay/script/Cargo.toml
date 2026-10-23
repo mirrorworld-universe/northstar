@@ -1,5 +1,6 @@
 [package]
 name = "northstar-zkvm-replay-script"
+default-run = "northstar-zkvm-replay-script"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -11,6 +12,7 @@ profiling = ["sp1-sdk/profiling"]
 
 [dependencies]
 anyhow = "1"
+borsh = "1"
 hex = "0.4"
 northstar-zkvm-replay-shared = { path = "../shared" }
 serde = { version = "1", features = ["derive"] }

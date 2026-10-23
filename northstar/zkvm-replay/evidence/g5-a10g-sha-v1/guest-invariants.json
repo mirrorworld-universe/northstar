@@ -1,0 +1,25 @@
+{
+  "controls": [
+    {
+      "guest_exit_code": 1,
+      "guest_rejected": true,
+      "label": "signature_binding",
+      "native_rejected": true
+    },
+    {
+      "guest_exit_code": 1,
+      "guest_rejected": true,
+      "label": "instruction_binding",
+      "native_rejected": true
+    },
+    {
+      "guest_exit_code": 1,
+      "guest_rejected": true,
+      "label": "complete_witness_encoding",
+      "native_rejected": true
+    }
+  ],
+  "cycles": 5851015,
+  "schema": "northstar-sp1-guest-invariants-v1",
+  "valid_public_inputs_match": true
+}

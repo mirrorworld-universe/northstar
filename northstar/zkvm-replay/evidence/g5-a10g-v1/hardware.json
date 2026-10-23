@@ -1,0 +1,22 @@
+{
+  "instance": "g5.xlarge",
+  "cpu": "AMD EPYC 7R32",
+  "logical_cpus": 4,
+  "memory_total_kib": 16161560,
+  "kernel": "7.0.0-1006-aws",
+  "gpu": "NVIDIA A10G, 23028 MiB, 595.91.07, Enabled",
+  "cuda_toolkit": "13.1.115",
+  "go_live_heap_peak_mib": 15260,
+  "gpu_memory_peak_mib": {
+    "released-nvme-gpu": 21629.0,
+    "parallel-corpus": 22141.0,
+    "maximum-memory": 21629.0,
+    "swap-readahead": 19899.0,
+    "gc-budget": 21597.0
+  },
+  "artifact_storage": "local NVMe ext4",
+  "swap_bytes": 34359734272,
+  "swappiness": 60,
+  "page_cluster": 0,
+  "zswap": false
+}

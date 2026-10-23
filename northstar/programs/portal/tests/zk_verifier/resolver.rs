@@ -19,23 +19,21 @@ const PROGRAM: Pubkey = solana_pubkey::pubkey!("5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7
 type Fixture = (u64, u64, Vec<(Pubkey, Account)>);
 
 fn fixture() -> Fixture {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../zkvm-replay/evidence/resolver-v1/resolver-fixture.bin");
+    current_fixture("resolver-v1", "resolver")
+}
+
+fn current_fixture(snapshot: &str, case: &str) -> Fixture {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zkvm-replay/evidence");
+    let path = root.join(snapshot);
     let (slot, er_slot, mut accounts): Fixture =
-        bincode::deserialize(&std::fs::read(&path).unwrap()).unwrap();
-    let current = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../zkvm-replay/evidence/sp1-v6.8.0/resolver");
+        bincode::deserialize(&std::fs::read(path.join("resolver-fixture.bin")).unwrap()).unwrap();
+    let current = root.join("g5-a10g-sha-v1/corpus").join(case);
     let proof = std::fs::read(current.join("northstar-sp1-groth16-onchain.bin")).unwrap();
     let public = std::fs::read(current.join("northstar-sp1-public-inputs.bin")).unwrap();
     // Keep the authenticated account snapshot; rotate only the program's proof.
     assert_eq!(
         public,
-        std::fs::read(
-            path.parent()
-                .unwrap()
-                .join("northstar-sp1-public-inputs.bin")
-        )
-        .unwrap()
+        std::fs::read(path.join("northstar-sp1-public-inputs.bin")).unwrap()
     );
     update::<StepProofAccount>(&mut accounts[4].1, |state| {
         state.data = proof.try_into().unwrap();
@@ -55,16 +53,22 @@ fn update<T: BorshDeserialize + BorshSerialize>(
 
 #[tokio::test]
 async fn production_resolver_binds_metadata_and_preserves_rejected_state() {
-    assert_resolver_bindings("sp1-v6.8.0/resolver", fixture()).await;
+    assert_resolver_bindings("g5-a10g-sha-v1/resolver", fixture(), true).await;
+    assert_resolver_bindings(
+        "g5-a10g-sha-v1/coordinator",
+        current_fixture("proof-coordinator-v1/proving", "coordinator"),
+        true,
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn production_resolver_rechecks_colocated_proofs_and_rejection_invariants() {
+async fn production_resolver_rejects_previous_program_and_preserves_rejected_state() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../zkvm-replay/evidence/weekly-proof-recovery-v1");
     for case in ["live-01", "live-02", "live-03", "manager"] {
         let bytes = std::fs::read(root.join(case).join("resolver-fixture.bin")).unwrap();
-        assert_resolver_bindings(case, bincode::deserialize(&bytes).unwrap()).await;
+        assert_resolver_bindings(case, bincode::deserialize(&bytes).unwrap(), false).await;
     }
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../zkvm-replay/evidence/proof-coordinator-v1");
@@ -78,12 +82,17 @@ async fn production_resolver_rechecks_colocated_proofs_and_rejection_invariants(
         assert_resolver_bindings(
             &format!("coordinator/{case}"),
             bincode::deserialize(&bytes).unwrap(),
+            false,
         )
         .await;
     }
 }
 
-async fn assert_resolver_bindings(case: &str, (slot, er_slot, original): Fixture) {
+async fn assert_resolver_bindings(
+    case: &str,
+    (slot, er_slot, original): Fixture,
+    expected_valid_proof: bool,
+) {
     assert_eq!(original.len(), 7);
     let mut test = ProgramTest::new("northstar_portal", PROGRAM, None);
     for (key, account) in &original {
@@ -92,7 +101,7 @@ async fn assert_resolver_bindings(case: &str, (slot, er_slot, original): Fixture
     let mut context = test.start_with_context().await;
     context.warp_to_slot(slot).unwrap();
     let cases = [
-        "valid",
+        "unchanged_proof",
         "session_pda",
         "session_owner",
         "checkpoint_owner",
@@ -127,7 +136,7 @@ async fn assert_resolver_bindings(case: &str, (slot, er_slot, original): Fixture
     for (index, name) in cases.iter().enumerate() {
         let mut accounts = original.clone();
         let rejection = match *name {
-            "valid" => None,
+            "unchanged_proof" => None,
             "session_pda" => {
                 accounts[0].0 = Pubkey::new_unique();
                 Some(PortalError::InvalidPdaSeeds)
@@ -295,7 +304,7 @@ async fn assert_resolver_bindings(case: &str, (slot, er_slot, original): Fixture
             &[&context.payer],
             context.last_blockhash,
         );
-        if *name == "valid" {
+        if *name == "unchanged_proof" {
             let simulation = context
                 .banks_client
                 .simulate_transaction(transaction.clone())
@@ -321,7 +330,7 @@ async fn assert_resolver_bindings(case: &str, (slot, er_slot, original): Fixture
             );
         } else {
             result.unwrap_or_else(|error| panic!("{name}: {error:?}"));
-            let valid = *name == "valid";
+            let valid = expected_valid_proof && *name == "unchanged_proof";
             let bond = Checkpoint::try_from_slice(&accounts[1].1.data)
                 .unwrap()
                 .bond_lamports;

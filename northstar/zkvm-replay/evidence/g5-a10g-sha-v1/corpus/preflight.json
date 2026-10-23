@@ -1,0 +1,100 @@
+[
+  {
+    "executed_units": 218,
+    "label": "baseline",
+    "ok": true,
+    "vm_rows": 208,
+    "witness_bytes": 341517
+  },
+  {
+    "executed_units": 218,
+    "label": "resolver",
+    "ok": true,
+    "vm_rows": 208,
+    "witness_bytes": 365709
+  },
+  {
+    "executed_units": 218,
+    "label": "partial",
+    "ok": true,
+    "vm_rows": 208,
+    "witness_bytes": 362515
+  },
+  {
+    "executed_units": 62,
+    "label": "coordinator",
+    "ok": true,
+    "vm_rows": 52,
+    "witness_bytes": 317415
+  },
+  {
+    "executed_units": 218,
+    "label": "combined-settlement",
+    "ok": true,
+    "vm_rows": 208,
+    "witness_bytes": 365709
+  },
+  {
+    "executed_units": 218,
+    "label": "hardened-runner",
+    "ok": true,
+    "vm_rows": 208,
+    "witness_bytes": 365709
+  },
+  {
+    "executed_units": 218,
+    "label": "live-01",
+    "ok": true,
+    "vm_rows": 208,
+    "witness_bytes": 365709
+  },
+  {
+    "executed_units": 218,
+    "label": "live-02",
+    "ok": true,
+    "vm_rows": 208,
+    "witness_bytes": 365709
+  },
+  {
+    "executed_units": 218,
+    "label": "live-03",
+    "ok": true,
+    "vm_rows": 208,
+    "witness_bytes": 365709
+  },
+  {
+    "executed_units": 218,
+    "label": "live-guards",
+    "ok": true,
+    "vm_rows": 208,
+    "witness_bytes": 365709
+  },
+  {
+    "executed_units": 218,
+    "label": "fast-live-1",
+    "ok": true,
+    "vm_rows": 208,
+    "witness_bytes": 365709
+  },
+  {
+    "executed_units": 218,
+    "label": "fast-live-2",
+    "ok": true,
+    "vm_rows": 208,
+    "witness_bytes": 365709
+  },
+  {
+    "executed_units": 218,
+    "label": "fast-live-3",
+    "ok": true,
+    "vm_rows": 208,
+    "witness_bytes": 365709
+  },
+  {
+    "executed_units": 218,
+    "label": "upload-recovery",
+    "ok": true,
+    "vm_rows": 208,
+    "witness_bytes": 365709
+  }
+]

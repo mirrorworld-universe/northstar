@@ -62,9 +62,12 @@ PY
     cuda_flags=("-DCMAKE_CUDA_FLAGS=-I$prefix/cuda-compat")
     nvcc -I"$prefix/cuda-compat" -c "$prefix/cuda-probe.cu" -o "$prefix/cuda-probe.o"
 fi
+# Icicle selects Clang after project(), which can reset cached prefixes on reconfigure.
 for curve in bn254 bls12_377 bls12_381 bw6_761; do
     cmake -S "$prefix/src/icicle-gnark/icicle" -B "$prefix/build-$curve" \
-        -DCMAKE_CUDA_COMPILER="$(command -v nvcc)" -DCMAKE_CUDA_ARCHITECTURES=native \
+        -DCMAKE_C_COMPILER="$(command -v clang || command -v cc)" \
+        -DCMAKE_CXX_COMPILER="$(command -v clang++ || command -v c++)" \
+        -DCMAKE_CUDA_COMPILER="$(command -v nvcc)" -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHS:-native}" \
         -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_INSTALL_LIBDIR=lib \
         -DCURVE="$curve" -DMSM=ON -DNTT=ON -DG2=ON -DCMAKE_BUILD_TYPE=Release "${cuda_flags[@]}"
     cmake --build "$prefix/build-$curve" --target install -j "${NORTHSTAR_GPU_BUILD_JOBS:-8}"
@@ -76,9 +79,9 @@ export C_INCLUDE_PATH="$prefix/include${C_INCLUDE_PATH:+:$C_INCLUDE_PATH}"
 export ICICLE_BACKEND_INSTALL_DIR="$prefix/lib/backend"
 elf="$CARGO_TARGET_DIR/elf-compilation/riscv64im-succinct-zkvm-elf/release/northstar-zkvm-replay-program"
 mkdir -p "$(dirname "$elf")"
-gzip -dc "$replay/evidence/sp1-v6.8.0/candidate.elf.gz" > "$elf"
-printf '484af2d12fb26d8b6a70014b2d209d7cb474ea32d66eed0d273036914650e033  %s\n' "$elf" | sha256sum -c -
-(cd "$replay"; SP1_SKIP_PROGRAM_BUILD=true cargo +1.98.1 build --release --locked -p northstar-zkvm-replay-script --features cuda)
+gzip -dc "$replay/evidence/g5-a10g-sha-v1/candidate.elf.gz" > "$elf"
+printf 'e49aef88f69f321331999be2b0a11f021a5d0f158bb2e2c1dc4825498cfffb62  %s\n' "$elf" | sha256sum -c -
+(cd "$replay"; SP1_SKIP_PROGRAM_BUILD=true cargo +1.98.1 build --release --locked -p northstar-zkvm-replay-script --features cuda,profiling)
 {
     printf '#!/usr/bin/env bash\nset -euo pipefail\n'
     printf 'export LD_LIBRARY_PATH=%q\n' "$LD_LIBRARY_PATH"

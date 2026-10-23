@@ -270,6 +270,26 @@ async fn sbf_verifier_binds_current_program_and_rejects_changed_fields() {
             "../proof-coordinator-v1/upload-worker-offline",
         ]
         .into_iter()
+        .map(|case| (case, String::new(), false)),
+    )
+    .chain(
+        [
+            "../g5-a10g-sha-v1/corpus/baseline",
+            "../g5-a10g-sha-v1/corpus/resolver",
+            "../g5-a10g-sha-v1/corpus/partial",
+            "../g5-a10g-sha-v1/corpus/coordinator",
+            "../g5-a10g-sha-v1/corpus/combined-settlement",
+            "../g5-a10g-sha-v1/corpus/hardened-runner",
+            "../g5-a10g-sha-v1/corpus/live-01",
+            "../g5-a10g-sha-v1/corpus/live-02",
+            "../g5-a10g-sha-v1/corpus/live-03",
+            "../g5-a10g-sha-v1/corpus/live-guards",
+            "../g5-a10g-sha-v1/corpus/fast-live-1",
+            "../g5-a10g-sha-v1/corpus/fast-live-2",
+            "../g5-a10g-sha-v1/corpus/fast-live-3",
+            "../g5-a10g-sha-v1/corpus/upload-recovery",
+        ]
+        .into_iter()
         .map(|case| (case, String::new(), true)),
     ) {
         let proof = std::fs::read(

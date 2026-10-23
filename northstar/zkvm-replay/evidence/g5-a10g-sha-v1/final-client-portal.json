@@ -1,0 +1,24 @@
+{
+  "portal_elf_sha256": "474a6681fc7cde757e0920bc24ea83abc797094c37613bee25ecf9448f583c8a",
+  "native_harness_sha256": "41648e4bbab262263ec8c1f0a4415e9e06c3b459d4792bad9154aece52396df2",
+  "samples": [
+    {
+      "index": 0,
+      "compute_units": 84081,
+      "proof_sha256": "4320074914fe442e661cb125d94a9d9036c80aab002bc0ce9b24591222afc16a",
+      "public_inputs_sha256": "8adcb7dbdf3285822ae6d187ce2861911b848d6008b08b4967c0f22204e207eb"
+    },
+    {
+      "index": 1,
+      "compute_units": 84080,
+      "proof_sha256": "ed017857b93f4e84f641c6d9b26030ce12b195941bbbd4318b204cc2a2a63b5a",
+      "public_inputs_sha256": "8adcb7dbdf3285822ae6d187ce2861911b848d6008b08b4967c0f22204e207eb"
+    },
+    {
+      "index": 2,
+      "compute_units": 84081,
+      "proof_sha256": "aa56ca61a841a8df49fdf5d7a61411f16f45121f4062b0452edd18770e4dc131",
+      "public_inputs_sha256": "8adcb7dbdf3285822ae6d187ce2861911b848d6008b08b4967c0f22204e207eb"
+    }
+  ]
+}

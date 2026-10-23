@@ -95,8 +95,11 @@ mod tests {
 
     #[test]
     fn verifies_retained_proof_and_refuses_measurement_overwrite() {
-        let evidence =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../evidence/sp1-v6.8.0");
+        let manifest: serde_json::Value =
+            serde_json::from_str(include_str!("../../partial-candidate-v1.json")).unwrap();
+        let evidence = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(manifest["evidence"].as_str().unwrap());
         let output = std::env::temp_dir().join(format!(
             "northstar-host-verification-{}-{}.json",
             std::process::id(),
