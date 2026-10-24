@@ -863,6 +863,15 @@ impl EphemeralRuntime {
         })
     }
 
+    #[cfg(feature = "vrf-candidate-capture")]
+    pub fn set_vrf_candidate_capture(
+        &self,
+        sink: Arc<crate::vrf_candidate_capture::CandidateCaptureSink>,
+    ) {
+        let _guard = self.bank_operation_lock.lock().unwrap();
+        self._tx_client.set_candidate_capture(sink);
+    }
+
     pub fn rpc_addr(&self) -> String {
         format!("http://{}", self.rpc_addr)
     }

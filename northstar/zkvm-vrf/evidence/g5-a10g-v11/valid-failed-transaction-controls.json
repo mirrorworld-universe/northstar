@@ -1,0 +1,42 @@
+{
+  "schema": "northstar-real-rollback-guest-controls-v11",
+  "proof_generated": false,
+  "controls": [
+    {
+      "control": "rollback-00001-path",
+      "guest_elf_sha256": "b0531ecbe24a339b60407673181274a83aeafeb2d3cc04057369ff5992829a92",
+      "execution": {
+        "acceptance_window": false,
+        "case_id": "single-input",
+        "cpu_only_control": true,
+        "cycle_tracker": {},
+        "cycles": 82938222,
+        "exit_code": 0,
+        "phase": "execute",
+        "public_output_bytes": 256,
+        "public_output_sha256": "dc0183a7bb2e51fb9c2bbed7f692982d2e59234b23345b19c4729519612b3b19",
+        "strict_observer_passed": true,
+        "syscalls": 122266,
+        "wall_ms": 4798
+      }
+    },
+    {
+      "control": "rollback-00002-path",
+      "guest_elf_sha256": "b0531ecbe24a339b60407673181274a83aeafeb2d3cc04057369ff5992829a92",
+      "execution": {
+        "acceptance_window": false,
+        "case_id": "single-input",
+        "cpu_only_control": true,
+        "cycle_tracker": {},
+        "cycles": 85318442,
+        "exit_code": 0,
+        "phase": "execute",
+        "public_output_bytes": 256,
+        "public_output_sha256": "097a1835766a967f1e4d59f1db794976e356cfec18cf1c0fe865354880e2278f",
+        "strict_observer_passed": true,
+        "syscalls": 122296,
+        "wall_ms": 4912
+      }
+    }
+  ]
+}

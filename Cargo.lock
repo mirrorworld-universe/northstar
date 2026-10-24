@@ -5287,6 +5287,7 @@ dependencies = [
  "northstar-token-bridge",
  "northstar-transaction-proof",
  "northstar-zk-types",
+ "serde",
  "serde_json",
  "solana-account",
  "solana-accounts-db",
@@ -5505,6 +5506,42 @@ dependencies = [
  "thiserror 2.0.21",
  "vrf-r255",
  "zeroize",
+]
+
+[[package]]
+name = "northstar-vrf-sbpf-replay"
+version = "0.1.0"
+dependencies = [
+ "agave-feature-set",
+ "agave-reserved-account-keys",
+ "borsh",
+ "northstar-transaction-proof",
+ "serde_json",
+ "solana-account",
+ "solana-bpf-loader-program",
+ "solana-clock",
+ "solana-compute-budget",
+ "solana-compute-budget-program",
+ "solana-hash",
+ "solana-instruction 4.0.0",
+ "solana-instruction-error 3.1.0",
+ "solana-message",
+ "solana-program-runtime",
+ "solana-pubkey 4.4.0",
+ "solana-rent",
+ "solana-sdk-ids",
+ "solana-sha256-hasher",
+ "solana-slot-hashes",
+ "solana-svm-callback",
+ "solana-svm-feature-set",
+ "solana-svm-log-collector",
+ "solana-svm-timings",
+ "solana-svm-transaction",
+ "solana-syscalls",
+ "solana-system-program",
+ "solana-transaction-context",
+ "solana-transaction-error",
+ "wincode",
 ]
 
 [[package]]

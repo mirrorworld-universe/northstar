@@ -1,0 +1,8 @@
+[package]
+name = "northstar-zkvm-vrf-script"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+northstar-zkvm-vrf-shared = { path = "../shared" }

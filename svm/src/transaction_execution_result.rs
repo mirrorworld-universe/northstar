@@ -29,8 +29,22 @@ impl ExecutedTransaction {
     }
 }
 
+// Sonic: Raw development capture is separate from legacy optional return-data history.
+#[cfg(feature = "vrf-candidate-capture")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CandidateExecutionBoundary {
+    pub accounts: Vec<(Pubkey, solana_account::AccountSharedData)>,
+    pub return_data: TransactionReturnData,
+    pub compute_unit_limit: u64,
+    pub heap_size: u32,
+    pub execution_cost_debug: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TransactionExecutionDetails {
+    // Sonic: Absent in production builds; never serialized into legacy history.
+    #[cfg(feature = "vrf-candidate-capture")]
+    pub candidate: Option<Box<CandidateExecutionBoundary>>,
     pub status: TransactionResult<()>,
     pub log_messages: Option<Vec<String>>,
     pub inner_instructions: Option<InnerInstructionsList>,

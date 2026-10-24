@@ -1,0 +1,119 @@
+{
+  "schema": "northstar.vrf-candidate-portal-receipt-audit.v1",
+  "classification": "offline_structural_audit_not_consensus_or_proof_verification",
+  "signed_attempts": 10,
+  "failed_or_unconfirmed_attempts": 0,
+  "samples": [
+    {
+      "receipt": "000-open-session",
+      "signature": "4wNewQoScA8BMWGpRGwQJhNDMsisasi5AcN7uVGGpaTm2q2WhgvWDfk1ryQxXhkcJhubctuwxiZuZGLhqLTrtw75",
+      "slot": 6,
+      "transaction_sha256": "81b75f93bb8abca043e1049805dac0890eb49c38c4ac7155845de8ee53dd9133",
+      "rpc_receipt_sha256": "6fd66e1d91ce5d10cfa20c4e9dc9b2e6c3b8d1cfeac96a79ff1416f7694598cd",
+      "portal_tag": 0,
+      "portal_instruction_cu": 13746,
+      "transaction_cu": 13896,
+      "transaction_error": null
+    },
+    {
+      "receipt": "001-propose-checkpoint-bond",
+      "signature": "4JEqd1yXLeQ5ymTVBDxhBdvbfFi93RfdChg8CDzKZ7957wCsEtuSp2RtznGc7FmZfDZ3RAuYJENRSq42Wgj4G8cP",
+      "slot": 24,
+      "transaction_sha256": "e3ebffa2711f4175f2fb59ffc03b74bb73b17161d17300395cd7981b88a5f5a0",
+      "rpc_receipt_sha256": "7fc413ae26642396eb6365e8c5ba51bf6cf615e3012cea71a68d1dd4a9648081",
+      "portal_tag": 14,
+      "portal_instruction_cu": 16960,
+      "transaction_cu": 17110,
+      "transaction_error": null
+    },
+    {
+      "receipt": "002-open-challenge",
+      "signature": "5c5GYB6a5JkvTFh1XQsXp9FLkKTgMNRZQSb6AtSV3gEw9oEcTDGY3vwT5Kcwq6JNFCbeCFUsGwqUoRPr5sphVEBu",
+      "slot": 25,
+      "transaction_sha256": "af253ade9f5b68bf32e99c77e427b75e6d245939629cee17066f136d8357e371",
+      "rpc_receipt_sha256": "71e243bde71b73285e7990f86c598d6b126c6ce0105a4d0a8da20bad3eb91347",
+      "portal_tag": 17,
+      "portal_instruction_cu": 23888,
+      "transaction_cu": 24038,
+      "transaction_error": null
+    },
+    {
+      "receipt": "003-respond-0-1",
+      "signature": "5HpRgivMR5GKyR3DtgU3BvzvKvuLwX9KKJGXtseoRj1vY1cJnza9z6mysJNvEPBWGVcnb5fCczfMwF1fPGuj2GDn",
+      "slot": 26,
+      "transaction_sha256": "82f98588c6b9995b96856bfc458d8e89122657c8d50fc8759935ad1906a6bbe2",
+      "rpc_receipt_sha256": "ffa2d10da59f6a263ca10ff7e367498767e12e8045a3a1f36c6503db06a8490f",
+      "portal_tag": 23,
+      "portal_instruction_cu": 17477,
+      "transaction_cu": 17627,
+      "transaction_error": null
+    },
+    {
+      "receipt": "004-create-kind3-proof",
+      "signature": "57tyeQSMn4GnunwS6cyz49VQbmZPYFnb4VqU2vmD1Sea3NJKoKLtEggyUYpDRsvKTmj9dLvFh7J2nSB28LvmErE7",
+      "slot": 27,
+      "transaction_sha256": "0c0665af3c3729a5dff7d923f3e0da6b11b99c8ae95f16df3fd1b8b90a0b30d9",
+      "rpc_receipt_sha256": "9f9c191cbcb9412f609b2c542b42d893e178bc22324792fdf4a4f737084d042a",
+      "portal_tag": 18,
+      "portal_instruction_cu": 27614,
+      "transaction_cu": 27764,
+      "transaction_error": null
+    },
+    {
+      "receipt": "005-write-proof-0",
+      "signature": "4bqxEasxnQYqmhygrAYUuh1N7ycBNqMMXmiFpBn7SF4AYfFePMT1HRih6Y8Xv3ePTtNYkhHYVQr9aXy2E3XyZqEH",
+      "slot": 48,
+      "transaction_sha256": "ee19c93694498980351087576184e354a2c4d8756f9a75b864ebaa654115ad27",
+      "rpc_receipt_sha256": "915673224ce9d4da67776f1f4cf11887d5438ac8469b66cd24c14dcf80f192dd",
+      "portal_tag": 19,
+      "portal_instruction_cu": 19056,
+      "transaction_cu": 19206,
+      "transaction_error": null
+    },
+    {
+      "receipt": "006-write-proof-128",
+      "signature": "V3Rcn6Wsi6zk7wLxWcaUnfAKNLakZ5c7TkS2ewhs8RBFfkVnwYVUzvvxBUZCQEi49T4CJGsNNg9VXMX9LXrG7ZB",
+      "slot": 49,
+      "transaction_sha256": "b93070e31a61f010bda2e08c61d63e9acab2a9b47623ef75d2dc94261be83b2a",
+      "rpc_receipt_sha256": "ff449b228294b9a42595f95e53a2fa8a66b9ac5d17b29596c2aba7e052d99840",
+      "portal_tag": 19,
+      "portal_instruction_cu": 19056,
+      "transaction_cu": 19206,
+      "transaction_error": null
+    },
+    {
+      "receipt": "007-write-proof-256",
+      "signature": "3DodxC8qjEstiXNFueUFBBvGPRBfX4jg5FF9s4ymbkWL4hmCHKLUDKEr2nYHRZXMQAQ8gA8G35wG2wCPXKhGrrA4",
+      "slot": 50,
+      "transaction_sha256": "97a4387b30e702fe1f323ae7ccaf24b8ec51064aa896da83cffa7a0b22af5d9d",
+      "rpc_receipt_sha256": "7148c9350f05c13400fc0d4c808395de85421fe52e4bb03d4a781f90ad5d7183",
+      "portal_tag": 19,
+      "portal_instruction_cu": 19056,
+      "transaction_cu": 19206,
+      "transaction_error": null
+    },
+    {
+      "receipt": "008-seal-proof",
+      "signature": "fMtBMdbX4QGBtYtVHc8RG4uhoBqL9JVRDppEhQoxBzuhwU6oD6ZnmHHwEqhsuHuVQ68imCWhdEnKU2PKcdHnUTK",
+      "slot": 51,
+      "transaction_sha256": "6506cce31d4eb2e1109c03eb08ee841d2dba6304b3094dcbdc22ec59a1c8a9dd",
+      "rpc_receipt_sha256": "f5478fa246d7e582ce6c3378e007be2dc2c4241accc25c34cbfddf5f06a5fef6",
+      "portal_tag": 20,
+      "portal_instruction_cu": 19121,
+      "transaction_cu": 19271,
+      "transaction_error": null
+    },
+    {
+      "receipt": "009-resolve-production",
+      "signature": "yT53CmBvfV94ZqCktrqK5Gvvi2Eow8dMMGck6oQj4BB8W7LPYhaNR5p5zctiaWUKcj4ugNhzyfQthG6eRkBDJD5",
+      "slot": 52,
+      "transaction_sha256": "b9db1b37a40cfa89bec690a7e6cd0e203b74015386ffcf270515b761bd360e8f",
+      "rpc_receipt_sha256": "6abd504d12fffb16d3d83644ce9dd23e907c794de83a401bc6bbbad2d59e491f",
+      "portal_tag": 21,
+      "portal_instruction_cu": 111253,
+      "transaction_cu": 111403,
+      "transaction_error": null
+    }
+  ],
+  "candidate_acceptance": "not_established"
+}

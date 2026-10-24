@@ -48,7 +48,7 @@ solana-poseidon = { workspace = true }
 solana-program-entrypoint = { workspace = true }
 solana-program-runtime = { workspace = true }
 solana-pubkey = { workspace = true }
-solana-sbpf = { workspace = true, features = ["jit"] }
+solana-sbpf = { workspace = true }
 solana-sdk-ids = { workspace = true }
 solana-secp256k1-recover = { workspace = true }
 solana-sha256-hasher = { workspace = true }
@@ -62,6 +62,10 @@ solana-sysvar-id = { workspace = true }
 solana-transaction-context = { workspace = true }
 thiserror = { workspace = true }
 wincode = { workspace = true }
+
+# Sonic: preserve host JIT without pulling executable-memory support into zkVM.
+[target.'cfg(not(target_os = "zkvm"))'.dependencies]
+solana-sbpf = { workspace = true, features = ["jit"] }
 
 [dev-dependencies]
 assert_matches = { workspace = true }

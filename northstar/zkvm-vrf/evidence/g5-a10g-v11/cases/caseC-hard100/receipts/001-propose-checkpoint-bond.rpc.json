@@ -1,0 +1,121 @@
+{
+  "blockTime": 1792855092,
+  "meta": {
+    "computeUnitsConsumed": 17110,
+    "costUnits": 18889,
+    "err": null,
+    "fee": 5000,
+    "innerInstructions": [
+      {
+        "index": 1,
+        "instructions": [
+          {
+            "accounts": [
+              0,
+              2
+            ],
+            "data": "3Bxs4WSESgLtuiDM",
+            "programIdIndex": 3,
+            "stackHeight": 2
+          },
+          {
+            "accounts": [
+              2
+            ],
+            "data": "9krTDS1vv2kePcHM",
+            "programIdIndex": 3,
+            "stackHeight": 2
+          },
+          {
+            "accounts": [
+              2
+            ],
+            "data": "SYXsFSFiqMdk1iAi5GiaTQcRezYdAQ5Xjz8jNudPNzBNMhdB",
+            "programIdIndex": 3,
+            "stackHeight": 2
+          },
+          {
+            "accounts": [
+              0,
+              1
+            ],
+            "data": "3Bxs4NJSS5tpVje7",
+            "programIdIndex": 3,
+            "stackHeight": 2
+          },
+          {
+            "accounts": [
+              1
+            ],
+            "data": "9krTDMAdc7DNutgF",
+            "programIdIndex": 3,
+            "stackHeight": 2
+          },
+          {
+            "accounts": [
+              1
+            ],
+            "data": "SYXsFSFiqMdk1iAi5GiaTQcRezYdAQ5Xjz8jNudPNzBNMhdB",
+            "programIdIndex": 3,
+            "stackHeight": 2
+          }
+        ]
+      }
+    ],
+    "loadedAddresses": {
+      "readonly": [],
+      "writable": []
+    },
+    "logMessages": [
+      "Program ComputeBudget111111111111111111111111111111 invoke [1]",
+      "Program ComputeBudget111111111111111111111111111111 success",
+      "Program 5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf invoke [1]",
+      "Program log: Instruction: ProposeCheckpoint, er_slot=1099511628263",
+      "Program 11111111111111111111111111111111 invoke [2]",
+      "Program 11111111111111111111111111111111 success",
+      "Program 11111111111111111111111111111111 invoke [2]",
+      "Program 11111111111111111111111111111111 success",
+      "Program 11111111111111111111111111111111 invoke [2]",
+      "Program 11111111111111111111111111111111 success",
+      "Program 11111111111111111111111111111111 invoke [2]",
+      "Program 11111111111111111111111111111111 success",
+      "Program 11111111111111111111111111111111 invoke [2]",
+      "Program 11111111111111111111111111111111 success",
+      "Program 11111111111111111111111111111111 invoke [2]",
+      "Program 11111111111111111111111111111111 success",
+      "Program 5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf consumed 16960 of 299850 compute units",
+      "Program 5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf success"
+    ],
+    "postBalances": [
+      1989858480,
+      4535680,
+      1955760,
+      1,
+      1141440,
+      2463840,
+      1
+    ],
+    "postTokenBalances": [],
+    "preBalances": [
+      1996354920,
+      0,
+      0,
+      1,
+      1141440,
+      2463840,
+      1
+    ],
+    "preTokenBalances": [],
+    "rewards": [],
+    "status": {
+      "Ok": null
+    }
+  },
+  "slot": 24,
+  "transaction": [
+    "AaTquhUScXNLT24YJr1t8vohS5Gy8f41wtrsRzjI6mhtsx0wGuvSi9EAfAsCFAyvPQ/dTLEgpzjWNK0AKy1tGwgBAAQHwcb0PRiPhHD1UUvykwWnCyo6y0p4cM3MjmTYc0qihkNZNyY1/v3Vnk0uah43piuqCB18gmRwD1ttkxvv6KtyeqlM928Sa/zC5zQRga54gmHfIwNfd2u12xSRxP7TkxssAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQpizyPaUFFIJTMhaiJ7eG1c+0tFFBGjV0A4+XyG+gYyfAwZGb+UhFzL/7K26csOb57yM5bvF9xJrLEObOkAAAADZ8S7fWkNHgw8vTHLz5SE4/juU7t19AoCCi638U9rDoQIGAAUC4JMEAAQFAAUBAgP5AQ7nAQAAAAEAAAEAAAAAAAAAFpTAWDaGac08WBdcZjZ/1wkGTyN3Q5mFm8Qr1fi2+a0YC/GmhIS6BLgLhCjHbne47NTRCFvg7HU2rJqV7ffM5SdSFwX1bRdXZKJo0wuaY5rFTr+2xo9kdmRGSSLLDVSKEpo6lzqIocVhAdF+lDUizD/9Me9kK09K+0c56TuWf78Ax0geMcvIDHltI2DsqDiPMj+68buvRnaDwzpS5SZs0UlNlFOapl0Q77QF3ciuxXfL3yEKarIdWwRcFjNbwL25GEpbMG4QX7PUAbIVvc/Iahf34dKuCAYmKROdC1SUduYoIwAAAAAAAA==",
+    "base64"
+  ],
+  "transactionIndex": 0,
+  "version": "legacy"
+}

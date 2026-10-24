@@ -1,7 +1,20 @@
-use std::{
-    fmt,
-    time::{Duration, Instant},
-};
+#[cfg(not(target_os = "zkvm"))]
+use std::time::Instant;
+use std::{fmt, time::Duration};
+
+// Sonic: wall-clock measurements are statistics only, unavailable inside zkVM.
+#[cfg(target_os = "zkvm")]
+#[derive(Debug)]
+struct Instant;
+#[cfg(target_os = "zkvm")]
+impl Instant {
+    fn now() -> Self {
+        Self
+    }
+    fn elapsed(&self) -> Duration {
+        Duration::ZERO
+    }
+}
 
 #[derive(Debug)]
 pub struct Measure {

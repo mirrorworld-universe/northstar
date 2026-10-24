@@ -519,6 +519,9 @@ fn new_executed_processing_result(
                 ..LoadedTransaction::default()
             },
             execution_details: TransactionExecutionDetails {
+                // Sonic: Synthetic bank fixtures do not contain candidate captures.
+                #[cfg(feature = "vrf-candidate-capture")]
+                candidate: None,
                 status,
                 log_messages: None,
                 inner_instructions: None,

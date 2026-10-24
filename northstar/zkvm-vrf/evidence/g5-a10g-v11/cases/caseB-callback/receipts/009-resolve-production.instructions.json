@@ -1,0 +1,57 @@
+{
+  "label": "resolve-production",
+  "transaction_sha256": "537b729bf5a6e8d6af689cbc5bca1084bdb96a22ad8387aa131f05d9a8f585e0",
+  "ordered_instructions": [
+    {
+      "program": "ComputeBudget111111111111111111111111111111",
+      "data_hex": "02d0fb0100",
+      "accounts": []
+    },
+    {
+      "program": "5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf",
+      "data_hex": "15730000000001000000",
+      "accounts": [
+        {
+          "key": "5u4MZiLZ7RNNQX8R9974wRopA24TzT7Sq9EpaF13oTCP",
+          "signer": true,
+          "writable": false
+        },
+        {
+          "key": "BH5yRd1S8hW9AejSTFA9o8SuxVGHQ4iSztSXg3xHHqqY",
+          "signer": false,
+          "writable": false
+        },
+        {
+          "key": "7mAjgvuWoWdCtFBbDefytGadhFrZyk5KJGKGSgFxQVFB",
+          "signer": false,
+          "writable": true
+        },
+        {
+          "key": "9qbyrtkwCoXtxrcH5Eebn2v8fJxAB1UbNTJHLA8Ck47F",
+          "signer": false,
+          "writable": true
+        },
+        {
+          "key": "7sTa9tb7BEQCwxPCKhesza31pHHWgwobHWLRAjJpvUmG",
+          "signer": false,
+          "writable": false
+        },
+        {
+          "key": "7nnZx7xq8aaiB2x5e4tw1dXWgF4MZgLW9k719yMVjeh1",
+          "signer": false,
+          "writable": false
+        },
+        {
+          "key": "EXFPcQYkVGqhpYFQHvTSS58EsTdS3DRU7UMFJjBNPrNg",
+          "signer": false,
+          "writable": true
+        },
+        {
+          "key": "CPsyHpp9wGSYqWgYoCjW5m4qFgnizcb4PekNEVJfViRR",
+          "signer": false,
+          "writable": true
+        }
+      ]
+    }
+  ]
+}

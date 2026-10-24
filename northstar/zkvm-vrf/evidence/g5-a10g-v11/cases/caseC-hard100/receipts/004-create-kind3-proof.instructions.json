@@ -1,0 +1,47 @@
+{
+  "label": "create-kind3-proof",
+  "transaction_sha256": "0c0665af3c3729a5dff7d923f3e0da6b11b99c8ae95f16df3fd1b8b90a0b30d9",
+  "ordered_instructions": [
+    {
+      "program": "ComputeBudget111111111111111111111111111111",
+      "data_hex": "02e0930400",
+      "accounts": []
+    },
+    {
+      "program": "5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf",
+      "data_hex": "12e701000000010000030100000000000000000f0c9faba852e49ada82fca6ed0af442095852a4b5ddfe8e1a6ec61af23ad95d129a3a973a88a1c56101d17e943522cc3ffd31ef642b4f4afb4739e93b967fbf00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c7481e31cbc80c796d2360eca8388f323fbaf1bbaf467683c33a52e5266cd1184a5b306e105fb3d401b215bdcfc86a17f7e1d2ae08062629139d0b549476e6",
+      "accounts": [
+        {
+          "key": "HGRwbfUV6tvn9yVcPnjopreiZt6BaPtsT65AVfhGni4E",
+          "signer": true,
+          "writable": true
+        },
+        {
+          "key": "BH5yRd1S8hW9AejSTFA9o8SuxVGHQ4iSztSXg3xHHqqY",
+          "signer": false,
+          "writable": false
+        },
+        {
+          "key": "71G4Sn96FKHBWmrmZrxBnjPbANLmPA44PPu9NwDM3FZs",
+          "signer": false,
+          "writable": false
+        },
+        {
+          "key": "8xddcxJqVdG8eZptVvXroLRxcsYB4WCUPqaP1Fy6xtzr",
+          "signer": false,
+          "writable": false
+        },
+        {
+          "key": "GAbnTRhwizTSrBPeYiFvDCzi1E3iLxSiK4aRCS4bw52r",
+          "signer": false,
+          "writable": true
+        },
+        {
+          "key": "11111111111111111111111111111111",
+          "signer": false,
+          "writable": false
+        }
+      ]
+    }
+  ]
+}

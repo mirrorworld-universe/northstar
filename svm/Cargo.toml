@@ -20,6 +20,8 @@ crate-type = ["lib"]
 name = "solana_svm"
 
 [features]
+# Sonic: Retain execution-boundary inputs only in opt-in development captures.
+vrf-candidate-capture = []
 default = ["metrics"]
 agave-unstable-api = []
 conformance = [

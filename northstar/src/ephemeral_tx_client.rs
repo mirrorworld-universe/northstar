@@ -115,6 +115,8 @@ pub struct EphemeralTransactionClient {
     unsettled_state_store: Arc<UnsettledStateStore>,
     sync_status: Arc<NorthStarSyncStatus>,
     checkpoint_capture: Arc<RwLock<CheckpointCaptureV1>>,
+    #[cfg(feature = "vrf-candidate-capture")]
+    candidate_capture: Arc<RwLock<Option<Arc<crate::vrf_candidate_capture::CandidateCaptureSink>>>>,
 }
 
 impl Clone for EphemeralTransactionClient {
@@ -139,6 +141,8 @@ impl Clone for EphemeralTransactionClient {
             unsettled_state_store: Arc::clone(&self.unsettled_state_store),
             sync_status: Arc::clone(&self.sync_status),
             checkpoint_capture: Arc::clone(&self.checkpoint_capture),
+            #[cfg(feature = "vrf-candidate-capture")]
+            candidate_capture: Arc::clone(&self.candidate_capture),
         }
     }
 }
@@ -370,6 +374,8 @@ impl EphemeralTransactionClient {
             unsettled_state_store: options.unsettled_state_store,
             sync_status: options.sync_status,
             checkpoint_capture: Arc::new(RwLock::new(CheckpointCaptureV1::default())),
+            #[cfg(feature = "vrf-candidate-capture")]
+            candidate_capture: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -840,6 +846,12 @@ impl EphemeralTransactionClient {
             );
             return;
         }
+        #[cfg(feature = "vrf-candidate-capture")]
+        if let Some(sink) = self.candidate_capture.read().unwrap().as_ref() {
+            for wire in &wire_transactions {
+                sink.observe_wire(wire);
+            }
+        }
         let txs: Vec<VersionedTransaction> = wire_transactions
             .into_iter()
             .filter_map(|wire_tx| match bincode::deserialize(&wire_tx) {
@@ -1084,6 +1096,14 @@ impl EphemeralTransactionClient {
         })
     }
 
+    #[cfg(feature = "vrf-candidate-capture")]
+    pub(crate) fn set_candidate_capture(
+        &self,
+        sink: Arc<crate::vrf_candidate_capture::CandidateCaptureSink>,
+    ) {
+        *self.candidate_capture.write().unwrap() = Some(sink);
+    }
+
     fn execute_transactions(
         &self,
         bank: &Bank,
@@ -1160,6 +1180,23 @@ impl EphemeralTransactionClient {
                 return Err(e.into());
             }
         };
+        #[cfg(feature = "vrf-candidate-capture")]
+        let mut candidate_capture =
+            self.candidate_capture
+                .read()
+                .unwrap()
+                .as_ref()
+                .and_then(|sink| {
+                    let mut state_keys = self.touched_accounts.read().unwrap().clone();
+                    state_keys.extend(self.delegated_accounts.read().unwrap().iter().copied());
+                    state_keys.extend(Self::writable_accounts_for_batch(bank, &txs));
+                    sink.begin(
+                        bank,
+                        &txs,
+                        self.transaction_max_age,
+                        state_keys.into_iter().collect(),
+                    )
+                });
         let replay_snapshots = txs
             .iter()
             .map(|tx| {
@@ -1177,6 +1214,16 @@ impl EphemeralTransactionClient {
                 &mut ExecuteTimings::default(),
                 None,
                 |processing_results| {
+                    #[cfg(feature = "vrf-candidate-capture")]
+                    if let (Some(capture), Some(executed)) = (
+                        candidate_capture.as_mut(),
+                        processing_results
+                            .first()
+                            .and_then(|result| result.as_ref().ok())
+                            .and_then(|result| result.executed_transaction()),
+                    ) {
+                        capture.observe_before_commit(bank, executed);
+                    }
                     account_snapshots = processing_results
                         .iter()
                         .map(|result| {
@@ -1202,6 +1249,10 @@ impl EphemeralTransactionClient {
                     Ok(())
                 },
             )?;
+        #[cfg(feature = "vrf-candidate-capture")]
+        if let Some(capture) = candidate_capture {
+            capture.finish(bank, commit_results.first());
+        }
         self.record_processed_signatures(bank, &txs, &commit_results);
         self.record_transaction_history_for_batch(bank, &txs, &commit_results, balance_collector);
         self.record_checkpoint_steps(
@@ -1836,6 +1887,10 @@ impl solana_rpc::rpc::ErTxExecutor for EphemeralTransactionClient {
             return Err(solana_rpc::rpc::ErTxError::NotActive);
         }
 
+        #[cfg(feature = "vrf-candidate-capture")]
+        if let Some(sink) = self.candidate_capture.read().unwrap().as_ref() {
+            sink.observe_wire(&wire_transaction);
+        }
         let tx =
             bincode::deserialize::<VersionedTransaction>(&wire_transaction).map_err(|err| {
                 solana_rpc::rpc::ErTxError::Rejected(format!(

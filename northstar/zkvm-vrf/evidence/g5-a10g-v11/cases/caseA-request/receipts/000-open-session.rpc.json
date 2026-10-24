@@ -1,0 +1,120 @@
+{
+  "blockTime": 1792854997,
+  "meta": {
+    "computeUnitsConsumed": 13896,
+    "costUnits": 15629,
+    "err": null,
+    "fee": 5000,
+    "innerInstructions": [
+      {
+        "index": 1,
+        "instructions": [
+          {
+            "accounts": [
+              0,
+              2
+            ],
+            "data": "3Bxs4H1kEGzZ2GNT",
+            "programIdIndex": 3,
+            "stackHeight": 2
+          },
+          {
+            "accounts": [
+              2
+            ],
+            "data": "9krTDeE823gRPzp7",
+            "programIdIndex": 3,
+            "stackHeight": 2
+          },
+          {
+            "accounts": [
+              2
+            ],
+            "data": "SYXsFSFiqMdk1iAi5GiaTQcRezYdAQ5Xjz8jNudPNzBNMhdB",
+            "programIdIndex": 3,
+            "stackHeight": 2
+          },
+          {
+            "accounts": [
+              0,
+              1
+            ],
+            "data": "3Bxs4WTFggFmHZ27",
+            "programIdIndex": 3,
+            "stackHeight": 2
+          },
+          {
+            "accounts": [
+              1
+            ],
+            "data": "9krTD7HPaULw9WKR",
+            "programIdIndex": 3,
+            "stackHeight": 2
+          },
+          {
+            "accounts": [
+              1
+            ],
+            "data": "SYXsFSFiqMdk1iAi5GiaTQcRezYdAQ5Xjz8jNudPNzBNMhdB",
+            "programIdIndex": 3,
+            "stackHeight": 2
+          }
+        ]
+      }
+    ],
+    "loadedAddresses": {
+      "readonly": [],
+      "writable": []
+    },
+    "logMessages": [
+      "Program ComputeBudget111111111111111111111111111111 invoke [1]",
+      "Program ComputeBudget111111111111111111111111111111 success",
+      "Program 5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf invoke [1]",
+      "Program log: Instruction: OpenSession, grid_id=401, ttl_slots=1000000, fee_cap=1000000000, settlement_interval_slots=10",
+      "Program 11111111111111111111111111111111 invoke [2]",
+      "Program 11111111111111111111111111111111 success",
+      "Program 11111111111111111111111111111111 invoke [2]",
+      "Program 11111111111111111111111111111111 success",
+      "Program 11111111111111111111111111111111 invoke [2]",
+      "Program 11111111111111111111111111111111 success",
+      "Program 11111111111111111111111111111111 invoke [2]",
+      "Program 11111111111111111111111111111111 success",
+      "Program 11111111111111111111111111111111 invoke [2]",
+      "Program 11111111111111111111111111111111 success",
+      "Program 11111111111111111111111111111111 invoke [2]",
+      "Program 11111111111111111111111111111111 success",
+      "Program log: OpenSession success",
+      "Program 5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf consumed 13746 of 299850 compute units",
+      "Program 5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf success"
+    ],
+    "postBalances": [
+      1996354920,
+      1176240,
+      2463840,
+      1,
+      1141440,
+      1
+    ],
+    "postTokenBalances": [],
+    "preBalances": [
+      2000000000,
+      0,
+      0,
+      1,
+      1141440,
+      1
+    ],
+    "preTokenBalances": [],
+    "rewards": [],
+    "status": {
+      "Ok": null
+    }
+  },
+  "slot": 6,
+  "transaction": [
+    "AQshSsMfnyOXkImoZKyT2nwPnCBe/FUW82fpUzirEX2M6CO6s7vLYv5UqniXMC6s844FeetHLCs7v69CuZNw2wYBAAMG3317BUWWBSHIGwpAdPYR73Tdy1Cy1WJEW4jPNPoQpYQ35Etn3m94Uoayg+M9X7IW9tupwspGs4i8Wlc4qK10HpizyPaUFFIJTMhaiJ7eG1c+0tFFBGjV0A4+XyG+gYyfAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQgMGRm/lIRcy/+ytunLDm+e8jOW7xfcSayxDmzpAAAAAzzQ8qLHYBDCnNmkTNcH4ave86HhJQ2c8/M/kUYTyp6UCBQAFAuCTBAAEBAACAQNBAJEBAAAAAAAAQEIPAAAAAAAAypo7AAAAAN99ewVFlgUhyBsKQHT2Ee903ctQstViRFuIzzT6EKWECgAAAAAAAAA=",
+    "base64"
+  ],
+  "transactionIndex": 0,
+  "version": "legacy"
+}
