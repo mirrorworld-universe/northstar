@@ -43,6 +43,8 @@ pub mod replay;
 pub mod settlement;
 pub mod slot_advancer;
 pub mod unsettled_state;
+#[cfg(feature = "vrf-candidate-capture")]
+pub mod vrf_candidate_capture;
 
 pub use crate::{
     ephemeral_runtime::{EphemeralRuntime, ErStateDiff, ErStateDiffAccount},

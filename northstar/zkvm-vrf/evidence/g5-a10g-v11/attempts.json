@@ -1,0 +1,51 @@
+{
+  "schema": "northstar-a10g-development-attempts-v11",
+  "calibration": {
+    "input_scope": "prior configured-session request, outside final3window",
+    "sdk_verified": true,
+    "prove_and_wrap_ms": 282566,
+    "verify_ms": 498,
+    "within_120s": false
+  },
+  "first_fresh_batch": {
+    "outcome": "failed-infrastructure",
+    "case_id": "caseA-request",
+    "guest_preflight_exit": 0,
+    "public_inputs_match": true,
+    "backend": "ICICLE CUDA Groth16 outer AR1 MSM",
+    "device_diagnostic": "Xid31 MMU read fault in prover process",
+    "sdk_error": "UnexpectedEof after backend abort",
+    "proof_generated": false,
+    "failed_or_unattempted_cases": [
+      "caseA-request",
+      "caseB-callback",
+      "caseC-hard100"
+    ],
+    "not_a_guest_rejection": true
+  },
+  "recovery_batch": {
+    "outcome": "three-sdk-verified-proofs-and-three-real-valid-Production-resolutions",
+    "same_immutable_preparations": true,
+    "guest_key_or_relation_changed": false,
+    "device_context_checked_clean_before_one_bounded_retry": true,
+    "proof_times_ms": [
+      245493,
+      204670,
+      210837
+    ],
+    "latency_gate_met": false
+  },
+  "local_controller_events": [
+    {
+      "event": "resolve preflight omitted canonical binding arguments",
+      "broadcast_new_resolution": false,
+      "retained": true
+    },
+    {
+      "event": "post-success receipt auditor was passed nested directory",
+      "actual_resolution_remained_valid": true,
+      "recovery": "audit/metadata-only resume; no second resolution broadcast"
+    }
+  ],
+  "production_acceptance": false
+}

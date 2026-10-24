@@ -350,7 +350,10 @@ pub fn create_program_runtime_environment(
         enable_register_tracing: debugging_features,
         enable_symbol_and_section_labels: debugging_features,
         reject_broken_elfs: reject_deployment_of_broken_elfs,
+        // Sonic: these fields do not exist in the zkVM interpreter-only build.
+        #[cfg(not(target_os = "zkvm"))]
         noop_instruction_rate: 256,
+        #[cfg(not(target_os = "zkvm"))]
         sanitize_user_provided_values: true,
         enabled_sbpf_versions: min_sbpf_version..=max_sbpf_version,
         optimize_rodata: false,

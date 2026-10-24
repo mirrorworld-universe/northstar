@@ -1,0 +1,16 @@
+[workspace]
+members = ["program", "shared", "script"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# This workspace-only variant accelerates SHA-256 compression on SP1 RV64IM.
+# Native engine/legacy workspaces retain their registry dependency graphs.
+[patch.crates-io]
+sha2 = { git = "https://github.com/sp1-patches/RustCrypto-hashes", rev = "e48b656ebc806117554bb33c2f8687e4637e37ff" }
+
+[profile.release]
+lto = "thin"

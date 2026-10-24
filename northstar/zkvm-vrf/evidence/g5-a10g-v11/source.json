@@ -1,0 +1,222 @@
+{
+  "schema": "northstar-bounded-guest-source-v11",
+  "base_revision": "34d6b3e2ff744c680d76ccdbfbf9aa2f3dba0d52",
+  "integrated_build_snapshot_sha256": "dfc27caa9879799f3e656706bde02eaf617db4712ff12abb8c55db0e0d648297",
+  "guest_relevant_source_files": [
+    {
+      "file": "Cargo.lock",
+      "sha256": "46963a38fad3bc13f068e164d0c5e5cc767eb150f9928d176ff1eddcc4a9e1d6",
+      "bytes": 348315
+    },
+    {
+      "file": "Cargo.toml",
+      "sha256": "7dc14f648541727526c31ffc46f92d73b0de1dee340244753539a5f7bb74b33d",
+      "bytes": 27661
+    },
+    {
+      "file": "feature-set/Cargo.toml",
+      "sha256": "4cf108dd15503a227d4632d0116717d24b324ef5a61de5120ae9296507468207",
+      "bytes": 1013
+    },
+    {
+      "file": "northstar/transaction-proof/src/bin/vrf-candidate-controls.rs",
+      "sha256": "f71c0eb302b6874d0e750e4222d0df8f78967dc8575dcb7d158bea69fdebc3c1",
+      "bytes": 37794
+    },
+    {
+      "file": "northstar/transaction-proof/src/bin/vrf-coordinator-shape.rs",
+      "sha256": "c6fcc7dd79dee15eba2b468a543958595c81fffc019258d64e4edfdfc8411fe8",
+      "bytes": 1419
+    },
+    {
+      "file": "northstar/transaction-proof/src/lib.rs",
+      "sha256": "db127e7134f70ee1a59eff23fffb87f7cdb5dc87e8991d18963f33921e0e97ed",
+      "bytes": 34942
+    },
+    {
+      "file": "northstar/transaction-proof/src/vrf_candidate.rs",
+      "sha256": "f72341d3c089a6f1a7978d8cf8ecf02b9a8e02e0559870ea077b69760f7f1835",
+      "bytes": 8848
+    },
+    {
+      "file": "northstar/transaction-proof/src/vrf_candidate/binding.rs",
+      "sha256": "5e7e35d0c1a4314ef7c6b47cf8710837a787a4dd9d5f64a85230eb6a636a3114",
+      "bytes": 25155
+    },
+    {
+      "file": "northstar/transaction-proof/src/vrf_candidate/ids.rs",
+      "sha256": "a0846928ee7a1f17ad4f2e5875e60be56a7d903ccc5943fc5c110d5465357b95",
+      "bytes": 1913
+    },
+    {
+      "file": "northstar/transaction-proof/src/vrf_candidate/wire.rs",
+      "sha256": "4cc4e5c30a252e4e1cef3987ad9b7ca789ff1afbf7c6242170429154893adb4a",
+      "bytes": 5949
+    },
+    {
+      "file": "northstar/transaction-proof/src/vrf_coordinator_profile.rs",
+      "sha256": "1738b098fb134cc13b42b16158ae88adf9dbadd91ade88a8a4f575bc59b0f731",
+      "bytes": 10048
+    },
+    {
+      "file": "northstar/transaction-proof/tests/vrf_candidate.rs",
+      "sha256": "c3eece7e8cb110f07b439320bbda071cac0bfc302299a3102e091b6dc5e1797f",
+      "bytes": 28209
+    },
+    {
+      "file": "northstar/transaction-proof/tests/vrf_candidate_reuse.rs",
+      "sha256": "1e4f0f343d6583f02a732664c3c29e4a48d9d32265b933f1252d68222b07ae93",
+      "bytes": 6924
+    },
+    {
+      "file": "northstar/transaction-proof/tests/vrf_coordinator_profile.rs",
+      "sha256": "ba1a3757ca082f518c7885527f26ed1c1c197da0c4e7c6614e8fb49a785fdc59",
+      "bytes": 11544
+    },
+    {
+      "file": "northstar/vrf-sbpf-replay/Cargo.toml",
+      "sha256": "93d2a6d004b0edfe5138deec50d6b107aef2405ff5bc0dbb26fc3c9da078e87e",
+      "bytes": 2124
+    },
+    {
+      "file": "northstar/vrf-sbpf-replay/src/bin/binding.rs",
+      "sha256": "39c7c821ce237b5a5a62d14cad1e66278d62a1102b6737ea47f0f1965bf8bd6c",
+      "bytes": 855
+    },
+    {
+      "file": "northstar/vrf-sbpf-replay/src/bin/replay.rs",
+      "sha256": "cf6dbcb186f420fcac83a4bb53d4ab0f0092f95af2c7e42ef564f450d60f6310",
+      "bytes": 4635
+    },
+    {
+      "file": "northstar/vrf-sbpf-replay/src/candidate.rs",
+      "sha256": "d22fd7edef466aabd5b62edb457bded27c3c883c6b04cbeb95ca7357ac037475",
+      "bytes": 11437
+    },
+    {
+      "file": "northstar/vrf-sbpf-replay/src/capture_tests.rs",
+      "sha256": "7d8038769186fada0447926c21f09c81e0639b7f5c3614e75b3b8738a318a3b0",
+      "bytes": 6231
+    },
+    {
+      "file": "northstar/vrf-sbpf-replay/src/lib.rs",
+      "sha256": "716e714f1111be5eca37558ad9d9021aad7ef74d0650132ef989d08cb149c6a1",
+      "bytes": 17216
+    },
+    {
+      "file": "northstar/vrf-sbpf-replay/src/sidecar.rs",
+      "sha256": "cab09300440ac0a6565baef8613dd3d12fb15efd1787b3f2e5a7e2627362bbd0",
+      "bytes": 21652
+    },
+    {
+      "file": "northstar/vrf-sbpf-replay/src/tests.rs",
+      "sha256": "5bae9ddb5934f0251d7492a0edff005d88b01e1086ec9aa112fced00ff71a178",
+      "bytes": 10412
+    },
+    {
+      "file": "northstar/zk-types/src/lib.rs",
+      "sha256": "d3013f446e87982292ff703c6e97cef65e89279be516d58f0b02a657c224fc59",
+      "bytes": 17679
+    },
+    {
+      "file": "northstar/zkvm-vrf/Cargo.lock",
+      "sha256": "9eb50c2df81092d491051836ca3ed1497ce3985b731154fbf7205e1b51b820a5",
+      "bytes": 87334
+    },
+    {
+      "file": "northstar/zkvm-vrf/Cargo.toml",
+      "sha256": "d5e73541cf0955740a6414e8b9fd2ef664da7c642e7e128605cbc3b84807bdf6",
+      "bytes": 462
+    },
+    {
+      "file": "northstar/zkvm-vrf/build-accelerated-guest.sh",
+      "sha256": "c661c744c2813916243c894bf3319f2083c42fb51534e882ec8a14d5547398d5",
+      "bytes": 4885
+    },
+    {
+      "file": "northstar/zkvm-vrf/program/Cargo.toml",
+      "sha256": "05b09f64309a2bd99aacc476110cb65bd4bb7797d115b9e3cc3c8872bdb29804",
+      "bytes": 715
+    },
+    {
+      "file": "northstar/zkvm-vrf/program/build.rs",
+      "sha256": "7e0e56ca6e9d0a0f9c3133337e409f9c9c30a57d7ae4775a70c0c78f3f582957",
+      "bytes": 1095
+    },
+    {
+      "file": "northstar/zkvm-vrf/program/src/bin/candidate.rs",
+      "sha256": "2914fbc17e576863f51b35d1a707d2a20f26926629733f62979a0612b8656fba",
+      "bytes": 571
+    },
+    {
+      "file": "northstar/zkvm-vrf/program/src/main.rs",
+      "sha256": "0abd2437e8d17637b6d5510c1cfd47f107f5ff2dee74c738e74cf658e4b3c488",
+      "bytes": 970
+    },
+    {
+      "file": "northstar/zkvm-vrf/script/Cargo.toml",
+      "sha256": "bd877be77cc31e79e513d9f03f6b302c2531feccaad5b90d1381a67e1118148f",
+      "bytes": 187
+    },
+    {
+      "file": "northstar/zkvm-vrf/script/src/main.rs",
+      "sha256": "f2df0d28319b5f6dfce814546dea8a206ec92505709c36216ca5ec756381a843",
+      "bytes": 1645
+    },
+    {
+      "file": "northstar/zkvm-vrf/shared/Cargo.toml",
+      "sha256": "1aa3369ac3abfd4dd441154a59e7f524f7d8ee7472fe63f5add02ad55604e993",
+      "bytes": 506
+    },
+    {
+      "file": "northstar/zkvm-vrf/shared/src/crypto_vectors.rs",
+      "sha256": "3d012722303ac3c709afc4ce6caa2a955930f8cd7aa77ddebc08280b824221cc",
+      "bytes": 5469
+    },
+    {
+      "file": "northstar/zkvm-vrf/shared/src/lib.rs",
+      "sha256": "5f4a9a715ef642f98971e4c3b4094b5e74c616874c12fcfb61bfa32e7a930d43",
+      "bytes": 2849
+    },
+    {
+      "file": "program-runtime/Cargo.toml",
+      "sha256": "5184c26344f3c1c8c67ae78eba91083cd17efad0d629e11970d9509ebffb8eb9",
+      "bytes": 4130
+    },
+    {
+      "file": "program-runtime/src/program_cache_entry.rs",
+      "sha256": "b7d5bc4299de95edc9ab99e5a79e7ff9c61de9c8ac2c880df31566bfff8cd7e2",
+      "bytes": 22720
+    },
+    {
+      "file": "programs/bpf_loader/Cargo.toml",
+      "sha256": "6c6dcd2bc40ea53c1b3904e912f224c8a3abac24293c9ca568344c4498e6dda4",
+      "bytes": 3486
+    },
+    {
+      "file": "svm-measure/src/macros.rs",
+      "sha256": "a2d8db09d077395583314e259b71109d3f73728537c8604dddea0e5363836402",
+      "bytes": 7213
+    },
+    {
+      "file": "svm-measure/src/measure.rs",
+      "sha256": "797a05099ec51ec2c07cbc997051d2fb11c79c35e438d4d7153cd10a5684115f",
+      "bytes": 4020
+    },
+    {
+      "file": "syscalls/Cargo.toml",
+      "sha256": "a363810daee360abedf73be6a1f4c577f34d0565ae4e1773c12e8e98d059a0c7",
+      "bytes": 3470
+    },
+    {
+      "file": "syscalls/src/lib.rs",
+      "sha256": "5a3f73e5777c97188c0a454aaab91124f593792189f9744ad114b6f570b7c7a7",
+      "bytes": 328338
+    }
+  ],
+  "source_scope": "These code/build/lock files match the compiled snapshot; later native capture-test cfg, Portal key/vector and evidence-document additions are outside the guest graph.",
+  "guest_elf_sha256": "b0531ecbe24a339b60407673181274a83aeafeb2d3cc04057369ff5992829a92",
+  "raw_guest_elf_published": false,
+  "raw_guest_elf_omission": "The executable contains compiler build-tree paths; publish source/locks, its digest, public SDK key and verified proof artifacts instead.",
+  "production_acceptance": false
+}

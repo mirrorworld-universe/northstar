@@ -88,6 +88,40 @@ async fn production_resolver_rejects_previous_program_and_preserves_rejected_sta
     }
 }
 
+#[cfg(feature = "zk-verifier-bounded-vrf")]
+#[tokio::test]
+#[ignore = "requires actual bounded-SBPF guest/key/proof and authenticated resolver fixture"]
+async fn production_resolver_accepts_actual_bounded_vrf_fixture() {
+    let path = std::env::var("NORTHSTAR_BOUNDED_VRF_RESOLVER_FIXTURE")
+        .expect("NORTHSTAR_BOUNDED_VRF_RESOLVER_FIXTURE path");
+    let fixture: Fixture = bincode::deserialize(&std::fs::read(path).unwrap()).unwrap();
+    let proof = StepProofAccount::try_from_slice(&fixture.2[4].1.data).unwrap();
+    assert_eq!(
+        proof.proof_kind,
+        northstar_zk_types::ER_STEP_PROOF_KIND_BOUNDED_VRF
+    );
+    assert_eq!(
+        proof.proof_version,
+        northstar_zk_types::ER_STEP_PROOF_VERSION_V1
+    );
+    assert_resolver_bindings("actual-bounded-vrf", fixture, true).await;
+}
+
+fn rebind_public_hash(accounts: &mut [(Pubkey, Account)]) {
+    let checkpoint = Checkpoint::try_from_slice(&accounts[1].1.data).unwrap();
+    let challenge = Challenge::try_from_slice(&accounts[2].1.data).unwrap();
+    let proof = StepProofAccount::try_from_slice(&accounts[4].1.data).unwrap();
+    let digest = northstar_portal::step_proof_public_input_hash(
+        &PROGRAM,
+        &accounts[0].0,
+        &accounts[1].0,
+        &checkpoint,
+        &challenge,
+        &proof,
+    );
+    update::<StepProofAccount>(&mut accounts[4].1, |state| state.public_input_hash = digest);
+}
+
 async fn assert_resolver_bindings(
     case: &str,
     (slot, er_slot, original): Fixture,
@@ -132,6 +166,9 @@ async fn assert_resolver_bindings(
         "cursor",
         "step_index",
         "invalid_proof",
+        "cross_domain_rebound",
+        "unknown_kind_rebound",
+        "unknown_version_rebound",
     ];
     for (index, name) in cases.iter().enumerate() {
         let mut accounts = original.clone();
@@ -270,6 +307,16 @@ async fn assert_resolver_bindings(
                 });
                 None
             }
+            "cross_domain_rebound" | "unknown_kind_rebound" | "unknown_version_rebound" => {
+                update::<StepProofAccount>(&mut accounts[4].1, |s| match *name {
+                    "cross_domain_rebound" => s.proof_kind = if s.proof_kind == 3 { 2 } else { 3 },
+                    "unknown_kind_rebound" => s.proof_kind = 255,
+                    "unknown_version_rebound" => s.proof_version = 255,
+                    _ => unreachable!(),
+                });
+                rebind_public_hash(&mut accounts);
+                None
+            }
             _ => unreachable!(),
         };
         for (key, account) in &accounts {
@@ -378,7 +425,42 @@ async fn assert_resolver_bindings(
 
 #[tokio::test]
 async fn create_proof_authenticates_transaction_path_before_allocating() {
-    let (slot, er_slot, original) = fixture();
+    assert_proof_creation(false).await;
+}
+
+#[cfg(feature = "zk-verifier-bounded-vrf")]
+#[tokio::test]
+async fn candidate_create_proof_binds_checkpoint_root_before_allocating() {
+    // Synthetic checkpoint metadata tests admission only, not execution or proof validity.
+    assert_proof_creation(true).await;
+}
+
+async fn assert_proof_creation(candidate: bool) {
+    let manifest: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/keys/bounded-vrf-v1.json"
+    )))
+    .unwrap();
+    let candidate_steps = manifest["checkpoint_steps"].as_u64().unwrap();
+    let (slot, er_slot, mut original) = fixture();
+    if candidate {
+        let root = northstar_zk_types::FrBytes::from_u64(17).to_bytes();
+        update::<Checkpoint>(&mut original[1].1, |state| {
+            state.tx_effect_root = root;
+            state.step_count = candidate_steps;
+        });
+        update::<Challenge>(&mut original[2].1, |state| {
+            state.start_step = 0;
+            state.end_step = 1;
+        });
+        update::<StepProofAccount>(&mut original[4].1, |state| {
+            state.proof_kind = 3;
+            state.proof_version = 1;
+            state.step_index = 0;
+            state.tx_effect_root = root;
+        });
+        rebind_public_hash(&mut original);
+    }
     let proof = StepProofAccount::try_from_slice(&original[4].1.data).unwrap();
     let witness_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../zkvm-replay/evidence/resolver-v1/witness-v2.bin");
@@ -386,14 +468,21 @@ async fn create_proof_authenticates_transaction_path_before_allocating() {
         northstar_transaction_proof::decode_witness(&std::fs::read(witness_path).unwrap()).unwrap();
     let path = witness.checkpoint.transaction_effect_path;
     let mut siblings = [[0; 32]; northstar_portal::TX_EFFECT_AUTH_PATH_NODES];
-    siblings[..path.siblings.len()].copy_from_slice(&path.siblings);
+    let path_len = if candidate {
+        0
+    } else {
+        path.siblings.len() as u8
+    };
+    if !candidate {
+        siblings[..path.siblings.len()].copy_from_slice(&path.siblings);
+    }
     let mut test = ProgramTest::new("northstar_portal", PROGRAM, None);
     for (key, account) in &original {
         test.add_account(*key, account.clone());
     }
     let mut context = test.start_with_context().await;
     context.warp_to_slot(slot).unwrap();
-    for (index, name) in [
+    let mut cases = vec![
         "valid",
         "sibling",
         "path_length",
@@ -404,10 +493,11 @@ async fn create_proof_authenticates_transaction_path_before_allocating() {
         "settlement",
         "pda",
         "authority",
-    ]
-    .iter()
-    .enumerate()
-    {
+    ];
+    if candidate {
+        cases.extend(["checkpoint_count_2", "checkpoint_count_3"]);
+    }
+    for (index, name) in cases.iter().enumerate() {
         let mut accounts = original.clone();
         if *name != "authority" {
             update::<Challenge>(&mut accounts[2].1, |state| {
@@ -422,19 +512,26 @@ async fn create_proof_authenticates_transaction_path_before_allocating() {
             step_index: proof.step_index,
             session_context: proof.session_context,
             tx_effect_root: proof.tx_effect_root,
-            tx_effect_path_len: path.siblings.len() as u8,
+            tx_effect_path_len: path_len,
             tx_effect_path: siblings,
             readonly_l1_root: proof.readonly_l1_root,
             settlement_effect_root: proof.settlement_effect_root,
         };
         let rejection = match *name {
             "valid" => None,
+            "checkpoint_count_2" | "checkpoint_count_3" => {
+                update::<Checkpoint>(&mut accounts[1].1, |state| {
+                    let count = if *name == "checkpoint_count_2" { 2 } else { 3 };
+                    state.step_count = if count == candidate_steps { 1 } else { count };
+                });
+                Some(PortalError::StepProofPublicInputMismatch)
+            }
             "sibling" => {
                 request.tx_effect_path[0][31] ^= 1;
                 Some(PortalError::StepProofPublicInputMismatch)
             }
             "path_length" => {
-                request.tx_effect_path_len -= 1;
+                request.tx_effect_path_len = if candidate { 1 } else { path_len - 1 };
                 Some(PortalError::StepProofPublicInputMismatch)
             }
             "effect_root" => {

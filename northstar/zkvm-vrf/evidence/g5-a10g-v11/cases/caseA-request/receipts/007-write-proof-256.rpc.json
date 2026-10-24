@@ -1,0 +1,55 @@
+{
+  "blockTime": 1792855029,
+  "meta": {
+    "computeUnitsConsumed": 17706,
+    "costUnits": 19879,
+    "err": null,
+    "fee": 10000,
+    "innerInstructions": [],
+    "loadedAddresses": {
+      "readonly": [],
+      "writable": []
+    },
+    "logMessages": [
+      "Program ComputeBudget111111111111111111111111111111 invoke [1]",
+      "Program ComputeBudget111111111111111111111111111111 success",
+      "Program 5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf invoke [1]",
+      "Program log: Instruction: WriteStepProof, er_slot=1099511627888",
+      "Program 5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf consumed 17556 of 299850 compute units",
+      "Program 5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf success"
+    ],
+    "postBalances": [
+      1989803480,
+      1989664400,
+      5540160,
+      2665680,
+      4535680,
+      1141440,
+      2463840,
+      1
+    ],
+    "postTokenBalances": [],
+    "preBalances": [
+      1989813480,
+      1989664400,
+      5540160,
+      2665680,
+      4535680,
+      1141440,
+      2463840,
+      1
+    ],
+    "preTokenBalances": [],
+    "rewards": [],
+    "status": {
+      "Ok": null
+    }
+  },
+  "slot": 50,
+  "transaction": [
+    "AiOJ3FVwnVYePtKdKkT63pq7gSJKFn0elzUxacys6yXkimYyrvWDu9yINrhR7LTW7d67/EAcUygokFBgPsftSgL1fL39iiUE2vzcktdt73NddOldnA4PuXKtf7E+o+7SpU9vXfJxysjE0b06Z8J2aD23xJPeJD2EnR7snqQw0tIHAgEFCN99ewVFlgUhyBsKQHT2Ee903ctQstViRFuIzzT6EKWEyAzvu51rvrYFtP7s9VYEU0Rah2aC2N83gKiAQ9vr4Xv2S5QAcL3/ucDWJzALrHh7u9d2lL57hkn+0+aaVcDoiygJo9vdNTsJhC0USdDe50+8JoKjhfWdyQNuGpA+0J2tKl1nKrB478qdQBPMZQRCt78Bm3pW+T0nIlut8AOFscBCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQpizyPaUFFIJTMhaiJ7eG1c+0tFFBGjV0A4+XyG+gYyfAwZGb+UhFzL/7K26csOb57yM5bvF9xJrLEObOkAAAADaSwTIiTydMxBY4aoiyu5VR/MFdI6Hhi4z8OrOaAPGyQIHAAUC4JMEAAUFAQYEAwKPARNwAAAAAAEAAAABAABkAHm3BY0J6oS5dsh3X/ppYXQ0sIoAEZOHW1zKQqwQLI/RjA9vhCC+n+7FZGhXbr3TlW9D43+n5fBssmdl6O3/QUXfJIphAf29fvHAmgsSNTud45jiaLn+XtB69T+uRKh3f0il1HcAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "base64"
+  ],
+  "transactionIndex": 0,
+  "version": "legacy"
+}

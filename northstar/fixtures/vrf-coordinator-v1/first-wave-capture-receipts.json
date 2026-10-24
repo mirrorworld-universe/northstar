@@ -1,0 +1,37 @@
+{
+  "schema_version": "northstar-vrf-coordinator-retained-receipts/v1",
+  "source_commit": "d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd",
+  "provenance": "actual_local_er_with_synthetic_genesis",
+  "complete_execution_witness": false,
+  "collector_wide_monotonic_clock": false,
+  "runs": {
+    "cycles-100-final": {
+      "journal": {
+        "file": "cycles-100-final.jsonl",
+        "bytes": 17650190,
+        "sha256": "74ba99005d744d31ca3474c759d59ccd3b3c12d85abde788418ff177fa023f3f"
+      },
+      "signed_transactions": 305,
+      "successful_callbacks": 100,
+      "retained_expected_errors": [6003],
+      "request_wire_sha256": "99d38a120f84c0462686afeb657bed9bfe23c5166d807b46f69e8c2cc120fe1b",
+      "fulfill_wire_sha256": "d53d3b2b385c94a8596cca32b3987364fee6df64c84c6feb547f9f3212de9312",
+      "harder_fixture_cycle": 31,
+      "harder_fixture_hash_to_curve_tries": 12,
+      "harder_fixture_runtime_fulfill_cu": 163968,
+      "runtime_fulfill_cu_is_portal_resolution_cu": false
+    },
+    "callback-failure-final": {
+      "journal": {
+        "file": "callback-failure-final.jsonl",
+        "bytes": 2033665,
+        "sha256": "b9195ec56ea3f6a62b327c23d9d577be68c401cf2b2f63c2d1673af93932b82a"
+      },
+      "signed_transactions": 8,
+      "successful_callbacks": 0,
+      "retained_expected_errors": [6003, 6001],
+      "fulfill_wire_sha256": "6ce308489d44ba7559a9b3c4d01bf54ae313a85af5f9e8bd515b2e99969ff7e7"
+    }
+  },
+  "human_acceptance": "pending"
+}

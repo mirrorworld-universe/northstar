@@ -1,0 +1,14 @@
+{
+  "schema": "northstar.vrf-candidate-portal-session.v1",
+  "program_id": "5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf",
+  "session": "BH5yRd1S8hW9AejSTFA9o8SuxVGHQ4iSztSXg3xHHqqY",
+  "grid_id": "403",
+  "nonce": "0",
+  "validator": "E3ReDVayvjPhViUcTM83w4pChGq7vxZfqT79wDQtzhvi",
+  "challenger": "HGRwbfUV6tvn9yVcPnjopreiZt6BaPtsT65AVfhGni4E",
+  "session_context_preimage_hex": "6e6f727468737461722d73657373696f6e2d636f6e746578742d7631424242424242424242424242424242424242424242424242424242424242424298b3c8f6941452094cc85a889ede1b573ed2d1450468d5d00e3e5f21be818c9f930100000000000000000000000000000000000000000000c1c6f43d188f8470f5514bf29305a70b2a3acb4a7870cdcc8e64d8734aa2864301",
+  "session_account_sha256": "de9ab5d88d9b8b696026041f4e80fc74a0c257039fc2bdc68a6b2059fecde83b",
+  "created_at_slot": "6",
+  "ttl_slots": "1000000",
+  "genesis_hash": "CsQ5ePMvnusNquyezo7kgLzZZ4HHnYs7kdRKo11gcFBc"
+}

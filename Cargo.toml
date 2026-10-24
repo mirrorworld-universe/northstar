@@ -138,6 +138,7 @@ members = [
     "northstar/replay-harness",
     "northstar/zk-verifier-bench",
     "northstar/vrf-oracle",
+    "northstar/vrf-sbpf-replay",
 ]
 
 exclude = [
@@ -200,7 +201,7 @@ dcou-tainted-packages = [
 [workspace.lints.rust.unexpected_cfgs]
 level = "warn"
 check-cfg = [
-    'cfg(target_os, values("solana"))',
+    'cfg(target_os, values("solana", "zkvm"))',
     'cfg(feature, values("stable-abi", "no-entrypoint"))',
     'cfg(target_arch, values("sbf"))',
 ]

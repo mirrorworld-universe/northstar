@@ -1,0 +1,243 @@
+{
+  "schema_version": "northstar-vrf-coordinator-atomic-receipts/v2",
+  "source_commit": "d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd",
+  "compatibility_sha256": "5891551ac67b003986a300e6b5e92089c886c3584c12c83411cf99374227b95d",
+  "provenance": "actual_local_er_with_synthetic_genesis",
+  "artifact_availability": "retained capture bundle; raw data is not committed or published here",
+  "validation": "local hashes, clock, byte shapes and reported outcome consistency only",
+  "compute_units_scope": "native ER transaction execution; not Portal ResolveChallenge CU",
+  "auditor_script_sha256": "7baf7b837f974d242f618609affc942c2e3ebd8d6317e5772376caaeff61782b",
+  "sidecar_catalog_digest_encoding": "SHA256(sort_keys compact ensure_ascii JSON of audit.atomic_capture.captures)",
+  "actual_interpreter_execution_verified_by_this_tool": false,
+  "g5_candidate_proof_measurement": null,
+  "production_resolution": null,
+  "independent_acceptance": "pending",
+  "runs": {
+    "atomic-100": {
+      "journal": {
+        "file": "atomic-100.jsonl",
+        "bytes": 19551180,
+        "sha256": "1e06be762af2df140cb4a5cae1d49124f4c2427101dbc2d6434966054bc40b16"
+      },
+      "collector": {
+        "file": "collector.json",
+        "bytes": 2776,
+        "sha256": "a7c61126199987486cbdb3cd424b2dedd0efa24fed73152bd3614592465750da"
+      },
+      "collector_end": {
+        "file": "collector-end.json",
+        "bytes": 356,
+        "sha256": "5f16d0f9e7207bfa7c1fa29410e3183a4a9b738633dc5a4932ba6eda03ed0b09"
+      },
+      "audit_sha256": "d40d51fc633ba6d1e6ca7d67dcd29afa97a2ffa70b980a344ae22771451651ce",
+      "source_provenance": "compiled-and-captured-harness-receipts-match",
+      "signed_transactions": 304,
+      "successful_callbacks": 100,
+      "authoritative_sidecars": 200,
+      "retained_expected_errors": [],
+      "clock_id": "northstar.er-vrf.monotonic.v1/11157t3sqMV725NVRLrVQbAu98Jjfk1uCKehJnXXQs/5238/1792773966725124396/0",
+      "runtime_policy": {
+        "transaction_max_age": 900,
+        "bank_queue_retention": 1800,
+        "compute_unit_limit": 1400000,
+        "heap_bytes": 32768,
+        "zero_transaction_fees": true
+      },
+      "sidecar_catalog_sha256": "9d0cc7b5f1515c7fd184e1d7e6b0f313519b9bfb1c68679501c433f43df5a3d9",
+      "selected_fixtures": [
+        {
+          "label": "0:make_request",
+          "artifact": {
+            "file": "00000.json",
+            "bytes": 4206261,
+            "sha256": "9252ab3317f41409dcb28a74dfeda33762fe20e90b221dbfc495840b9105b87c"
+          },
+          "wire_sha256": "d7ccd45e83775d518bce21732b8e3e01ad5820356bfc3bd0c2e5929e146d44ba",
+          "input_sha256": "c332d259a19619c76e4e9b64d198251337eb81e0bce46d943ac50950fcfb7d54",
+          "output_sha256": "15c5fae00e2ced8d162ead76626f6375abe433ff1d3defacd245fda1937de0cd",
+          "profile": "consumer.make_request",
+          "compute_units": 38951,
+          "status": {
+            "Ok": null
+          }
+        },
+        {
+          "label": "0:fulfill",
+          "artifact": {
+            "file": "00001.json",
+            "bytes": 4099516,
+            "sha256": "6bf6317b5eb721b6c65773be8d1508b8bc6b0138a340afb1ea0e1c3835af0341"
+          },
+          "wire_sha256": "0987ebd502b2667bab6cbb2a3062254b950992ce8174238fe6fa5966a23977cb",
+          "input_sha256": "b1600ed6daf1c19ceb0a8333cffc4a4db2e51104a3353ce5e96b59222a48d096",
+          "output_sha256": "9c5e9aab5868da3c14d06e0cd279e34cd898fbcb233fdfc85b406e5499c2fbef",
+          "profile": "coordinator.fulfill",
+          "compute_units": 81094,
+          "status": {
+            "Ok": null
+          }
+        },
+        {
+          "label": "44:fulfill",
+          "artifact": {
+            "file": "00089.json",
+            "bytes": 4291750,
+            "sha256": "1b5eae585dd1ed74c9c22de731626009acb2263c7f498aed316ee1673c898a75"
+          },
+          "wire_sha256": "0dba025263734f85ad6b7aaa7e3d208a68cd294ebbfdd1547140853fd3313e09",
+          "input_sha256": "c111004948e36cd9f264a9b340f3555db8131f9fac3d9492e541d1b1139abbba",
+          "output_sha256": "d1661a53927125e06f8b0e792a017a7f755210877cf580728e44037db598aaf0",
+          "profile": "coordinator.fulfill",
+          "compute_units": 139097,
+          "status": {
+            "Ok": null
+          }
+        }
+      ]
+    },
+    "atomic-invalid-proof": {
+      "journal": {
+        "file": "atomic-invalid-proof.jsonl",
+        "bytes": 2068504,
+        "sha256": "ac2f6ba29f6ab9ac45bde38dd217dcd9de5bc0d029de5e15739591a77a5bc5f2"
+      },
+      "collector": {
+        "file": "collector.json",
+        "bytes": 2775,
+        "sha256": "e115184fc79bda50a10d094dec29d3ad7327103bad2e8b49fdbde89d92a7db40"
+      },
+      "collector_end": {
+        "file": "collector-end.json",
+        "bytes": 353,
+        "sha256": "8ec45d89f72e0b4954110361b709ebad1eab36c46b76c3629007ca06db10b3bf"
+      },
+      "audit_sha256": "66de8d56565466f5a97c7ee688a269492928a7a2ea4efe3acd3d97d6e8c680c5",
+      "source_provenance": "compiled-and-captured-harness-receipts-match",
+      "signed_transactions": 8,
+      "successful_callbacks": 1,
+      "authoritative_sidecars": 3,
+      "retained_expected_errors": [
+        6003
+      ],
+      "clock_id": "northstar.er-vrf.monotonic.v1/11157t3sqMV725NVRLrVQbAu98Jjfk1uCKehJnXXQs/9297/1792774202120784733/0",
+      "runtime_policy": {
+        "transaction_max_age": 900,
+        "bank_queue_retention": 1800,
+        "compute_unit_limit": 1400000,
+        "heap_bytes": 32768,
+        "zero_transaction_fees": true
+      },
+      "sidecar_catalog_sha256": "871c7d7524e42f7cb4bb2dbb7a4960740573c663f87709b0d0551d051087a18a",
+      "selected_fixtures": [
+        {
+          "label": "0:make_request",
+          "artifact": {
+            "file": "00000.json",
+            "bytes": 4134958,
+            "sha256": "33b4fbc9a5eb00d416d0d1ead819d8d1705162c080f2910feaeb6cfccf23448e"
+          },
+          "wire_sha256": "0cf115dc9c56a7cddf868a8f6bf3bd15ffb7c7efc4bd98fa6436180d27867dc4",
+          "input_sha256": "1c49cc68b73004a7e681b71a2b655bb2c32135505421041c370c1ae17d970d7f",
+          "output_sha256": "5dae8675bf0ba0faf990ebc8d5837179bbb0fbb0f28ee24bbcb3d78e9a2dd4a7",
+          "profile": "consumer.make_request",
+          "compute_units": 38951,
+          "status": {
+            "Ok": null
+          }
+        },
+        {
+          "label": "0:fulfill",
+          "artifact": {
+            "file": "00002.json",
+            "bytes": 4043482,
+            "sha256": "5a898520d52fa34b6fcefb72d1ea54bdbbe33fed6dc3327549c936d51d728a2d"
+          },
+          "wire_sha256": "c0ac2f4d28a3bfc086157c1fcbf599628304332f5912eaf1e6d5ac6beacbecbb",
+          "input_sha256": "1c4d8ed253d8a4e87dca99a1b334c90acf1d9281d98d5fd039ec57e6f4e6f5b0",
+          "output_sha256": "a713b55e8e16ec90ee9d160e534cbb672c0d97f87208ce00c0a51e9a93e8e5e7",
+          "profile": "coordinator.fulfill",
+          "compute_units": 72810,
+          "status": {
+            "Ok": null
+          }
+        }
+      ]
+    },
+    "atomic-callback-failure": {
+      "journal": {
+        "file": "atomic-callback-failure.jsonl",
+        "bytes": 2070056,
+        "sha256": "c38326d704fa4189963b9d2a2a5cbb8a9a3a741e0dd43be50378dcf8dcc62df7"
+      },
+      "collector": {
+        "file": "collector.json",
+        "bytes": 2775,
+        "sha256": "70d7a83d7319a6ae2899402b3a1590aae448f00d64575c89acc3ca43c197454b"
+      },
+      "collector_end": {
+        "file": "collector-end.json",
+        "bytes": 353,
+        "sha256": "34d843e2ced85d9dcc2b5d7a3e26a20fc285390adb563f12f256e27ce9407940"
+      },
+      "audit_sha256": "200b13585bb3a6e1cb13a6219c52d7e6ff45745b91a7add16b80a1dabc6b652f",
+      "source_provenance": "compiled-and-captured-harness-receipts-match",
+      "signed_transactions": 8,
+      "successful_callbacks": 0,
+      "authoritative_sidecars": 3,
+      "retained_expected_errors": [
+        6003,
+        6001
+      ],
+      "clock_id": "northstar.er-vrf.monotonic.v1/11157t3sqMV725NVRLrVQbAu98Jjfk1uCKehJnXXQs/9445/1792774215603948403/0",
+      "runtime_policy": {
+        "transaction_max_age": 900,
+        "bank_queue_retention": 1800,
+        "compute_unit_limit": 1400000,
+        "heap_bytes": 32768,
+        "zero_transaction_fees": true
+      },
+      "sidecar_catalog_sha256": "3f9ad1dda635b0d93ca88473bd5fc942012ed2ab760be71e346f9c3b09dab1bd",
+      "selected_fixtures": [
+        {
+          "label": "0:make_request",
+          "artifact": {
+            "file": "00000.json",
+            "bytes": 4141865,
+            "sha256": "ba39d6828e6b19def79cbbb0b171caae784a14f2ef08511132da07a904aa9b7b"
+          },
+          "wire_sha256": "68c2fc5c1c0281ec42c4682d1e69261c34aba6aa5827be9cbe3ed298c18ccd2f",
+          "input_sha256": "f7c0dc9b1a7d8576cfde2bd0bc59d67685a8161f39da126a321e5ad87f26af1a",
+          "output_sha256": "41cc9af8a7caeb604239b9cf3c22c89376f367f410428f24f730122b322edf43",
+          "profile": "consumer.make_request",
+          "compute_units": 38953,
+          "status": {
+            "Ok": null
+          }
+        },
+        {
+          "label": "0:fulfill",
+          "artifact": {
+            "file": "00002.json",
+            "bytes": 4051633,
+            "sha256": "68e8a4c969aa9fa2d071cfb7b05e5125216eb74b36e0b3320452bb9f2814eeb2"
+          },
+          "wire_sha256": "5c24ccfa5c1a4432838b02cb87f808c109e2b1538f825a3f33c0e831ce8e6193",
+          "input_sha256": "0503f331068279cc2efd0b3b41259c6436acc1bc94f80c7d2d8b1881d0c6e28c",
+          "output_sha256": "351a9e2012fc820c5577a4934a7036030fc4f1e0a0d833f18c7e396d3060486f",
+          "profile": "coordinator.fulfill",
+          "compute_units": 80357,
+          "status": {
+            "Err": {
+              "InstructionError": [
+                1,
+                {
+                  "Custom": 6001
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -23,6 +23,8 @@ name = "solana_runtime"
 bench = false
 
 [features]
+# Sonic: Separate development capture; legacy replay/history encodings stay unchanged.
+vrf-candidate-capture = ["solana-svm/vrf-candidate-capture"]
 agave-unstable-api = []
 # Sonic: independent of the upstream protobuf conformance harness.
 northstar-replay = ["dev-context-only-utils", "solana-svm/conformance"]

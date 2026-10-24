@@ -1,0 +1,17 @@
+[package]
+name = "northstar-zkvm-vrf-shared"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[features]
+crypto-checks = ["dep:sha2"]
+cycle-profiling = []
+
+[dependencies]
+sha2 = { version = "=0.10.9", features = ["compress"], optional = true }
+northstar-vrf-sbpf-replay = { path = "../../vrf-sbpf-replay" }
+northstar-transaction-proof = { path = "../../transaction-proof", default-features = false }
+
+[dev-dependencies]
+sha2-reference = { package = "sha2", version = "=0.11.0" }

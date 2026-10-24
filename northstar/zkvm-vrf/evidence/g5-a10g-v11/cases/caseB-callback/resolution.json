@@ -1,0 +1,42 @@
+{
+  "schema": "northstar.vrf-candidate-portal-resolution.v1",
+  "binding_sha256": "53f31d18fbbb8a8132bec14de3f4dc09aeb196b155fe6257487c63f9e65a94ab",
+  "proof_sha256": "90660506b86d48230b7e8e9c8fdcb43d4f785e697e4ea1b8e5233fc517598d16",
+  "public_inputs_sha256": "d7c3cc09c8291ca980bb928b92bc3d1ed3a242b9a64400ccbbbb0c5b19ea74c8",
+  "signature": "3jE42dezXq5WmsnUF1tqzJLswHLpufw3eGeRwSGxSH246Z394tD4gn7gyTJMX7S7VL8uwwXdcdBcFpdEbksu4qoZ",
+  "slot": 52,
+  "units": 109753,
+  "before_slot": 51,
+  "after_slot": 52,
+  "checkpoint": {
+    "er_slot": "1099511627891",
+    "step_count": "1",
+    "previous_state_root": "138c3bb4c12cc2296e2cebccdeb8b080c4feb3481af60172ad316abce03765f9",
+    "new_state_root": "070b0b3e764816e1db8345c3b8feaa44bdbc57305b5da0a928a6a90ab88bb49a",
+    "trace_root": "23e479c79a5058cb341c1f7b95f7739bc6736f4300c3923e21608696718b0cdb",
+    "transaction_tree_root": "0df7cb70e22b2cc01e8e1aabb61606b3bcfc24876c100879a12981b99afd539c",
+    "readonly_context_root": "0f53123bce74e766d8d5bea43f403ad138a0c706165cfc6220cc0e15a66f1b77",
+    "da_commitment": "011e377bf356a6a3bea2623381a9e343ce92744bd764afd8d29757e4c72c63cf",
+    "settlement_effect_root": "184a5b306e105fb3d401b215bdcfc86a17f7e1d2ae08062629139d0b549476e6",
+    "proposed_at_slot": "24",
+    "deadline_slot": "9024",
+    "status": 0,
+    "bond_lamports": "1000000",
+    "bond_status": 0,
+    "challenge_resolved": true
+  },
+  "challenge": {
+    "hard_deadline_slot": "9024",
+    "deadline_slot": "776",
+    "start_step": "0",
+    "end_step": "1",
+    "start_state_root": "138c3bb4c12cc2296e2cebccdeb8b080c4feb3481af60172ad316abce03765f9",
+    "end_state_root": "070b0b3e764816e1db8345c3b8feaa44bdbc57305b5da0a928a6a90ab88bb49a",
+    "status": 2,
+    "turn": 2,
+    "rounds": 0
+  },
+  "production": true,
+  "verification_outcome": "valid",
+  "hosted_acceptance": false
+}

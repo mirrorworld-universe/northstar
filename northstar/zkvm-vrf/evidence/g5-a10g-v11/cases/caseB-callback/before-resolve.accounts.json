@@ -1,0 +1,93 @@
+{
+  "slot": 51,
+  "accounts": [
+    {
+      "role": "session",
+      "address": "BH5yRd1S8hW9AejSTFA9o8SuxVGHQ4iSztSXg3xHHqqY",
+      "account": {
+        "lamports": 2463840,
+        "owner": "5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf",
+        "executable": false,
+        "rent_epoch": 18446744073709552000,
+        "data_base64": "81FIc9a8SJCSAQAAAAAAAEBCDwAAAAAAAMqaOwAAAAAGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABIxL4m6evTnKmHOWGeRfFRwph3wIyTcf9daBRB/HVojEjEvibp69OcqYc5YZ5F8VHCmHfAjJNx/11oFEH8dWiMCgAAAAAAAAAGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/g=="
+      }
+    },
+    {
+      "role": "checkpoint",
+      "address": "7mAjgvuWoWdCtFBbDefytGadhFrZyk5KJGKGSgFxQVFB",
+      "account": {
+        "lamports": 4535680,
+        "owner": "5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf",
+        "executable": false,
+        "rent_epoch": 18446744073709552000,
+        "data_base64": "xz66umJ304uYs8j2lBRSCUzIWoie3htXPtLRRQRo1dAOPl8hvoGMn3MAAAAAAQAAAQAAAAAAAAATjDu0wSzCKW4s68zeuLCAxP6zSBr2AXKtMWq84Ddl+QcLCz52SBbh24NFw7j+qkS9vFcwW12gqSimqQq4i7SaI+R5x5pQWMs0HB97lfdzm8Zzb0MAw5I+IWCGlnGLDNsN98tw4isswB6OGqu2FgazvPwkh2wQCHmhKYG5mv1TnA9TEjvOdOdm2NW+pD9AOtE4oMcGFlz8YiDMDhWmbxt3AR43e/NWpqO+omIzganjQ86SdEvXZK/Y0pdX5McsY88YSlswbhBfs9QBshW9z8hqF/fh0q4IBiYpE50LVJR25kjEvibp69OcqYc5YZ5F8VHCmHfAjJNx/11oFEH8dWiMGAAAAAAAAABAIwAAAAAAAARAQg8AAAAAAADI55/887XpdCPdf4AIlfUY+EKLRK4hIeFf0qubM1otzRkAAAAAAAAAAP4="
+      }
+    },
+    {
+      "role": "challenge",
+      "address": "9qbyrtkwCoXtxrcH5Eebn2v8fJxAB1UbNTJHLA8Ck47F",
+      "account": {
+        "lamports": 2665680,
+        "owner": "5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf",
+        "executable": false,
+        "rent_epoch": 18446744073709552000,
+        "data_base64": "d/qheXdRFtBkdq+Jyhq9j4BhkTUTGg43+piinm26ci7pn7lhF/UrLsjnn/zztel0I91/gAiV9Rj4QotEriEh4V/Sq5szWi3NSMS+Junr05yphzlhnkXxUcKYd8CMk3H/XWgUQfx1aIwZAAAAAAAAAEAjAAAAAAAACAMAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAATjDu0wSzCKW4s68zeuLCAxP6zSBr2AXKtMWq84Ddl+QcLCz52SBbh24NFw7j+qkS9vFcwW12gqSimqQq4i7SaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAAD/"
+      }
+    },
+    {
+      "role": "da",
+      "address": "7sTa9tb7BEQCwxPCKhesza31pHHWgwobHWLRAjJpvUmG",
+      "account": {
+        "lamports": 2129760,
+        "owner": "5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf",
+        "executable": false,
+        "rent_epoch": 18446744073709552000,
+        "data_base64": "GIubKIeET4GDUO05GlWTp9XOaMH+5K9sdyBLCHrQj2jxMRS1Zk0uXmR2r4nKGr2PgGGRNRMaDjf6mKKebbpyLumfuWEX9SsuAR43e/NWpqO+omIzganjQ86SdEvXZK/Y0pdX5McsY88BHjd781amo76iYjOBqeNDzpJ0S9dkr9jSl1fkxyxjz4bTlAhfnvBuoSHXZLOE5740hwC46Qqssf5gXTqNuVLAGgAAAAAAAAAB/g=="
+      }
+    },
+    {
+      "role": "proof",
+      "address": "7nnZx7xq8aaiB2x5e4tw1dXWgF4MZgLW9k719yMVjeh1",
+      "account": {
+        "lamports": 5540160,
+        "owner": "5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf",
+        "executable": false,
+        "rent_epoch": 18446744073709552000,
+        "data_base64": "PiLyAPW5OBNkdq+Jyhq9j4BhkTUTGg43+piinm26ci7pn7lhF/UrLoNQ7TkaVZOn1c5owf7kr2x3IEsIetCPaPExFLVmTS5eyOef/PO16XQj3X+ACJX1GPhCi0SuISHhX9KrmzNaLc0DAQAAAAAAAAAALvg+jSRgWALm8UD9oNWd2f9h6XKXejiknQHYere5olkN98tw4isswB6OGqu2FgazvPwkh2wQCHmhKYG5mv1TnA9TEjvOdOdm2NW+pD9AOtE4oMcGFlz8YiDMDhWmbxt3GEpbMG4QX7PUAbIVvc/Iahf34dKuCAYmKROdC1SUduaczflKuIDZ8ixOn8CYB1XRkQPiLWpL5VVJG56Cm/JkJmQBAAABkGYFBrhtSCMLfo6cj9y0PU94Xml+TqG45SM/xRdZjRb9Q4iiHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAC+FDumYl01swA5QzQgUsJjAW/reRm0oVzJA0FfyU1IAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACKHsdrnSrLSMTWkCOJ2FC0qz7rjegzW5ZlQ0acf6XnhGHK9R9XAWLimHZdxEL4GNXIIMsFlkRXTyw1sDvIb1/0TZwGKEFswXQ4PL3xIasH2EG7mZja0tHAg88S54tkvqgbvln9X6xIvkbkXS9dtFQz6+qlgXU6OYNTkLuCn75XGKdNmLZv1ttIgiGyEDtKC3Q86UrX+Qv8/tzac/AEaGNELibRLa1nyYxcC5I7iCkEIS6bUFG/atQ+X/FBND8Ok0gjCzxbyKyC7OdauIxBltZJDXkKDz/OQGcY2aVwSKexGCmPjibxUg1sGVFRt50bhU1iY/0GVdGdhmVS4j99b0iE="
+      }
+    },
+    {
+      "role": "cursor",
+      "address": "CPsyHpp9wGSYqWgYoCjW5m4qFgnizcb4PekNEVJfViRR",
+      "account": {
+        "lamports": 1955760,
+        "owner": "5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf",
+        "executable": false,
+        "rent_epoch": 18446744073709552000,
+        "data_base64": "+9/YvDP0gcSYs8j2lBRSCUzIWoie3htXPtLRRQRo1dAOPl8hvoGMnwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGR2r4nKGr2PgGGRNRMaDjf6mKKebbpyLumfuWEX9SsucwAAAAABAAD/"
+      }
+    },
+    {
+      "role": "validator",
+      "address": "5u4MZiLZ7RNNQX8R9974wRopA24TzT7Sq9EpaF13oTCP",
+      "account": {
+        "lamports": 1989793480,
+        "owner": "11111111111111111111111111111111",
+        "executable": false,
+        "rent_epoch": 18446744073709552000,
+        "data_base64": ""
+      }
+    },
+    {
+      "role": "challenger",
+      "address": "EXFPcQYkVGqhpYFQHvTSS58EsTdS3DRU7UMFJjBNPrNg",
+      "account": {
+        "lamports": 1989664400,
+        "owner": "11111111111111111111111111111111",
+        "executable": false,
+        "rent_epoch": 18446744073709552000,
+        "data_base64": ""
+      }
+    }
+  ]
+}

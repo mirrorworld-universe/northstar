@@ -1,0 +1,23 @@
+[package]
+name = "northstar-zkvm-vrf-program"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "northstar-zkvm-vrf-candidate"
+path = "src/bin/candidate.rs"
+required-features = ["candidate"]
+
+[features]
+candidate = []
+crypto-checks = ["northstar-zkvm-vrf-shared/crypto-checks"]
+cycle-profiling = ["northstar-zkvm-vrf-shared/cycle-profiling"]
+
+[dependencies]
+northstar-zkvm-vrf-shared = { path = "../shared" }
+northstar-vrf-sbpf-replay = { path = "../../vrf-sbpf-replay" }
+solana-account = { version = "5.1.0", features = ["serde"] }
+solana-message = { version = "5.1.0", features = ["serde"] }
+solana-pubkey = { version = "4.4.0", features = ["serde"] }
+sp1-zkvm = "=6.8.0"

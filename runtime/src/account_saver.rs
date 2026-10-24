@@ -215,6 +215,9 @@ mod tests {
         Ok(ProcessedTransaction::Executed(Box::new(
             ExecutedTransaction {
                 execution_details: TransactionExecutionDetails {
+                    // Sonic: Synthetic saver fixtures do not contain candidate captures.
+                    #[cfg(feature = "vrf-candidate-capture")]
+                    candidate: None,
                     status,
                     log_messages: None,
                     inner_instructions: None,

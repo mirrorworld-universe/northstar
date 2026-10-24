@@ -19,6 +19,7 @@ pub const SP1_GROTH16_VK_ROOT: [u8; 32] = [
 ];
 pub const ER_STEP_PROOF_KIND_ONE_ACCOUNT: u8 = 1;
 pub const ER_STEP_PROOF_KIND_FULL_TRANSACTION: u8 = 2;
+pub const ER_STEP_PROOF_KIND_BOUNDED_VRF: u8 = 3;
 pub const ER_STEP_PROOF_VERSION_V1: u8 = 1;
 
 /// BN254 scalar-field modulus, big-endian.
@@ -269,6 +270,41 @@ impl TryFrom<ErStepPublicInputsV1> for FullTransactionPublicInputsV1 {
     }
 }
 
+/// Separately versioned bounded actual-SBPF development relation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoundedVrfPublicInputsV1(ErStepPublicInputsV1);
+
+impl BoundedVrfPublicInputsV1 {
+    pub const fn into_inner(self) -> ErStepPublicInputsV1 {
+        self.0
+    }
+}
+
+impl TryFrom<ErStepPublicInputsV1> for BoundedVrfPublicInputsV1 {
+    type Error = ZkTypeError;
+
+    fn try_from(inputs: ErStepPublicInputsV1) -> Result<Self, Self::Error> {
+        if inputs.domain
+            != FrBytes::er_step_domain_v1(ER_STEP_PROOF_KIND_BOUNDED_VRF, ER_STEP_PROOF_VERSION_V1)
+        {
+            return Err(ZkTypeError::InvalidProofDomain);
+        }
+        for commitment in [
+            inputs.session_context,
+            inputs.pre_state_root,
+            inputs.post_state_root,
+            inputs.tx_effect_root,
+            inputs.readonly_l1_root,
+            inputs.settlement_effect_root,
+        ] {
+            if commitment == FrBytes::ZERO {
+                return Err(ZkTypeError::MissingPublicCommitment);
+            }
+        }
+        Ok(Self(inputs))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,6 +440,68 @@ mod tests {
         }
         assert_eq!(borsh::to_vec(&public).unwrap().len(), 8 * 32);
         assert_eq!(ErStepPublicInputsV1::from_array(array), Ok(public));
+    }
+
+    #[test]
+    fn bounded_vrf_inputs_fail_closed_and_preserve_legacy_domains() {
+        let public = ErStepPublicInputsV1 {
+            domain: FrBytes::er_step_domain_v1(ER_STEP_PROOF_KIND_BOUNDED_VRF, 1),
+            session_context: FrBytes::from_u64(1),
+            slot_step: FrBytes::ZERO,
+            pre_state_root: FrBytes::from_u64(2),
+            post_state_root: FrBytes::from_u64(3),
+            tx_effect_root: FrBytes::from_u64(4),
+            readonly_l1_root: FrBytes::from_u64(5),
+            settlement_effect_root: FrBytes::from_u64(6),
+        };
+        assert_eq!(
+            BoundedVrfPublicInputsV1::try_from(public)
+                .unwrap()
+                .into_inner(),
+            public
+        );
+        assert_eq!(borsh::to_vec(&public).unwrap().len(), 256);
+        assert_eq!(
+            FullTransactionPublicInputsV1::try_from(public),
+            Err(ZkTypeError::InvalidProofDomain)
+        );
+        for kind in [0, 1, 2, 4, 255] {
+            let mut changed = public;
+            changed.domain = FrBytes::er_step_domain_v1(kind, 1);
+            assert_eq!(
+                BoundedVrfPublicInputsV1::try_from(changed),
+                Err(ZkTypeError::InvalidProofDomain)
+            );
+            if kind == ER_STEP_PROOF_KIND_FULL_TRANSACTION {
+                assert!(FullTransactionPublicInputsV1::try_from(changed).is_ok());
+            }
+        }
+        for version in [0, 2, 255] {
+            let mut changed = public;
+            changed.domain = FrBytes::er_step_domain_v1(ER_STEP_PROOF_KIND_BOUNDED_VRF, version);
+            assert_eq!(
+                BoundedVrfPublicInputsV1::try_from(changed),
+                Err(ZkTypeError::InvalidProofDomain)
+            );
+        }
+        for index in [1, 3, 4, 5, 6, 7] {
+            let mut fields = public.to_array();
+            fields[index] = [0; 32];
+            assert_eq!(
+                BoundedVrfPublicInputsV1::try_from(
+                    ErStepPublicInputsV1::from_array(fields).unwrap()
+                ),
+                Err(ZkTypeError::MissingPublicCommitment)
+            );
+        }
+        for index in 0..ER_STEP_PUBLIC_INPUTS_V1 {
+            let mut fields = public.to_array();
+            fields[index] = BN254_FR_MODULUS_BE;
+            assert_eq!(
+                ErStepPublicInputsV1::from_array(fields),
+                Err(ZkTypeError::NonCanonicalFieldElement)
+            );
+        }
     }
 
     #[test]

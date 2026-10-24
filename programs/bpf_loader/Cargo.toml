@@ -45,7 +45,7 @@ solana-loader-v3-interface = { workspace = true, features = ["serde"] }
 solana-packet = { workspace = true }
 solana-program-runtime = { workspace = true }
 solana-pubkey = { workspace = true }
-solana-sbpf = { workspace = true, features = ["jit"] }
+solana-sbpf = { workspace = true }
 solana-sdk-ids = { workspace = true }
 solana-svm-feature-set = { workspace = true }
 solana-svm-log-collector = { workspace = true }
@@ -55,6 +55,10 @@ solana-syscalls = { workspace = true }
 solana-system-interface = { workspace = true }
 solana-transaction-context = { workspace = true, features = ["bincode"] }
 wincode = { workspace = true }
+
+# Sonic: preserve host JIT without pulling executable-memory support into zkVM.
+[target.'cfg(not(target_os = "zkvm"))'.dependencies]
+solana-sbpf = { workspace = true, features = ["jit"] }
 
 [dev-dependencies]
 assert_matches = { workspace = true }
