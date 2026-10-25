@@ -90,6 +90,17 @@ impl BlockhashQueue {
             .map(|hash| DurableNonce::from_blockhash(&hash));
     }
 
+    // Sonic: Read-only candidate context export preserves every hash/age/fee entry.
+    pub fn capture_entries(&self) -> impl Iterator<Item = (Hash, Option<u64>, u64)> + '_ {
+        self.hashes.iter().map(|(hash, info)| {
+            (
+                *hash,
+                self.last_hash_index.checked_sub(info.hash_index),
+                info.lamports_per_signature(),
+            )
+        })
+    }
+
     pub fn get_lamports_per_signature(&self, hash: &Hash) -> Option<u64> {
         self.hashes
             .get(hash)

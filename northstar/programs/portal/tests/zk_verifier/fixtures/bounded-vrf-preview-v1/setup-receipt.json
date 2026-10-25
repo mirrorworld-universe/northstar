@@ -1,0 +1,10 @@
+{
+  "schema": "northstar-sp1-setup-v1",
+  "sp1_version": "6.8.0",
+  "elf_sha256": "23543b749b4a7c3f35b580695392768d30e6f2ef99e7d13b4f8fcb7bd4412b34",
+  "profile_sha256": "024ba21c70e2d7f05b9833b4df373812231fe124e27a3a266b17c6c8827cdfce",
+  "policy_profile_sha256": "c627c521e8bea57fdebaf2e611a3c56b047e0ae18e3e2e1a586f64d86a8a4d0d",
+  "program_vkey_hash": "0x001a26a674f911be746ffa5ea2dbdd412b0ee692bd34ebf2562b0b3bd25bd311",
+  "verifying_key_sha256": "e524336881c01f00b094a89956653dba2899cbbfb8c2e59aa0dc9617ad9f7ace",
+  "production_acceptance": false
+}

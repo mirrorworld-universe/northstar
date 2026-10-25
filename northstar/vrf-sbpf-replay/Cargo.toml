@@ -1,0 +1,60 @@
+[package]
+name = "northstar-vrf-sbpf-replay"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "vrf-sbpf-replay"
+path = "src/bin/replay.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "vrf-candidate-binding"
+path = "src/bin/binding.rs"
+required-features = ["cli"]
+
+[features]
+cli = ["dep:serde_json", "dep:borsh"]
+
+[dependencies]
+agave-reserved-account-keys = { workspace = true }
+agave-feature-set = { workspace = true }
+serde_json = { workspace = true, optional = true }
+borsh = { workspace = true, optional = true }
+northstar-transaction-proof = { path = "../transaction-proof", default-features = false }
+solana-account = { workspace = true }
+solana-bpf-loader-program = { workspace = true }
+solana-compute-budget = { workspace = true }
+solana-compute-budget-program = { workspace = true }
+solana-message = { workspace = true }
+solana-hash = { workspace = true }
+solana-instruction-error = { workspace = true }
+solana-program-runtime = { workspace = true }
+solana-pubkey = { workspace = true, features = ["sha2", "curve25519"] }
+solana-sdk-ids = { workspace = true }
+solana-rent = { workspace = true }
+solana-clock = { workspace = true }
+solana-sha256-hasher = { workspace = true, features = ["sha2"] }
+solana-svm-callback = { workspace = true }
+solana-svm-feature-set = { workspace = true }
+solana-svm-log-collector = { workspace = true }
+solana-svm-timings = { workspace = true }
+solana-svm-transaction = { workspace = true }
+solana-syscalls = { workspace = true }
+solana-system-program = { workspace = true }
+solana-transaction-context = { workspace = true }
+solana-transaction-error = { workspace = true }
+
+[dev-dependencies]
+solana-pubkey = { workspace = true, features = ["std"] }
+solana-transaction-context = { workspace = true, features = ["dev-context-only-utils"] }
+solana-clock = { workspace = true, features = ["wincode"] }
+solana-hash = { workspace = true }
+solana-instruction = { workspace = true }
+solana-rent = { workspace = true, features = ["wincode"] }
+solana-slot-hashes = { workspace = true, features = ["wincode"] }
+wincode = { workspace = true }
+
+[lints]
+workspace = true

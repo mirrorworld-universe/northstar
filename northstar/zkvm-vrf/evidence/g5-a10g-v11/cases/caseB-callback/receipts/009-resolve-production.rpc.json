@@ -1,0 +1,60 @@
+{
+  "blockTime": 1792855073,
+  "meta": {
+    "computeUnitsConsumed": 109903,
+    "costUnits": 112222,
+    "err": null,
+    "fee": 5000,
+    "innerInstructions": [],
+    "loadedAddresses": {
+      "readonly": [],
+      "writable": []
+    },
+    "logMessages": [
+      "Program ComputeBudget111111111111111111111111111111 invoke [1]",
+      "Program ComputeBudget111111111111111111111111111111 success",
+      "Program 5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf invoke [1]",
+      "Program log: Instruction: ResolveChallenge, er_slot=1099511627891",
+      "Program log: Challenge proof: er_slot=1099511627891, elapsed_slots=27, outcome=2",
+      "Program 5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf consumed 109753 of 129850 compute units",
+      "Program 5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf success"
+    ],
+    "postBalances": [
+      1989788480,
+      4535680,
+      2665680,
+      1955760,
+      1989664400,
+      1141440,
+      5540160,
+      2129760,
+      2463840,
+      1
+    ],
+    "postTokenBalances": [],
+    "preBalances": [
+      1989793480,
+      4535680,
+      2665680,
+      1955760,
+      1989664400,
+      1141440,
+      5540160,
+      2129760,
+      2463840,
+      1
+    ],
+    "preTokenBalances": [],
+    "rewards": [],
+    "status": {
+      "Ok": null
+    }
+  },
+  "slot": 52,
+  "transaction": [
+    "AYhygBO6Royq5+Pqse6e9CWvlDmk430wqZOVYh+XRr2D20JWCjikwGyUDI8tAxlFt5/pibTJ6bTwVsKzzRXQswQBAAUKSMS+Junr05yphzlhnkXxUcKYd8CMk3H/XWgUQfx1aIxkdq+Jyhq9j4BhkTUTGg43+piinm26ci7pn7lhF/UrLoNQ7TkaVZOn1c5owf7kr2x3IEsIetCPaPExFLVmTS5eqUz3bxJr/MLnNBGBrniCYd8jA193a7XbFJHE/tOTGyzI55/887XpdCPdf4AIlfUY+EKLRK4hIeFf0qubM1otzUJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCZODIMKGtuk9G055xHpaNFo2d84DxSO2f195Gu4DR4hRmEzTlXe/C88opZTz7BzwGntgXhGB31k7LH+l4qrjrq5izyPaUFFIJTMhaiJ7eG1c+0tFFBGjV0A4+XyG+gYyfAwZGb+UhFzL/7K26csOb57yM5bvF9xJrLEObOkAAAACte2SDJGyHqypkURLdCMAXLfulZotCfWHhcWDFKW4nkAIJAAUC0PsBAAUIAAgBAgcGBAMKFXMAAAAAAQAAAA==",
+    "base64"
+  ],
+  "transactionIndex": 0,
+  "version": "legacy"
+}

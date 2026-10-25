@@ -250,6 +250,9 @@ mod check_transactions;
 pub mod entry_bytes_budget;
 // Sonic: Supported ER transaction reconstruction inputs.
 pub mod er_replay;
+// Sonic: Candidate capture is separately versioned and never widens legacy admission.
+#[cfg(feature = "vrf-candidate-capture")]
+pub mod er_vrf_candidate;
 mod fee_distribution;
 mod metrics;
 pub(crate) mod partitioned_epoch_rewards;

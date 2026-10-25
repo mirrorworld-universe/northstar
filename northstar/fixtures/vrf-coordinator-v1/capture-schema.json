@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Draft Coordinator runtime observations, not acceptance evidence",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "evidence_class", "compatibility_sha256", "clock_id", "environment", "window", "artifacts", "requests", "callbacks", "attempts"],
+  "properties": {
+    "schema_version": {"const": "northstar-vrf-coordinator-capture/v1"},
+    "evidence_class": {"enum": ["synthetic", "native_diagnostic", "local_er", "hosted_er"]},
+    "compatibility_sha256": {"$ref": "#/$defs/sha256"},
+    "clock_id": {"$ref": "#/$defs/id"},
+    "environment": {"$ref": "#/$defs/environment"},
+    "window": {"$ref": "#/$defs/window"},
+    "artifacts": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/artifact"}},
+    "requests": {"type": "array", "maxItems": 2000, "items": {"$ref": "#/$defs/request"}},
+    "callbacks": {"type": "array", "maxItems": 4000, "items": {"$ref": "#/$defs/callback"}},
+    "attempts": {"type": "array", "maxItems": 10000, "items": {"$ref": "#/$defs/attempt"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"},
+    "text": {"type": "string", "minLength": 1, "maxLength": 1024},
+    "optional_text": {"type": ["string", "null"], "minLength": 1, "maxLength": 1024},
+    "sha256": {"type": "string", "pattern": "[0-9a-f]{64}"},
+    "optional_sha256": {"type": ["string", "null"], "pattern": "[0-9a-f]{64}"},
+    "optional_commit": {"type": ["string", "null"], "pattern": "[0-9a-f]{40}"},
+    "time": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+    "sequence": {"type": "integer", "minimum": 1, "maximum": 10000},
+    "artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "path", "sha256", "bytes", "provenance"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "path": {"type": "string", "minLength": 1, "maxLength": 512},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "bytes": {"type": "integer", "minimum": 1, "maximum": 67108864},
+        "provenance": {"enum": ["captured", "synthetic", "retained"]}
+      }
+    },
+    "program": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "binary_sha256", "features"],
+      "properties": {
+        "id": {"$ref": "#/$defs/text"}, "binary_sha256": {"$ref": "#/$defs/optional_sha256"},
+        "features": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}
+      }
+    },
+    "environment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["runtime_revision", "runtime_binary_sha256", "er_genesis_hash", "l1_genesis_hash", "feature_set_sha256", "configuration_artifact", "programs"],
+      "properties": {
+        "runtime_revision": {"$ref": "#/$defs/optional_commit"},
+        "runtime_binary_sha256": {"$ref": "#/$defs/optional_sha256"},
+        "er_genesis_hash": {"$ref": "#/$defs/optional_text"},
+        "l1_genesis_hash": {"$ref": "#/$defs/optional_text"},
+        "feature_set_sha256": {"$ref": "#/$defs/optional_sha256"},
+        "configuration_artifact": {"type": ["string", "null"], "pattern": "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"},
+        "programs": {
+          "type": "object", "additionalProperties": false,
+          "required": ["coordinator", "reference_verifier", "test_consumer"],
+          "properties": {
+            "coordinator": {"$ref": "#/$defs/program"},
+            "reference_verifier": {"$ref": "#/$defs/program"},
+            "test_consumer": {"$ref": "#/$defs/program"}
+          }
+        }
+      }
+    },
+    "window": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "started_ns", "ended_ns", "attempts_artifact"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"}, "started_ns": {"$ref": "#/$defs/time"},
+        "ended_ns": {"$ref": "#/$defs/time"},
+        "attempts_artifact": {"type": ["string", "null"], "pattern": "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"}
+      }
+    },
+    "request": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "request_address", "sequence", "submitted_ns", "status", "transaction", "artifact"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"}, "request_address": {"$ref": "#/$defs/text"},
+        "sequence": {"$ref": "#/$defs/sequence"}, "submitted_ns": {"$ref": "#/$defs/time"},
+        "status": {"enum": ["fulfilled", "pending", "failed", "missing"]},
+        "transaction": {"$ref": "#/$defs/optional_text"}, "artifact": {"$ref": "#/$defs/id"}
+      }
+    },
+    "callback": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "request_id", "sequence", "observed_ns", "status", "transaction", "output_hex", "deliveries", "artifact"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"}, "request_id": {"$ref": "#/$defs/id"},
+        "sequence": {"$ref": "#/$defs/sequence"}, "observed_ns": {"$ref": "#/$defs/time"},
+        "status": {"enum": ["success", "failed", "missing"]},
+        "transaction": {"$ref": "#/$defs/optional_text"},
+        "output_hex": {"type": ["string", "null"], "pattern": "[0-9a-f]{128}"},
+        "deliveries": {"type": ["integer", "null"], "minimum": 0, "maximum": 10000},
+        "artifact": {"$ref": "#/$defs/id"}
+      }
+    },
+    "attempt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "request_id", "sequence", "stage", "status", "observed_ns", "transaction", "artifact", "reason"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"}, "request_id": {"$ref": "#/$defs/id"},
+        "sequence": {"$ref": "#/$defs/sequence"},
+        "stage": {"enum": ["request", "fulfill", "callback"]},
+        "status": {"enum": ["success", "failed", "missing"]},
+        "observed_ns": {"$ref": "#/$defs/time"},
+        "transaction": {"$ref": "#/$defs/optional_text"},
+        "artifact": {"$ref": "#/$defs/id"}, "reason": {"$ref": "#/$defs/optional_text"}
+      }
+    }
+  }
+}

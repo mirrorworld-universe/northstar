@@ -53,7 +53,7 @@ solana-message = { workspace = true, optional = true }
 solana-program-entrypoint = { workspace = true }
 solana-pubkey = { workspace = true }
 solana-rent = { workspace = true, features = ["wincode"] }
-solana-sbpf = { workspace = true, features = ["jit"] }
+solana-sbpf = { workspace = true }
 # Sonic: hash deterministic SBPF trace program text.
 solana-sha256-hasher = { workspace = true, features = ["sha2"] }
 solana-sdk-ids = { workspace = true }
@@ -73,6 +73,10 @@ solana-sysvar-id = { workspace = true }
 solana-transaction-context = { workspace = true }
 thiserror = { workspace = true }
 wincode = { workspace = true }
+
+# Sonic: the JIT is host-only; the same interpreter runs on zkVM targets.
+[target.'cfg(not(target_os = "zkvm"))'.dependencies]
+solana-sbpf = { workspace = true, features = ["jit"] }
 
 [dev-dependencies]
 assert_matches = { workspace = true }

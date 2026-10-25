@@ -1176,6 +1176,9 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         config: &TransactionProcessingConfig,
     ) -> ExecutedTransaction {
         let transaction_accounts = std::mem::take(&mut loaded_transaction.accounts);
+        // Sonic: Preserve actual loader/fee-normalized input before interpreter mutation.
+        #[cfg(feature = "vrf-candidate-capture")]
+        let candidate_accounts = transaction_accounts.clone();
 
         // Ensure the length of accounts matches the expected length from tx.account_keys().
         // This is a sanity check in case that someone starts adding some additional accounts
@@ -1349,6 +1352,17 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         execute_timings.details.total_account_count += loaded_transaction.accounts.len() as u64;
         execute_timings.details.changed_account_count += touched_account_count as u64;
 
+        // Sonic: Empty data still has a producer; keep it only in the candidate sidecar.
+        #[cfg(feature = "vrf-candidate-capture")]
+        let candidate = Some(Box::new(
+            crate::transaction_execution_result::CandidateExecutionBoundary {
+                accounts: candidate_accounts,
+                return_data: return_data.clone(),
+                compute_unit_limit: compute_budget.compute_unit_limit,
+                heap_size: compute_budget.heap_size,
+                execution_cost_debug: format!("{:?}", self.execution_cost),
+            },
+        ));
         let return_data = if config.recording_config.enable_return_data_recording
             && !return_data.data.is_empty()
         {
@@ -1359,6 +1373,9 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
 
         ExecutedTransaction {
             execution_details: TransactionExecutionDetails {
+                // Sonic: Development capture does not affect transaction history fields.
+                #[cfg(feature = "vrf-candidate-capture")]
+                candidate,
                 status,
                 log_messages,
                 inner_instructions,

@@ -1,0 +1,42 @@
+{
+  "label": "propose-checkpoint-bond",
+  "transaction_sha256": "162f6b16800f8b71b1fabccc058c94c3b342ccdd7fb25c0294ceb91a78d30cc8",
+  "ordered_instructions": [
+    {
+      "program": "ComputeBudget111111111111111111111111111111",
+      "data_hex": "02e0930400",
+      "accounts": []
+    },
+    {
+      "program": "5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf",
+      "data_hex": "0e73000000000100000100000000000000138c3bb4c12cc2296e2cebccdeb8b080c4feb3481af60172ad316abce03765f9070b0b3e764816e1db8345c3b8feaa44bdbc57305b5da0a928a6a90ab88bb49a23e479c79a5058cb341c1f7b95f7739bc6736f4300c3923e21608696718b0cdb0df7cb70e22b2cc01e8e1aabb61606b3bcfc24876c100879a12981b99afd539c0f53123bce74e766d8d5bea43f403ad138a0c706165cfc6220cc0e15a66f1b77011e377bf356a6a3bea2623381a9e343ce92744bd764afd8d29757e4c72c63cf184a5b306e105fb3d401b215bdcfc86a17f7e1d2ae08062629139d0b549476e62823000000000000",
+      "accounts": [
+        {
+          "key": "5u4MZiLZ7RNNQX8R9974wRopA24TzT7Sq9EpaF13oTCP",
+          "signer": true,
+          "writable": true
+        },
+        {
+          "key": "BH5yRd1S8hW9AejSTFA9o8SuxVGHQ4iSztSXg3xHHqqY",
+          "signer": false,
+          "writable": false
+        },
+        {
+          "key": "7mAjgvuWoWdCtFBbDefytGadhFrZyk5KJGKGSgFxQVFB",
+          "signer": false,
+          "writable": true
+        },
+        {
+          "key": "CPsyHpp9wGSYqWgYoCjW5m4qFgnizcb4PekNEVJfViRR",
+          "signer": false,
+          "writable": true
+        },
+        {
+          "key": "11111111111111111111111111111111",
+          "signer": false,
+          "writable": false
+        }
+      ]
+    }
+  ]
+}

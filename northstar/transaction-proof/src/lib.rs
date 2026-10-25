@@ -5,6 +5,9 @@ pub mod fixture;
 pub mod poseidon;
 #[cfg(not(target_os = "zkvm"))]
 pub mod readiness;
+pub mod vrf_candidate;
+#[cfg(all(feature = "host", not(target_os = "zkvm")))]
+pub mod vrf_coordinator_profile;
 
 #[cfg(not(target_os = "zkvm"))]
 use sha2::{Digest, Sha256};

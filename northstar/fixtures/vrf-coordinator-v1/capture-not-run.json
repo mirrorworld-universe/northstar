@@ -1,0 +1,41 @@
+{
+  "schema_version": "northstar-vrf-coordinator-capture/v1",
+  "evidence_class": "synthetic",
+  "compatibility_sha256": "5891551ac67b003986a300e6b5e92089c886c3584c12c83411cf99374227b95d",
+  "clock_id": "not-run-placeholder",
+  "environment": {
+    "runtime_revision": null,
+    "runtime_binary_sha256": null,
+    "er_genesis_hash": null,
+    "l1_genesis_hash": null,
+    "feature_set_sha256": null,
+    "configuration_artifact": null,
+    "programs": {
+      "coordinator": {
+        "id": "FTDEMxTj2RsKBSCGETrFXDiSLu1nJLRfAYDsjJ6GXQ4N",
+        "binary_sha256": null,
+        "features": []
+      },
+      "reference_verifier": {
+        "id": "FUBz1nvSSoHnMqFoK2CA3jF5ckpYPdF3ZT4SoLzDNzh1",
+        "binary_sha256": null,
+        "features": []
+      },
+      "test_consumer": {
+        "id": "HFg1j9ZMixGkMo42ZoeqNpqBZpGcVbsRwfFBLcGCn5Kt",
+        "binary_sha256": null,
+        "features": []
+      }
+    }
+  },
+  "window": {
+    "id": "not-run-no-observations",
+    "started_ns": 0,
+    "ended_ns": 0,
+    "attempts_artifact": null
+  },
+  "artifacts": [],
+  "requests": [],
+  "callbacks": [],
+  "attempts": []
+}

@@ -1,0 +1,142 @@
+{
+  "schema": "northstar-vrf-coordinator-proof-profile-fixture-metadata-v1",
+  "profile_id": "northstar-vrf-coordinator-proof-profile-v1-draft",
+  "status": "experimental_candidate_legacy_not_admitted",
+  "decision_date": "2026-10-23",
+  "selected_relation": "bounded_actual_sbpf_interpreter",
+  "measurement_target": "g5.xlarge/A10G",
+  "candidate_envelope": {
+    "magic": "NSVRF001",
+    "version": 1,
+    "proof_kind": 3,
+    "proof_version": 1,
+    "public_field_order_changed": false,
+    "transaction_effect_public_value": "candidate_checkpoint_transaction_tree_root",
+    "readonly_public_value": "authenticated_er_readonly_profile_runtime_context_tree_not_l1_provenance",
+    "readonly_context_membership": "per_step_path_same_index_and_leaf_count_as_transaction_tree",
+    "maximum_checkpoint_steps": 16,
+    "initial_review_profile_checkpoint_steps": 1,
+    "checkpoint_step_count_binding": "fixed_in_guest_profile_and_checked_by_portal_metadata",
+    "cross_layer_settlement": "unsupported_fixed_empty_effect_commitment",
+    "source": "northstar/transaction-proof/src/vrf_candidate.rs",
+    "execution_engine": "required_actual_interpreter_not_test_engine",
+    "transaction_fees": 0,
+    "prioritization_fees": 0,
+    "maximum_envelope_bytes": 16777216,
+    "maximum_account_data_bytes": 4194304
+  },
+  "northstar_revision": "34d6b3e2ff744c680d76ccdbfbf9aa2f3dba0d52",
+  "library_revision": "d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd",
+  "library_source": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library/tree/d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd",
+  "programs": {
+    "coordinator": "FTDEMxTj2RsKBSCGETrFXDiSLu1nJLRfAYDsjJ6GXQ4N",
+    "reference_verifier_test_only": "FUBz1nvSSoHnMqFoK2CA3jF5ckpYPdF3ZT4SoLzDNzh1",
+    "test_consumer": "HFg1j9ZMixGkMo42ZoeqNpqBZpGcVbsRwfFBLcGCn5Kt"
+  },
+  "algorithm": {
+    "name": "ECVRF-EDWARDS25519-SHA512-TAI",
+    "application_suite": 1,
+    "rfc_suite_string": 3,
+    "proof_bytes": 80,
+    "output_bytes": 64
+  },
+  "source_payload_bytes": {
+    "fulfill_with_80_byte_proof": 92,
+    "verify_with_80_byte_proof": 157,
+    "callback_with_empty_appended_arguments": 104,
+    "validated_by_shape_diagnostic": false
+  },
+  "synthetic_test_specimens": {
+    "source": "northstar/transaction-proof/tests/vrf_coordinator_profile.rs",
+    "kind": "signed_wire_shapes_not_execution_captures",
+    "valid_application_arguments": false,
+    "proves_actual_execution": false,
+    "expected_frozen_wire_result": "Wire",
+    "instruction_labels": [
+      "coordinator:request_random",
+      "coordinator:fulfill",
+      "reference_verifier:verify",
+      "test_consumer:make_request",
+      "test_consumer:on_random"
+    ]
+  },
+  "source_callback_key_maps": {
+    "kind": "synthetic_keys_with_source_account_index_maps_not_execution_captures",
+    "compute_budget_prefix": false,
+    "request": {
+      "entrypoint": "test_consumer:make_request",
+      "message_keys": 9,
+      "writable_keys": 3,
+      "program_index": 8,
+      "instruction_accounts": [0, 1, 3, 8, 4, 2, 5, 6, 7]
+    },
+    "fulfillment": {
+      "entrypoint": "coordinator:fulfill",
+      "message_keys": 9,
+      "writable_keys": 4,
+      "program_index": 8,
+      "instruction_accounts": [0, 4, 1, 2, 5, 6, 7, 3]
+    }
+  },
+  "retained_regression": {
+    "path": "northstar/zkvm-replay/evidence/resolver-v1/witness-v2.bin",
+    "kind": "retained_narrow_relation_not_vrf",
+    "sha256": "4ed87414613d145efb056486eb1a7946637c24241f5c5f8b3af58891cfef8161",
+    "fresh_execution": false
+  },
+  "required_runtime_captures": [
+    "request_success",
+    "fulfillment_callback_success",
+    "fulfillment_invalid_proof_rollback",
+    "fulfillment_callback_failure_rollback"
+  ],
+  "required_capture_fields": [
+    "raw_signed_transaction_bytes_and_sha256",
+    "ordered_message_keys_flags_and_instruction_indices",
+    "pre_post_readonly_rollback_accounts_with_absence_and_sha256",
+    "all_invoked_program_programdata_elf_bytes_and_sha256",
+    "source_build_flags_and_toolchain_identity",
+    "runtime_feature_vm_syscall_compute_fee_rent_policy",
+    "clock_and_raw_slot_hashes_with_authenticated_provenance",
+    "nested_vm_trace_and_call_time_memory_transitions",
+    "cpi_privileges_pda_seeds_signers_and_errors",
+    "return_data_producer_and_consumed_bytes",
+    "transaction_errors_cu_logs_and_complete_account_effects",
+    "checkpoint_roots_paths_and_independent_anchors",
+    "observation_level_native_bank_local_er_hosted_er_gpu_or_portal"
+  ],
+  "captured_runtime_artifacts": [
+    {
+      "role": "request",
+      "sha256": "99d38a120f84c0462686afeb657bed9bfe23c5166d807b46f69e8c2cc120fe1b",
+      "bytes": 527,
+      "level": "actual_local_er_runtime_diagnostic",
+      "message_signature_verified": true,
+      "legacy_wire_rejected": true,
+      "candidate_outer_shape_admitted": true,
+      "complete_execution_witness": false
+    },
+    {
+      "role": "fulfillment",
+      "sha256": "d53d3b2b385c94a8596cca32b3987364fee6df64c84c6feb547f9f3212de9312",
+      "bytes": 533,
+      "level": "actual_local_er_runtime_diagnostic",
+      "message_signature_verified": true,
+      "legacy_wire_rejected": true,
+      "candidate_outer_shape_admitted": true,
+      "complete_execution_witness": false
+    }
+  ],
+  "capture_rejection_test": {
+    "name": "invariant_captured_request_and_fulfillment_remain_rejected",
+    "default_status": "ignored_requires_real_signed_captures",
+    "actual_capture_run": "passed_2026-10-23_exit_0_1_test",
+    "request_path_environment": "NORTHSTAR_VRF_REQUEST_TRANSACTION",
+    "fulfillment_path_environment": "NORTHSTAR_VRF_FULFILL_TRANSACTION"
+  },
+  "guest_changed": false,
+  "accepted_relation_changed": false,
+  "public_abi_changed": false,
+  "proof_generated": false,
+  "vrf_ready": false
+}

@@ -1,0 +1,21 @@
+{
+  "schema": "northstar.vrf-sha2-build.v1",
+  "variant": "sha2-sp1-v1",
+  "features": "candidate",
+  "policy_profile_sha256": "c627c521e8bea57fdebaf2e611a3c56b047e0ae18e3e2e1a586f64d86a8a4d0d",
+  "policy_checkpoint_steps": 1,
+  "sha2_version": "0.10.9",
+  "sha2_patch_revision": "e48b656ebc806117554bb33c2f8687e4637e37ff",
+  "cargo_lock_sha256": "9eb50c2df81092d491051836ca3ed1497ce3985b731154fbf7205e1b51b820a5",
+  "elf": {
+    "file": "northstar-zkvm-vrf-candidate",
+    "sha256": "b0531ecbe24a339b60407673181274a83aeafeb2d3cc04057369ff5992829a92",
+    "bytes": 10174128,
+    "machine": 243,
+    "flags": 0
+  },
+  "classification": "build-and-ISA-screening-only",
+  "execution_verified": false,
+  "key_configured": false,
+  "production_acceptance": false
+}

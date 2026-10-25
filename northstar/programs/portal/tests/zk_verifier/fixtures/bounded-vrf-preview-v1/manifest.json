@@ -1,0 +1,21 @@
+{
+  "schema": "northstar-bounded-vrf-preview-proof-v1",
+  "scope": "actual-preview-proof-not-final-lifecycle",
+  "production_acceptance": false,
+  "proof_kind": 3,
+  "proof_version": 1,
+  "checkpoint_steps": 1,
+  "program_vkey_hash": "0x001a26a674f911be746ffa5ea2dbdd412b0ee692bd34ebf2562b0b3bd25bd311",
+  "elf_sha256": "23543b749b4a7c3f35b580695392768d30e6f2ef99e7d13b4f8fcb7bd4412b34",
+  "profile_sha256": "024ba21c70e2d7f05b9833b4df373812231fe124e27a3a266b17c6c8827cdfce",
+  "policy_profile_sha256": "c627c521e8bea57fdebaf2e611a3c56b047e0ae18e3e2e1a586f64d86a8a4d0d",
+  "proof_sha256": "f4c8a848a1d047a9ffc50a11746e56816c2f89e8bb8d256d131b98b55dc829df",
+  "public_inputs_sha256": "d969043b6b98c4a8f34a556ddb6bcea6b75389153738234a8c42fa7a25d59fbd",
+  "sdk_version": "6.8.0",
+  "outer_circuit_version": "v6.1.0",
+  "measurement_target": "g5.xlarge NVIDIA A10G",
+  "process_cold_prove_and_wrap_ms": 309924,
+  "sdk_verify_ms": 499,
+  "within_120s_prove_wrap": false,
+  "acceptance_window": false
+}
