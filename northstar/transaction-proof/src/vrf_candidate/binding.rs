@@ -24,12 +24,44 @@ pub fn encode_candidate(envelope: &CandidateEnvelopeV1) -> Result<Vec<u8>, Candi
     borsh::to_vec(envelope).map_err(|_| CandidateError::Encoding)
 }
 
+struct CanonicalBytes<'a>(&'a [u8]);
+
+impl Write for CanonicalBytes<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let Some(prefix) = self.0.get(..bytes.len()) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "noncanonical encoding",
+            ));
+        };
+        if !candidate_bytes_equal(prefix, bytes) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "noncanonical encoding",
+            ));
+        }
+        self.0 = &self.0[bytes.len()..];
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 pub fn decode_candidate(bytes: &[u8]) -> Result<CandidateEnvelopeV1, CandidateError> {
     if bytes.len() > MAX_ENVELOPE_BYTES {
         return Err(CandidateError::ResourceLimit);
     }
-    let envelope = borsh::from_slice(bytes).map_err(|_| CandidateError::Encoding)?;
-    if encode_candidate(&envelope)? != bytes {
+    let envelope: CandidateEnvelopeV1 =
+        crate::track("candidate_deserialize", || borsh::from_slice(bytes))
+            .map_err(|_| CandidateError::Encoding)?;
+    validate_encoded_length(&envelope)?;
+    // Re-encode canonically without allocating another copy of the program ELF byte vectors.
+    let mut canonical = CanonicalBytes(bytes);
+    crate::track("candidate_reencode", || envelope.serialize(&mut canonical))
+        .map_err(|_| CandidateError::Encoding)?;
+    if !canonical.0.is_empty() {
         return Err(CandidateError::Encoding);
     }
     Ok(envelope)
@@ -48,13 +80,24 @@ pub fn verify_candidate<E: CandidateReplayEngine>(
     {
         return Err(CandidateError::Domain);
     }
-    let transaction = validate_candidate_input(&envelope.input, policy)?;
-    validate_prestate(&envelope.input, &transaction, &envelope.checkpoint)?;
+    let transaction = crate::track("candidate_input", || {
+        validate_candidate_input(&envelope.input, policy)
+    })?;
+    crate::track("candidate_prestate", || {
+        validate_prestate(&envelope.input, &transaction, &envelope.checkpoint)
+    })?;
     let output = engine.execute(&envelope.input)?;
     if output != envelope.expected_output {
         return Err(CandidateError::Outcome);
     }
-    bind_validated_candidate_execution(&envelope.input, &transaction, &output, &envelope.checkpoint)
+    crate::track("candidate_binding", || {
+        bind_validated_candidate_execution(
+            &envelope.input,
+            &transaction,
+            &output,
+            &envelope.checkpoint,
+        )
+    })
 }
 
 pub fn validate_candidate_input(
@@ -125,7 +168,9 @@ pub fn validate_candidate_input(
     {
         return Err(CandidateError::Profile);
     }
-    let transaction = admit_signed_transaction(&input.transaction_bytes)?;
+    let transaction = crate::track("candidate_signature", || {
+        admit_signed_transaction(&input.transaction_bytes)
+    })?;
     if transaction.compute_unit_limit != input.runtime.compute_unit_limit
         || transaction.compute_unit_limit > profile.max_compute_units
     {
@@ -340,12 +385,14 @@ fn validate_prestate(
             .iter()
             .position(|key| *key == entry.key)
             .is_some_and(|index| transaction.is_writable(index));
-        let expected = entry
-            .state
-            .as_ref()
-            .map(|state| candidate_state_value(entry.key, state));
-        if (writable || existing.is_some()) && existing != expected {
-            return Err(CandidateError::Checkpoint);
+        if writable || existing.is_some() {
+            let expected = entry
+                .state
+                .as_ref()
+                .map(|state| candidate_state_value(entry.key, state));
+            if existing != expected {
+                return Err(CandidateError::Checkpoint);
+            }
         }
     }
     let context_path = &checkpoint.readonly_context_path;
@@ -454,8 +501,10 @@ fn bind_validated_candidate_execution(
     let public = ErStepPublicInputsV1 {
         domain: FrBytes::er_step_domain_v1(CANDIDATE_PROOF_KIND, CANDIDATE_PROOF_VERSION),
         session_context: fr_to_bytes(
-            bytes(SESSION_CONTEXT_TAG, &input.session_context)
-                .map_err(|_| CandidateError::Checkpoint)?,
+            crate::track("candidate_session_context", || {
+                bytes(SESSION_CONTEXT_TAG, &input.session_context)
+            })
+            .map_err(|_| CandidateError::Checkpoint)?,
         ),
         slot_step: FrBytes::from_u64_pair(input.er_slot, u64::from(input.step_index)),
         pre_state_root: FrBytes::new(
@@ -692,16 +741,109 @@ fn validate_encoded_length(envelope: &CandidateEnvelopeV1) -> Result<(), Candida
 fn sha256(value: &[u8]) -> Hash32 {
     Sha256::digest(value).into()
 }
+struct DigestBytes(Sha256);
+
+impl Write for DigestBytes {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 fn digest<T: BorshSerialize>(tag: &[u8], value: &T) -> Result<Hash32, CandidateError> {
-    let bytes = borsh::to_vec(value).map_err(|_| CandidateError::Encoding)?;
-    let mut hash = Sha256::new();
-    hash.update(tag);
-    hash.update((bytes.len() as u64).to_le_bytes());
-    hash.update(bytes);
-    Ok(hash.finalize().into())
+    let length = borsh::object_length(value).map_err(|_| CandidateError::Encoding)?;
+    let mut hash = DigestBytes(Sha256::new());
+    hash.0.update(tag);
+    hash.0.update((length as u64).to_le_bytes());
+    value
+        .serialize(&mut hash)
+        .map_err(|_| CandidateError::Encoding)?;
+    Ok(hash.0.finalize().into())
 }
 fn field_digest<T: BorshSerialize>(tag: &[u8], value: &T) -> Result<Hash32, CandidateError> {
     let mut hash = digest(tag, value)?;
     hash[0] &= 0x1f;
     Ok(hash)
+}
+
+#[cfg(test)]
+mod canonical_stream_tests {
+    use super::*;
+
+    fn matches<T: BorshSerialize>(value: &T, bytes: &[u8]) -> bool {
+        let mut writer = CanonicalBytes(bytes);
+        value.serialize(&mut writer).is_ok() && writer.0.is_empty()
+    }
+
+    #[test]
+    fn canonical_stream_matches_buffered_bytes() {
+        for length in [0, 1, 31, 1024, 2 * 1024 * 1024] {
+            let value = (
+                BoundedVec::<u8, MAX_ACCOUNT_BYTES>::new(vec![0xa5; length]).unwrap(),
+                Some(vec![vec![1u8, 2, 3], vec![]]),
+                BTreeMap::from([(3u64, vec![7u8, 8]), (1, vec![9])]),
+            );
+            let encoded = borsh::to_vec(&value).unwrap();
+            assert!(matches(&value, &encoded));
+            for index in [0, encoded.len() / 2, encoded.len() - 1] {
+                let mut changed = encoded.clone();
+                changed[index] ^= 1;
+                assert!(!matches(&value, &changed));
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_stream_rejects_mismatch_and_length() {
+        let value = (vec![1u8, 2, 3], 47u64);
+        let encoded = borsh::to_vec(&value).unwrap();
+        for length in 0..encoded.len() {
+            assert!(!matches(&value, &encoded[..length]));
+        }
+        for index in 0..encoded.len() {
+            let mut changed = encoded.clone();
+            changed[index] ^= 1;
+            assert!(!matches(&value, &changed));
+        }
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(!matches(&value, &trailing));
+        assert!(matches(&(), &[]));
+        assert!(!matches(&(), &[0]));
+    }
+
+    #[test]
+    fn streaming_digests_match_buffered_domain_and_length() {
+        for length in [0, 1, 31, 55, 56, 63, 64, 65, 127, 128, 129, 2 * 1024 * 1024] {
+            let value = (vec![0xa5u8; length], Some(vec![1u8, 2, 3]), 47u64);
+            let encoded = borsh::to_vec(&value).unwrap();
+            for tag in [b"".as_slice(), b"northstar-vrf-readonly-context-v1"] {
+                let mut reference = Sha256::new();
+                reference.update(tag);
+                reference.update((encoded.len() as u64).to_le_bytes());
+                reference.update(&encoded);
+                let expected: Hash32 = reference.finalize().into();
+                assert_eq!(digest(tag, &value).unwrap(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_stream_handles_segmented_writes() {
+        let mut writer = CanonicalBytes(b"canonical");
+        writer.write_all(b"canon").unwrap();
+        writer.write_all(b"").unwrap();
+        assert_eq!(
+            writer.write(b"other").unwrap_err().kind(),
+            io::ErrorKind::InvalidData,
+        );
+        writer.write_all(b"ical").unwrap();
+        writer.flush().unwrap();
+        assert!(writer.0.is_empty());
+        assert!(writer.write(b"extra").is_err());
+    }
 }

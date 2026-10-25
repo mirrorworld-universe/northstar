@@ -1,0 +1,58 @@
+{
+  "schema": "northstar.bounded-vrf-candidate-deployment.v1",
+  "proof_kind": 3,
+  "proof_version": 1,
+  "checkpoint_steps": 1,
+  "public_input_fields": [
+    "domain",
+    "session_context",
+    "slot_step",
+    "pre_state_root",
+    "post_state_root",
+    "tx_effect_root",
+    "readonly_l1_root",
+    "settlement_effect_root"
+  ],
+  "production_acceptance": false,
+  "guest_status": "authenticated-envelope",
+  "elf_sha256": "e95546332b8e6116b2f752131991823b33946ddbc80d8de1886b745670fbb0e4",
+  "policy_profile_sha256": "c627c521e8bea57fdebaf2e611a3c56b047e0ae18e3e2e1a586f64d86a8a4d0d",
+  "sp1_version": "6.8.0",
+  "guest_target": "riscv64im-succinct-zkvm-elf",
+  "cross_c_flags": "--target=riscv64-unknown-elf -march=rv64im -mabi=lp64 -mno-relax",
+  "build_recipe_sha256": "c661c744c2813916243c894bf3319f2083c42fb51534e882ec8a14d5547398d5",
+  "implementation_variant": "sha2-sp1-v1+validated-reuse-v11+entry-local-interpreter+streamed-bindings+wordwise-aligned-load-v3",
+  "diagnostic_mode": "none",
+  "measurement_eligible": true,
+  "source_base_revision": "13e762df09173df33edf6c9ea12041327907f5dd",
+  "source_overlay_sha256": "38bfc4ef23be6eed042e2788f867e722d661d3c24baaaa934bcd413d816cb186",
+  "library_repository": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library",
+  "library_revision": "d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd",
+  "vrf_suite": "RFC9381-ECVRF-EDWARDS25519-SHA512-TAI-1",
+  "runtime": {
+    "vm_config_sha256": "a02bcd61a0419646188200258d1eafdf65a4d6d15f09c8de86c20cd9f40b83f3",
+    "syscall_registry_sha256": "504b310bcbd30ade0a27653529c3aeb7a923deb4773011e8270a2d1371f12a60",
+    "compute_budget_sha256": "068dc3d1379587965ba537eb1edba864939c36a5fccce9733a3446a6a3aa993e",
+    "transaction_admission_max_age": 900,
+    "queue_retention_max_age": 1800,
+    "heap_bytes": 32768,
+    "max_compute_units": 1400000,
+    "transaction_fees_lamports": 0,
+    "features": "compiled curve-only development profile"
+  },
+  "program_elf_sha256": {
+    "coordinator": "441d8f463ecfcc398d2151f1bb4a1e221cff8b5fff1d9f185db90de6f78b8cde",
+    "reference_verifier": "225fc076dc79661768bf6a48bbac0d26596d00ad15a8bddcf99dc4a76ad4aa88",
+    "test_consumer": "b7662ad1e4ebca17f1a8f2e222f18fcb1dcacf1e8daaad7d709f67f92798c4a1"
+  },
+  "measurement_target": "g5.xlarge NVIDIA A10G",
+  "scope": {
+    "local_er_native_development": true,
+    "generic_svm": false,
+    "l1_readonly_provenance": false,
+    "cross_layer_settlement": false,
+    "hosted_delegated_handoff": false,
+    "human_acceptance": false
+  },
+  "source_manifest_sha256": "512b308bcf24222e9d5c56c83f80a30c5074fe9c5037c3c929cfc02dfcc77ff1"
+}

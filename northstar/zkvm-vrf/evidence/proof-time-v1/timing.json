@@ -1,0 +1,549 @@
+{
+  "schema": "northstar.vrf-proof-time-stage-unions.v1",
+  "run_id": "spans-wordwise-v3-e448",
+  "log_sha256": "ab26e87f7fdce95d7653b31e3a4b627c80ffec7a756e41ceec780df43e4cc2b9",
+  "non_additive": true,
+  "stages": [
+    {
+      "target": "sp1_prover::recursion",
+      "span": "Read input values",
+      "count": 1,
+      "busy_s_sum": 0.0205,
+      "idle_s_sum": 2e-06,
+      "span_s_max": 0.020502,
+      "interval_union_s": 0.020502
+    },
+    {
+      "target": "sp1_prover::recursion",
+      "span": "Verify deferred program",
+      "count": 1,
+      "busy_s_sum": 0.0882,
+      "idle_s_sum": 3e-06,
+      "span_s_max": 0.088203,
+      "interval_union_s": 0.088203
+    },
+    {
+      "target": "sp1_prover::recursion",
+      "span": "build compress program",
+      "count": 4,
+      "busy_s_sum": 1.183,
+      "idle_s_sum": 1.5e-05,
+      "span_s_max": 0.501004,
+      "interval_union_s": 1.183015
+    },
+    {
+      "target": "sp1_prover::recursion",
+      "span": "build recursion program",
+      "count": 10,
+      "busy_s_sum": 6.53,
+      "idle_s_sum": 2.8e-05,
+      "span_s_max": 1.760003,
+      "interval_union_s": 4.083008
+    },
+    {
+      "target": "sp1_prover::recursion",
+      "span": "build shrink program",
+      "count": 1,
+      "busy_s_sum": 0.101,
+      "idle_s_sum": 3e-06,
+      "span_s_max": 0.101003,
+      "interval_union_s": 0.101003
+    },
+    {
+      "target": "sp1_prover::recursion",
+      "span": "build wrap program",
+      "count": 1,
+      "busy_s_sum": 0.361,
+      "idle_s_sum": 2e-06,
+      "span_s_max": 0.361002,
+      "interval_union_s": 0.361002
+    },
+    {
+      "target": "sp1_prover::recursion",
+      "span": "compile compress program",
+      "count": 4,
+      "busy_s_sum": 1.642,
+      "idle_s_sum": 1e-05,
+      "span_s_max": 0.650002,
+      "interval_union_s": 1.642009
+    },
+    {
+      "target": "sp1_prover::recursion",
+      "span": "compile deferred program",
+      "count": 1,
+      "busy_s_sum": 0.158,
+      "idle_s_sum": 2e-06,
+      "span_s_max": 0.158002,
+      "interval_union_s": 0.158002
+    },
+    {
+      "target": "sp1_prover::recursion",
+      "span": "compile recursion program",
+      "count": 10,
+      "busy_s_sum": 4.205,
+      "idle_s_sum": 3e-05,
+      "span_s_max": 0.701003,
+      "interval_union_s": 2.376298
+    },
+    {
+      "target": "sp1_prover::recursion",
+      "span": "compile shrink program",
+      "count": 1,
+      "busy_s_sum": 0.165,
+      "idle_s_sum": 2e-06,
+      "span_s_max": 0.165002,
+      "interval_union_s": 0.165002
+    },
+    {
+      "target": "sp1_prover::recursion",
+      "span": "compile wrap program",
+      "count": 1,
+      "busy_s_sum": 0.579,
+      "idle_s_sum": 3e-06,
+      "span_s_max": 0.579003,
+      "interval_union_s": 0.579003
+    },
+    {
+      "target": "sp1_prover::recursion",
+      "span": "get operations for the deferred program",
+      "count": 1,
+      "busy_s_sum": 0.109,
+      "idle_s_sum": 1e-06,
+      "span_s_max": 0.109001,
+      "interval_union_s": 0.109001
+    },
+    {
+      "target": "sp1_prover::worker::controller",
+      "span": "reduce",
+      "count": 1,
+      "busy_s_sum": 0.000869,
+      "idle_s_sum": 82.3,
+      "span_s_max": 82.300869,
+      "interval_union_s": 82.300869
+    },
+    {
+      "target": "sp1_prover::worker::controller",
+      "span": "setup task",
+      "count": 1,
+      "busy_s_sum": 4e-06,
+      "idle_s_sum": 5.22,
+      "span_s_max": 5.220004,
+      "interval_union_s": 5.220004
+    },
+    {
+      "target": "sp1_prover::worker::controller",
+      "span": "setup vkey",
+      "count": 1,
+      "busy_s_sum": 8.2e-05,
+      "idle_s_sum": 5.22,
+      "span_s_max": 5.220083,
+      "interval_union_s": 5.220083
+    },
+    {
+      "target": "sp1_prover::worker::controller",
+      "span": "wait executor",
+      "count": 1,
+      "busy_s_sum": 5e-06,
+      "idle_s_sum": 57.2,
+      "span_s_max": 57.200005,
+      "interval_union_s": 57.200005
+    },
+    {
+      "target": "sp1_prover::worker::controller::compress",
+      "span": "Core proof processing",
+      "count": 1,
+      "busy_s_sum": 0.000162,
+      "idle_s_sum": 57.2,
+      "span_s_max": 57.200162,
+      "interval_union_s": 57.200162
+    },
+    {
+      "target": "sp1_prover::worker::controller::core",
+      "span": "emit global memory shards",
+      "count": 1,
+      "busy_s_sum": 0.258,
+      "idle_s_sum": 56.4,
+      "span_s_max": 56.658,
+      "interval_union_s": 56.658
+    },
+    {
+      "target": "sp1_prover::worker::controller::core",
+      "span": "emit precompile shards",
+      "count": 1,
+      "busy_s_sum": 1.7e-05,
+      "idle_s_sum": 53.4,
+      "span_s_max": 53.400017,
+      "interval_union_s": 53.400017
+    },
+    {
+      "target": "sp1_prover::worker::controller::core",
+      "span": "minimal executor",
+      "count": 1,
+      "busy_s_sum": 1.6,
+      "idle_s_sum": 37.9,
+      "span_s_max": 39.5,
+      "interval_union_s": 39.5
+    },
+    {
+      "target": "sp1_prover::worker::controller::core",
+      "span": "splicing",
+      "count": 2,
+      "busy_s_sum": 0.000298,
+      "idle_s_sum": 39.52,
+      "span_s_max": 38.000127,
+      "interval_union_s": 38.246565
+    },
+    {
+      "target": "sp1_prover::worker::controller::core",
+      "span": "wait for splicers",
+      "count": 1,
+      "busy_s_sum": 9.2e-05,
+      "idle_s_sum": 39.5,
+      "span_s_max": 39.500092,
+      "interval_union_s": 39.500092
+    },
+    {
+      "target": "sp1_prover::worker::controller::global",
+      "span": "collect global memory events",
+      "count": 1,
+      "busy_s_sum": 39.7,
+      "idle_s_sum": 4.8e-05,
+      "span_s_max": 39.700048,
+      "interval_union_s": 39.700048
+    },
+    {
+      "target": "sp1_prover::worker::controller::global",
+      "span": "create global memory shards",
+      "count": 1,
+      "busy_s_sum": 0.0735,
+      "idle_s_sum": 56.6,
+      "span_s_max": 56.6735,
+      "interval_union_s": 56.6735
+    },
+    {
+      "target": "sp1_prover::worker::controller::precompiles",
+      "span": "deferred listener",
+      "count": 1,
+      "busy_s_sum": 0.000185,
+      "idle_s_sum": 39.5,
+      "span_s_max": 39.500185,
+      "interval_union_s": 39.500185
+    },
+    {
+      "target": "sp1_prover::worker::controller::precompiles",
+      "span": "deferred sender",
+      "count": 1,
+      "busy_s_sum": 0.00051,
+      "idle_s_sum": 53.4,
+      "span_s_max": 53.40051,
+      "interval_union_s": 53.40051
+    },
+    {
+      "target": "sp1_prover::worker::controller::precompiles",
+      "span": "split last",
+      "count": 1,
+      "busy_s_sum": 0.0,
+      "idle_s_sum": 1e-06,
+      "span_s_max": 2e-06,
+      "interval_union_s": 1e-06
+    },
+    {
+      "target": "sp1_prover::worker::controller::splicing",
+      "span": "collecting touched addresses and sending to global memory",
+      "count": 2,
+      "busy_s_sum": 2.7e-05,
+      "idle_s_sum": 6e-06,
+      "span_s_max": 1.9e-05,
+      "interval_union_s": 3.4e-05
+    },
+    {
+      "target": "sp1_prover::worker::controller::splicing",
+      "span": "get splices to serialize",
+      "count": 2,
+      "busy_s_sum": 0.00713,
+      "idle_s_sum": 38.22,
+      "span_s_max": 36.70266,
+      "interval_union_s": 38.22713
+    },
+    {
+      "target": "sp1_prover::worker::controller::splicing",
+      "span": "send splice",
+      "count": 13,
+      "busy_s_sum": 0.6213,
+      "idle_s_sum": 136.845,
+      "span_s_max": 30.755,
+      "interval_union_s": 37.907746
+    },
+    {
+      "target": "sp1_prover::worker::controller::splicing",
+      "span": "spawn prove shard tasks",
+      "count": 2,
+      "busy_s_sum": 0.000158,
+      "idle_s_sum": 38.22,
+      "span_s_max": 36.700084,
+      "interval_union_s": 38.220158
+    },
+    {
+      "target": "sp1_prover::worker::controller::splicing",
+      "span": "splicing trace chunk",
+      "count": 2,
+      "busy_s_sum": 2.674,
+      "idle_s_sum": 0.001181,
+      "span_s_max": 1.75101,
+      "interval_union_s": 2.675181
+    },
+    {
+      "target": "sp1_prover::worker::node::full",
+      "span": "prove",
+      "count": 1,
+      "busy_s_sum": 0.0125,
+      "idle_s_sum": 142.0,
+      "span_s_max": 142.0125,
+      "interval_union_s": 142.0125
+    },
+    {
+      "target": "sp1_prover::worker::node::full",
+      "span": "setup task",
+      "count": 1,
+      "busy_s_sum": 7e-06,
+      "idle_s_sum": 4.16,
+      "span_s_max": 4.160007,
+      "interval_union_s": 4.160007
+    },
+    {
+      "target": "sp1_prover::worker::node::full::init",
+      "span": "Controller",
+      "count": 1,
+      "busy_s_sum": 0.000976,
+      "idle_s_sum": 142.0,
+      "span_s_max": 142.000976,
+      "interval_union_s": 142.000976
+    },
+    {
+      "target": "sp1_prover::worker::node::full::init",
+      "span": "CoreExecute",
+      "count": 1,
+      "busy_s_sum": 0.153,
+      "idle_s_sum": 57.0,
+      "span_s_max": 57.153,
+      "interval_union_s": 57.153
+    },
+    {
+      "target": "sp1_prover::worker::node::full::init",
+      "span": "Groth16Wrap",
+      "count": 1,
+      "busy_s_sum": 0.000801,
+      "idle_s_sum": 47.5,
+      "span_s_max": 47.500801,
+      "interval_union_s": 47.500801
+    },
+    {
+      "target": "sp1_prover::worker::node::full::init",
+      "span": "ProveShard",
+      "count": 17,
+      "busy_s_sum": 39.13,
+      "idle_s_sum": 390.5,
+      "span_s_max": 36.76,
+      "interval_union_s": 77.925664
+    },
+    {
+      "target": "sp1_prover::worker::node::full::init",
+      "span": "RecursionReduce",
+      "count": 6,
+      "busy_s_sum": 7.914,
+      "idle_s_sum": 23.73,
+      "span_s_max": 9.5,
+      "interval_union_s": 17.781813
+    },
+    {
+      "target": "sp1_prover::worker::node::full::init",
+      "span": "SetupVkey",
+      "count": 2,
+      "busy_s_sum": 2.207,
+      "idle_s_sum": 7.17,
+      "span_s_max": 5.22,
+      "interval_union_s": 9.377
+    },
+    {
+      "target": "sp1_prover::worker::node::full::init",
+      "span": "ShrinkWrap",
+      "count": 1,
+      "busy_s_sum": 1.89,
+      "idle_s_sum": 5.19,
+      "span_s_max": 7.08,
+      "interval_union_s": 7.08
+    },
+    {
+      "target": "sp1_prover::worker::prover::core",
+      "span": "allocating record",
+      "count": 13,
+      "busy_s_sum": 0.04864,
+      "idle_s_sum": 4.3e-05,
+      "span_s_max": 0.012803,
+      "interval_union_s": 0.048683
+    },
+    {
+      "target": "sp1_prover::worker::prover::core",
+      "span": "core setup and prove",
+      "count": 17,
+      "busy_s_sum": 36.4,
+      "idle_s_sum": 97.69,
+      "span_s_max": 14.59,
+      "interval_union_s": 67.28239
+    },
+    {
+      "target": "sp1_prover::worker::prover::core",
+      "span": "deferred upload",
+      "count": 13,
+      "busy_s_sum": 0.001241,
+      "idle_s_sum": 0.038146,
+      "span_s_max": 0.030569,
+      "interval_union_s": 0.039387
+    },
+    {
+      "target": "sp1_prover::worker::prover::core",
+      "span": "generate dependencies",
+      "count": 17,
+      "busy_s_sum": 36.906,
+      "idle_s_sum": 0.004823,
+      "span_s_max": 5.530173,
+      "interval_union_s": 24.20369
+    },
+    {
+      "target": "sp1_prover::worker::prover::core",
+      "span": "get recursion program",
+      "count": 17,
+      "busy_s_sum": 10.866115,
+      "idle_s_sum": 0.018656,
+      "span_s_max": 2.44152,
+      "interval_union_s": 6.43521
+    },
+    {
+      "target": "sp1_prover::worker::prover::core",
+      "span": "into_record",
+      "count": 17,
+      "busy_s_sum": 19.667,
+      "idle_s_sum": 0.00069,
+      "span_s_max": 2.290017,
+      "interval_union_s": 14.955149
+    },
+    {
+      "target": "sp1_prover::worker::prover::core",
+      "span": "normalize prove shard",
+      "count": 17,
+      "busy_s_sum": 37.219,
+      "idle_s_sum": 71.32,
+      "span_s_max": 10.366,
+      "interval_union_s": 67.14488
+    },
+    {
+      "target": "sp1_prover::worker::prover::recursion",
+      "span": "download compress proof",
+      "count": 1,
+      "busy_s_sum": 0.000129,
+      "idle_s_sum": 0.00166,
+      "span_s_max": 0.001789,
+      "interval_union_s": 0.001789
+    },
+    {
+      "target": "sp1_prover::worker::prover::recursion",
+      "span": "download wrap proof",
+      "count": 1,
+      "busy_s_sum": 0.000654,
+      "idle_s_sum": 0.00452,
+      "span_s_max": 0.005174,
+      "interval_union_s": 0.005174
+    },
+    {
+      "target": "sp1_prover::worker::prover::recursion",
+      "span": "execute runtime",
+      "count": 23,
+      "busy_s_sum": 11.22,
+      "idle_s_sum": 6e-05,
+      "span_s_max": 1.800002,
+      "interval_union_s": 10.713984
+    },
+    {
+      "target": "sp1_prover::worker::prover::recursion",
+      "span": "generate dependencies",
+      "count": 23,
+      "busy_s_sum": 0.000155,
+      "idle_s_sum": 2.6e-05,
+      "span_s_max": 2e-05,
+      "interval_union_s": 0.000181
+    },
+    {
+      "target": "sp1_prover::worker::prover::recursion",
+      "span": "get keys",
+      "count": 23,
+      "busy_s_sum": 0.001607,
+      "idle_s_sum": 1.2e-05,
+      "span_s_max": 0.000191,
+      "interval_union_s": 0.001619
+    },
+    {
+      "target": "sp1_prover::worker::prover::recursion",
+      "span": "prove groth16",
+      "count": 1,
+      "busy_s_sum": 5e-06,
+      "idle_s_sum": 47.5,
+      "span_s_max": 47.500005,
+      "interval_union_s": 47.500005
+    },
+    {
+      "target": "sp1_prover::worker::prover::recursion",
+      "span": "prove shrink",
+      "count": 1,
+      "busy_s_sum": 0.268,
+      "idle_s_sum": 0.412,
+      "span_s_max": 0.68,
+      "interval_union_s": 0.68
+    },
+    {
+      "target": "sp1_prover::worker::prover::recursion",
+      "span": "prove wrap",
+      "count": 1,
+      "busy_s_sum": 0.964,
+      "idle_s_sum": 2.53,
+      "span_s_max": 3.494,
+      "interval_union_s": 3.494
+    },
+    {
+      "target": "sp1_prover::worker::prover::recursion",
+      "span": "upload groth16 proof",
+      "count": 1,
+      "busy_s_sum": 2.6e-05,
+      "idle_s_sum": 3.9e-05,
+      "span_s_max": 6.5e-05,
+      "interval_union_s": 6.5e-05
+    },
+    {
+      "target": "sp1_prover::worker::prover::recursion",
+      "span": "upload wrap proof",
+      "count": 1,
+      "busy_s_sum": 0.000713,
+      "idle_s_sum": 0.00424,
+      "span_s_max": 0.004953,
+      "interval_union_s": 0.004953
+    },
+    {
+      "target": "sp1_prover::worker::prover::recursion",
+      "span": "verify shrink proof",
+      "count": 1,
+      "busy_s_sum": 0.0365,
+      "idle_s_sum": 1e-06,
+      "span_s_max": 0.036501,
+      "interval_union_s": 0.036501
+    },
+    {
+      "target": "sp1_prover::worker::prover::recursion",
+      "span": "verify wrap proof",
+      "count": 1,
+      "busy_s_sum": 0.617,
+      "idle_s_sum": 3e-06,
+      "span_s_max": 0.617003,
+      "interval_union_s": 0.617003
+    }
+  ],
+  "diagnostic_only": true
+}

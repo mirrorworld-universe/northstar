@@ -1,0 +1,28 @@
+diff --git a/crates/recursion/gnark-ffi/go/sp1/prove_groth16_icicle.go b/crates/recursion/gnark-ffi/go/sp1/prove_groth16_icicle.go
+--- a/crates/recursion/gnark-ffi/go/sp1/prove_groth16_icicle.go
++++ b/crates/recursion/gnark-ffi/go/sp1/prove_groth16_icicle.go
+@@ -39,7 +39,23 @@ func loadGroth16Circuit(dataDir string) {
+ 		panic(err)
+ 	}
+ 	defer file.Close()
+-	if _, err := globalR1cs.ReadFrom(bufio.NewReaderSize(file, 1024*1024)); err != nil {
++	var reader io.Reader = file
++	switch os.Getenv("SP1_GROTH16_FILTER_DIAGNOSTICS") {
++	case "1":
++		stat, err := file.Stat()
++		if err != nil {
++			panic(err)
++		}
++		reader, err = withoutR1CSDiagnostics(file, stat.Size())
++		if err != nil {
++			panic(err)
++		}
++		fmt.Println("Filtered R1CS diagnostic fields before deserialization")
++	case "", "0":
++	default:
++		panic("SP1_GROTH16_FILTER_DIAGNOSTICS must be 0 or 1")
++	}
++	if _, err := globalR1cs.ReadFrom(bufio.NewReaderSize(reader, 1024*1024)); err != nil {
+ 		panic(err)
+ 	}
+ 	switch os.Getenv("SP1_GROTH16_TRIM_DIAGNOSTICS") {

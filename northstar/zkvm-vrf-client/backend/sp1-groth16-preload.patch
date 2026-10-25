@@ -1,0 +1,92 @@
+diff --git a/crates/recursion/gnark-ffi/src/ffi/native.rs b/crates/recursion/gnark-ffi/src/ffi/native.rs
+--- a/crates/recursion/gnark-ffi/src/ffi/native.rs
++++ b/crates/recursion/gnark-ffi/src/ffi/native.rs
+@@ -199,6 +199,19 @@ pub fn test_plonk_bn254(witness_json: &str, constraints_json: &str) {
+     test(ProofSystem::Plonk, witness_json, constraints_json)
+ }
+ 
++pub fn preload_groth16_bn254(data_dir: &str) -> Result<(), String> {
++    let data_dir = CString::new(data_dir).map_err(|error| error.to_string())?;
++    // The Go call borrows the directory for this call and returns an owned error string.
++    unsafe {
++        let error = bind::PreloadGroth16Bn254(data_dir.as_ptr() as *mut c_char);
++        if error.is_null() {
++            Ok(())
++        } else {
++            Err(ptr_to_string_freed(error))
++        }
++    }
++}
++
+ pub fn build_groth16_bn254(data_dir: &str) {
+     build(ProofSystem::Groth16, data_dir)
+ }
+diff --git a/crates/prover/src/worker/node/full/mod.rs b/crates/prover/src/worker/node/full/mod.rs
+--- a/crates/prover/src/worker/node/full/mod.rs
++++ b/crates/prover/src/worker/node/full/mod.rs
+@@ -172,6 +172,27 @@ impl<C: SP1ProverComponents> SP1LocalNode<C> {
+         context: SP1Context<'static>,
+         mode: ProofMode,
+     ) -> anyhow::Result<ProofFromNetwork> {
++        #[cfg(feature = "native-gnark")]
++        let preload_dir = if std::env::var("SP1_GROTH16_OVERLAP_INIT").as_deref() == Ok("1")
++            && mode == ProofMode::Groth16
++        {
++            anyhow::ensure!(
++                !crate::build::use_development_mode(),
++                "overlapping initialization requires the release circuit"
++            );
++            let dir = crate::build::groth16_circuit_artifacts_dir()?;
++            for file in ["groth16_circuit.bin", "groth16_pk.bin", "groth16_vk.bin"] {
++                anyhow::ensure!(dir.join(file).is_file(), "preload requires existing artifacts");
++            }
++            Some(
++                dir.to_str()
++                    .ok_or_else(|| anyhow::anyhow!("non-UTF8 artifact path"))?
++                    .to_owned(),
++            )
++        } else {
++            None
++        };
++
+         // Allocate the per-proof artifacts and id up front so the cleanup below
+         // can always reach them, regardless of how the proving body exits.
+         let elf_artifact = self.inner.artifact_client.create_artifact()?;
+@@ -181,6 +202,15 @@ impl<C: SP1ProverComponents> SP1LocalNode<C> {
+         let output_artifact = self.inner.artifact_client.create_artifact()?;
+         let proof_id = ProofId::new("proof".create_type_id::<V7>().to_string());
+ 
++        #[cfg(feature = "native-gnark")]
++        let preload = preload_dir.map(|dir| {
++            tokio::task::spawn_blocking(move || {
++                let span = tracing::info_span!("groth16 initialization during prove");
++                let _entered = span.enter();
++                sp1_recursion_gnark_ffi::ffi::preload_groth16_bn254(&dir)
++            })
++        });
++
+         // Run the actual proving. `?` inside only short-circuits this block; the
+         // cleanup afterwards always runs (on both success and failure).
+         let result = async {
+@@ -225,6 +255,21 @@ impl<C: SP1ProverComponents> SP1LocalNode<C> {
+         }
+         .await;
+ 
++        // Drain initialization even if proving failed; none of its cost escapes the RPC.
++        #[cfg(feature = "native-gnark")]
++        let result = if let Some(preload) = preload {
++            let initialized = preload
++                .await
++                .map_err(anyhow::Error::from)
++                .and_then(|result| result.map_err(anyhow::Error::msg));
++            if let Err(error) = &initialized {
++                tracing::warn!("Groth16 initialization failed: {error}");
++            }
++            result.and_then(|proof| initialized.map(|()| proof))
++        } else {
++            result
++        };
++
+         // Always release this proof's task bookkeeping. The node (and its
+         // worker_client) is reused across proofs, and `submit_task` records every
+         // task in the worker client's `db`/`proof_index`; `complete_proof` is the

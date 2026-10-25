@@ -1,0 +1,831 @@
+diff --git a/crates/recursion/gnark-ffi/go/sp1/groth16_diagnostics.go b/crates/recursion/gnark-ffi/go/sp1/groth16_diagnostics.go
+new file mode 100644
+index 0000000..3ddec91
+--- /dev/null
++++ b/crates/recursion/gnark-ffi/go/sp1/groth16_diagnostics.go
+@@ -0,0 +1,23 @@
++//go:build icicle
++
++package sp1
++
++import (
++	"fmt"
++
++	"github.com/consensys/gnark/constraint"
++	constraint_bn254 "github.com/consensys/gnark/constraint/bn254"
++)
++
++func trimGroth16Diagnostics(system constraint.ConstraintSystem) (int, int, error) {
++	circuit, ok := system.(*constraint_bn254.R1CS)
++	if !ok || circuit == nil {
++		return 0, 0, fmt.Errorf("unexpected Groth16 constraint-system type %T", system)
++	}
++	entries, indices := len(circuit.DebugInfo), len(circuit.MDebug)
++	// These source annotations format solver errors; they are not constraints or solver inputs.
++	circuit.DebugInfo = nil
++	circuit.MDebug = nil
++	circuit.SymbolTable = (constraint_bn254.R1CS{}).SymbolTable
++	return entries, indices, nil
++}
+diff --git a/crates/recursion/gnark-ffi/go/sp1/groth16_diagnostics_test.go b/crates/recursion/gnark-ffi/go/sp1/groth16_diagnostics_test.go
+new file mode 100644
+index 0000000..b33c5ab
+--- /dev/null
++++ b/crates/recursion/gnark-ffi/go/sp1/groth16_diagnostics_test.go
+@@ -0,0 +1,70 @@
++//go:build icicle
++
++package sp1
++
++import (
++	"reflect"
++	"testing"
++
++	"github.com/consensys/gnark-crypto/ecc"
++	"github.com/consensys/gnark/constraint"
++	constraint_bn254 "github.com/consensys/gnark/constraint/bn254"
++	"github.com/consensys/gnark/frontend"
++	"github.com/consensys/gnark/frontend/cs/r1cs"
++)
++
++type diagnosticsCircuit struct {
++	X        frontend.Variable
++	Expected frontend.Variable `gnark:",public"`
++}
++
++func (c *diagnosticsCircuit) Define(api frontend.API) error {
++	api.AssertIsEqual(api.Mul(c.X, c.X), c.Expected)
++	return nil
++}
++
++func TestTrimGroth16DiagnosticsPreservesConstraintChecks(t *testing.T) {
++	compiled, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &diagnosticsCircuit{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	circuit := compiled.(*constraint_bn254.R1CS)
++	instructions := append([]constraint.PackedInstruction(nil), circuit.Instructions...)
++	calldata := append([]uint32(nil), circuit.CallData...)
++	constraints := circuit.GetNbConstraints()
++	entries, indices := len(circuit.DebugInfo), len(circuit.MDebug)
++	if entries == 0 || indices == 0 {
++		t.Fatal("test circuit must contain diagnostic metadata")
++	}
++	check := func(expected int, wantError bool) {
++		t.Helper()
++		witness, err := frontend.NewWitness(&diagnosticsCircuit{X: 3, Expected: expected}, ecc.BN254.ScalarField())
++		if err != nil {
++			t.Fatal(err)
++		}
++		_, err = circuit.Solve(witness)
++		if (err != nil) != wantError {
++			t.Fatalf("expected=%d wantError=%v got=%v", expected, wantError, err)
++		}
++	}
++	check(9, false)
++	check(10, true)
++	removedEntries, removedIndices, err := trimGroth16Diagnostics(circuit)
++	if err != nil || removedEntries != entries || removedIndices != indices {
++		t.Fatalf("trim result: entries=%d indices=%d error=%v", removedEntries, removedIndices, err)
++	}
++	if circuit.DebugInfo != nil || circuit.MDebug != nil || !reflect.DeepEqual(circuit.SymbolTable, (constraint_bn254.R1CS{}).SymbolTable) {
++		t.Fatal("diagnostic metadata was retained")
++	}
++	if constraints != circuit.GetNbConstraints() || !reflect.DeepEqual(instructions, circuit.Instructions) || !reflect.DeepEqual(calldata, circuit.CallData) {
++		t.Fatal("constraint data changed")
++	}
++	check(9, false)
++	check(10, true)
++}
++
++func TestTrimGroth16DiagnosticsRejectsNil(t *testing.T) {
++	if _, _, err := trimGroth16Diagnostics(nil); err == nil {
++		t.Fatal("nil constraint system accepted")
++	}
++}
+diff --git a/crates/recursion/gnark-ffi/go/sp1/groth16_domain_cache.go b/crates/recursion/gnark-ffi/go/sp1/groth16_domain_cache.go
+new file mode 100644
+index 0000000..06599ce
+--- /dev/null
++++ b/crates/recursion/gnark-ffi/go/sp1/groth16_domain_cache.go
+@@ -0,0 +1,35 @@
++//go:build icicle
++
++package sp1
++
++import (
++	"bytes"
++	"fmt"
++	"io"
++
++	"github.com/consensys/gnark-crypto/ecc/bn254/fr/fft"
++	dump "github.com/consensys/gnark-crypto/utils/unsafe"
++)
++
++func withoutCPUFFTCache(reader io.Reader) (io.Reader, error) {
++	var layout bytes.Buffer
++	if err := dump.WriteMarker(&layout); err != nil {
++		return nil, err
++	}
++	var domain fft.Domain
++	if _, err := domain.WriteTo(&layout); err != nil {
++		return nil, err
++	}
++
++	header := layout.Bytes()
++	if _, err := io.ReadFull(reader, header); err != nil {
++		return nil, fmt.Errorf("read proving-key domain: %w", err)
++	}
++	if header[len(header)-1] > 1 {
++		return nil, fmt.Errorf("invalid FFT precomputation flag")
++	}
++	// This final domain byte enables CPU-only FFT tables. Icicle uses GPU FFTs;
++	// preserve every field element, key point, and the architecture marker.
++	header[len(header)-1] = 0
++	return io.MultiReader(bytes.NewReader(header), reader), nil
++}
+diff --git a/crates/recursion/gnark-ffi/go/sp1/groth16_domain_cache_test.go b/crates/recursion/gnark-ffi/go/sp1/groth16_domain_cache_test.go
+new file mode 100644
+index 0000000..4503b3d
+--- /dev/null
++++ b/crates/recursion/gnark-ffi/go/sp1/groth16_domain_cache_test.go
+@@ -0,0 +1,104 @@
++//go:build icicle
++
++package sp1
++
++import (
++	"bytes"
++	"errors"
++	"io"
++	"testing"
++
++	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
++	"github.com/consensys/gnark-crypto/ecc/bn254/fr/fft"
++	dump "github.com/consensys/gnark-crypto/utils/unsafe"
++)
++
++func TestWithoutCPUFFTCachePreservesDomainAndPayload(t *testing.T) {
++	for _, size := range []uint64{32, 256} {
++		for _, shiftValue := range []uint64{5, 7} {
++			var shift fr.Element
++			shift.SetUint64(shiftValue)
++			domain := fft.NewDomain(size, fft.WithShift(shift))
++			var input bytes.Buffer
++			if err := dump.WriteMarker(&input); err != nil {
++				t.Fatal(err)
++			}
++			markerSize := input.Len()
++			if _, err := domain.WriteTo(&input); err != nil {
++				t.Fatal(err)
++			}
++			flagOffset := input.Len() - 1
++			input.WriteString("unchanged proving-key payload")
++			original := bytes.Clone(input.Bytes())
++			reader, err := withoutCPUFFTCache(bytes.NewReader(original))
++			if err != nil {
++				t.Fatal(err)
++			}
++			encoded, err := io.ReadAll(reader)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if encoded[flagOffset] != 0 || original[flagOffset] != 1 {
++				t.Fatal("cache flag was not disabled or source bytes were mutated")
++			}
++			expected := bytes.Clone(original)
++			expected[flagOffset] = 0
++			if !bytes.Equal(encoded, expected) {
++				t.Fatal("domain fields, marker, or key payload changed")
++			}
++			var decoded fft.Domain
++			if _, err := decoded.ReadFrom(bytes.NewReader(encoded[markerSize:])); err != nil {
++				t.Fatal(err)
++			}
++			if _, err := decoded.Twiddles(); err == nil {
++				t.Fatal("CPU FFT cache was allocated")
++			}
++			if _, err := decoded.CosetTable(); err == nil {
++				t.Fatal("CPU coset cache was allocated")
++			}
++			cached, uncached := make([]fr.Element, size), make([]fr.Element, size)
++			for i := range cached {
++				cached[i].SetUint64(uint64(i*i + 1))
++			}
++			copy(uncached, cached)
++			domain.FFT(cached, fft.DIF, fft.OnCoset())
++			decoded.FFT(uncached, fft.DIF, fft.OnCoset())
++			for i := range cached {
++				if !cached[i].Equal(&uncached[i]) {
++					t.Fatalf("FFT mismatch at %d", i)
++				}
++			}
++			domain.FFTInverse(cached, fft.DIT, fft.OnCoset())
++			decoded.FFTInverse(uncached, fft.DIT, fft.OnCoset())
++			for i := range cached {
++				var expected fr.Element
++				expected.SetUint64(uint64(i*i + 1))
++				if !cached[i].Equal(&expected) || !uncached[i].Equal(&expected) {
++					t.Fatalf("inverse FFT mismatch at %d", i)
++				}
++			}
++		}
++	}
++}
++
++func TestWithoutCPUFFTCacheRejectsTruncatedDomain(t *testing.T) {
++	if _, err := withoutCPUFFTCache(bytes.NewReader([]byte{1})); !errors.Is(err, io.ErrUnexpectedEOF) {
++		t.Fatalf("expected truncated-domain error, got %v", err)
++	}
++}
++
++func TestWithoutCPUFFTCacheRejectsInvalidFlag(t *testing.T) {
++	var input bytes.Buffer
++	if err := dump.WriteMarker(&input); err != nil {
++		t.Fatal(err)
++	}
++	var domain fft.Domain
++	if _, err := domain.WriteTo(&input); err != nil {
++		t.Fatal(err)
++	}
++	header := input.Bytes()
++	header[len(header)-1] = 2
++	if _, err := withoutCPUFFTCache(bytes.NewReader(header)); err == nil {
++		t.Fatal("expected invalid-flag error")
++	}
++}
+diff --git a/crates/recursion/gnark-ffi/go/sp1/groth16_profile.go b/crates/recursion/gnark-ffi/go/sp1/groth16_profile.go
+new file mode 100644
+index 0000000..9f029f0
+--- /dev/null
++++ b/crates/recursion/gnark-ffi/go/sp1/groth16_profile.go
+@@ -0,0 +1,60 @@
++//go:build icicle
++
++package sp1
++
++import (
++	"fmt"
++	"os"
++	"runtime"
++	"runtime/pprof"
++
++	constraint_bn254 "github.com/consensys/gnark/constraint/bn254"
++)
++
++func startGroth16Profile() func() {
++	dir := os.Getenv("SP1_GROTH16_PROFILE_DIR")
++	if dir == "" {
++		return func() {}
++	}
++	if err := os.MkdirAll(dir, 0700); err != nil {
++		panic(err)
++	}
++	file, err := os.CreateTemp(dir, "groth16-*.cpu.pprof")
++	if err != nil {
++		panic(err)
++	}
++	if err := pprof.StartCPUProfile(file); err != nil {
++		file.Close()
++		panic(err)
++	}
++	memory := func(stage string) {
++		var stats runtime.MemStats
++		runtime.ReadMemStats(&stats)
++		fmt.Printf("GNARK_MEMORY stage=%s heap_alloc_bytes=%d heap_inuse_bytes=%d heap_sys_bytes=%d num_gc=%d gc_cpu_fraction=%f\n",
++			stage, stats.HeapAlloc, stats.HeapInuse, stats.HeapSys, stats.NumGC, stats.GCCPUFraction)
++	}
++	if circuit, ok := globalR1cs.(*constraint_bn254.R1CS); ok {
++		fmt.Printf("GNARK_LAYOUT instructions=%d calldata_words=%d levels=%d debug_entries=%d debug_index_entries=%d logs=%d internal_variables=%d\n",
++			len(circuit.Instructions), len(circuit.CallData), len(circuit.Levels), len(circuit.DebugInfo), len(circuit.MDebug), len(circuit.Logs), circuit.NbInternalVariables)
++	}
++	memory("before_prove")
++	return func() {
++		pprof.StopCPUProfile()
++		if err := file.Close(); err != nil {
++			panic(err)
++		}
++		memory("after_prove")
++		heap, err := os.Create(file.Name() + ".heap")
++		if err != nil {
++			panic(err)
++		}
++		if err := pprof.WriteHeapProfile(heap); err != nil {
++			heap.Close()
++			panic(err)
++		}
++		if err := heap.Close(); err != nil {
++			panic(err)
++		}
++		fmt.Printf("GNARK_PROFILE cpu=%s heap=%s\n", file.Name(), heap.Name())
++	}
++}
+diff --git a/crates/recursion/gnark-ffi/go/sp1/prove_groth16_icicle.go b/crates/recursion/gnark-ffi/go/sp1/prove_groth16_icicle.go
+index f3837e8..1454db2 100644
+--- a/crates/recursion/gnark-ffi/go/sp1/prove_groth16_icicle.go
++++ b/crates/recursion/gnark-ffi/go/sp1/prove_groth16_icicle.go
+@@ -6,7 +6,9 @@ import (
+ 	"bufio"
+ 	"encoding/json"
+ 	"fmt"
++	"io"
+ 	"os"
++	"runtime/debug"
+ 	"sync"
+ 	"time"
+ 
+@@ -15,6 +17,7 @@ import (
+ 	"github.com/consensys/gnark/backend/groth16"
+ 	"github.com/consensys/gnark/constraint"
+ 	"github.com/consensys/gnark/frontend"
++	icicle_runtime "github.com/ingonyama-zk/icicle-gnark/v3/wrappers/golang/runtime"
+ )
+ 
+ var globalMutex sync.RWMutex
+@@ -22,6 +25,75 @@ var globalR1cs constraint.ConstraintSystem = icicle_groth16.NewCS(ecc.BN254)
+ var globalR1csInitialized = false
+ var globalPk groth16.ProvingKey = icicle_groth16.NewProvingKey(ecc.BN254)
+ var globalPkInitialized = false
++var globalPkMutex sync.Mutex
++
++func loadGroth16Circuit(dataDir string) {
++	globalMutex.Lock()
++	defer globalMutex.Unlock()
++	if globalR1csInitialized {
++		return
++	}
++	start := time.Now()
++	file, err := os.Open(dataDir + "/" + groth16CircuitPath)
++	if err != nil {
++		panic(err)
++	}
++	defer file.Close()
++	if _, err := globalR1cs.ReadFrom(bufio.NewReaderSize(file, 1024*1024)); err != nil {
++		panic(err)
++	}
++	switch os.Getenv("SP1_GROTH16_TRIM_DIAGNOSTICS") {
++	case "1":
++		entries, indices, err := trimGroth16Diagnostics(globalR1cs)
++		if err != nil {
++			panic(err)
++		}
++		fmt.Printf("Removed Groth16 diagnostic metadata: entries=%d indices=%d\n", entries, indices)
++		debug.FreeOSMemory()
++	case "", "0":
++	default:
++		panic("SP1_GROTH16_TRIM_DIAGNOSTICS must be 0 or 1")
++	}
++	globalR1csInitialized = true
++	fmt.Printf("Reading R1CS took %s\n", time.Since(start))
++	if os.Getenv("SP1_GROTH16_RELEASE_HEAP") == "1" {
++		debug.FreeOSMemory()
++	}
++}
++
++func loadGroth16ProvingKey(dataDir string) {
++	globalPkMutex.Lock()
++	defer globalPkMutex.Unlock()
++	if globalPkInitialized {
++		return
++	}
++	start := time.Now()
++	file, err := os.Open(dataDir + "/" + groth16PkPath)
++	if err != nil {
++		panic(err)
++	}
++	defer file.Close()
++	var reader io.Reader = bufio.NewReaderSize(file, 1024*1024)
++	switch os.Getenv("SP1_GROTH16_SKIP_CPU_FFT_CACHE") {
++	case "1":
++		reader, err = withoutCPUFFTCache(reader)
++		if err != nil {
++			panic(err)
++		}
++		fmt.Println("CPU FFT cache disabled for Groth16 proving key")
++	case "", "0":
++	default:
++		panic("SP1_GROTH16_SKIP_CPU_FFT_CACHE must be 0 or 1")
++	}
++	if err := globalPk.ReadDump(reader); err != nil {
++		panic(err)
++	}
++	globalPkInitialized = true
++	fmt.Printf("Reading proving key took %s\n", time.Since(start))
++	if os.Getenv("SP1_GROTH16_RELEASE_HEAP") == "1" {
++		debug.FreeOSMemory()
++	}
++}
+ 
+ func ProveGroth16(dataDir string, witnessPath string) Proof {
+ 	// Sanity check the required arguments have been provided.
+@@ -29,42 +101,48 @@ func ProveGroth16(dataDir string, witnessPath string) Proof {
+ 		panic("dataDirStr is required")
+ 	}
+ 
++	if os.Getenv("SP1_CUDA_SYNC_BEFORE_GROTH16") == "1" {
++		if err := icicle_runtime.LoadBackendFromEnvOrDefault(); err != icicle_runtime.Success {
++			panic(fmt.Sprintf("load CUDA backend before Groth16: %s", err.AsString()))
++		}
++		device := icicle_runtime.CreateDevice("CUDA", 0)
++		done := make(chan struct{})
++		icicle_runtime.RunOnDevice(&device, func(args ...any) {
++			// SP1 polls events; an explicit synchronization applies the CUDA pool release threshold.
++			if err := icicle_runtime.DeviceSynchronize(); err != icicle_runtime.Success {
++				panic(fmt.Sprintf("synchronize CUDA before Groth16: %s", err.AsString()))
++			}
++			memory, err := icicle_runtime.GetAvailableMemory()
++			if err != icicle_runtime.Success {
++				panic(fmt.Sprintf("query CUDA memory before Groth16: %s", err.AsString()))
++			}
++			fmt.Printf("CUDA memory before Groth16: %+v\n", memory)
++			close(done)
++		})
++		<-done
++	}
++
+ 	start := time.Now()
+ 	os.Setenv("CONSTRAINTS_JSON", dataDir+"/"+constraintsJsonFile)
+ 	os.Setenv("GROTH16", "1")
+ 	fmt.Printf("Setting environment variables took %s\n", time.Since(start))
+ 
+-	// Read the R1CS.
+-	globalMutex.Lock()
+-	if !globalR1csInitialized {
+-		start = time.Now()
+-		r1csFile, err := os.Open(dataDir + "/" + groth16CircuitPath)
+-		if err != nil {
+-			panic(err)
+-		}
+-		r1csReader := bufio.NewReaderSize(r1csFile, 1024*1024)
+-		globalR1cs.ReadFrom(r1csReader)
+-		defer r1csFile.Close()
+-		globalR1csInitialized = true
+-		fmt.Printf("Reading R1CS took %s\n", time.Since(start))
+-	}
+-	globalMutex.Unlock()
+-
+-	// Read the proving key.
+-	globalMutex.Lock()
+-	if !globalPkInitialized {
+-		start = time.Now()
+-		pkFile, err := os.Open(dataDir + "/" + groth16PkPath)
+-		if err != nil {
+-			panic(err)
+-		}
+-		pkReader := bufio.NewReaderSize(pkFile, 1024*1024)
+-		globalPk.ReadDump(pkReader)
+-		defer pkFile.Close()
+-		globalPkInitialized = true
+-		fmt.Printf("Reading proving key took %s\n", time.Since(start))
++	if os.Getenv("SP1_GROTH16_PARALLEL_INIT") == "1" {
++		var loaded sync.WaitGroup
++		loaded.Add(2)
++		go func() {
++			defer loaded.Done()
++			loadGroth16Circuit(dataDir)
++		}()
++		go func() {
++			defer loaded.Done()
++			loadGroth16ProvingKey(dataDir)
++		}()
++		loaded.Wait()
++	} else {
++		loadGroth16Circuit(dataDir)
++		loadGroth16ProvingKey(dataDir)
+ 	}
+-	globalMutex.Unlock()
+ 
+ 	start = time.Now()
+ 	// Read the file.
+@@ -94,6 +172,8 @@ func ProveGroth16(dataDir string, witnessPath string) Proof {
+ 
+ 	start = time.Now()
+ 	// Generate the proof.
++	finishProfile := startGroth16Profile()
++	defer finishProfile()
+ 	proof, err := icicle_groth16.Prove(globalR1cs, globalPk, witness)
+ 	if err != nil {
+ 		fmt.Printf("Error: %v\n", err)
+@@ -101,5 +181,10 @@ func ProveGroth16(dataDir string, witnessPath string) Proof {
+ 	}
+ 	fmt.Printf("Generating proof took %s\n", time.Since(start))
+ 
+-	return NewSP1Groth16Proof(&proof, witnessInput)
++	result := NewSP1Groth16Proof(&proof, witnessInput)
++	if os.Getenv("SP1_GROTH16_RELEASE_HEAP") == "1" {
++		// Return Go scratch pages before the next Rust/CUDA phase pressures host RAM.
++		debug.FreeOSMemory()
++	}
++	return result
+ }
+diff --git a/sp1-gpu/crates/basefold/src/grinding_challenger.rs b/sp1-gpu/crates/basefold/src/grinding_challenger.rs
+index ec6707f..76b9e14 100644
+--- a/sp1-gpu/crates/basefold/src/grinding_challenger.rs
++++ b/sp1-gpu/crates/basefold/src/grinding_challenger.rs
+@@ -108,7 +108,7 @@ mod tests {
+         };
+ 
+         sp1_gpu_cudart::run_sync_in_place(|t| {
+-            for bits in 1..10 {
++            for bits in [0, 1, 4, 8, 12, 16, 20] {
+                 let perm = outer_perm();
+                 let mut challenger = slop_challenger::MultiField32Challenger::<
+                     SP1Field,
+diff --git a/sp1-gpu/crates/challenger/src/grinding_challenger.rs b/sp1-gpu/crates/challenger/src/grinding_challenger.rs
+index f4835f7..d7ef864 100644
+--- a/sp1-gpu/crates/challenger/src/grinding_challenger.rs
++++ b/sp1-gpu/crates/challenger/src/grinding_challenger.rs
+@@ -1,5 +1,7 @@
+ #![allow(clippy::disallowed_types)]
+ 
++use std::{env, time::Instant};
++
+ use crate::{DuplexChallenger, MultiField32Challenger};
+ use slop_algebra::{Field, PrimeField, PrimeField31, PrimeField32, PrimeField64};
+ use slop_challenger::GrindingChallenger;
+@@ -88,6 +90,15 @@ fn multi_field32_grind_kernel() -> KernelPtr {
+     unsafe { grind_multi_field32() }
+ }
+ 
++fn bn254_grind_blocks(value: Option<&str>) -> usize {
++    let blocks = value
++        .unwrap_or("1")
++        .parse::<usize>()
++        .expect("SP1_GPU_BN254_GRIND_BLOCKS must be an integer");
++    assert!((1..=1024).contains(&blocks), "SP1_GPU_BN254_GRIND_BLOCKS must be in 1..=1024");
++    blocks
++}
++
+ /// Grinds on device synchronously for a MultiField32Challenger.
+ pub fn grind_multi_field32_challenger_on_device<F, PF, P, const WIDTH: usize, const RATE: usize>(
+     challenger: &mut slop_challenger::MultiField32Challenger<F, PF, P, WIDTH, RATE>,
+@@ -99,19 +110,20 @@ where
+     PF: PrimeField + Field + Send + Sync,
+     P: CryptographicPermutation<[PF; WIDTH]> + Send + Sync,
+ {
++    let blocks = env::var("SP1_GPU_BN254_GRIND_BLOCKS").ok();
++    let grid_dim = bn254_grind_blocks(blocks.as_deref());
++    let timer = (env::var("SP1_GPU_GRIND_TIMING").as_deref() == Ok("1")).then(Instant::now);
+     let cpu_challenger: MultiField32Challenger<F, PF, _> = challenger.clone().into();
+ 
+     let mut result = DeviceBuffer::with_capacity_in(1, scope.clone());
+-    let mut found_flag = DeviceBuffer::<bool>::with_capacity_in(1, scope.clone());
++    let mut found_flag = DeviceBuffer::from_host_slice(&[0_u32], scope).unwrap();
+     let mut gpu_challenger = cpu_challenger.to_device_sync(scope).unwrap();
+ 
+     let block_dim: usize = 512;
+-    let grid_dim: usize = 1;
+     let n = F::ORDER_U64;
+ 
+     unsafe {
+         result.assume_init();
+-        found_flag.assume_init();
+         let args = args!(
+             gpu_challenger.as_mut_raw(),
+             result.as_mut_ptr(),
+@@ -124,15 +136,18 @@ where
+             .unwrap();
+     }
+ 
+-    // Copy result back to host synchronously
++    assert_eq!(found_flag.to_host().unwrap()[0], 1, "BN254 grinding found no witness");
+     let result = result.to_host().unwrap();
+-
+     let witness = *result.first().unwrap();
+ 
+-    // Check the witness. This is necessary because it changes the internal state of the
+-    // challenger, and the CPU version of the challenger does this as well. It's also necessary
+-    // for the security of the protocol.
++    // Checking the witness also advances the CPU transcript; neither step can be skipped.
+     assert!(challenger.check_witness(bits, witness));
++    if let Some(timer) = timer {
++        eprintln!(
++            "SP1_GPU_BN254_GRIND blocks={grid_dim} bits={bits} elapsed_ms={}",
++            timer.elapsed().as_millis()
++        );
++    }
+     witness
+ }
+ 
+@@ -143,6 +158,17 @@ mod tests {
+     use slop_challenger::{CanObserve, CanSample, GrindingChallenger};
+     use sp1_hypercube::inner_perm;
+ 
++    #[test]
++    fn bn254_grid_bounds() {
++        assert_eq!(bn254_grind_blocks(None), 1);
++        assert_eq!(bn254_grind_blocks(Some("1")), 1);
++        assert_eq!(bn254_grind_blocks(Some("128")), 128);
++        assert_eq!(bn254_grind_blocks(Some("1024")), 1024);
++        for invalid in ["0", "1025", "not-an-integer"] {
++            assert!(std::panic::catch_unwind(|| bn254_grind_blocks(Some(invalid))).is_err());
++        }
++    }
++
+     #[test]
+     fn test_grinding() {
+         sp1_gpu_cudart::run_sync_in_place(|t| {
+diff --git a/sp1-gpu/crates/prover_components/src/components.rs b/sp1-gpu/crates/prover_components/src/components.rs
+index f04c767..2c7196c 100644
+--- a/sp1-gpu/crates/prover_components/src/components.rs
++++ b/sp1-gpu/crates/prover_components/src/components.rs
+@@ -19,6 +19,15 @@ use sp1_prover::{CompressAir, ReadyWrapProverBuilder, SP1ProverComponents, WrapA
+ 
+ pub struct SP1CudaProverComponents;
+ 
++fn parse_trace_buffer_count(value: &str, maximum: usize) -> usize {
++    let count = value.parse::<usize>().expect("SP1_GPU_TRACE_BUFFER_COUNT must be an integer");
++    assert!(
++        (1..=maximum).contains(&count),
++        "SP1_GPU_TRACE_BUFFER_COUNT must be within the default pool size"
++    );
++    count
++}
++
+ impl SP1ProverComponents for SP1CudaProverComponents {
+     type CoreProver = CudaShardProver<SP1GlobalContext, CudaProverCoreComponents>;
+     type RecursionProver = CudaShardProver<SP1GlobalContext, CudaProverRecursionComponents>;
+@@ -96,6 +105,11 @@ where
+         all_interactions.insert(chip.name().to_string(), Arc::new(device_interactions));
+     }
+ 
++    let num_workers = match std::env::var("SP1_GPU_TRACE_BUFFER_COUNT") {
++        Ok(value) => parse_trace_buffer_count(&value, num_workers),
++        Err(std::env::VarError::NotPresent) => num_workers,
++        Err(error) => panic!("invalid SP1_GPU_TRACE_BUFFER_COUNT: {error}"),
++    };
+     let mut trace_buffers = Vec::with_capacity(num_workers);
+     for _ in 0..num_workers {
+         let pinned_buffer = PinnedBuffer::<GC::F>::with_capacity(max_trace_size);
+@@ -115,3 +129,32 @@ where
+         drop_ldes,
+     )
+ }
++
++#[cfg(test)]
++mod trace_buffer_count_tests {
++    use super::parse_trace_buffer_count;
++
++    #[test]
++    fn accepts_one_and_default_pool_size() {
++        assert_eq!(parse_trace_buffer_count("1", 4), 1);
++        assert_eq!(parse_trace_buffer_count("4", 4), 4);
++    }
++
++    #[test]
++    #[should_panic(expected = "within the default pool size")]
++    fn rejects_empty_pool() {
++        parse_trace_buffer_count("0", 4);
++    }
++
++    #[test]
++    #[should_panic(expected = "within the default pool size")]
++    fn rejects_pool_above_default() {
++        parse_trace_buffer_count("5", 4);
++    }
++
++    #[test]
++    #[should_panic(expected = "must be an integer")]
++    fn rejects_non_integer_pool_size() {
++        parse_trace_buffer_count("invalid", 4);
++    }
++}
+diff --git a/sp1-gpu/crates/server/src/main.rs b/sp1-gpu/crates/server/src/main.rs
+index 65e94f5..3e8b2f3 100644
+--- a/sp1-gpu/crates/server/src/main.rs
++++ b/sp1-gpu/crates/server/src/main.rs
+@@ -7,7 +7,7 @@ static GLOBAL: Jemalloc = Jemalloc;
+ 
+ use clap::Parser;
+ use server::Server;
+-use sp1_gpu_cudart::run_in_place;
++use sp1_gpu_cudart::{run_in_place, TaskPoolBuilder};
+ 
+ mod server;
+ 
+@@ -34,6 +34,15 @@ async fn main() {
+         .parse()
+         .expect("Expected only one CUDA device as a u32");
+ 
++    match std::env::var("SP1_CUDA_MEM_RELEASE_THRESHOLD") {
++        Ok(value) => {
++            let threshold = value.parse::<u64>().expect("SP1_CUDA_MEM_RELEASE_THRESHOLD must be a byte count");
++            TaskPoolBuilder::new().mem_release_threshold(threshold).build_global().unwrap();
++        }
++        Err(std::env::VarError::NotPresent) => {}
++        Err(error) => panic!("invalid SP1_CUDA_MEM_RELEASE_THRESHOLD: {error}"),
++    }
++
+     let server = Server { cuda_device_id };
+ 
+     if let Err(e) = run_in_place(|scope| server.run(scope)).await.await {
+diff --git a/sp1-gpu/crates/shard_prover/src/prover.rs b/sp1-gpu/crates/shard_prover/src/prover.rs
+index 067b073..0f09776 100644
+--- a/sp1-gpu/crates/shard_prover/src/prover.rs
++++ b/sp1-gpu/crates/shard_prover/src/prover.rs
+@@ -158,11 +158,43 @@ pub(crate) struct CudaShardProverInner<GC: IopCtx, PC: CudaShardProverComponents
+     pub _marker: PhantomData<GC>,
+ }
+ 
++pub(crate) struct TraceBufferGuard<F> {
++    buffer: Worker<PinnedBuffer<F>>,
++    release: bool,
++}
++
++impl<F> std::ops::Deref for TraceBufferGuard<F> {
++    type Target = Worker<PinnedBuffer<F>>;
++
++    fn deref(&self) -> &Self::Target {
++        &self.buffer
++    }
++}
++
++impl<F> Drop for TraceBufferGuard<F> {
++    fn drop(&mut self) {
++        if self.release {
++            // Gnark needs these host pages after STARK proving; idle pinned pages cannot swap.
++            *self.buffer = PinnedBuffer::with_capacity(0);
++        }
++    }
++}
++
+ impl<GC: IopCtx<F = Felt, EF = Ext>, PC: CudaShardProverComponents<GC>>
+     CudaShardProverInner<GC, PC>
+ {
+-    pub async fn get_buffer(&self) -> Worker<PinnedBuffer<GC::F>> {
+-        self.trace_buffers.clone().pop().await.expect("buffer pool exhausted")
++    pub async fn get_buffer(&self) -> TraceBufferGuard<GC::F> {
++        let release = match std::env::var("SP1_GPU_RELEASE_TRACE_BUFFERS") {
++            Ok(value) if value == "1" => true,
++            Ok(value) if value == "0" => false,
++            Err(std::env::VarError::NotPresent) => false,
++            _ => panic!("SP1_GPU_RELEASE_TRACE_BUFFERS must be 0 or 1"),
++        };
++        let mut buffer = self.trace_buffers.clone().pop().await.expect("buffer pool exhausted");
++        if buffer.capacity() < self.max_trace_size {
++            *buffer = PinnedBuffer::with_capacity(self.max_trace_size);
++        }
++        TraceBufferGuard { buffer, release }
+     }
+ 
+     fn machine(&self) -> &Machine<GC::F, PC::Air> {
+diff --git a/sp1-gpu/crates/sys/include/challenger/challenger.cuh b/sp1-gpu/crates/sys/include/challenger/challenger.cuh
+index 830c712..436fa28 100644
+--- a/sp1-gpu/crates/sys/include/challenger/challenger.cuh
++++ b/sp1-gpu/crates/sys/include/challenger/challenger.cuh
+@@ -1,4 +1,5 @@
+ #pragma once
++#include <cuda/atomic>
+ #include "fields/kb31_t.cuh"
+ #include "poseidon2/poseidon2_kb31_16.cuh"
+ #include "poseidon2/poseidon2_bn254_3.cuh"
+@@ -289,8 +290,9 @@ class MultiField32Challenger {
+     }
+ 
+     __device__ __forceinline__ void
+-    grind(size_t bits, kb31_t* result, volatile bool* found_flag, size_t n) {
++    grind(size_t bits, kb31_t* result, unsigned int* found_flag, size_t n) {
+         size_t idx = threadIdx.x + blockIdx.x * blockDim.x;
++        cuda::atomic_ref<unsigned int, cuda::thread_scope_device> found(*found_flag);
+ 
+         size_t original_buffer_sizes[NUM_BUFFER_SIZES];
+         for (size_t j = 0; j < NUM_BUFFER_SIZES; j++) {
+@@ -322,7 +324,8 @@ class MultiField32Challenger {
+         kb31_t local_output_buffer[OUTPUT_BUFFER_SIZE];
+         size_t local_buffer_sizes[NUM_BUFFER_SIZES];
+ 
+-        for (size_t i = idx; i < n && !*found_flag; i += blockDim.x * gridDim.x) {
++        for (size_t i = idx; i < n && found.load(cuda::memory_order_relaxed) == 0;
++             i += blockDim.x * gridDim.x) {
+             // Reset local state from shared memory.
+             for (size_t j = 0; j < NUM_BUFFER_SIZES; j++) {
+                 local_buffer_sizes[j] = original_buffer_sizes[j];
+@@ -342,9 +345,11 @@ class MultiField32Challenger {
+ 
+             kb31_t witness = kb31_t((int)i);
+             if (temp_challenger.check_witness(bits, &witness)) {
+-                result[0] = witness;
+-                atomicExch((int*)found_flag, 1);
+-                __threadfence();
++                unsigned int expected = 0;
++                if (found.compare_exchange_strong(expected, 1, cuda::memory_order_relaxed)) {
++                    // Kernel completion orders this write before the host result copy.
++                    result[0] = witness;
++                }
+                 return;
+             }
+         }
+diff --git a/sp1-gpu/crates/sys/lib/challenger/challenger.cu b/sp1-gpu/crates/sys/lib/challenger/challenger.cu
+index 1efd628..8ebc2d5 100644
+--- a/sp1-gpu/crates/sys/lib/challenger/challenger.cu
++++ b/sp1-gpu/crates/sys/lib/challenger/challenger.cu
+@@ -15,8 +15,7 @@ grindKernel(DuplexChallenger challenger, kb31_t* result, size_t bits, size_t n,
+ extern "C" void* grind_koala_bear() { return (void*)grindKernel; }
+ 
+ __global__ void
+-grindMultiFieldKernel(MultiField32Challenger challenger, kb31_t* result, size_t bits, size_t n, bool* found_flag) {
+-    found_flag[0] = false;
++grindMultiFieldKernel(MultiField32Challenger challenger, kb31_t* result, size_t bits, size_t n, unsigned int* found_flag) {
+     challenger.grind(bits, result, found_flag, n);
+ }
+ 
