@@ -1,0 +1,50 @@
+{
+  "schema": "northstar.public-evidence-checksums.v1",
+  "files": [
+    {
+      "file": "README.md",
+      "bytes": 2289,
+      "sha256": "ca5d7d1bc8d148d7caab826a5144c581d1295732d891a96a2cbb3cbcc2dd8bf4"
+    },
+    {
+      "file": "attempts.json",
+      "bytes": 91451,
+      "sha256": "3c89ad32cb7cc169032625d347cbcd213af68e3c0db516405eaa1c44fbc6b82e"
+    },
+    {
+      "file": "best-diagnostic.env",
+      "bytes": 1314,
+      "sha256": "310a637fecf056d87aa28fab2a1f450f73e5a3a4f1704764b1b586a2d54bce3c"
+    },
+    {
+      "file": "best-proof/onchain-proof.bin",
+      "bytes": 356,
+      "sha256": "82661ac67eb7c512fa327c11d0f574bfe8f0dc050a1d8f11beacd159210bc325"
+    },
+    {
+      "file": "best-proof/public-inputs.bin",
+      "bytes": 256,
+      "sha256": "d37219bd831d9b5ff19e75f0a6766c874b965c08d125b21c32895dedba7f2d36"
+    },
+    {
+      "file": "best-proof/sdk-proof.bin",
+      "bytes": 1950,
+      "sha256": "ce7e0dd0468443c352ea31a44ad830d188b493bb09576770af307bfaff7efaec"
+    },
+    {
+      "file": "guest-controls.json",
+      "bytes": 17875,
+      "sha256": "d91fcf14ba1d6bd5d7e8945665f574a0bc811fc174685198b37e3001fabe1ca6"
+    },
+    {
+      "file": "summary.json",
+      "bytes": 2955,
+      "sha256": "6d23254eea5c5519eb852a70cd2fc4afb5819826fe02d952f10b85ad03dd4c92"
+    },
+    {
+      "file": "timing.json",
+      "bytes": 14619,
+      "sha256": "eca3ee33c4f9f9b3311e94ff7aee5477352b968b5ab52fb530e15dba751c3661"
+    }
+  ]
+}

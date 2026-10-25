@@ -84,16 +84,107 @@ impl<T: BorshDeserialize, const MAX: usize> BorshDeserialize for BoundedVec<T, M
     }
 }
 
+#[inline]
+fn candidate_bytes_equal(left: &[u8], right: &[u8]) -> bool {
+    #[cfg(target_os = "zkvm")]
+    {
+        wordwise_bytes_equal(left, right)
+    }
+    #[cfg(not(target_os = "zkvm"))]
+    {
+        left == right
+    }
+}
+
+#[cfg(any(test, target_os = "zkvm"))]
+fn wordwise_bytes_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    if std::ptr::eq(left.as_ptr(), right.as_ptr()) {
+        return true;
+    }
+    // SAFETY: Both casts preserve slice bounds; every u64 bit pattern is valid and access is shared.
+    let (left_head, left_words, left_tail) = unsafe { left.align_to::<u64>() };
+    // SAFETY: The same bounds, validity, and shared-access conditions apply to the right slice.
+    let (right_head, right_words, right_tail) = unsafe { right.align_to::<u64>() };
+    if left_head.len() == right_head.len() && left_words.len() == right_words.len() {
+        if left_head != right_head || left_tail != right_tail {
+            return false;
+        }
+        // A word reduction avoids lowering large equal buffers to bytewise memcmp in the zkVM.
+        left_words
+            .iter()
+            .zip(right_words)
+            .fold(0, |difference, (left, right)| difference | (*left ^ *right))
+            == 0
+    } else {
+        let (right_head, right) = right.split_at(left_head.len());
+        let (right_words, right_tail) = right.split_at(std::mem::size_of_val(left_words));
+        if left_head != right_head || left_tail != right_tail {
+            return false;
+        }
+        let Some((last_left, left_prefix)) = left_words.split_last() else {
+            return true;
+        };
+        // SAFETY: This shared u64 view stays inside the exact compared byte region.
+        let (head, words, tail) = unsafe { right_words.align_to::<u64>() };
+        if head.is_empty() || head.len() >= 8 || tail.len() >= 8 || words.len() != left_prefix.len()
+        {
+            return left_words
+                .iter()
+                .zip(right_words.as_chunks::<8>().0)
+                .fold(0, |difference, (left, right)| {
+                    difference | (*left ^ u64::from_ne_bytes(*right))
+                })
+                == 0;
+        }
+        let low_bytes = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .rev()
+                .fold(0u64, |word, byte| (word << 8) | u64::from(*byte))
+        };
+        let shift = (head.len() as u32) << 3;
+        let remaining = u64::BITS.saturating_sub(shift);
+        let mut carry = low_bytes(head);
+        let mut difference = 0;
+        for (left, right) in left_prefix.iter().zip(words) {
+            let right = right.to_le();
+            difference |= left.to_le() ^ (carry | (right << shift));
+            carry = right >> remaining;
+        }
+        difference | (last_left.to_le() ^ (carry | (low_bytes(tail) << shift))) == 0
+    }
+}
+
 pub type Hash32 = [u8; 32];
 pub type AccountBytes = BoundedVec<u8, MAX_ACCOUNT_BYTES>;
 
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, Eq, BorshSerialize, BorshDeserialize)]
 pub struct CandidateAccountStateV1 {
     pub lamports: u64,
     pub owner: Hash32,
     pub executable: bool,
     pub rent_epoch: u64,
     pub data: AccountBytes,
+}
+
+impl PartialEq for CandidateAccountStateV1 {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            lamports,
+            owner,
+            executable,
+            rent_epoch,
+            data,
+        } = self;
+        *lamports == other.lamports
+            && *owner == other.owner
+            && *executable == other.executable
+            && *rent_epoch == other.rent_epoch
+            && candidate_bytes_equal(data, &other.data)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -270,4 +361,70 @@ pub trait CandidateReplayEngine {
         &mut self,
         input: &CandidateExecutionInputV1,
     ) -> Result<CandidateExecutionOutputV1, CandidateError>;
+}
+
+#[cfg(test)]
+mod byte_equality_tests {
+    use super::*;
+
+    #[test]
+    fn wordwise_equality_matches_bytes_at_all_alignments() {
+        for length in (0..96).chain([127, 128, 129, 1023, 1024, 1025, 16385]) {
+            for left_offset in 0..8 {
+                for right_offset in 0..8 {
+                    let mut left = vec![0u8; length + 8];
+                    let mut right = vec![0u8; length + 8];
+                    let left = &mut left[left_offset..left_offset + length];
+                    let right = &mut right[right_offset..right_offset + length];
+                    for (index, byte) in left.iter_mut().enumerate() {
+                        *byte = (index as u8).wrapping_mul(17).wrapping_add(5);
+                    }
+                    right.copy_from_slice(left);
+                    assert!(wordwise_bytes_equal(left, right));
+                    assert!(wordwise_bytes_equal(left, left));
+                    if length == 0 {
+                        continue;
+                    }
+                    assert!(!wordwise_bytes_equal(left, &right[..length - 1]));
+                    let indices: Vec<_> = if length < 96 {
+                        (0..length).collect()
+                    } else {
+                        vec![0, 7, 8, 15, 16, length / 2, length - 1]
+                    };
+                    for index in indices {
+                        for mask in [1, 0x80] {
+                            right[index] ^= mask;
+                            assert!(!wordwise_bytes_equal(left, right));
+                            assert!(!wordwise_bytes_equal(right, left));
+                            right[index] ^= mask;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn account_equality_checks_every_field() {
+        let original = CandidateAccountStateV1 {
+            lamports: 1,
+            owner: [2; 32],
+            executable: false,
+            rent_epoch: 3,
+            data: AccountBytes::new(vec![4; 1025]).unwrap(),
+        };
+        assert_eq!(original, original.clone());
+        for field in 0..5 {
+            let mut changed = original.clone();
+            match field {
+                0 => changed.lamports += 1,
+                1 => changed.owner[0] ^= 1,
+                2 => changed.executable = true,
+                3 => changed.rent_epoch += 1,
+                4 => changed.data = AccountBytes::new(vec![5; 1025]).unwrap(),
+                _ => unreachable!(),
+            }
+            assert_ne!(original, changed);
+        }
+    }
 }

@@ -6,7 +6,7 @@ publish.workspace = true
 
 [features]
 crypto-checks = ["dep:sha2"]
-cycle-profiling = []
+cycle-profiling = ["northstar-transaction-proof/cycle-tracking"]
 
 [dependencies]
 sha2 = { version = "=0.10.9", features = ["compress"], optional = true }

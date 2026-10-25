@@ -1,0 +1,2 @@
+# Unified-diff context prefixes are significant, including before tabs.
+*.patch whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
