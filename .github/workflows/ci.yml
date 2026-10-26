@@ -170,6 +170,43 @@ jobs:
       - name: Run Northstar core service tests
         run: cargo test --locked -p solana-core northstar_service --no-fail-fast
 
+  # Sonic: The network adapter is an isolated SP1 workspace; tests use no GPU or paid requests.
+  network-prover:
+    name: Network prover (CPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SP1_SKIP_PROGRAM_BUILD: "true"
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      RAYON_NUM_THREADS: 2
+      TOKIO_WORKER_THREADS: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/ensure-rust-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: northstar/zkvm-replay -> target
+          save-if: ${{ env.SAVE_CI_CACHE }}
+      - name: Install SDK build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config clang
+      - name: Prepare the frozen guest
+        working-directory: northstar/zkvm-replay
+        run: |
+          mkdir -p target/elf-compilation/riscv64im-succinct-zkvm-elf/release
+          gzip -dc evidence/g5-a10g-sha-v1/candidate.elf.gz \
+            > target/elf-compilation/riscv64im-succinct-zkvm-elf/release/northstar-zkvm-replay-program
+      - name: Test network gateway guards without services
+        run: python3 -B northstar/scripts/test_network_gateway.py
+      - name: Test network adapter and retained proofs
+        working-directory: northstar/zkvm-replay
+        run: cargo test --locked -p northstar-zkvm-replay-script --features network --bin northstar-network-prover --test network_adapter
+      - name: Check network adapter
+        working-directory: northstar/zkvm-replay
+        run: cargo clippy --locked -p northstar-zkvm-replay-script --features network --bin northstar-network-prover --test network_adapter -- -D warnings
+
   deploy:
     name: Build and Deploy on Devnet
     needs: [fmt, clippy, test]

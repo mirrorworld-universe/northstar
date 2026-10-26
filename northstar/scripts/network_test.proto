@@ -1,0 +1,69 @@
+syntax = "proto3";
+package network;
+
+// Test-only wire-compatible subset of SP1 SDK 6.8.0's reserved network API.
+service ProverNetwork {
+  rpc GetNonce(GetNonceRequest) returns (GetNonceResponse);
+  rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
+  rpc GetProgram(GetProgramRequest) returns (GetProgramResponse);
+  rpc CreateProgram(CreateProgramRequest) returns (CreateProgramResponse);
+  rpc RequestProof(RequestProofRequest) returns (RequestProofResponse);
+  rpc GetProofRequestStatus(GetProofRequestStatusRequest) returns (GetProofRequestStatusResponse);
+}
+
+message GetNonceRequest { bytes address = 1; }
+message GetNonceResponse { uint64 nonce = 1; }
+message GetBalanceRequest { bytes address = 1; }
+message GetBalanceResponse { string amount = 1; }
+message Program { bytes vk_hash = 1; bytes vk = 2; string program_uri = 3; }
+message GetProgramRequest { bytes vk_hash = 1; }
+message GetProgramResponse { Program program = 1; }
+message CreateProgramRequest {
+  int32 format = 1;
+  bytes signature = 2;
+  CreateProgramRequestBody body = 3;
+}
+message CreateProgramRequestBody {
+  uint64 nonce = 1;
+  bytes vk_hash = 2;
+  bytes vk = 3;
+  string program_uri = 4;
+}
+message CreateProgramResponse { bytes tx_hash = 1; Empty body = 2; }
+message Empty {}
+message RequestProofRequest {
+  int32 format = 1;
+  bytes signature = 2;
+  RequestProofRequestBody body = 3;
+}
+message RequestProofRequestBody {
+  uint64 nonce = 1;
+  bytes vk_hash = 2;
+  string version = 3;
+  int32 mode = 4;
+  int32 strategy = 5;
+  string stdin_uri = 6;
+  uint64 deadline = 7;
+  uint64 cycle_limit = 8;
+  uint64 gas_limit = 9;
+  uint64 min_auction_period = 10;
+  repeated bytes whitelist = 11;
+  bool stdin_private = 12;
+}
+message RequestProofResponse { bytes tx_hash = 1; RequestProofResponseBody body = 2; }
+message RequestProofResponseBody { bytes request_id = 1; }
+message GetProofRequestStatusRequest { bytes request_id = 1; }
+message GetProofRequestStatusResponse {
+  int32 fulfillment_status = 1;
+  int32 execution_status = 2;
+  bytes request_tx_hash = 3;
+  uint64 deadline = 4;
+  optional bytes fulfill_tx_hash = 5;
+  optional string proof_uri = 6;
+  optional bytes public_values_hash = 7;
+  optional string proof_public_uri = 8;
+}
+
+// These messages are served at /artifact.ArtifactStore/CreateArtifact.
+message CreateArtifactRequest { bytes signature = 1; int32 artifact_type = 2; }
+message CreateArtifactResponse { string artifact_uri = 1; string artifact_presigned_url = 2; }
