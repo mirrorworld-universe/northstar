@@ -8,8 +8,11 @@ It is not a cross-repository `workflow_run` listener or another job sharing a la
 
 1. Build/validate the normal Northstar artifacts.
 2. Stop the managed oracle **before** Portal changes or validator restart. Inspect
-   its deployment-bound journal. Pending/retryable/unresolved or missing/corrupt
-   state blocks deployment and restores a previously active worker for reconciliation.
+   its deployment-bound journal with the offline Rust validator. Under the deployment
+   lock, validate/reconcile every indexed administrative intent without signing.
+   Pending/retryable/unresolved, incomplete program uploads or missing/corrupt state
+   blocks deployment and restores a previously active worker. A missing systemd unit
+   does not bypass retained state; receipt-cache updates preserve file ownership.
 3. Complete existing Portal/token-bridge deployment, session setup, validator restart
    and SOL/SPL smoke tests. The smoke tests themselves restart the validator.
 4. If enabled, checkout the approved oracle revision and its pinned Coordinator/Bai
@@ -66,6 +69,11 @@ Private deployment keys/plans/logs stay under `/solana/northstar/vrf-service`.
 Worker journals stay under `/var/lib/northstar-vrf-oracle/journals`; installed public
 configuration is `/etc/northstar-vrf-oracle/config.json`. Never remove these to bypass
 an unresolved-intent gate. Restore approved backups and reconcile outcomes first.
+
+The controller binds session incarnation before its first mutation, including failed
+initial bootstraps. Existing Coordinator governance is checked before funding/upgrades.
+A program CLI interruption leaves a durable pending-program barrier requiring explicit
+operator reconciliation. Never clear it merely to rerun CD.
 
 Bootstrap failure stops/disables the service without erasing state or rolling back
 L1 upgrades. Do not concurrently run a manual bootstrap or restart the validator.
