@@ -86,6 +86,9 @@ jobs:
           bash -n northstar/scripts/vrf-proof-cpu-conformance.sh
       - name: Test SOL smoke restart finalization guard
         run: bash .github/scripts/test-devnet-e2e-smoke.sh
+      # Sonic: Deployment guards use no service, credentials or chain requests.
+      - name: Test managed VRF redeploy guard
+        run: python3 -B .github/scripts/test-stop-vrf-service.py
       - name: Test pinned SBF build arguments
         run: bash .github/scripts/test-sbf-toolchain.sh
       - name: Test bounded GPU runner without GPU
@@ -218,6 +221,22 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Sonic: The same deploy job owns the node and its persistent oracle service.
+      - name: Validate enabled VRF deployment inputs
+        if: vars.NORTHSTAR_VRF_ENABLED == 'true'
+        env:
+          SOURCE_READ_TOKEN: ${{ secrets.NORTHSTAR_VRF_SOURCE_READ_TOKEN }}
+          ORACLE_REVISION: ${{ vars.NORTHSTAR_VRF_REVISION }}
+          FUNDER_KEYPAIR: ${{ vars.NORTHSTAR_VRF_FUNDER_KEYPAIR }}
+          FUNDING_CAP: ${{ vars.NORTHSTAR_VRF_MAX_FUNDING_LAMPORTS }}
+        run: |
+          set -euo pipefail
+          test -n "$SOURCE_READ_TOKEN"
+          [[ "$ORACLE_REVISION" =~ ^[a-f0-9]{40}$ ]]
+          test -n "$FUNDER_KEYPAIR" && test -f "$FUNDER_KEYPAIR"
+          [[ "$FUNDING_CAP" =~ ^[0-9]{1,11}$ ]]
+          test "$FUNDING_CAP" -gt 0 && test "$FUNDING_CAP" -le 50000000000
+
       - name: Check for program changes
         id: program_changes
         run: |
@@ -291,6 +310,9 @@ jobs:
           set -euo pipefail
           BIN="/solana/northstar/release/agave-validator"
           test -f "$BIN" && test -x "$BIN" && "$BIN" --version
+
+      - name: Stop managed VRF before deployment
+        run: sudo -n python3 .github/scripts/stop-vrf-service.py
 
       - name: Generate new portal program address
         id: portal_address
@@ -451,6 +473,87 @@ jobs:
           TOKEN_BRIDGE_ADDRESS: ${{ steps.token_bridge_deploy.outputs.token_bridge_address }}
           REPORT_PATH: /tmp/northstar-spl-e2e-report.txt
         run: ./.github/scripts/devnet-spl-e2e-smoke.sh
+
+      - name: Check out approved oracle source
+        if: vars.NORTHSTAR_VRF_ENABLED == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: mirrorworld-universe/vrf-oracle
+          ref: ${{ vars.NORTHSTAR_VRF_REVISION }}
+          token: ${{ secrets.NORTHSTAR_VRF_SOURCE_READ_TOKEN }}
+          persist-credentials: false
+          path: .vrf-ci/oracle
+
+      - name: Read pinned VRF program sources
+        if: vars.NORTHSTAR_VRF_ENABLED == 'true'
+        id: vrf_pins
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          pins = json.loads(Path('.vrf-ci/oracle/sources.lock.json').read_text())['repositories']
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for name in ('coordinator', 'verifier'):
+                  revision = pins[name]['revision']
+                  if not re.fullmatch('[a-f0-9]{40}', revision):
+                      raise SystemExit('VRF source must be an immutable commit')
+                  print(f'{name}={revision}', file=output)
+          PY
+
+      - name: Check out pinned Coordinator
+        if: vars.NORTHSTAR_VRF_ENABLED == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: mirrorworld-universe/vrf-coordinator-program-library
+          ref: ${{ steps.vrf_pins.outputs.coordinator }}
+          token: ${{ secrets.NORTHSTAR_VRF_SOURCE_READ_TOKEN }}
+          persist-credentials: false
+          path: .vrf-ci/coordinator
+
+      - name: Check out pinned Bai verifier
+        if: vars.NORTHSTAR_VRF_ENABLED == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: mirrorworld-universe/vrf_verify_contract
+          ref: ${{ steps.vrf_pins.outputs.verifier }}
+          token: ${{ secrets.NORTHSTAR_VRF_SOURCE_READ_TOKEN }}
+          persist-credentials: false
+          path: .vrf-ci/verifier
+
+      - name: Set up VRF deployment Python
+        if: vars.NORTHSTAR_VRF_ENABLED == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Reconcile CI-owned VRF stack and enable service
+        if: vars.NORTHSTAR_VRF_ENABLED == 'true'
+        id: vrf_deploy
+        timeout-minutes: 60
+        env:
+          ORACLE_REVISION: ${{ vars.NORTHSTAR_VRF_REVISION }}
+          VRF_FUNDER_KEYPAIR: ${{ vars.NORTHSTAR_VRF_FUNDER_KEYPAIR }}
+          VRF_MAX_FUNDING_LAMPORTS: ${{ vars.NORTHSTAR_VRF_MAX_FUNDING_LAMPORTS }}
+          VRF_DEPLOYMENT_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: bash .github/scripts/deploy-vrf-service.sh
+
+      - name: Stop VRF after failed or cancelled bootstrap
+        if: always() && vars.NORTHSTAR_VRF_ENABLED == 'true' && (steps.vrf_deploy.outcome == 'failure' || steps.vrf_deploy.outcome == 'cancelled')
+        run: |
+          set -euo pipefail
+          state=$(systemctl show --property=LoadState --value northstar-vrf-oracle.service)
+          if [ "$state" != not-found ]; then
+            sudo -n systemctl disable --now northstar-vrf-oracle.service
+          fi
+
+      - name: Retain public VRF deployment evidence
+        if: vars.NORTHSTAR_VRF_ENABLED == 'true' && steps.vrf_deploy.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vrf-devnet-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.vrf_deploy.outputs.report }}
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Notify Slack
         if: always()
