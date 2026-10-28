@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "state": "ready",
+  "native": {
+    "repository": "mirrorworld-universe/northstar",
+    "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "run_id": "42",
+    "run_attempt": "2",
+    "runner_name": "northstar-devnet-1",
+    "enabled": true
+  },
+  "observed": {
+    "portal": "5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf",
+    "session": "11111111111111111111111111111111",
+    "validator": "11111111111111111111111111111111",
+    "l1_genesis": "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+    "er_genesis": "11111111111111111111111111111111",
+    "session_identity_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "process": {
+      "pid": 123,
+      "start_ticks": "12345",
+      "boot_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  }
+}
