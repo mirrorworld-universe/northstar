@@ -1,127 +1,67 @@
-# Oracle-owned devnet deployment
+# Manual oracle deployment on the devnet host
 
-Northstar owns validator deployment and its restart safeguards. The
+Northstar owns validator deployment. The
 [`vrf-oracle` repository](https://github.com/mirrorworld-universe/vrf-oracle)
-owns Coordinator/Bai/consumer provisioning, the persistent oracle service and its
-callback smoke test. A push to either default branch does not activate this flow.
+owns a **manual** Actions workflow for Coordinator/Bai/consumer provisioning and the
+persistent oracle service. Northstar does not dispatch it automatically.
 
 ## Release ordering
 
-1. The existing release job builds Northstar artifacts. Before Portal changes or
-   validator restart, `vrf-handoff.py begin` acquires the host handoff lock and runs
-   the retained-state stop guard. That guard validates the complete worker journal
-   and reconciles indexed administrative receipts without signing. Unresolved
-   work, incomplete uploads or missing/corrupt state block deployment and restore
-   a previously active worker. A missing unit does not bypass inactivity confirmation,
-   worker reservations or orphaned state trees.
-2. A durable `deploying` handoff invalidates the previous native generation before
-   chain/node changes. Northstar deploys Portal/token bridge as needed, opens its
-   session, and completes SOL/SPL smoke tests and the existing notification step.
-3. The final native step publishes a root-owned `ready` handoff. It binds the source
-   run/attempt/commit, runner name, enablement, Portal, session incarnation, validator,
-   genesis values and running process identity. Settlement progress is not included
-   in the session incarnation digest. Ordinary failure marks the owned generation
-   `failed`; a stale finalizer cannot replace another generation.
-4. Only after the **entire `CI` workflow succeeds**, `vrf-dispatch.yml` requests
-   `deploy-devnet.yml` on the oracle repository's protected `main` branch. Its
-   `workflow_run` listener lives in Northstar, not in the receiving repository.
-   The dispatch contains public source provenance only.
-5. Oracle independently verifies the successful release run and native deployment
-   job through GitHub's API. It verifies that its job uses the **same organization
-   runner ID**, not merely the same label or name. Under the host lock it compares
-   the current handoff with fresh runtime observations before service/key changes.
-6. Oracle builds its approved immutable revision and pinned program sources,
-   provisions only CI-owned programs, delegates consumer state, starts the worker,
-   and requires a confirmed callback with Coordinator/Bai/consumer CPI evidence.
-   Its workflow owns the success report and deployment outcome.
+1. Before Portal changes or validator restart, `stop-vrf-service.py` stops the
+   managed oracle and confirms inactivity. It validates the complete bound worker
+   journal and indexed administrative receipts without signing transactions.
+2. Pending or unknown outcomes, incomplete uploads and missing/corrupt established
+   state block deployment. On inspection failure, a previously active oracle is
+   restarted against the old ER so it can reconcile. Missing units do not bypass
+   shutdown confirmation, worker reservations or orphaned-state checks.
+3. Native CI deploys programs, restarts the validator, opens its session and completes
+   its existing SOL/SPL smoke tests. The managed oracle remains stopped/disabled.
+4. After native CI succeeds, an operator runs **Deploy VRF on devnet** in the oracle
+   repository on `main`, supplying the current Portal ID and other public inputs.
+   That workflow rechecks devnet/session identity, provisions only dedicated programs,
+   starts the oracle and requires a confirmed callback before reporting success.
 
-The notifier does not assert oracle readiness. If dispatch or bootstrap fails,
-Northstar can be healthy while the oracle remains stopped. Monitor both workflows.
-Existing local Bai-profile evidence is not hosted workflow/systemd qualification.
-No SP1 or oracle L1-settlement qualification is claimed.
+## Setup
 
-## One shared organization runner
+**No new Northstar secrets or variables are required.** Its existing `devnet` runner
+label is unchanged. Make that same persistent runner registration accessible to
+vrf-oracle, preferably one organization runner shared by both repositories. Do not
+register a second runner process on the same host or place multiple hosts behind
+the selected label. One registration serializes native and oracle deployment jobs.
 
-Register the devnet runner **once at organization scope**, and grant only the
-approved Northstar and oracle deployment workflows access. Give that registration
-a host-specific label, such as `northstar-devnet-1`. Configure both repositories
-with the same exact runner name and label. Do not register a second agent on the
-host, create per-repository registrations, or use a pool behind the label.
+The oracle repository needs only:
 
-A single registration serializes deployment jobs across repositories. GitHub
-Actions concurrency groups alone do not: they are repository-scoped. The host
-handoff lock adds a local fence; a native `deploying` marker blocks oracle startup
-between native workflow steps. Oracle holds that lock through provisioning and
-cleanup. This is not distributed fencing or HA. Do not restart the validator or
-invoke another provisioner outside this protocol.
+- `SOURCE_READ_TOKEN`: fine-grained token with Contents read on the private
+  Coordinator and verifier repositories.
+- `DEVNET_FUNDER_KEYPAIR`: a funded, disposable devnet Solana keypair JSON secret.
 
-## Activation inputs
+Runner label, Portal ID, loopback L1/ER RPC URLs, funding cap and invocation name are
+manual workflow inputs. Oracle/program revisions come from its checked-out `main`
+commit and source lock. No GitHub App, cross-repository token with Actions write,
+enablement flag, approved-revision variable or CI-run identity input is needed.
+See the oracle [deployment runbook](https://github.com/mirrorworld-universe/vrf-oracle/blob/main/deploy/README.md)
+for exact inputs, permissions and recovery steps.
 
-These changes do not provision credentials, grant runner access, enable variables
-or push `release`. Before activation, publish/review the companion oracle workflow
-and configure its protected `devnet` environment. Both repositories must have the
-new workflow files on their default branches; the native handoff code must also
-reach `release` through the normal release process.
+## Retained state and recovery
 
-Configure in **mirrorworld-universe/northstar**:
+Stable keys, control plans/intents and reports live under
+`/solana/northstar/vrf-service`. Its `worker-state.json` reserves the current worker
+binding/configuration independently of activation success. Journals live under
+`/var/lib/northstar-vrf-oracle/journals`; installed public configuration is
+`/etc/northstar-vrf-oracle/config.json`. Systemd supplies only fulfiller/VRF credentials;
+admin/program/funder keys stay outside the worker's access.
 
-- Variable `NORTHSTAR_DEVNET_RUNNER_NAME`: exact shared organization runner name.
-- Variable `NORTHSTAR_DEVNET_RUNNER_LABEL`: host-specific label; generic `devnet`,
-  `self-hosted`, `linux` and `x64` labels are rejected when enablement is requested.
-- Variable `NORTHSTAR_VRF_DISPATCH_APP_ID` and secret
-  `NORTHSTAR_VRF_DISPATCH_APP_KEY`: a GitHub App installed on **vrf-oracle only**,
-  with Actions write permission. The listener mints a short-lived dispatch token.
-- Variable `NORTHSTAR_VRF_ENABLED`: set `true` only after both sides are ready.
+The service stops with `northstar-validator.service`. After a native deployment,
+restart it through the manual workflow, not an automatic release notification.
+Never delete journals, reservations or signed intents to force a deployment through.
+Unknown upload/transaction outcomes require explicit reconciliation. Failed oracle
+bootstrap does not roll back L1 upgrades or remove delegated test accounts.
 
-Oracle revision approval, private source-read credentials, funding key path and
-funding cap now belong to **vrf-oracle**, not Northstar. Its
-[`deploy/README.md`](https://github.com/mirrorworld-universe/vrf-oracle/blob/main/deploy/README.md)
-lists the receiving workflow's inputs and permissions. The ordinary repository
-`GITHUB_TOKEN` is not a cross-repository credential. No broad personal token is needed.
+Do not concurrently run another provisioner or restart the validator outside this
+workflow ordering. Repository Actions concurrency is not cross-repository fencing;
+one shared runner registration is required. The controller's deployment lock protects
+state and cleanup, but no host-handoff/provenance protocol remains. Root/runner/RPC
+are trusted. Forced process loss may bypass cleanup and requires operator inspection.
 
-The host needs systemd, passwordless deployment `sudo`, Linux `/proc`, Python 3.10+
-for the native observer and the existing Northstar toolchain. Oracle sets up Python
-3.12 and its pinned Rust/SBF tools. Update the Actions runner to support Node 24
-before using `actions/create-github-app-token@v2`.
-
-## Persistent state and recovery
-
-- `/var/lib/northstar-deployment/current.json`: root-owned public handoff. Its
-  directory is the shared advisory lock; do not replace/delete it while a job runs.
-- `/usr/local/lib/northstar-deployment`: native observer and retained-state guard.
-- `/solana/northstar/vrf-service`: private oracle keys, plans, intents and reports.
-  Its `worker-state.json` reserves the current binding/configuration before startup,
-  independently of activation success. Missing or mismatched configuration blocks
-  restart even when the unit is absent.
-- `/var/lib/northstar-vrf-oracle/journals`: deployment-bound worker journals.
-- `/etc/northstar-vrf-oracle/config.json`: installed public worker configuration.
-
-The systemd worker has a DynamicUser and only the fulfiller/VRF credentials;
-admin/program/funder keys remain outside its access. It stops with the validator.
-A successful oracle bootstrap enables it independently of the Actions process.
-Disabling either repository flag does not interrupt an already running job or
-service. Disabling the native flag stops/disables the worker at the next guarded
-native deployment and publishes a handoff that refuses oracle activation.
-
-A failed stop gate leaves the previous handoff intact and precedes native mutation.
-A force-killed native job may leave `deploying`; automatic deployment then blocks.
-Reconcile that exact native run's node/program outcomes before an operator marks
-its handoff failed. Never delete the handoff or private journals to force progress.
-
-An old or delayed dispatch is rejected if the native generation, process, session
-or enablement changed. A partial GitHub rerun without a matching native deployment
-attempt is also rejected; rerun the complete release deployment. Retry the notifier
-only for the current successful native generation. Identical source-generation/
-approved-oracle-revision requests reuse the same controller invocation and receipts.
-
-Oracle cancellation performs cleanup inside the host lock when Python receives
-SIGINT/SIGTERM; further signals during failure handling do not interrupt cleanup.
-Receiver-only retries independently stop the unit and validate retained worker state.
-Forced process/runner loss may bypass cleanup. Inspect the unit,
-retained control index and worker journal before recovery. Unknown program uploads
-remain barriers requiring explicit review. Bootstrap does not roll back L1 upgrades,
-delete delegated accounts or discard signed intents.
-
-The service remains development-only: no automatic archival, rotation, HA or
-production SLO. Root/runner administrators and colocated RPC are trusted; process
-and RPC comparisons are not authenticated execution witnesses.
+The service remains development-only. Hosted workflow/systemd execution is unvalidated;
+local Bai-profile evidence is not hosted success, SP1 or L1-settlement qualification.

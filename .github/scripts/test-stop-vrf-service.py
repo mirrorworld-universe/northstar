@@ -265,30 +265,21 @@ class StopTests(unittest.TestCase):
 
     def test_deploy_order_and_trust_boundary(self):
         source = Path(__file__).parents[1].joinpath("workflows/ci.yml").read_text()
-        stop = source.index("Quiesce oracle and begin native handoff")
+        stop = source.index("Stop managed VRF before deployment")
         self.assertLess(stop, source.index("Generate new portal program address"))
-        self.assertLess(
-            source.index(
-                "Run SPL deposit, resume, withdrawal, and settlement smoke test"
-            ),
-            source.index("Publish successful native handoff"),
-        )
+        self.assertIn("sudo -n python3 -B .github/scripts/stop-vrf-service.py", source)
         deploy = source[source.index("  deploy:") :]
-        self.assertIn("runs-on: [self-hosted, linux,", deploy)
+        self.assertIn("runs-on: [self-hosted, linux, devnet]", deploy)
         self.assertIn("github.ref == 'refs/heads/release'", deploy)
         self.assertIn("persist-credentials: false", deploy)
-        self.assertIn("NORTHSTAR_VRF_ENABLED == 'true'", deploy)
+        self.assertNotIn("NORTHSTAR_VRF_", deploy)
         self.assertNotIn("Reconcile CI-owned VRF stack", deploy)
         self.assertNotIn("vrf-coordinator-program-library", deploy)
         self.assertNotIn("NORTHSTAR_VRF_FUNDER_KEYPAIR", deploy)
-        notify = (
-            Path(__file__).parents[1].joinpath("workflows/vrf-dispatch.yml").read_text()
+        self.assertFalse(
+            Path(__file__).parents[1].joinpath("workflows/vrf-dispatch.yml").exists()
         )
-        self.assertIn("workflow_run:", notify)
-        self.assertIn("conclusion == 'success'", notify)
-        self.assertIn("repositories: vrf-oracle", notify)
-        self.assertIn("permission-actions: write", notify)
-        self.assertNotIn("actions/checkout", notify)
+        self.assertNotIn("vrf-handoff", deploy)
 
 
 if __name__ == "__main__":

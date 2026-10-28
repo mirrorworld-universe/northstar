@@ -87,10 +87,8 @@ jobs:
       - name: Test SOL smoke restart finalization guard
         run: bash .github/scripts/test-devnet-e2e-smoke.sh
       # Sonic: Deployment guards use no service, credentials or chain requests.
-      - name: Test managed VRF redeploy guards
-        run: |
-          python3 -B .github/scripts/test-stop-vrf-service.py
-          python3 -B .github/scripts/test-vrf-handoff.py
+      - name: Test managed VRF redeploy guard
+        run: python3 -B .github/scripts/test-stop-vrf-service.py
       - name: Test pinned SBF build arguments
         run: bash .github/scripts/test-sbf-toolchain.sh
       - name: Test bounded GPU runner without GPU
@@ -217,28 +215,12 @@ jobs:
     name: Build and Deploy on Devnet
     needs: [fmt, clippy, test]
     if: github.repository == 'mirrorworld-universe/northstar' && github.event_name == 'push' && github.ref == 'refs/heads/release'
-    runs-on: [self-hosted, linux, "${{ vars.NORTHSTAR_DEVNET_RUNNER_LABEL || 'devnet' }}"]
+    runs-on: [self-hosted, linux, devnet]
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
-
-      # Sonic: Oracle deployment runs separately on this same organization runner.
-      - name: Validate VRF handoff configuration
-        if: vars.NORTHSTAR_VRF_ENABLED == 'true'
-        env:
-          EXPECTED_RUNNER: ${{ vars.NORTHSTAR_DEVNET_RUNNER_NAME }}
-          HOST_LABEL: ${{ vars.NORTHSTAR_DEVNET_RUNNER_LABEL }}
-          APP_ID: ${{ vars.NORTHSTAR_VRF_DISPATCH_APP_ID }}
-          APP_KEY_CONFIGURED: ${{ secrets.NORTHSTAR_VRF_DISPATCH_APP_KEY != '' }}
-        run: |
-          set -euo pipefail
-          test "$RUNNER_ENVIRONMENT" = self-hosted
-          test -n "$EXPECTED_RUNNER" && test "$RUNNER_NAME" = "$EXPECTED_RUNNER"
-          [[ "$HOST_LABEL" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]]
-          case "${HOST_LABEL,,}" in self-hosted|linux|x64|devnet) exit 1 ;; esac
-          [[ "$APP_ID" =~ ^[1-9][0-9]*$ ]] && test "$APP_KEY_CONFIGURED" = true
 
       - name: Check for program changes
         id: program_changes
@@ -314,15 +296,9 @@ jobs:
           BIN="/solana/northstar/release/agave-validator"
           test -f "$BIN" && test -x "$BIN" && "$BIN" --version
 
-      - name: Quiesce oracle and begin native handoff
-        id: vrf_handoff
-        env:
-          VRF_ENABLED: ${{ vars.NORTHSTAR_VRF_ENABLED == 'true' && 'true' || 'false' }}
-        run: |
-          sudo -n python3 -B .github/scripts/vrf-handoff.py begin \
-            --revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \
-            --run-attempt "$GITHUB_RUN_ATTEMPT" --runner "$RUNNER_NAME" \
-            --enabled "$VRF_ENABLED"
+      # Sonic: Oracle startup is manual; preserve unresolved work before replacing its ER.
+      - name: Stop managed VRF before deployment
+        run: sudo -n python3 -B .github/scripts/stop-vrf-service.py
 
       - name: Generate new portal program address
         id: portal_address
@@ -621,26 +597,4 @@ jobs:
           if ! jq -e '.ok == true' >/dev/null <<<"$THREAD_RESPONSE"; then
             echo "Failed to post E2E report thread: $THREAD_RESPONSE" >&2
             exit 1
-          fi
-
-      # Sonic: The completion notifier runs only after the entire CI workflow succeeds.
-      - name: Publish successful native handoff
-        env:
-          VRF_ENABLED: ${{ vars.NORTHSTAR_VRF_ENABLED == 'true' && 'true' || 'false' }}
-        run: |
-          sudo -n python3 -B .github/scripts/vrf-handoff.py complete \
-            --revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \
-            --run-attempt "$GITHUB_RUN_ATTEMPT" --runner "$RUNNER_NAME" \
-            --enabled "$VRF_ENABLED"
-
-      - name: Invalidate failed native handoff
-        if: always() && (failure() || cancelled())
-        env:
-          VRF_ENABLED: ${{ vars.NORTHSTAR_VRF_ENABLED == 'true' && 'true' || 'false' }}
-        run: |
-          if test -f .github/scripts/vrf-handoff.py; then
-            sudo -n python3 -B .github/scripts/vrf-handoff.py fail \
-              --revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \
-              --run-attempt "$GITHUB_RUN_ATTEMPT" --runner "$RUNNER_NAME" \
-              --enabled "$VRF_ENABLED"
           fi
