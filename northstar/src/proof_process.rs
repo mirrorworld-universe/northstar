@@ -23,6 +23,14 @@ fn allowed_environment(key: &OsStr) -> bool {
                 | "HTTP_PROXY"
                 | "HTTPS_PROXY"
                 | "NO_PROXY"
+                | "NORTHSTAR_NETWORK_PRIVATE_KEY_FILE"
+                | "NORTHSTAR_NETWORK_STATE_DIR"
+                | "NORTHSTAR_NETWORK_MAX_GAS"
+                | "NORTHSTAR_NETWORK_MAX_CYCLES"
+                | "NORTHSTAR_NETWORK_MAX_PRICE_PER_PGU"
+                | "NORTHSTAR_NETWORK_ALLOW_PAID"
+                | "NORTHSTAR_NETWORK_MODE"
+                | "NORTHSTAR_NETWORK_RPC_URL"
         )
     ) || key
         .to_str()
@@ -127,12 +135,26 @@ mod tests {
             "NORTHSTAR_LIVE_PAYER",
             "TRANSFER_SOURCE_PRIVATE_KEY",
             "SP1_PRIVATE_KEY",
+            "NETWORK_PRIVATE_KEY",
+            "NORTHSTAR_NETWORK_SIGNING_KEY",
         ] {
             assert!(!allowed_environment(OsStr::new(key)));
         }
         assert!(allowed_environment(OsStr::new(
             "NORTHSTAR_GPU_WORKER_SOCKET"
         )));
+        for key in [
+            "NORTHSTAR_NETWORK_PRIVATE_KEY_FILE",
+            "NORTHSTAR_NETWORK_STATE_DIR",
+            "NORTHSTAR_NETWORK_MAX_GAS",
+            "NORTHSTAR_NETWORK_MAX_CYCLES",
+            "NORTHSTAR_NETWORK_MAX_PRICE_PER_PGU",
+            "NORTHSTAR_NETWORK_ALLOW_PAID",
+            "NORTHSTAR_NETWORK_MODE",
+            "NORTHSTAR_NETWORK_RPC_URL",
+        ] {
+            assert!(allowed_environment(OsStr::new(key)));
+        }
     }
 
     #[test]

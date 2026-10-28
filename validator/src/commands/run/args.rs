@@ -1073,9 +1073,12 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .hidden(hidden_unless_forced()),
     )
     .arg(
-        Arg::with_name("no_skip_initial_accounts_db_clean")
-            .long("no-skip-initial-accounts-db-clean")
-            .help("Do not skip the initial cleaning of accounts when verifying snapshot bank")
+        Arg::with_name("accounts_db_account_storage_file_format")
+            .long("accounts-db-account-storage-file-format")
+            .takes_value(true)
+            .possible_values(&["append-vec", "split-experimental"])
+            .default_value("append-vec")
+            .help("Selects the account storage file format")
             .hidden(hidden_unless_forced()),
     )
     .arg(
@@ -1337,9 +1340,21 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .help(DefaultSchedulerPool::cli_message()),
     )
     .arg(
+        Arg::with_name("replay_arenas")
+            .long("experimental-replay-arenas")
+            .value_name("COUNT")
+            .takes_value(true)
+            .validator(|s| is_within_range(s, 1..))
+            .help(
+                "Number of jemalloc arenas for replay. solReplayStage uses arena 0 and unified \
+                 scheduler handler threads use the arenas in round-robin order",
+            ),
+    )
+    .arg(
         Arg::with_name("no_xdp")
             .long("no-xdp")
             .takes_value(false)
+            .conflicts_with("no_xdp_zero_copy")
             .help("Disable XDP transmit and fall back to UDP sockets"),
     )
     .arg(
@@ -1370,7 +1385,16 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .long("xdp-zero-copy")
             .takes_value(false)
             .conflicts_with("no_xdp")
+            .conflicts_with("no_xdp_zero_copy")
             .help("Enable XDP zero copy mode. Requires hardware and driver support"),
+    )
+    .arg(
+        Arg::with_name("no_xdp_zero_copy")
+            .long("no-xdp-zero-copy")
+            .takes_value(false)
+            .conflicts_with("xdp_zero_copy")
+            .conflicts_with("no_xdp")
+            .help("Use XDP copy mode"),
     )
     .args(&pub_sub_config::args(/*test_validator:*/ false))
     .args(&json_rpc_config::args())

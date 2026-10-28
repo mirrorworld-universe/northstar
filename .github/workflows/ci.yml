@@ -26,6 +26,8 @@ jobs:
       - run: rustup toolchain install nightly-2026-07-20 --component rustfmt
       - run: cargo +nightly-2026-07-20 fmt --all -- --check
       - run: cargo +nightly-2026-07-20 fmt --manifest-path northstar/zkvm-replay/Cargo.toml --all -- --check
+      # Sonic: The portable VRF probe is an isolated workspace.
+      - run: cargo +nightly-2026-07-20 fmt --manifest-path northstar/programs/vrf-runtime-probe/Cargo.toml --all -- --check
 
   clippy:
     name: Clippy
@@ -50,6 +52,8 @@ jobs:
       - run: cargo clippy --locked --all --tests -- -D warnings
       # Sonic: Check opt-in paths without enabling them in deployment builds.
       - run: cargo clippy --locked --all --tests --features northstar/proof-coordinator-test-hooks,agave-validator/proof-coordinator-test-hooks,northstar-portal/zk-verifier-profile -- -D warnings
+      # Sonic: Root workspace checks do not include the portable VRF probe.
+      - run: cargo clippy --locked --manifest-path northstar/programs/vrf-runtime-probe/Cargo.toml --workspace --all-targets -- -D warnings
 
   test:
     name: Test
@@ -70,8 +74,21 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler libprotobuf-dev libudev-dev libclang-dev
+      # Sonic: CPU-only VRF clients require no hosted ER or proving service.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Test CPU VRF evidence and RPC clients
+        run: |
+          python3 -B -m unittest discover -s northstar/scripts -p 'test_vrf_evidence.py'
+          bun test northstar/scripts/vrf-runtime-rpc.test.mjs
+          bash -n northstar/scripts/vrf-runtime-build-sbf.sh
+          bash -n northstar/scripts/vrf-proof-cpu-conformance.sh
       - name: Test SOL smoke restart finalization guard
         run: bash .github/scripts/test-devnet-e2e-smoke.sh
+      # Sonic: Deployment guards use no service, credentials or chain requests.
+      - name: Test managed VRF redeploy guard
+        run: python3 -B .github/scripts/test-stop-vrf-service.py
       - name: Test pinned SBF build arguments
         run: bash .github/scripts/test-sbf-toolchain.sh
       - name: Test bounded GPU runner without GPU
@@ -124,6 +141,18 @@ jobs:
             ~/.cache/solana
             ~/.local/share/solana/install/active_release/bin/platform-tools-sdk/sbf/dependencies/platform-tools
           key: ${{ runner.os }}-solana-platform-tools-v4-${{ hashFiles('cargo-build-sbf') }}-${{ hashFiles('Cargo.lock') }}
+      # Sonic: Execute the portable fixtures locally without claiming hosted ER acceptance.
+      - name: Test VRF runtime SBF conformance
+        run: |
+          ./cargo-build-sbf --manifest-path northstar/programs/vrf-runtime-probe/Cargo.toml \
+            --sbf-out-dir "$PWD/northstar/programs/vrf-runtime-probe/target/deploy" -- --locked
+          BPF_OUT_DIR="$PWD/northstar/programs/vrf-runtime-probe/target/deploy" \
+            cargo test --locked --manifest-path northstar/programs/vrf-runtime-probe/Cargo.toml --workspace -- --include-ignored
+      - name: Test CPU VRF and witness foundations
+        run: |
+          cargo test --locked -p northstar-vrf-oracle -p northstar-transaction-proof -p northstar-replay-harness -p northstar-zk-types
+          cargo test --locked -p northstar-transaction-proof --no-default-features
+          CARGO_TARGET_DIR="$PWD/target" bash northstar/scripts/vrf-proof-cpu-conformance.sh "$RUNNER_TEMP/vrf-proof-cpu"
       - name: Build test validator
         run: cargo build --locked --bin solana-test-validator
       - name: Test devnet SPL smoke state format
@@ -144,15 +173,54 @@ jobs:
       - name: Run Northstar core service tests
         run: cargo test --locked -p solana-core northstar_service --no-fail-fast
 
+  # Sonic: The network adapter is an isolated SP1 workspace; tests use no GPU or paid requests.
+  network-prover:
+    name: Network prover (CPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SP1_SKIP_PROGRAM_BUILD: "true"
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      RAYON_NUM_THREADS: 2
+      TOKIO_WORKER_THREADS: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/ensure-rust-toolchain
+      - run: rustup component add clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: northstar/zkvm-replay -> target
+          save-if: ${{ env.SAVE_CI_CACHE }}
+      - name: Install SDK build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config clang protobuf-compiler libprotobuf-dev
+      - name: Prepare the frozen guest
+        working-directory: northstar/zkvm-replay
+        run: |
+          mkdir -p target/elf-compilation/riscv64im-succinct-zkvm-elf/release
+          gzip -dc evidence/g5-a10g-sha-v1/candidate.elf.gz \
+            > target/elf-compilation/riscv64im-succinct-zkvm-elf/release/northstar-zkvm-replay-program
+      - name: Test network gateway guards without services
+        run: python3 -B northstar/scripts/test_network_gateway.py
+      - name: Test network adapter and retained proofs
+        working-directory: northstar/zkvm-replay
+        run: cargo test --locked -p northstar-zkvm-replay-script --features network --bin northstar-network-prover --test network_adapter
+      - name: Check network adapter
+        working-directory: northstar/zkvm-replay
+        run: cargo clippy --locked -p northstar-zkvm-replay-script --features network --bin northstar-network-prover --test network_adapter -- -D warnings
+
   deploy:
     name: Build and Deploy on Devnet
     needs: [fmt, clippy, test]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/release'
-    runs-on: [devnet]
+    if: github.repository == 'mirrorworld-universe/northstar' && github.event_name == 'push' && github.ref == 'refs/heads/release'
+    runs-on: [self-hosted, linux, devnet]
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Check for program changes
         id: program_changes
@@ -227,6 +295,10 @@ jobs:
           set -euo pipefail
           BIN="/solana/northstar/release/agave-validator"
           test -f "$BIN" && test -x "$BIN" && "$BIN" --version
+
+      # Sonic: Oracle startup is manual; preserve unresolved work before replacing its ER.
+      - name: Stop managed VRF before deployment
+        run: sudo -n python3 -B .github/scripts/stop-vrf-service.py
 
       - name: Generate new portal program address
         id: portal_address

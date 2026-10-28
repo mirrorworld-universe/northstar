@@ -77,8 +77,8 @@ pub use {
     settle_deposit_receipt::process_settle_deposit_receipt,
     settlement::{
         process_abort_settlement, process_begin_settlement, process_finish_settlement,
-        process_settle_account_lamports, process_settle_account_owner,
-        process_write_settlement_chunk,
+        process_settle_account_lamports, process_settle_account_lamports_with_surplus,
+        process_settle_account_owner, process_write_settlement_chunk,
     },
     start_withdrawal::process_start_withdrawal,
     undelegate::{process_undelegate, process_undelegate_handoff},

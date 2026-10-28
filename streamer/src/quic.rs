@@ -6,7 +6,6 @@ use {
             simple_qos::{SimpleQos, SimpleQosBanlist, SimpleQosConfig},
             swqos::{SwQos, SwQosConfig},
         },
-        quic_socket::QuicSocket,
         streamer::StakedNodes,
     },
     crossbeam_channel::Sender,
@@ -17,6 +16,7 @@ use {
     },
     rustls::KeyLogFile,
     solana_keypair::Keypair,
+    solana_net_utils::quic_socket::QuicSocket,
     solana_packet::PACKET_DATA_SIZE,
     solana_perf::packet::PacketBatch,
     solana_tls_utils::{NotifyKeyUpdate, new_dummy_x509_certificate, tls_server_config_builder},
@@ -46,7 +46,7 @@ pub const DEFAULT_MAX_QUIC_CONNECTIONS_PER_STAKED_PEER: usize = 16;
 
 pub const DEFAULT_MAX_STAKED_CONNECTIONS: usize = 2000;
 
-pub const DEFAULT_MAX_UNSTAKED_CONNECTIONS: usize = 2000;
+pub const DEFAULT_MAX_UNSTAKED_CONNECTIONS: usize = 3000;
 
 /// Limit to 500K PPS
 pub const DEFAULT_MAX_STREAMS_PER_MS: u64 = 500;
@@ -214,8 +214,8 @@ pub struct StreamerStats {
     // opened from a particular IP address.
     pub(crate) connection_rate_limited_per_ipaddr: AtomicUsize,
     pub(crate) throttled_streams: AtomicUsize,
-    pub(crate) stream_load_ema: AtomicUsize,
-    pub(crate) stream_load_ema_overflow: AtomicUsize,
+    pub(crate) staked_stream_load_ema: AtomicUsize,
+    pub(crate) unstaked_stream_load_ema: AtomicUsize,
     pub(crate) stream_load_capacity_overflow: AtomicUsize,
     pub(crate) total_staked_packets_sent_for_batching: AtomicUsize,
     pub(crate) total_unstaked_packets_sent_for_batching: AtomicUsize,
@@ -473,13 +473,13 @@ impl StreamerStats {
                 i64
             ),
             (
-                "stream_load_ema",
-                self.stream_load_ema.load(Ordering::Relaxed),
+                "staked_stream_load_ema",
+                self.staked_stream_load_ema.load(Ordering::Relaxed),
                 i64
             ),
             (
-                "stream_load_ema_overflow",
-                self.stream_load_ema_overflow.load(Ordering::Relaxed),
+                "unstaked_stream_load_ema",
+                self.unstaked_stream_load_ema.load(Ordering::Relaxed),
                 i64
             ),
             (
@@ -1010,7 +1010,12 @@ mod test {
             stream.write_all(&[9u8]).await.unwrap();
             stream.finish().unwrap();
             let packet_batch = wait_for_packet().await.unwrap();
-            let remote_pubkey = packet_batch.get(0).unwrap().meta().remote_pubkey().unwrap();
+            let remote_pubkey = packet_batch
+                .first()
+                .unwrap()
+                .meta()
+                .remote_pubkey()
+                .unwrap();
 
             // Ban the pubkey and ensure new connections are rejected.
             banlist.ban(remote_pubkey, Duration::from_secs(30));
@@ -1145,26 +1150,19 @@ mod test {
                     debug!("Received packet batch (iteration {iterations})");
 
                     // Verify we get the client pubkey
-                    match &packet_batch {
-                        PacketBatch::Bytes(_) => {
-                            panic!("Expected PacketBatch::Simple but got PacketBatch::Bytes");
-                        }
-                        PacketBatch::Pinned(_) => {
-                            panic!("Expected PacketBatch::Simple but got PacketBatch::Pinned");
-                        }
-                        PacketBatch::Single(packet) => {
-                            if *packet.data(0).unwrap() == 0u8 {
-                                debug!("Packet from stream with client 1");
-                                assert_eq!(packet.meta().remote_pubkey(), expected_client_pubkey_1);
-                            } else if *packet.data(0).unwrap() == 1u8 {
-                                debug!("Packet from stream with client 2");
-                                assert_eq!(packet.meta().remote_pubkey(), expected_client_pubkey_2);
-                            } else {
-                                panic!("Unexpected data in packet: {:?}", packet.data(0));
-                            }
-                            total_packets += 1;
-                        }
+                    let PacketBatch::Single(packet) = &packet_batch else {
+                        panic!("Expected PacketBatch::Single but got PacketBatch::Bytes");
+                    };
+                    if *packet.data(0).unwrap() == 0u8 {
+                        debug!("Packet from stream with client 1");
+                        assert_eq!(packet.meta().remote_pubkey(), expected_client_pubkey_1);
+                    } else if *packet.data(0).unwrap() == 1u8 {
+                        debug!("Packet from stream with client 2");
+                        assert_eq!(packet.meta().remote_pubkey(), expected_client_pubkey_2);
+                    } else {
+                        panic!("Unexpected data in packet: {:?}", packet.data(0));
                     }
+                    total_packets += 1;
                 }
                 Err(e) => {
                     if iterations % 10 == 0 {

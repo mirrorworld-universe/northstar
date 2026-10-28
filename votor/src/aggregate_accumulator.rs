@@ -1,11 +1,11 @@
 //! Defines `AggregateAccumulator` that can used to aggregate votes and produce certificates.
 
 use {
+    agave_bls_sigverify::sig_verified_messages::VoteAggregate,
     agave_votor_messages::{
         certificate::{Certificate, CertificateType},
         consensus_message::VoteMessage,
         fraction::Fraction,
-        sig_verified_messages::VoteAggregate,
     },
     bitvec::vec::BitVec,
     solana_bls_signatures::{
@@ -48,6 +48,16 @@ impl AggregateAccumulator {
     pub fn new(max_validators: usize) -> Self {
         Self {
             ranks: default_bitvec(max_validators),
+            signature: SignatureProjective::identity(),
+            stake: 0,
+        }
+    }
+
+    pub(crate) fn from_recycled_ranks(mut ranks: BitVec<u8>, max_validators: usize) -> Self {
+        ranks.resize(max_validators, false);
+        ranks.fill(false);
+        Self {
+            ranks,
             signature: SignatureProjective::identity(),
             stake: 0,
         }
@@ -111,7 +121,7 @@ impl AggregateAccumulator {
     ///
     /// Uses base3 encoding when the fallback partition is usable, and base2 encoding when only
     /// the primary partition is usable.
-    pub fn try_build_base3_cert(
+    pub(crate) fn try_build_base3_cert(
         cert_type: CertificateType,
         total_stake: NonZero<u64>,
         primary: Option<&AggregateAccumulator>,
@@ -183,6 +193,10 @@ impl AggregateAccumulator {
     /// Accessor for stake
     pub fn stake(&self) -> u64 {
         self.stake
+    }
+
+    pub(crate) fn into_ranks(self) -> BitVec<u8> {
+        self.ranks
     }
 
     fn is_identity(&self) -> bool {

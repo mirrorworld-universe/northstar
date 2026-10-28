@@ -13,8 +13,16 @@ use {
     wincode::{SchemaRead, SchemaWrite},
 };
 
+/// The wire bytes of a single shred.
+///
+/// A thin wrapper over [`Bytes`] so that a shred's payload can be cloned and
+/// shared between concurrent consumers without copying the buffer. Mutation
+/// goes through `PayloadMutGuard`, which copies only when the buffer is not
+/// uniquely owned.
 #[derive(Clone, Debug, Eq, SchemaRead, SchemaWrite)]
 pub struct Payload {
+    /// The shred's serialized bytes. Always exactly `SIZE_OF_PAYLOAD` bytes for
+    /// the owning shred type once the shred has been parsed or built.
     pub bytes: Bytes,
 }
 
@@ -73,21 +81,6 @@ impl Payload {
         packet.meta_mut().size = size;
     }
 
-    pub fn to_packet(&self, nonce: Option<Nonce>) -> Packet {
-        let mut packet = Packet::default();
-        let size = self.len();
-        packet.buffer_mut()[..size].copy_from_slice(self);
-        let size = if let Some(nonce) = nonce {
-            let full_size = size + mem::size_of::<Nonce>();
-            packet.buffer_mut()[size..full_size].copy_from_slice(&nonce.to_le_bytes());
-            full_size
-        } else {
-            size
-        };
-        packet.meta_mut().size = size;
-        packet
-    }
-
     pub fn to_bytes_packet(&self, nonce: Option<Nonce>) -> BytesPacket {
         let cap = self.len() + nonce.map(|_| mem::size_of::<Nonce>()).unwrap_or(0);
         let mut buffer = BytesMut::with_capacity(cap);
@@ -95,7 +88,9 @@ impl Payload {
         if let Some(nonce) = nonce {
             buffer.put_u32_le(nonce);
         }
-        BytesPacket::new(buffer.freeze(), Meta::default())
+        let mut meta = Meta::default();
+        meta.size = buffer.len();
+        BytesPacket::new(buffer.freeze(), meta)
     }
 }
 
@@ -256,11 +251,8 @@ mod test {
     #[test]
     fn test_to_bytes_packet_nonce_endianness() {
         use {
-            crate::shredder::{ReedSolomonCache, Shredder},
-            solana_entry::entry::Entry,
-            solana_hash::Hash,
-            solana_keypair::Keypair,
-            solana_perf::packet::PacketFlags,
+            crate::shredder::Shredder, solana_entry::entry::Entry, solana_hash::Hash,
+            solana_keypair::Keypair, solana_perf::packet::PacketFlags,
         };
 
         // Build a valid shred payload using the shredder helper.
@@ -275,7 +267,6 @@ mod test {
             Hash::default(),
             0,
             0,
-            &ReedSolomonCache::default(),
             &mut stats,
         );
         let shred = &shreds[0];
@@ -284,10 +275,14 @@ mod test {
         let nonce: super::Nonce = 0x0A0B_0C0D;
         let mut bytes_packet = shred.payload().to_bytes_packet(Some(nonce));
         bytes_packet.meta_mut().flags |= PacketFlags::REPAIR;
+        assert_eq!(
+            bytes_packet.meta().size,
+            shred.payload().len() + std::mem::size_of::<super::Nonce>()
+        );
 
         // Ensure wire::get_shred_and_repair_nonce reads the same nonce (LE).
-        let (bytes, got) = wire::get_shred_and_repair_nonce(bytes_packet.as_ref())
-            .expect("valid packet and nonce");
+        let (bytes, got) =
+            wire::get_shred_and_repair_nonce(&bytes_packet).expect("valid packet and nonce");
         assert_eq!(bytes, shred.payload().as_ref());
         assert_eq!(got, Some(nonce));
     }

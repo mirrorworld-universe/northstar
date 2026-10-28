@@ -201,6 +201,46 @@ impl ProgramCacheEntry {
         elf_bytes: &[u8],
         #[cfg(feature = "metrics")] metrics: &mut LoadProgramMetrics,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        // Sonic: retain ordinary JIT policy while sharing candidate validation.
+        Self::load_with_jit(
+            loader_key,
+            program_runtime_environment,
+            deployment_slot,
+            elf_bytes,
+            true,
+            #[cfg(feature = "metrics")]
+            metrics,
+        )
+    }
+
+    // Sonic: scope candidate interpretation to its entries, not workspace-wide features.
+    pub fn load_interpreted(
+        loader_key: &Pubkey,
+        program_runtime_environment: ProgramRuntimeEnvironment,
+        deployment_slot: Slot,
+        elf_bytes: &[u8],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::load_with_jit(
+            loader_key,
+            program_runtime_environment,
+            deployment_slot,
+            elf_bytes,
+            false,
+            #[cfg(feature = "metrics")]
+            &mut LoadProgramMetrics::default(),
+        )
+    }
+
+    fn load_with_jit(
+        loader_key: &Pubkey,
+        program_runtime_environment: ProgramRuntimeEnvironment,
+        deployment_slot: Slot,
+        elf_bytes: &[u8],
+        compile_jit: bool,
+        #[cfg(feature = "metrics")] metrics: &mut LoadProgramMetrics,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        #[cfg(not(all(not(target_os = "windows"), target_arch = "x86_64")))]
+        let _ = compile_jit;
         let entry_stats = ProgramStatistics::default();
         #[cfg(feature = "metrics")]
         let load_elf_time = solana_svm_measure::measure::Measure::start("load_elf_time");
@@ -220,7 +260,7 @@ impl ProgramCacheEntry {
         }
 
         #[cfg(all(not(target_os = "windows"), target_arch = "x86_64"))]
-        {
+        if compile_jit {
             let jit_compile_time = solana_svm_measure::measure::Measure::start("jit_compile_time");
             executable.jit_compile()?;
             let jit_compile_time = jit_compile_time.end_as_us();
@@ -347,6 +387,10 @@ impl ProgramCacheEntry {
         slot >= self.deployment_slot && slot < self.effective_slot()
     }
 
+    pub fn is_unloaded(&self) -> bool {
+        matches!(self.program, ProgramCacheEntryType::Unloaded(_))
+    }
+
     pub fn effective_slot(&self) -> Slot {
         match self.program {
             ProgramCacheEntryType::Closed
@@ -422,6 +466,36 @@ mod tests {
         },
         std::sync::atomic::{AtomicU64, Ordering},
     };
+
+    // Sonic: candidate dependency features must not disable the ordinary loader's JIT.
+    #[cfg(all(not(target_os = "windows"), target_arch = "x86_64"))]
+    #[test]
+    fn invariant_native_loader_retains_jit() {
+        let entry = super::ProgramCacheEntry::load(
+            &solana_sdk_ids::bpf_loader_upgradeable::id(),
+            crate::loaded_programs::get_mock_program_runtime_environment(),
+            0,
+            include_bytes!("../../programs/bpf_loader/test_elfs/out/noop_aligned.so"),
+            #[cfg(feature = "metrics")]
+            &mut crate::program_metrics::LoadProgramMetrics::default(),
+        )
+        .unwrap();
+        let super::ProgramCacheEntryType::Loaded(executable) = entry.program else {
+            panic!("expected loaded program");
+        };
+        assert!(executable.get_compiled_program().is_some());
+        let interpreted = super::ProgramCacheEntry::load_interpreted(
+            &solana_sdk_ids::bpf_loader_upgradeable::id(),
+            crate::loaded_programs::get_mock_program_runtime_environment(),
+            0,
+            include_bytes!("../../programs/bpf_loader/test_elfs/out/noop_aligned.so"),
+        )
+        .unwrap();
+        let super::ProgramCacheEntryType::Loaded(executable) = interpreted.program else {
+            panic!("expected loaded program");
+        };
+        assert!(executable.get_compiled_program().is_none());
+    }
 
     #[test]
     fn test_retention_score_decay_horizon() {

@@ -9,11 +9,63 @@ and follows a [Backwards Compatibility Policy](https://docs.anza.xyz/backwards-c
 
 Release channels have their own copy of this changelog:
 
-* [edge - v4.4](#440-unreleased)
-* [beta - v4.3](https://github.com/anza-xyz/agave/blob/v4.3/CHANGELOG.md)
-* [stable - v4.2](https://github.com/anza-xyz/agave/blob/v4.2/CHANGELOG.md)
+* [edge - v4.5](#450-unreleased)
+* [beta - v4.4](https://github.com/anza-xyz/agave/blob/v4.4/CHANGELOG.md)
+* [stable - v4.3](https://github.com/anza-xyz/agave/blob/v4.3/CHANGELOG.md)
 
-## 4.4.0-Unreleased
+## 4.5.0-Unreleased
+
+### RPC
+
+#### Breaking
+
+#### Changes
+
+* `getBlocksWithLimit` now enforces `minContextSlot` before falling back to BigTable: it returns
+  `MinContextSlotNotReached` (-32016) when the node's context slot at the finalized commitment is
+  below the minimum, instead of silently serving blocks from BigTable. This mirrors the existing
+  `getBlocks` behavior.
+* Added `getRankMap` to return validator ranks, vote accounts, identities, BLS keys, and stakes
+  for the epoch containing a requested slot, with an optional identity filter. Always queries
+  finalized state; there is no commitment parameter.
+* Added `RpcClient::get_rank_map` and `RpcClient::get_rank_map_with_config`.
+
+### Validator
+
+#### Breaking
+
+#### Changes
+
+* Added `agave-validator --no-xdp-zero-copy` to explicitly select XDP copy mode. It conflicts
+  with `--xdp-zero-copy` and `--no-xdp`.
+* The default full snapshot interval is now 200,000 slots.
+
+### CLI
+
+#### Breaking
+
+* Prebuilt Windows releases are no longer provided.
+* `solana-genesis` no longer accepts the `--alpenglow` option.
+
+#### Changes
+
+* `airdrop` now prints a link to <https://faucet.solana.com>, pre-populated with the recipient address,
+  when the request fails on devnet or testnet.
+* `solana-test-validator` now activates Alpenglow consensus at genesis by default. The `--alpenglow` flag
+  no longer has any effect and it is no longer possible to start a test-validator with TowerBFT.
+* `solana-genesis` now activates Alpenglow consensus at genesis by default.
+
+### Geyser
+
+#### Changes
+
+* Contact info notifications now include unchanged gossip republishes. Plugins that subscribe to
+  contact info should be prepared for thousands of callbacks per second, many carrying duplicates.
+  Deduplicate locally if only field changes are needed. Keep callbacks short: a blocked callback
+  can fill the shared channel and cause updates to be dropped for all subscribed plugins.
+  Plugins loaded later can learn about unchanged nodes from subsequent republishes.
+
+## 4.4.0
 
 ### RPC
 
@@ -28,6 +80,8 @@ Release channels have their own copy of this changelog:
 * Added `RpcClient::get_signature_statuses_with_config`.
 * `accountSubscribe` and `programSubscribe` now honor `dataSlice` for binary account data.
   A zero-length slice returns empty data; omitting `dataSlice` returns the full account data.
+* `getLeaderSchedule` now returns a new error code `-32022` if the specified
+  `identity` does not appear in the leader schedule
 
 ### Validator
 
@@ -52,6 +106,8 @@ Release channels have their own copy of this changelog:
 * Added `vote-update-commission-collector` to set the account that collects a vote account's
   commission. The `COMMISSION_KIND` argument selects which collector to update:
   `inflation-rewards` or `block-revenue`.
+* `leader-schedule` now accepts `--key-by-vote-account` to show each slot's leader by vote
+  account instead of validator identity.
 
 ## 4.3.0
 

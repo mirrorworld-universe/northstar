@@ -1,0 +1,9 @@
+{
+  "source": "https://github.com/C2SP/C2SP/blob/fc7f312aff098ed080f3dd5a3da4fd820be17a2e/vrf-r255.md#test-vector",
+  "warning": "PUBLIC TEST SCALAR. Never use this key for real requests.",
+  "public_test_scalar": "3431c2b03533e280b23232e280b34e2c3132c2b03238e280b23131e280b34500",
+  "public_key": "54136cd90d99fbd1d4e855d9556efea87ba0337f2a6ce22028d0f5726fcb854e",
+  "alpha": "633273702e6f72672f7672662d72323535",
+  "proof": "0a97d961262fb549b4175c5117860f42ae44a123f93c476c439eddd1c0cff9265c805525233e2284dbed45e593b8eea31d5ca9734d72bcbba9738d5237f955f3b2422351149d1312503b6441a47c940c",
+  "output": "dd653f0879b48c3ef69e13551239bec4cbcc1c18fe8894de2e9e1c790e18273603bf1c6c25d7a797aeff3c43fd32b974d3fcbd4bcce916007097922a3ea3a794"
+}

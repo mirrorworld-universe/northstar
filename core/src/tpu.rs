@@ -24,14 +24,15 @@ use {
         validator::{BlockProductionMethod, GeneratorConfig},
     },
     agave_banking_stage_ingress_types::{BankingPacketBatch, SchedulerPriorityFloor},
+    agave_bls_sigverify::pubkeys::VerifiedVotorSlotsMessage,
     agave_votor::{event::VotorEventSender, slot_clock::SharedAlpenglowSlotClock},
-    agave_votor_messages::VerifiedVotorSlotsMessage,
     agave_xdp::transmitter::XdpSender,
     crossbeam_channel::{Receiver, Sender, bounded},
     solana_clock::Slot,
     solana_gossip::cluster_info::ClusterInfo,
     solana_keypair::Keypair,
     solana_ledger::{blockstore::Blockstore, entry_notifier_service::EntryNotifierSender},
+    solana_net_utils::quic_socket::{QuicSocket, into_quic_sockets},
     solana_poh::{
         poh_recorder::{PohRecorder, WORKING_BANK_CHANNEL_CAPACITY, WorkingBankMessage},
         transaction_recorder::TransactionRecorder,
@@ -53,7 +54,6 @@ use {
             SimpleQosQuicStreamerConfig, SpawnServerResult, SwQosQuicStreamerConfig,
             spawn_simple_qos_server, spawn_stake_weighted_qos_server,
         },
-        quic_socket::QuicSocket,
         streamer::StakedNodes,
     },
     solana_turbine::{
@@ -238,7 +238,7 @@ impl Tpu {
 
         // Streamer for TPU
         let transactions_quic_sockets =
-            into_quic_sockets(transactions_quic_sockets, quic_xdp_sender.clone());
+            into_quic_sockets(transactions_quic_sockets, quic_xdp_sender.as_ref());
         let SpawnServerResult {
             endpoints: _,
             thread: tpu_quic_t,
@@ -258,7 +258,7 @@ impl Tpu {
 
         // Streamer for TPU forward
         let transactions_forwards_quic_sockets =
-            into_quic_sockets(transactions_forwards_quic_sockets, quic_xdp_sender);
+            into_quic_sockets(transactions_forwards_quic_sockets, quic_xdp_sender.as_ref());
         let SpawnServerResult {
             endpoints: _,
             thread: tpu_forwards_quic_t,
@@ -430,18 +430,4 @@ impl Tpu {
         }
         Ok(())
     }
-}
-
-fn into_quic_sockets(
-    sockets: impl IntoIterator<Item = UdpSocket>,
-    quic_xdp_sender: Option<(XdpSender, Ipv4Addr)>,
-) -> impl Iterator<Item = QuicSocket> {
-    sockets
-        .into_iter()
-        .map(move |socket| match &quic_xdp_sender {
-            Some((xdp_sender, fallback_src_ip)) => {
-                QuicSocket::with_xdp(socket, *fallback_src_ip, xdp_sender.clone())
-            }
-            None => QuicSocket::from(socket),
-        })
 }

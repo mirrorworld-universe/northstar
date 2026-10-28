@@ -93,12 +93,6 @@ pub fn accounts_db_args<'a, 'b>() -> Box<[Arg<'a, 'b>]> {
                  the disk-backed index. The disk-backed index has lower performance; prefer \
                  higher explicit limits here. \"minimal\" is deprecated and behaves as \"25GB\".",
             ),
-        Arg::with_name("accounts_db_skip_shrink")
-            .long("accounts-db-skip-shrink")
-            .help(
-                "Enables faster starting of ledger-tool by skipping shrink. This option is for \
-                 use during testing.",
-            ),
         Arg::with_name("accounts_db_verify_index")
             .long("accounts-db-verify-index")
             .help(
@@ -124,6 +118,13 @@ pub fn accounts_db_args<'a, 'b>() -> Box<[Arg<'a, 'b>]> {
         Arg::with_name("accounts_db_skip_initial_hash_calculation")
             .long("accounts-db-skip-initial-hash-calculation")
             .help("Do not verify accounts hash at startup.")
+            .hidden(hidden_unless_forced()),
+        Arg::with_name("accounts_db_account_storage_file_format")
+            .long("accounts-db-account-storage-file-format")
+            .takes_value(true)
+            .possible_values(&["append-vec", "split-experimental"])
+            .default_value("append-vec")
+            .help("Selects the account storage file format")
             .hidden(hidden_unless_forced()),
         Arg::with_name("accounts_db_ancient_append_vecs")
             .long("accounts-db-ancient-append-vecs")
@@ -247,7 +248,6 @@ pub fn parse_process_options(ledger_path: &Path, arg_matches: &ArgMatches<'_>) -
         use_snapshot_archives_at_startup::cli::NAME,
         UseSnapshotArchivesAtStartup
     );
-    let accounts_db_skip_shrink = arg_matches.is_present("accounts_db_skip_shrink");
     let verify_index = arg_matches.is_present("verify_accounts_index");
     let limit_load_slot_count_from_snapshot =
         value_t!(arg_matches, "limit_load_slot_count_from_snapshot", usize).ok();
@@ -263,7 +263,6 @@ pub fn parse_process_options(ledger_path: &Path, arg_matches: &ArgMatches<'_>) -
         new_hard_forks,
         runtime_config,
         accounts_db_config,
-        accounts_db_skip_shrink,
         verify_index,
         limit_load_slot_count_from_snapshot,
         run_final_accounts_hash_calc,
@@ -366,6 +365,18 @@ pub fn get_accounts_db_config(
         })
         .unwrap_or_default();
 
+    let accounts_file_provider = arg_matches
+        .value_of("accounts_db_account_storage_file_format")
+        .map(|format| match format {
+            "append-vec" => AccountsFileProvider::AppendVec,
+            "split-experimental" => AccountsFileProvider::Split,
+            _ => {
+                // clap will enforce one of the above values is given
+                unreachable!("invalid value given to accounts_db_account_storage_file_format")
+            }
+        })
+        .unwrap();
+
     AccountsDbConfig {
         index: Some(accounts_index_config),
         account_indexes: None,
@@ -389,7 +400,7 @@ pub fn get_accounts_db_config(
         partitioned_epoch_rewards_config: PartitionedEpochRewardsConfig::default(),
         scan_filter_for_shrinking,
         num_background_threads: None,
-        accounts_file_provider: AccountsFileProvider::AppendVec,
+        accounts_file_provider,
     }
 }
 

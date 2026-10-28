@@ -3,8 +3,8 @@ use {
     log::warn,
     northstar_portal::{
         find_checkpoint_cursor_pda, find_checkpoint_pda, find_delegation_record_pda,
-        find_token_withdrawal_authorization_pda, AccumulateTokenWithdrawal, BeginSettlement,
-        CommitCheckpoint, FinishSettlement, PortalInstruction, ProposeCheckpoint,
+        find_fee_vault_pda, find_token_withdrawal_authorization_pda, AccumulateTokenWithdrawal,
+        BeginSettlement, CommitCheckpoint, FinishSettlement, PortalInstruction, ProposeCheckpoint,
         SettleAccountLamports, SettleAccountOwner, SettleDepositReceipt, WriteSettlementChunk,
         MAX_SETTLEMENT_CHUNK, MAX_SETTLEMENT_LAMPORT_ACCOUNTS,
     },
@@ -256,16 +256,70 @@ impl SettlementPlan {
         validator: &Keypair,
         recent_blockhash: Hash,
         effect_commitment: [u8; 32],
-        include_begin: bool,
+        resume_accumulator: Option<[u8; 32]>,
     ) -> Vec<Transaction> {
-        self.portal_transactions_inner(
+        let skip_lamports = resume_accumulator
+            .is_some_and(|accumulator| self.lamports_already_applied(accumulator));
+        self.portal_instruction_batches_inner(
             portal_program_id,
             session_pda,
             validator,
-            recent_blockhash,
+            resume_accumulator.is_none(),
             effect_commitment,
-            include_begin,
         )
+        .into_iter()
+        .filter_map(|mut instructions| {
+            if skip_lamports {
+                instructions.retain(|instruction| instruction.data.first() != Some(&12));
+            }
+            (!instructions.is_empty())
+                .then(|| sign_settlement_transaction(&instructions, validator, recent_blockhash))
+        })
+        .collect()
+    }
+
+    fn lamport_accumulator_before(&self) -> [u8; 32] {
+        checksum_settlement(
+            self.er_slot,
+            &self.chunks,
+            &self.owner_changes,
+            &[],
+            &[],
+            &[],
+        )
+    }
+
+    fn lamports_already_applied(&self, accumulator: [u8; 32]) -> bool {
+        if self.lamport_changes.is_empty() {
+            return false;
+        }
+        let mut checksum = self.lamport_accumulator_before();
+        for change in &self.lamport_changes {
+            checksum = accumulate_lamports_checksum(checksum, &change.account, change.lamports);
+        }
+        if checksum == accumulator {
+            return true;
+        }
+        for receipt in &self.receipt_balances {
+            checksum = accumulate_receipt_checksum(
+                checksum,
+                &receipt.er_source,
+                &receipt.l1_recipient,
+                receipt.balance,
+                receipt.withdrawn,
+                receipt.payout_lamports,
+            );
+            if checksum == accumulator {
+                return true;
+            }
+        }
+        for withdrawal in &self.token_withdrawals {
+            checksum = accumulate_token_withdrawal_checksum(checksum, withdrawal);
+            if checksum == accumulator {
+                return true;
+            }
+        }
+        false
     }
 
     fn portal_transactions_inner(
@@ -519,18 +573,24 @@ impl SettlementPlan {
                 accounts.push(AccountMeta::new(lamport_change.account, false));
                 accounts.push(AccountMeta::new_readonly(delegation_record, false));
             }
+            accounts.push(AccountMeta::new(
+                find_fee_vault_pda(&portal_program_id).0,
+                false,
+            ));
+            let mut data = borsh::to_vec(&PortalInstruction::SettleAccountLamports(
+                SettleAccountLamports {
+                    er_slot: self.er_slot,
+                    checksum: self.checksum,
+                    account_count: self.lamport_changes.len() as u8,
+                    lamports,
+                },
+            ))
+            .unwrap();
+            data.extend_from_slice(&self.lamport_accumulator_before());
             instructions.push(Instruction {
                 program_id: portal_program_id,
                 accounts,
-                data: borsh::to_vec(&PortalInstruction::SettleAccountLamports(
-                    SettleAccountLamports {
-                        er_slot: self.er_slot,
-                        checksum: self.checksum,
-                        account_count: self.lamport_changes.len() as u8,
-                        lamports,
-                    },
-                ))
-                .unwrap(),
+                data,
             });
         }
 
@@ -801,15 +861,23 @@ pub fn build_settlement_plan(
             .unwrap_or(0);
         let post_receipt_l1_lamports = (l1_lamports as u128).saturating_add(receipt_payout);
         if post_receipt_l1_lamports != er_lamports as u128 {
-            if receipt_payout > 0 {
+            if let Some(target_before_payout) = (er_lamports as u128)
+                .checked_sub(receipt_payout)
+                .and_then(|target| u64::try_from(target).ok())
+            {
+                lamport_candidates.push((
+                    account_diff.pubkey,
+                    l1_lamports,
+                    er_lamports,
+                    target_before_payout,
+                ));
+            } else {
                 unsupported_accounts.insert(account_diff.pubkey);
                 unsupported_changes.push(SettlementUnsupportedChange::LamportsChanged {
                     account: account_diff.pubkey,
                     l1_lamports,
                     er_lamports,
                 });
-            } else {
-                lamport_candidates.push((account_diff.pubkey, l1_lamports, er_lamports));
             }
         }
         chunks.extend(data_chunks_for_account(
@@ -825,20 +893,21 @@ pub fn build_settlement_plan(
             count: lamport_candidates.len(),
             max: MAX_SETTLEMENT_LAMPORT_ACCOUNTS,
         });
-        unsupported_accounts.extend(lamport_candidates.iter().map(|(account, _, _)| *account));
+        unsupported_accounts.extend(lamport_candidates.iter().map(|(account, _, _, _)| *account));
     } else if !lamport_candidates.is_empty() {
         let l1_total = lamport_candidates
             .iter()
-            .map(|(_, l1_lamports, _)| *l1_lamports as u128)
+            .map(|(_, l1_lamports, _, _)| *l1_lamports as u128)
             .sum::<u128>();
-        let er_total = lamport_candidates
+        let target_total = lamport_candidates
             .iter()
-            .map(|(_, _, er_lamports)| *er_lamports as u128)
+            .map(|(_, _, _, target_lamports)| *target_lamports as u128)
             .sum::<u128>();
-        if l1_total != er_total {
-            unsupported_accounts.extend(lamport_candidates.iter().map(|(account, _, _)| *account));
+        if l1_total < target_total {
+            unsupported_accounts
+                .extend(lamport_candidates.iter().map(|(account, _, _, _)| *account));
             unsupported_changes.extend(lamport_candidates.iter().map(
-                |(account, l1_lamports, er_lamports)| {
+                |(account, l1_lamports, er_lamports, _)| {
                     SettlementUnsupportedChange::LamportsChanged {
                         account: *account,
                         l1_lamports: *l1_lamports,
@@ -848,9 +917,9 @@ pub fn build_settlement_plan(
             ));
         } else {
             lamport_changes.extend(lamport_candidates.into_iter().map(
-                |(account, _, er_lamports)| AccountLamportsSettlement {
+                |(account, _, _, target_lamports)| AccountLamportsSettlement {
                     account,
-                    lamports: er_lamports,
+                    lamports: target_lamports,
                 },
             ));
         }
@@ -1208,6 +1277,119 @@ mod tests {
     }
 
     #[test]
+    fn invariant_l1_surplus_builds_lamport_settlement() {
+        let delegated = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let diff = diff_for_account(
+            delegated,
+            Some(account(&[], 11, &owner)),
+            account(&[], 10, &owner),
+        );
+        let plan = build_settlement_plan(&diff, &HashSet::from([delegated]), 5, vec![]).unwrap();
+        assert!(!plan.has_unsupported_changes());
+        assert_eq!(
+            plan.lamport_changes,
+            vec![AccountLamportsSettlement {
+                account: delegated,
+                lamports: 10
+            }]
+        );
+    }
+
+    #[test]
+    fn invariant_surplus_with_receipt_payout_uses_pre_payout_target() {
+        let delegated = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let diff = diff_for_account(
+            delegated,
+            Some(account(&[], 11, &owner)),
+            account(&[], 15, &owner),
+        );
+        let plan = build_settlement_plan(
+            &diff,
+            &HashSet::from([delegated]),
+            5,
+            vec![ReceiptBalanceSettlement {
+                er_source: Pubkey::new_unique(),
+                l1_recipient: delegated,
+                balance: 95,
+                withdrawn: 5,
+                payout_lamports: 5,
+            }],
+        )
+        .unwrap();
+        assert!(!plan.has_unsupported_changes());
+        assert_eq!(
+            plan.lamport_changes,
+            vec![AccountLamportsSettlement {
+                account: delegated,
+                lamports: 10
+            }]
+        );
+    }
+
+    #[test]
+    fn invariant_lamport_instructions_bind_vault_and_resume_after_receipts() {
+        let delegated = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let diff = diff_for_account(
+            delegated,
+            Some(account(&[1], 11, &owner)),
+            account(&[2], 10, &owner),
+        );
+        let plan = build_settlement_plan(
+            &diff,
+            &HashSet::from([delegated]),
+            5,
+            vec![ReceiptBalanceSettlement {
+                er_source: Pubkey::new_unique(),
+                l1_recipient: Pubkey::new_unique(),
+                balance: 95,
+                withdrawn: 5,
+                payout_lamports: 5,
+            }],
+        )
+        .unwrap();
+        let validator = Keypair::new();
+        let portal = Pubkey::new_unique();
+        let session = Pubkey::new_unique();
+        let instructions = plan.portal_instructions(portal, session, validator.pubkey());
+        let lamports = instructions
+            .iter()
+            .find(|instruction| instruction.data[0] == 12)
+            .unwrap();
+        assert_eq!(
+            lamports.accounts.last().unwrap().pubkey,
+            find_fee_vault_pda(&portal).0
+        );
+        assert_eq!(
+            lamports.data.len(),
+            1 + SettleAccountLamports::SERIALIZED_LEN + 32
+        );
+        assert_eq!(
+            &lamports.data[1 + SettleAccountLamports::SERIALIZED_LEN..],
+            &plan.lamport_accumulator_before()
+        );
+        let after_lamports =
+            accumulate_lamports_checksum(plan.lamport_accumulator_before(), &delegated, 10);
+        for accumulator in [after_lamports, plan.checksum] {
+            let transactions = plan.portal_transactions_with_effect_commitment(
+                portal,
+                session,
+                &validator,
+                Hash::new_unique(),
+                plan.checksum,
+                Some(accumulator),
+            );
+            assert!(transactions
+                .iter()
+                .flat_map(|transaction| &transaction.message.instructions)
+                .all(|instruction| instruction.data[0] != 12));
+        }
+        assert!(!plan.lamports_already_applied(plan.lamport_accumulator_before()));
+    }
+
+    #[test]
     fn net_zero_lamport_diff_builds_lamport_settlement() {
         let first = Pubkey::new_unique();
         let second = Pubkey::new_unique();
@@ -1281,13 +1463,13 @@ mod tests {
     }
 
     #[test]
-    fn receipt_payout_must_exactly_cover_delegated_lamport_delta() {
+    fn receipt_payout_must_cover_delegated_lamport_deficit() {
         let er_source = Pubkey::new_unique();
         let delegated = Pubkey::new_unique();
         let owner = Pubkey::new_unique();
         let delegated_accounts = HashSet::from([delegated]);
 
-        for (er_lamports, payout_lamports) in [(16, 5), (14, 5)] {
+        for (er_lamports, payout_lamports) in [(16, 5), (14, 3)] {
             let diff = diff_for_account(
                 delegated,
                 Some(account(&[], 10, &owner)),
@@ -1331,7 +1513,7 @@ mod tests {
         let diff = diff_for_account(
             dirty_delegated,
             Some(account(&[], 100, &owner)),
-            account(&[], 40, &owner),
+            account(&[], 140, &owner),
         );
         let delegated_accounts = HashSet::from([dirty_delegated]);
         let receipt = ReceiptBalanceSettlement {
@@ -1353,7 +1535,7 @@ mod tests {
             vec![SettlementUnsupportedChange::LamportsChanged {
                 account: dirty_delegated,
                 l1_lamports: 100,
-                er_lamports: 40,
+                er_lamports: 140,
             }]
         );
 
@@ -1771,7 +1953,7 @@ mod tests {
                 &validator,
                 Hash::new_unique(),
                 [7; 32],
-                include_begin,
+                (!include_begin).then(|| initial_settlement_checksum(plan.er_slot)),
             );
             let instructions: Vec<_> = transactions
                 .iter()
@@ -1801,7 +1983,7 @@ mod tests {
                 &validator,
                 Hash::new_unique(),
                 [7; 32],
-                true,
+                None,
             )
             .is_empty());
     }

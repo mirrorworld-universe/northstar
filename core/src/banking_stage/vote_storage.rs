@@ -4,7 +4,7 @@ use {
     ahash::HashMap,
     itertools::Itertools,
     rand::{Rng, rng},
-    solana_account::ReadableAccount as _,
+    solana_account::state_traits::StateMutWincode as _,
     solana_clock::Epoch,
     solana_perf::packet::bytes::Bytes,
     solana_pubkey::Pubkey,
@@ -138,9 +138,9 @@ impl VoteStorage {
     }
 
     pub fn drain_unprocessed(&mut self, bank: &Bank) -> Vec<SanitizedTransactionView<Bytes>> {
-        let slot_hashes = bank
+        let slot_hashes: Option<SlotHashes> = bank
             .get_account(&sysvar::slot_hashes::id())
-            .and_then(|account| wincode::deserialize::<SlotHashes>(account.data()).ok());
+            .and_then(|account| account.state().ok());
         if slot_hashes.is_none() {
             error!(
                 "Slot hashes sysvar doesn't exist on bank {}. Including all votes without \
@@ -396,7 +396,7 @@ pub(crate) mod tests {
         epoch: solana_clock::Epoch,
     ) -> solana_vote::vote_account::VoteAccount {
         use {
-            solana_account::AccountSharedData,
+            solana_account::{AccountSharedData, state_traits::StateMutWincode as _},
             solana_vote_program::vote_state::{VoteInit, VoteStateV4, VoteStateVersions},
         };
 
@@ -481,7 +481,7 @@ pub(crate) mod tests {
         timestamp: Option<UnixTimestamp>,
     ) -> LatestValidatorVote {
         let packet = packet_from_slots(slots, keypairs, timestamp);
-        LatestValidatorVote::new(packet.as_ref(), vote_source, true).unwrap()
+        LatestValidatorVote::new(&packet, vote_source, true).unwrap()
     }
 
     /// Create a vote packet with a custom authorized voter keypair

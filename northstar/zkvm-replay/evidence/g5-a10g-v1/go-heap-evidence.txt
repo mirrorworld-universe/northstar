@@ -1,0 +1,4 @@
+profile=maximum-memory; Go GC live heap is the third MB value
+gc 57 @135.202s 2%: 0.075+608+1.0 ms clock, 0.30+198/607/420+4.0 ms cpu, 14380->15261->15260 MB, 14380 MB goal, 0 MB stacks, 0 MB globals, 4 P
+gc 243 @354.608s 4%: 0.12+363+0.19 ms clock, 0.51+146/363/264+0.78 ms cpu, 14381->15261->15260 MB, 14381 MB goal, 0 MB stacks, 0 MB globals, 4 P
+gc 153 @267.117s 3%: 0.11+642+8.7 ms clock, 0.44+136/507/410+34 ms cpu, 14381->15261->15260 MB, 14381 MB goal, 0 MB stacks, 0 MB globals, 4 P

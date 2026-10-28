@@ -1,12 +1,13 @@
 use {
-    crate::rolling_bit_field::RollingBitField,
+    crate::bank_id::BankId,
     core::fmt::{Debug, Formatter},
     solana_clock::Slot,
 };
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 pub struct Ancestors {
-    ancestors: RollingBitField,
+    /// Sorted by slot, with at most one bank per slot
+    ancestors: Vec<(Slot, BankId)>,
 }
 
 impl Debug for Ancestors {
@@ -15,57 +16,52 @@ impl Debug for Ancestors {
     }
 }
 
-// some tests produce ancestors ranges that are too large such
-// that we prefer to implement them in a sparse HashSet
-const ANCESTORS_SIZE: u64 = 8192;
-
-impl Default for Ancestors {
-    fn default() -> Self {
-        Self {
-            ancestors: RollingBitField::new(ANCESTORS_SIZE),
-        }
+/// Pairs each slot with a bank id equal to it
+impl From<Vec<Slot>> for Ancestors {
+    fn from(source: Vec<Slot>) -> Ancestors {
+        Ancestors::from(
+            source
+                .into_iter()
+                .map(|slot| (slot, BankId::new(slot)))
+                .collect::<Vec<_>>(),
+        )
     }
 }
 
-impl From<Vec<Slot>> for Ancestors {
-    fn from(mut source: Vec<Slot>) -> Ancestors {
-        // Bitfield performs optimally when we insert the minimum value first so that it knows the correct start/end values.
-        source.sort_unstable();
-        // Sonic: Northstar ER banks can have intentionally sparse ancestry, e.g. an
-        // L1 parent near slot 0 and an ER child at 1 << 40. Inserting ascending
-        // would walk the whole gap while moving low slots to excess. Insert the
-        // high end first for sparse sets so low slots go straight to excess.
-        if source
-            .last()
-            .zip(source.first())
-            .is_some_and(|(max, min)| max.saturating_sub(*min) > ANCESTORS_SIZE)
-        {
-            source.reverse();
-        }
-        let mut result = Ancestors::default();
-        source.into_iter().for_each(|slot| {
-            result.ancestors.insert(slot);
-        });
-
-        result
+impl From<Vec<(Slot, BankId)>> for Ancestors {
+    fn from(mut source: Vec<(Slot, BankId)>) -> Ancestors {
+        source.sort_unstable_by_key(|(slot, _bank_id)| *slot);
+        debug_assert!(
+            source.windows(2).all(|pair| pair[0].0 != pair[1].0),
+            "ancestors cannot contain duplicate slots: {source:?}"
+        );
+        Ancestors { ancestors: source }
     }
 }
 
 impl Ancestors {
     pub fn keys(&self) -> Vec<Slot> {
-        self.ancestors.get_all()
+        self.iter().collect()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = Slot> + '_ {
-        self.ancestors.iter_ones()
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = Slot> + '_ {
+        self.ancestors.iter().map(|(slot, _bank_id)| *slot)
     }
 
-    pub fn remove(&mut self, slot: &Slot) {
-        self.ancestors.remove(slot);
+    // Sonic: ER banks preserve ancestry after severing parent links, including bank identities.
+    pub fn iter_with_bank_id(&self) -> impl Iterator<Item = (Slot, BankId)> + '_ {
+        self.ancestors.iter().copied()
+    }
+
+    /// Removes the entry with the highest slot, returning that slot
+    pub fn remove_max_slot(&mut self) -> Option<Slot> {
+        self.ancestors.pop().map(|(slot, _bank_id)| slot)
     }
 
     pub fn contains_key(&self, slot: &Slot) -> bool {
-        self.ancestors.contains(slot)
+        self.ancestors
+            .binary_search_by_key(slot, |(slot, _bank_id)| *slot)
+            .is_ok()
     }
 
     pub fn len(&self) -> usize {
@@ -73,22 +69,34 @@ impl Ancestors {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.ancestors.is_empty()
     }
 
     pub fn min_slot(&self) -> Option<Slot> {
-        self.ancestors.min()
+        self.ancestors.first().map(|(slot, _bank_id)| *slot)
     }
 
     pub fn max_slot(&self) -> Slot {
-        self.ancestors.max_exclusive().saturating_sub(1)
+        self.ancestors.last().map_or(0, |(slot, _bank_id)| *slot)
+    }
+
+    /// Is an index entry at `slot` an ancestor?
+    /// This includes any ancestors and any slots older than the oldest ancestor in the list
+    pub fn is_ancestor(&self, slot: Slot) -> bool {
+        self.min_slot().is_none_or(|min_slot| slot <= min_slot) || self.contains_key(&slot)
     }
 }
 
 #[cfg(feature = "dev-context-only-utils")]
 impl Ancestors {
+    /// Pairs `slot` with a bank id equal to it
     pub fn insert(&mut self, slot: Slot) {
-        self.ancestors.insert(slot);
+        if let Err(index) = self
+            .ancestors
+            .binary_search_by_key(&slot, |(slot, _bank_id)| *slot)
+        {
+            self.ancestors.insert(index, (slot, BankId::new(slot)));
+        }
     }
 }
 

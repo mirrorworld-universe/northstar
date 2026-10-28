@@ -561,7 +561,7 @@ fn load_transaction_accounts<CB: TransactionProcessingCallback>(
             if bpf_loader_upgradeable::check_id(account.owner())
                 && let Ok(UpgradeableLoaderState::Program {
                     programdata_address,
-                }) = bincode::deserialize(account.data())
+                }) = wincode::deserialize(account.data())
             {
                 // ...its programdata was not already counted and will not later be counted...
                 if !account_keys.iter().any(|key| programdata_address == *key)
@@ -690,7 +690,10 @@ mod tests {
         super::*,
         crate::transaction_account_state_info::TransactionAccountStateInfo,
         rand::prelude::*,
-        solana_account::{Account, AccountSharedData, ReadableAccount, WritableAccount},
+        solana_account::{
+            Account, AccountSharedData, ReadableAccount, WritableAccount,
+            state_traits::StateMutWincode as _,
+        },
         solana_hash::Hash,
         solana_instruction::{AccountMeta, Instruction},
         solana_keypair::Keypair,
@@ -2625,7 +2628,7 @@ mod tests {
                     }
 
                     if has_programdata || rng.random() {
-                        bincode::serialize_into(
+                        wincode::serialize_into(
                             account.data_as_mut_slice(),
                             &UpgradeableLoaderState::Program {
                                 programdata_address,

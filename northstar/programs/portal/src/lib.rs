@@ -105,9 +105,23 @@ fn process_instruction(
         Ok((11, payload)) => deserialize_args(payload).and_then(|owner| {
             instructions::process_settle_account_owner(program_id, accounts, owner)
         }),
-        Ok((12, payload)) => deserialize_args(payload).and_then(|lamports| {
-            instructions::process_settle_account_lamports(program_id, accounts, lamports)
-        }),
+        Ok((12, payload)) => {
+            let lamports = deserialize_args::<SettleAccountLamports>(payload)?;
+            match &payload[SettleAccountLamports::SERIALIZED_LEN..] {
+                [] => instructions::process_settle_account_lamports(program_id, accounts, lamports),
+                guard if guard.len() == 32 => {
+                    instructions::process_settle_account_lamports_with_surplus(
+                        program_id,
+                        accounts,
+                        lamports,
+                        guard
+                            .try_into()
+                            .map_err(|_| ProgramError::InvalidInstructionData)?,
+                    )
+                }
+                _ => Err(ProgramError::InvalidInstructionData),
+            }
+        }
         Ok((13, payload)) => deserialize_args::<u64>(payload)
             .and_then(|lamports| instructions::process_start_withdrawal(accounts, lamports)),
         Ok((14, payload)) => deserialize_args(payload).and_then(|checkpoint| {
@@ -160,11 +174,11 @@ fn process_instruction(
 // Sonic: Portal instructions need far fewer accounts than the transaction-wide
 // maximum. Keeping the Pinocchio account scratch array at MAX_TX_ACCOUNTS burns
 // the SBF stack before dispatch and causes live-validator Portal calls to exhaust
-// compute units without logs. Sixteen accounts covers current Portal instructions,
-// including batched Delegate calls, while keeping the stack scratch space small.
+// compute units without logs. Seventeen accounts covers seven delegated account/record
+// pairs plus validator, session, and the optional surplus vault.
 #[cfg_attr(not(feature = "no-entrypoint"), no_mangle)]
 /// # Safety
 /// `input` must be a valid pointer to a serialized Solana program input buffer.
 pub unsafe extern "C" fn entrypoint(input: *mut u8) -> u64 {
-    pinocchio::entrypoint::process_entrypoint::<16>(input, process_instruction)
+    pinocchio::entrypoint::process_entrypoint::<17>(input, process_instruction)
 }

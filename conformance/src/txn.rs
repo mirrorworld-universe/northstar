@@ -24,7 +24,7 @@ use {
         ancestors::Ancestors,
         blockhash_queue::BlockhashQueue,
     },
-    solana_clock::{BankId, Clock, DEFAULT_TICKS_PER_SLOT, Epoch, MAX_PROCESSING_AGE},
+    solana_clock::{Clock, DEFAULT_TICKS_PER_SLOT, Epoch, MAX_PROCESSING_AGE},
     solana_epoch_schedule::EpochSchedule,
     solana_fee_calculator::FeeRateGovernor,
     solana_hash::Hash,
@@ -102,16 +102,13 @@ pub fn execute_txn_proto(context: &ProtoTxnContext) -> ProtoTxnResult {
     let epoch = epoch_schedule.get_epoch(slot);
 
     // Populate the accounts DB with the input accounts at the parent slot.
-    let bank_accounts = new_accounts_for_tests_single_threaded();
+    let bank_rc = BankRc::new(new_accounts_for_tests_single_threaded());
+    let bank_id = bank_rc.next_bank_id();
     let ancestors = Ancestors::from(vec![parent_slot]);
-    bank_accounts.store_accounts(
-        (parent_slot, &accounts[..]),
-        BankId::default(),
-        None,
-        &ancestors,
-    );
-    bank_accounts.accounts_db.add_root(parent_slot);
-    let bank_rc = BankRc::new(bank_accounts);
+    bank_rc
+        .accounts
+        .store_accounts((parent_slot, &accounts[..]), bank_id, None, &ancestors);
+    bank_rc.accounts.accounts_db.add_root(parent_slot);
 
     // Dummy epoch stakes with the provided total stake at the current and next epoch.
     let mut epoch_stakes: HashMap<Epoch, VersionedEpochStakes> = HashMap::new();
@@ -493,11 +490,10 @@ mod tests {
     fn proto_transaction(transaction: &VersionedTransaction) -> ProtoSanitizedTransaction {
         let message = &transaction.message;
         let header = message.header();
-        // The fixture format only distinguishes legacy from v0.
-        let (is_legacy, address_table_lookups) = match message {
-            VersionedMessage::Legacy(_) => (true, vec![]),
+        let (version, address_table_lookups) = match message {
+            VersionedMessage::Legacy(_) => (protosol::protos::TransactionVersion::Legacy, vec![]),
             VersionedMessage::V0(message) => (
-                false,
+                protosol::protos::TransactionVersion::V0,
                 message
                     .address_table_lookups
                     .iter()
@@ -523,7 +519,7 @@ mod tests {
 
         ProtoSanitizedTransaction {
             message: Some(ProtoTransactionMessage {
-                is_legacy,
+                version: version as i32,
                 header: Some(ProtoMessageHeader {
                     num_required_signatures: u32::from(header.num_required_signatures),
                     num_readonly_signed_accounts: u32::from(header.num_readonly_signed_accounts),
@@ -552,6 +548,7 @@ mod tests {
                     })
                     .collect(),
                 address_table_lookups,
+                v1_config: None,
             }),
             message_hash: vec![0; 32],
             signatures: transaction
@@ -751,7 +748,7 @@ mod tests {
         let processed =
             ProcessedTransaction::NoOp(Box::new(solana_svm::account_loader::NoOpTransaction {
                 validation_error: validation_error.clone(),
-                fee_payer_balance: Some(42),
+                fee_payer_balance: None,
                 compute_unit_limit: COMPUTE_UNIT_LIMIT,
                 loaded_accounts_bytes_limit: LOADED_ACCOUNTS_BYTES_LIMIT,
                 nonce_address: None,

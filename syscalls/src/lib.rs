@@ -350,7 +350,10 @@ pub fn create_program_runtime_environment(
         enable_register_tracing: debugging_features,
         enable_symbol_and_section_labels: debugging_features,
         reject_broken_elfs: reject_deployment_of_broken_elfs,
+        // Sonic: these fields do not exist in the zkVM interpreter-only build.
+        #[cfg(not(target_os = "zkvm"))]
         noop_instruction_rate: 256,
+        #[cfg(not(target_os = "zkvm"))]
         sanitize_user_provided_values: true,
         enabled_sbpf_versions: min_sbpf_version..=max_sbpf_version,
         optimize_rodata: false,
@@ -3064,9 +3067,9 @@ mod tests {
         assert_eq!(pubkey, *translated_pubkey);
 
         // Instruction
-        let instruction = Instruction::new_with_bincode(
+        let instruction = Instruction::new_with_bytes(
             solana_pubkey::new_rand(),
-            &"foobar",
+            b"foobar",
             vec![AccountMeta::new(solana_pubkey::new_rand(), false)],
         );
         let instruction = StableInstruction::from(instruction);
@@ -4436,7 +4439,7 @@ mod tests {
             );
             assert_eq!(result.unwrap(), 0);
 
-            let clock_from_buf = bincode::deserialize::<Clock>(&got_clock_buf).unwrap();
+            let clock_from_buf = wincode::deserialize::<Clock>(&got_clock_buf).unwrap();
 
             assert_eq!(clock_from_buf, src_clock);
             assert!(are_bytes_equal(&clock_from_buf, &clean_clock));
@@ -4508,7 +4511,7 @@ mod tests {
             assert_eq!(result.unwrap(), 0);
 
             let epochschedule_from_buf =
-                bincode::deserialize::<EpochSchedule>(&got_epochschedule_buf).unwrap();
+                wincode::deserialize::<EpochSchedule>(&got_epochschedule_buf).unwrap();
 
             assert_eq!(epochschedule_from_buf, src_epochschedule);
 
@@ -4594,7 +4597,7 @@ mod tests {
             );
             assert_eq!(result.unwrap(), 0);
 
-            let rent_from_buf = bincode::deserialize::<Rent>(&got_rent_buf).unwrap();
+            let rent_from_buf = wincode::deserialize::<Rent>(&got_rent_buf).unwrap();
 
             assert_eq!(rent_from_buf, src_rent);
 
@@ -4660,7 +4663,7 @@ mod tests {
             );
             assert_eq!(result.unwrap(), 0);
 
-            let rewards_from_buf = bincode::deserialize::<EpochRewards>(&got_rewards_buf).unwrap();
+            let rewards_from_buf = wincode::deserialize::<EpochRewards>(&got_rewards_buf).unwrap();
 
             assert_eq!(rewards_from_buf, src_rewards);
 
@@ -4720,7 +4723,7 @@ mod tests {
             assert_eq!(result.unwrap(), 0);
 
             let restart_from_buf =
-                bincode::deserialize::<LastRestartSlot>(&got_restart_buf).unwrap();
+                wincode::deserialize::<LastRestartSlot>(&got_restart_buf).unwrap();
 
             assert_eq!(restart_from_buf, src_restart);
             assert!(are_bytes_equal(&restart_from_buf, &clean_restart));
@@ -4752,9 +4755,6 @@ mod tests {
         }
 
         let src_history = src_history;
-
-        let mut src_history_buf = vec![0; STAKE_HISTORY_ACCOUNT_SIZE];
-        bincode::serialize_into(&mut src_history_buf, &src_history).unwrap();
 
         let transaction_accounts = vec![(
             sysvar::stake_history::id(),
@@ -4793,7 +4793,7 @@ mod tests {
             );
             assert_eq!(result.unwrap(), 0);
 
-            let history_from_buf = bincode::deserialize::<StakeHistory>(&got_history_buf).unwrap();
+            let history_from_buf = wincode::deserialize::<StakeHistory>(&got_history_buf).unwrap();
             assert_eq!(history_from_buf, src_history);
         }
     }
@@ -5038,7 +5038,7 @@ mod tests {
             )
             .unwrap();
 
-            let clock_from_buf = bincode::deserialize::<Clock>(&got_clock_buf_rw).unwrap();
+            let clock_from_buf = wincode::deserialize::<Clock>(&got_clock_buf_rw).unwrap();
 
             assert_eq!(clock_from_buf, src_clock);
         }
@@ -5237,11 +5237,11 @@ mod tests {
          */
 
         // Execute A
-        invoke_context.transaction_context.push().unwrap();
+        invoke_context.transaction_context.push(true).unwrap();
         invoke_context.transaction_context.pop().unwrap();
 
         // Execute B
-        invoke_context.transaction_context.push().unwrap();
+        invoke_context.transaction_context.push(true).unwrap();
         // B does a CPI into B1
         invoke_context
             .transaction_context
@@ -5251,12 +5251,12 @@ mod tests {
                 vec![b'B', 1],
             )
             .unwrap();
-        invoke_context.transaction_context.push().unwrap();
+        invoke_context.transaction_context.push(true).unwrap();
         invoke_context.transaction_context.pop().unwrap();
         invoke_context.transaction_context.pop().unwrap();
 
         // Start instruction C
-        invoke_context.transaction_context.push().unwrap();
+        invoke_context.transaction_context.push(true).unwrap();
 
         const VM_BASE_ADDRESS: u64 = 0x100000000;
         const META_OFFSET: usize = 0;
@@ -5501,10 +5501,10 @@ mod tests {
          */
 
         // Execute Instr A
-        invoke_context.transaction_context.push().unwrap();
+        invoke_context.transaction_context.push(true).unwrap();
         invoke_context.transaction_context.pop().unwrap();
         // Execute Instr B
-        invoke_context.transaction_context.push().unwrap();
+        invoke_context.transaction_context.push(true).unwrap();
         // CPI into B1
         invoke_context
             .transaction_context
@@ -5514,7 +5514,7 @@ mod tests {
                 vec![b'B', 1],
             )
             .unwrap();
-        invoke_context.transaction_context.push().unwrap();
+        invoke_context.transaction_context.push(true).unwrap();
         // CPI into B2
         invoke_context
             .transaction_context
@@ -5524,7 +5524,7 @@ mod tests {
                 vec![b'B', 2],
             )
             .unwrap();
-        invoke_context.transaction_context.push().unwrap();
+        invoke_context.transaction_context.push(true).unwrap();
         // Return from B2 and B1
         invoke_context.transaction_context.pop().unwrap();
         invoke_context.transaction_context.pop().unwrap();
@@ -5537,7 +5537,7 @@ mod tests {
                 vec![b'B', 3],
             )
             .unwrap();
-        invoke_context.transaction_context.push().unwrap();
+        invoke_context.transaction_context.push(true).unwrap();
         // Return from B3
         invoke_context.transaction_context.pop().unwrap();
         // CPI into B4
@@ -5549,7 +5549,7 @@ mod tests {
                 vec![b'B', 4],
             )
             .unwrap();
-        invoke_context.transaction_context.push().unwrap();
+        invoke_context.transaction_context.push(true).unwrap();
         // CPI into B5
         invoke_context
             .transaction_context
@@ -5559,7 +5559,7 @@ mod tests {
                 vec![b'B', 5],
             )
             .unwrap();
-        invoke_context.transaction_context.push().unwrap();
+        invoke_context.transaction_context.push(true).unwrap();
 
         // Invoking the syscall from B5 should return false
         invoke_context
@@ -5586,7 +5586,7 @@ mod tests {
                 vec![b'B', 6],
             )
             .unwrap();
-        invoke_context.transaction_context.push().unwrap();
+        invoke_context.transaction_context.push(true).unwrap();
         // CPI into B7
         invoke_context
             .transaction_context
@@ -5596,7 +5596,7 @@ mod tests {
                 vec![b'B', 7],
             )
             .unwrap();
-        invoke_context.transaction_context.push().unwrap();
+        invoke_context.transaction_context.push(true).unwrap();
         // Return from B7
         invoke_context.transaction_context.pop().unwrap();
 
@@ -5680,7 +5680,7 @@ mod tests {
                 vec![b'B', 8],
             )
             .unwrap();
-        invoke_context.transaction_context.push().unwrap();
+        invoke_context.transaction_context.push(true).unwrap();
 
         // Invoking the syscall from B8 with index zero should return ix B6
         invoke_context
@@ -5812,7 +5812,7 @@ mod tests {
         invoke_context.transaction_context.pop().unwrap();
 
         // Execute C
-        invoke_context.transaction_context.push().unwrap();
+        invoke_context.transaction_context.push(true).unwrap();
 
         // Invoking the syscall from B with index zero should return ix C
         invoke_context
@@ -5878,7 +5878,7 @@ mod tests {
                 vec![b'C', 1],
             )
             .unwrap();
-        invoke_context.transaction_context.push().unwrap();
+        invoke_context.transaction_context.push(true).unwrap();
 
         // Invoking the CPI from C1 with index zero should return false.
         invoke_context
@@ -5905,7 +5905,7 @@ mod tests {
                 vec![b'C', 2],
             )
             .unwrap();
-        invoke_context.transaction_context.push().unwrap();
+        invoke_context.transaction_context.push(true).unwrap();
 
         // Invoking the syscall from C2 with index zero should return ix C1
         invoke_context

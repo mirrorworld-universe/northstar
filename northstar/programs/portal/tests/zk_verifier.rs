@@ -174,6 +174,50 @@ async fn sbf_verifier_rejects_noncanonical_portal_input() {
 #[tokio::test]
 #[ignore = "manual external artifact override; retained checkpoint artifacts are tested separately"]
 async fn sbf_verifier_accepts_checkpoint_bound_sp1_proof() {
+    assert_external_sp1_proof(false).await;
+}
+
+#[cfg(feature = "zk-verifier-bounded-vrf")]
+#[tokio::test]
+async fn sbf_candidate_verifier_accepts_actual_proof_and_rejects_mutations() {
+    assert_sp1_proof(
+        *include_bytes!("zk_verifier/fixtures/bounded-vrf-integrated-v11/proof.bin"),
+        *include_bytes!("zk_verifier/fixtures/bounded-vrf-integrated-v11/public-inputs.bin"),
+        true,
+    )
+    .await;
+}
+
+#[cfg(feature = "zk-verifier-bounded-vrf")]
+#[tokio::test]
+async fn sbf_verifier_rejects_historical_v7c_candidate_key() {
+    let instruction = Instruction {
+        program_id: PORTAL_PROGRAM_ID,
+        accounts: vec![],
+        data: borsh::to_vec(&PortalInstruction::VerifyErStepProofV1(
+            VerifyErStepProofV1 {
+                proof: *include_bytes!("zk_verifier/fixtures/bounded-vrf-preview-v1/proof.bin"),
+                public_inputs: *include_bytes!(
+                    "zk_verifier/fixtures/bounded-vrf-preview-v1/public-inputs.bin"
+                ),
+            },
+        ))
+        .unwrap(),
+    };
+    let context = setup().await;
+    let result = context
+        .banks_client
+        .simulate_transaction(transaction(&context, instruction))
+        .await
+        .unwrap();
+    let error = result.result.unwrap().unwrap_err();
+    assert!(format!("{error:?}").contains(&format!(
+        "Custom({})",
+        PortalError::StepProofVerificationFailed as u32
+    )));
+}
+
+async fn assert_external_sp1_proof(candidate: bool) {
     let proof: [u8; SP1_GROTH16_PROOF_V1_LEN] =
         std::fs::read(std::env::var("NORTHSTAR_SP1_PROOF").expect("NORTHSTAR_SP1_PROOF path"))
             .unwrap()
@@ -185,6 +229,21 @@ async fn sbf_verifier_accepts_checkpoint_bound_sp1_proof() {
     .unwrap()
     .try_into()
     .unwrap();
+    assert_sp1_proof(proof, public_inputs, candidate).await;
+}
+
+async fn assert_sp1_proof(
+    proof: [u8; SP1_GROTH16_PROOF_V1_LEN],
+    public_inputs: [u8; 256],
+    candidate: bool,
+) {
+    if candidate {
+        let fields = public_inputs.as_chunks::<32>().0.try_into().unwrap();
+        northstar_zk_types::BoundedVrfPublicInputsV1::try_from(
+            ErStepPublicInputsV1::from_array(fields).unwrap(),
+        )
+        .unwrap();
+    }
     let instruction = Instruction {
         program_id: PORTAL_PROGRAM_ID,
         accounts: vec![],
@@ -204,17 +263,52 @@ async fn sbf_verifier_accepts_checkpoint_bound_sp1_proof() {
         .unwrap();
     assert_eq!(result.result.unwrap(), Ok(()));
     let compute_units = result.simulation_details.unwrap().units_consumed;
-    println!("checkpoint-bound SP1 verifier CU: {compute_units}");
+    println!(
+        "SP1 VerifyErStepProofV1 instruction CU: {compute_units}; candidate={candidate}; not \
+         ResolveChallenge CU"
+    );
     assert!(compute_units <= 130_000);
 
-    let mut changed_proof = instruction;
-    changed_proof.data[101] ^= 1;
-    let result = context
-        .banks_client
-        .simulate_transaction(transaction(&context, changed_proof))
-        .await
-        .unwrap();
-    assert!(result.result.unwrap().is_err());
+    for index in [0, 4, 36, 68, 100, 164, 292, 355] {
+        let mut changed = instruction.clone();
+        changed.data[1 + index] ^= 1;
+        let result = context
+            .banks_client
+            .simulate_transaction(transaction(&context, changed))
+            .await
+            .unwrap();
+        assert!(result.result.unwrap().is_err(), "proof byte {index}");
+    }
+    for field in 0..8 {
+        let mut changed = instruction.clone();
+        changed.data[1 + SP1_GROTH16_PROOF_V1_LEN + field * 32 + 31] ^= 1;
+        let result = context
+            .banks_client
+            .simulate_transaction(transaction(&context, changed))
+            .await
+            .unwrap();
+        assert!(result.result.unwrap().is_err(), "public field {field}");
+    }
+    if candidate {
+        let mut changed = instruction;
+        changed.data[1 + SP1_GROTH16_PROOF_V1_LEN..1 + SP1_GROTH16_PROOF_V1_LEN + 32]
+            .copy_from_slice(
+                &FrBytes::er_step_domain_v1(
+                    ER_STEP_PROOF_KIND_FULL_TRANSACTION,
+                    ER_STEP_PROOF_VERSION_V1,
+                )
+                .to_bytes(),
+            );
+        let result = context
+            .banks_client
+            .simulate_transaction(transaction(&context, changed))
+            .await
+            .unwrap();
+        assert!(
+            result.result.unwrap().is_err(),
+            "candidate proof under legacy domain"
+        );
+    }
 }
 
 #[tokio::test]
@@ -268,6 +362,26 @@ async fn sbf_verifier_binds_current_program_and_rejects_changed_fields() {
             "../proof-coordinator-v1/upload",
             "../proof-coordinator-v1/proving-under-deadline",
             "../proof-coordinator-v1/upload-worker-offline",
+        ]
+        .into_iter()
+        .map(|case| (case, String::new(), false)),
+    )
+    .chain(
+        [
+            "../g5-a10g-sha-v1/corpus/baseline",
+            "../g5-a10g-sha-v1/corpus/resolver",
+            "../g5-a10g-sha-v1/corpus/partial",
+            "../g5-a10g-sha-v1/corpus/coordinator",
+            "../g5-a10g-sha-v1/corpus/combined-settlement",
+            "../g5-a10g-sha-v1/corpus/hardened-runner",
+            "../g5-a10g-sha-v1/corpus/live-01",
+            "../g5-a10g-sha-v1/corpus/live-02",
+            "../g5-a10g-sha-v1/corpus/live-03",
+            "../g5-a10g-sha-v1/corpus/live-guards",
+            "../g5-a10g-sha-v1/corpus/fast-live-1",
+            "../g5-a10g-sha-v1/corpus/fast-live-2",
+            "../g5-a10g-sha-v1/corpus/fast-live-3",
+            "../g5-a10g-sha-v1/corpus/upload-recovery",
         ]
         .into_iter()
         .map(|case| (case, String::new(), true)),

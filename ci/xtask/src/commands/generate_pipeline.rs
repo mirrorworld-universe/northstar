@@ -137,15 +137,17 @@ fn generate_merge_queue_pipeline() -> Result<buildkite::Pipeline> {
     pipeline.set_priority(10);
     pipeline.add_step(default_sanity_step());
     pipeline.add_step(default_checks_step());
+    pipeline.add_step(default_release_check_step());
     Ok(pipeline)
 }
 
 struct PullRequestPipelineFlags {
     shellcheck: bool,
     checks: bool,
+    release_check: bool,
     feature_check: bool,
     miri: bool,
-    frozen_abi: bool,
+    stable_abi: bool,
     stable: bool,
     local_cluster: bool,
     docs: bool,
@@ -189,6 +191,11 @@ impl PullRequestPipelineFlags {
                         || file.ends_with("scripts/spl-token-cli-version.sh")
                         || file.ends_with("scripts/cargo-build-sbf-version.sh")
                 }),
+            release_check: trigger_all
+                || rust_changed
+                || changed_files
+                    .iter()
+                    .any(|file| file == ".cargo/config.toml"),
             feature_check: trigger_all
                 || rust_changed
                 || changed_files
@@ -199,11 +206,11 @@ impl PullRequestPipelineFlags {
                 || changed_files
                     .iter()
                     .any(|file| file.ends_with("ci/test-miri.sh")),
-            frozen_abi: trigger_all
+            stable_abi: trigger_all
                 || rust_changed
                 || changed_files
                     .iter()
-                    .any(|file| file.ends_with("ci/test-frozen-abi.sh")),
+                    .any(|file| file.ends_with("ci/test-stable-abi.sh")),
             stable: trigger_all
                 || rust_changed
                 || changed_files.iter().any(|file| {
@@ -289,14 +296,17 @@ async fn generate_pull_request_pipeline(
     if flags.checks {
         pipeline.add_step(default_checks_step());
     }
+    if flags.release_check {
+        pipeline.add_step(default_release_check_step());
+    }
     if flags.feature_check {
         pipeline.add_step(default_feature_check_step(5));
     }
     if flags.miri {
         pipeline.add_step(default_miri_step());
     }
-    if flags.frozen_abi {
-        pipeline.add_step(default_frozen_abi_step());
+    if flags.stable_abi {
+        pipeline.add_step(default_stable_abi_step());
     }
 
     pipeline.add_step(buildkite::Step::Wait(buildkite::WaitStep {}));
@@ -341,9 +351,10 @@ fn generate_full_pipeline() -> Result<buildkite::Pipeline> {
     pipeline.add_step(buildkite::Step::Wait(buildkite::WaitStep {}));
 
     pipeline.add_step(default_checks_step());
+    pipeline.add_step(default_release_check_step());
     pipeline.add_step(default_feature_check_step(5));
     pipeline.add_step(default_miri_step());
-    pipeline.add_step(default_frozen_abi_step());
+    pipeline.add_step(default_stable_abi_step());
 
     pipeline.add_step(buildkite::Step::Wait(buildkite::WaitStep {}));
 
@@ -402,6 +413,16 @@ fn default_checks_step() -> buildkite::Step {
     })
 }
 
+fn default_release_check_step() -> buildkite::Step {
+    buildkite::Step::Command(buildkite::CommandStep {
+        name: String::from("release-check"),
+        command: String::from("ci/docker-run-default-image.sh cargo xtask release-check"),
+        agents: Some(queue_agents()),
+        timeout_in_minutes: Some(25),
+        ..Default::default()
+    })
+}
+
 fn default_feature_check_step(parallel: u64) -> buildkite::Step {
     let mut group = buildkite::GroupStep {
         name: String::from("feature-checks"),
@@ -423,17 +444,19 @@ fn default_feature_check_step(parallel: u64) -> buildkite::Step {
             }));
     }
 
-    group
-        .steps
-        .push(buildkite::Step::Command(buildkite::CommandStep {
-            name: String::from("feature-check-dev-bins"),
-            command: String::from(
-                "ci/docker-run-default-image.sh ci/feature-check/test-feature-dev-bins.sh",
-            ),
-            agents: Some(queue_agents()),
-            timeout_in_minutes: Some(20),
-            ..Default::default()
-        }));
+    for workspace in ["dev-bins", "sbf", "xtask"] {
+        group
+            .steps
+            .push(buildkite::Step::Command(buildkite::CommandStep {
+                name: format!("feature-check-{workspace}"),
+                command: format!(
+                    "ci/docker-run-default-image.sh ci/feature-check/test-feature-{workspace}.sh"
+                ),
+                agents: Some(queue_agents()),
+                timeout_in_minutes: Some(20),
+                ..Default::default()
+            }));
+    }
 
     buildkite::Step::Group(group)
 }
@@ -448,10 +471,10 @@ fn default_miri_step() -> buildkite::Step {
     })
 }
 
-fn default_frozen_abi_step() -> buildkite::Step {
+fn default_stable_abi_step() -> buildkite::Step {
     buildkite::Step::Command(buildkite::CommandStep {
-        name: String::from("frozen-abi"),
-        command: String::from("ci/docker-run-default-image.sh ci/test-frozen-abi.sh"),
+        name: String::from("stable-abi"),
+        command: String::from("ci/docker-run-default-image.sh ci/test-stable-abi.sh"),
         agents: Some(queue_agents()),
         timeout_in_minutes: Some(30),
         ..Default::default()
@@ -655,9 +678,10 @@ mod tests {
         let f = flags(&["README.md"]);
         assert!(!f.shellcheck);
         assert!(!f.checks);
+        assert!(!f.release_check);
         assert!(!f.feature_check);
         assert!(!f.miri);
-        assert!(!f.frozen_abi);
+        assert!(!f.stable_abi);
         assert!(!f.stable);
         assert!(!f.local_cluster);
         assert!(!f.docs);
@@ -672,9 +696,10 @@ mod tests {
     fn test_rust_nightly_version_toml_triggers_all() {
         let f = flags(&["ci/rust-nightly-version.toml"]);
         assert!(f.checks);
+        assert!(f.release_check);
         assert!(f.feature_check);
         assert!(f.miri);
-        assert!(f.frozen_abi);
+        assert!(f.stable_abi);
         assert!(f.stable);
         assert!(f.local_cluster);
         assert!(f.docs);
@@ -689,9 +714,10 @@ mod tests {
     fn test_docker_change_triggers_all() {
         let f = flags(&["ci/docker/Dockerfile"]);
         assert!(f.checks);
+        assert!(f.release_check);
         assert!(f.feature_check);
         assert!(f.miri);
-        assert!(f.frozen_abi);
+        assert!(f.stable_abi);
         assert!(f.stable);
         assert!(f.local_cluster);
         assert!(f.docs);
@@ -706,9 +732,10 @@ mod tests {
     fn test_rust_change_triggers_all() {
         let f = flags(&["core/src/lib.rs"]);
         assert!(f.checks);
+        assert!(f.release_check);
         assert!(f.feature_check);
         assert!(f.miri);
-        assert!(f.frozen_abi);
+        assert!(f.stable_abi);
         assert!(f.stable);
         assert!(f.local_cluster);
         assert!(f.docs);
@@ -737,9 +764,10 @@ mod tests {
         let f = flags(&["some/random/script.sh"]);
         assert!(f.shellcheck);
         assert!(!f.checks);
+        assert!(!f.release_check);
         assert!(!f.feature_check);
         assert!(!f.miri);
-        assert!(!f.frozen_abi);
+        assert!(!f.stable_abi);
         assert!(!f.stable);
         assert!(!f.local_cluster);
         assert!(!f.docs);
@@ -756,9 +784,10 @@ mod tests {
         assert!(f.shellcheck);
         assert!(f.docs);
         assert!(!f.checks);
+        assert!(!f.release_check);
         assert!(!f.feature_check);
         assert!(!f.miri);
-        assert!(!f.frozen_abi);
+        assert!(!f.stable_abi);
         assert!(!f.stable);
         assert!(!f.local_cluster);
         assert!(!f.localnet);
@@ -766,5 +795,12 @@ mod tests {
         assert!(!f.shuttle);
         assert!(!f.coverage);
         assert!(!f.xdp_tests);
+    }
+
+    #[test]
+    fn test_cargo_config_triggers_release_check() {
+        let f = flags(&[".cargo/config.toml"]);
+        assert!(f.release_check);
+        assert!(!f.checks);
     }
 }

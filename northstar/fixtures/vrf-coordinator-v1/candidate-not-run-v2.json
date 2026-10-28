@@ -1,0 +1,50 @@
+{
+  "schema_version": "northstar-vrf-coordinator-candidate-evidence/v2",
+  "contract_sha256": "6fed54799dfeee9428ad32e8a97ae885368f7b914e8df4d63986c8cfb21082f1",
+  "identity": {
+    "library_commit": "d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd",
+    "algorithm": "ECVRF-EDWARDS25519-SHA512-TAI",
+    "suite": 1,
+    "proof_kind": 3,
+    "proof_version": 1,
+    "domain_hex": "00000000000000006e6f727468737461722d65722d737465702d763100000301",
+    "profile_sha256": null,
+    "execution_profile_sha256": null,
+    "guest_sha256": null,
+    "verification_key_sha256": null,
+    "runtime_revision": null,
+    "runtime_binary_sha256": null,
+    "feature_set_sha256": null,
+    "er_genesis_config_sha256": null,
+    "capture_journal_sha256": null,
+    "capture_collector_sha256": null,
+    "configuration_sha256": null,
+    "rejection_corpus_sha256": null,
+    "proof_window_sha256": null
+  },
+  "bindings": {
+    "profile": null,
+    "execution_profile": null,
+    "guest": null,
+    "verification_key": null,
+    "configuration": null,
+    "rejection_corpus": null
+  },
+  "artifacts": [],
+  "proof_window": {
+    "id": "not-run-no-attempts",
+    "clock_id": null,
+    "started_ns": null,
+    "ended_ns": null,
+    "attempts_artifact": null
+  },
+  "retained_failed_windows": [],
+  "resolutions": [],
+  "lifecycle": {
+    "startup_ns": null,
+    "cold_start_ns": null,
+    "recovery_ns": null,
+    "artifact": null
+  },
+  "rejection_cases": []
+}

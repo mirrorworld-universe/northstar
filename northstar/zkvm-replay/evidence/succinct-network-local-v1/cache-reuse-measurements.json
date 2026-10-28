@@ -1,0 +1,26 @@
+{
+  "backend": "succinct-network",
+  "client_init_ms": 408,
+  "network_mode": "local-hosted",
+  "network_request_id": "0x905ac08fcd854ca18780229570124871f143474260bf4a2dba8e323fcb0046a8",
+  "network_rpc_url": "http://127.0.0.1:50051",
+  "phases": [
+    {
+      "artifact_bytes": 1950,
+      "onchain_proof_bytes": 356,
+      "onchain_proof_path": "northstar-sp1-groth16-onchain.bin",
+      "phase": "groth16",
+      "prove_and_wrap_ms": 54981,
+      "public_inputs_path": "northstar-sp1-public-inputs.bin",
+      "verify_ms": 486
+    }
+  ],
+  "profile": "offline-cache-reuse",
+  "program_vkey_hash": "0x0063a10e31e90625b76d06bfa22cbf0a4a8fa0850ccf71e063d243bd1a7aa31b",
+  "public_inputs": "00000000000000006e6f727468737461722d65722d737465702d76310000020121105e90f1a233f41d463aa67b24ceb649686684960d848d3e500304d50329cd0000000000000000000000000000000000000000000000140000000000000001077ff322af47ca3d9fab643ba3fdaffb498d76009d25884bd7876698ee55b8fb07ccd0d520f3a8f38d336b6a2c09cc528ce504149c8065a55529c31cac58ce63015928c99aed236514efd21411a15dd0b9c4bf7ccd9a528da2e23f0f62bad48d13b76609a5a90cf0871b589525e1e09ab510a4de174910a8eb532f8f01d9a71706d49097142ba45317688ab0a52a666186ecd7735947a7c6245a7ac5b8f1a3b3",
+  "schema": "northstar-sp1-benchmark-v2",
+  "sp1_groth16_vkey_sha256": "4388a21c687fdd5f218d7e3d13190cac4c5355818d3605fd5fb811df468ee696",
+  "sp1_verifier_root": "002f850ee998974d6cc00e50cd0814b098c05bfade466d28573240d057f25352",
+  "witness_bytes": 341517,
+  "witness_sha256": "952f20bfa1d3e3f7eae8e5b2d05bd7a623e9fb12d67ab6667a42c26af3dc8a80"
+}

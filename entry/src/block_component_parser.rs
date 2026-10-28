@@ -204,6 +204,7 @@ mod tests {
             },
             entry::Entry,
         },
+        agave_votor_messages::consensus_message::BlockId,
         solana_bls_signatures::Keypair as BlsKeypair,
         solana_keypair::Keypair,
         solana_pubkey::Pubkey,
@@ -351,14 +352,14 @@ mod tests {
     #[test_case(
         VersionedBlockMarker::from_update_parent(UpdateParentV1 {
             new_parent_slot: 43,
-            new_parent_block_id: Hash::new_unique(),
+            new_parent_block_id: BlockId::new_unique(),
         });
         "update_parent"
     )]
     #[test_case(
         VersionedBlockMarker::from_genesis_cert_block_marker(GenesisCertBlockMarker {
             slot: 44,
-            block_id: Hash::new_unique(),
+            block_id: BlockId::new_unique(),
             bls_signature: BlsKeypair::new().sign(b"genesis").into(),
             bitmap: vec![1, 2, 3],
         });

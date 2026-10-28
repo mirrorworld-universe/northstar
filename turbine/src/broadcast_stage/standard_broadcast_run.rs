@@ -7,7 +7,10 @@ use {
     },
     crate::cluster_nodes::ClusterNodesCache,
     agave_votor::event::VotorEventSender,
-    agave_votor_messages::{consensus_message::Block, migration::MigrationStatus},
+    agave_votor_messages::{
+        consensus_message::{Block, BlockId},
+        migration::MigrationStatus,
+    },
     solana_cost_model::shred_limit::{
         DEFAULT_MAX_CODE_SHREDS_PER_SLOT, DEFAULT_MAX_DATA_SHREDS_PER_SLOT,
     },
@@ -16,10 +19,7 @@ use {
     solana_keypair::Keypair,
     solana_ledger::{
         leader_schedule_cache::LeaderScheduleCache,
-        shred::{
-            ProcessShredsStats, ReedSolomonCache, Shred, ShredType, Shredder,
-            merkle_tree::MerkleTree,
-        },
+        shred::{ProcessShredsStats, Shred, ShredType, Shredder, merkle_tree::MerkleTree},
     },
     solana_runtime::bank::Bank,
     solana_sha256_hasher::hashv,
@@ -59,7 +59,6 @@ pub struct StandardBroadcastRun {
     num_batches: usize,
     cluster_nodes_cache: Arc<ClusterNodesCache<BroadcastStage>>,
     leader_schedule_cache: Arc<LeaderScheduleCache>,
-    reed_solomon_cache: Arc<ReedSolomonCache>,
     migration_status: Arc<MigrationStatus>,
     votor_event_sender: VotorEventSender,
     max_data_shreds_per_slot: u32,
@@ -89,7 +88,7 @@ impl StandardBroadcastRun {
             parent_block_id: Hash::default(),
             parent_for_double_merkle: Block {
                 slot: Slot::MAX,
-                block_id: Hash::default(),
+                block_id: BlockId::default(),
             },
             chained_merkle_root: Hash::default(),
             double_merkle_leaves: vec![],
@@ -106,7 +105,6 @@ impl StandardBroadcastRun {
             num_batches: 0,
             cluster_nodes_cache,
             leader_schedule_cache,
-            reed_solomon_cache: Arc::<ReedSolomonCache>::default(),
             migration_status,
             votor_event_sender,
             max_data_shreds_per_slot: DEFAULT_MAX_DATA_SHREDS_PER_SLOT,
@@ -177,7 +175,7 @@ impl StandardBroadcastRun {
         self.parent_block_id = parent_block_id;
         self.parent_for_double_merkle = Block {
             slot: bank.parent_slot(),
-            block_id: parent_block_id,
+            block_id: BlockId::from(parent_block_id),
         };
         self.chained_merkle_root = chained_merkle_root;
         self.double_merkle_leaves.clear();
@@ -211,7 +209,6 @@ impl StandardBroadcastRun {
                 self.chained_merkle_root,
                 self.next_shred_index,
                 self.next_code_index,
-                &self.reed_solomon_cache,
                 &mut self.process_shreds_stats,
             );
         // These shreds will finish the slot so no need to update
@@ -245,7 +242,6 @@ impl StandardBroadcastRun {
                     self.chained_merkle_root,
                     self.next_shred_index,
                     self.next_code_index,
-                    &self.reed_solomon_cache,
                     process_stats,
                 );
         shreds.iter().for_each(|shred| {
@@ -1531,11 +1527,11 @@ mod test {
         bs.parent_block_id = original_parent_block_id;
         bs.parent_for_double_merkle = Block {
             slot: bs.parent,
-            block_id: bs.parent_block_id,
+            block_id: BlockId::from(bs.parent_block_id),
         };
 
         let new_parent_slot = 7;
-        let new_parent_block_id = Hash::new_unique();
+        let new_parent_block_id = BlockId::new_unique();
         let component = BlockComponent::new_block_marker(VersionedBlockMarker::from_update_parent(
             solana_entry::block_component::UpdateParentV1 {
                 new_parent_slot,

@@ -13,7 +13,7 @@ use {
     },
     solana_account::{AccountSharedData, ReadableAccount},
     solana_clock::Slot,
-    solana_measure::{measure::Measure, measure_us},
+    solana_measure::{meas_dur, measure::Measure, measure_us},
     solana_pubkey::Pubkey,
     std::{
         mem::ManuallyDrop,
@@ -54,8 +54,8 @@ pub struct ReadOnlyCacheStats {
     pub hits: u64,
     pub misses: u64,
     pub evicts: u64,
-    pub load_us: u64,
-    pub store_us: u64,
+    pub load_ns: u64,
+    pub store_ns: u64,
     pub evict_us: u64,
     pub evict_run_count: u64,
 }
@@ -65,8 +65,8 @@ struct AtomicReadOnlyCacheStats {
     hits: AtomicU64,
     misses: AtomicU64,
     evicts: AtomicU64,
-    load_us: AtomicU64,
-    store_us: AtomicU64,
+    load_ns: AtomicU64,
+    store_ns: AtomicU64,
     evict_us: AtomicU64,
     evict_run_count: AtomicU64,
 }
@@ -91,7 +91,6 @@ pub(crate) struct ReadOnlyAccountsCache {
 
     // Performance statistics
     stats: Arc<AtomicReadOnlyCacheStats>,
-    highest_slot_stored: AtomicU64,
 
     /// Timer for generating timestamps for entries.
     timer: Instant,
@@ -143,7 +142,6 @@ impl ReadOnlyAccountsCache {
         );
 
         Self {
-            highest_slot_stored: AtomicU64::default(),
             _max_data_size_lo: max_data_size_lo,
             _max_data_size_hi: max_data_size_hi,
             cache,
@@ -156,20 +154,30 @@ impl ReadOnlyAccountsCache {
         }
     }
 
+    /// Load `pubkey`'s cached account, and the slot it was cached at, if `valid_slot` accepts
+    /// that slot.
+    ///
+    /// The cache holds one version per pubkey: loads store only the newest version in storage,
+    /// and flushing a newer version drops that pubkey's entry, so a hit is the newest version
+    /// in storage.
     #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
-    pub(crate) fn load(&self, pubkey: Pubkey, slot: Slot) -> Option<AccountSharedData> {
-        let (account, load_us) = measure_us!({
+    pub(crate) fn load(
+        &self,
+        pubkey: &Pubkey,
+        valid_slot: impl FnOnce(Slot) -> bool,
+    ) -> Option<(AccountSharedData, Slot)> {
+        let (found, load_duration) = meas_dur!({
             let mut found = None;
-            if let Some(entry) = self.cache.get(&pubkey)
-                && entry.slot == slot
+            if let Some(entry) = self.cache.get(pubkey)
+                && valid_slot(entry.slot)
             {
                 entry
                     .last_update_time
                     .store(self.timestamp(), Ordering::Relaxed);
-                let account = entry.account.clone();
+                let account_and_slot = (entry.account.clone(), entry.slot);
                 drop(entry);
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
-                found = Some(account);
+                found = Some(account_and_slot);
             }
 
             if found.is_none() {
@@ -177,8 +185,10 @@ impl ReadOnlyAccountsCache {
             }
             found
         });
-        self.stats.load_us.fetch_add(load_us, Ordering::Relaxed);
-        account
+        self.stats
+            .load_ns
+            .fetch_add(load_duration.as_nanos() as u64, Ordering::Relaxed);
+        found
     }
 
     fn account_size(account: &AccountSharedData) -> usize {
@@ -199,7 +209,6 @@ impl ReadOnlyAccountsCache {
         timestamp: u64,
     ) {
         let measure_store = Measure::start("");
-        self.highest_slot_stored.fetch_max(slot, Ordering::Release);
         let new_account_size = Self::account_size(&account);
         let old_account_size;
         match self.cache.entry(pubkey) {
@@ -217,13 +226,8 @@ impl ReadOnlyAccountsCache {
             }
         };
         update_stat(&self.data_size, old_account_size, new_account_size);
-        let store_us = measure_store.end_as_us();
-        self.stats.store_us.fetch_add(store_us, Ordering::Relaxed);
-    }
-
-    /// true if any pubkeys could have ever been stored into the cache at `slot`
-    pub(crate) fn can_slot_be_in_cache(&self, slot: Slot) -> bool {
-        self.highest_slot_stored.load(Ordering::Acquire) >= slot
+        let store_ns = measure_store.end_as_ns();
+        self.stats.store_ns.fetch_add(store_ns, Ordering::Relaxed);
     }
 
     /// remove entry if it exists.
@@ -269,8 +273,8 @@ impl ReadOnlyAccountsCache {
         let hits = self.stats.hits.swap(0, Ordering::Relaxed);
         let misses = self.stats.misses.swap(0, Ordering::Relaxed);
         let evicts = self.stats.evicts.swap(0, Ordering::Relaxed);
-        let load_us = self.stats.load_us.swap(0, Ordering::Relaxed);
-        let store_us = self.stats.store_us.swap(0, Ordering::Relaxed);
+        let load_ns = self.stats.load_ns.swap(0, Ordering::Relaxed);
+        let store_ns = self.stats.store_ns.swap(0, Ordering::Relaxed);
         let evict_us = self.stats.evict_us.swap(0, Ordering::Relaxed);
         let evict_run_count = self.stats.evict_run_count.swap(0, Ordering::Relaxed);
 
@@ -278,8 +282,8 @@ impl ReadOnlyAccountsCache {
             hits,
             misses,
             evicts,
-            load_us,
-            store_us,
+            load_ns,
+            store_ns,
             evict_us,
             evict_run_count,
         }
@@ -385,7 +389,12 @@ impl ReadOnlyAccountsCache {
                     .choose(rng)
                     .expect("number of shards should be greater than zero");
                 let shard = shard.read();
-                for (key, entry) in shard.iter().choose_multiple(rng, remaining_samples) {
+                // Safety: iteration is done before shard is dropped (iter isn't lifetime bound to it)
+                let iter = unsafe { shard.iter() };
+                for bucket in iter.choose_multiple(rng, remaining_samples) {
+                    // Safety: element is not ZST and iteration is over read-locked view of the table,
+                    // so all buckets (pointers) are valid
+                    let (key, entry) = unsafe { bucket.as_ref() };
                     let last_update_time = entry.get().last_update_time.load(Ordering::Relaxed);
                     if last_update_time < min_update_time {
                         min_update_time = last_update_time;
@@ -536,9 +545,11 @@ mod tests {
                 let element = cache.cache.iter().choose(&mut rng).unwrap();
                 let (pubkey, entry) = element.pair();
                 let slot = entry.slot;
-                let account = cache.load(*pubkey, slot).unwrap();
+                let account = cache
+                    .load(pubkey, |cached_slot| slot == cached_slot)
+                    .unwrap();
                 let (other, other_slot, index) = hash_map.get_mut(pubkey).unwrap();
-                assert_eq!(account, *other);
+                assert_eq!(&account.0, other);
                 assert_eq!(slot, *other_slot);
                 *index = ix;
             } else {

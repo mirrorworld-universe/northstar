@@ -30,6 +30,7 @@ pub const JSON_RPC_SERVER_ERROR_SLOT_NOT_EPOCH_BOUNDARY: i64 = -32018;
 pub const JSON_RPC_SERVER_ERROR_LONG_TERM_STORAGE_UNREACHABLE: i64 = -32019;
 pub const JSON_RPC_SERVER_ERROR_FILTER_TRANSACTION_NOT_FOUND: i64 = -32020;
 pub const JSON_RPC_SERVER_ERROR_NO_SLOT_HISTORY: i64 = -32021;
+pub const JSON_RPC_SERVER_ERROR_LEADER_SCHEDULE_IDENTITY_NOT_FOUND: i64 = -32022;
 // Sonic: Northstar JSON-RPC application errors use a dedicated space outside
 // Solana's -320xx server-error range, so clients can route ER failures cleanly.
 pub const JSON_RPC_NORTHSTAR_ERROR_EPHEMERAL_ROLLUP_NOT_ACTIVE: i64 = -34001;
@@ -89,6 +90,8 @@ pub enum RpcCustomError {
     FilterTransactionNotFound { signature: String },
     #[error("NoSlotHistory")]
     NoSlotHistory,
+    #[error("LeaderScheduleIdentityNotFound")]
+    LeaderScheduleIdentityNotFound { identity: String },
     #[error("EphemeralRollupNotActive")]
     EphemeralRollupNotActive,
 }
@@ -283,6 +286,15 @@ impl From<RpcCustomError> for Error {
             RpcCustomError::EphemeralRollupNotActive => Self {
                 code: ErrorCode::ServerError(JSON_RPC_NORTHSTAR_ERROR_EPHEMERAL_ROLLUP_NOT_ACTIVE),
                 message: "Ephemeral rollup is not active".to_string(),
+                data: None,
+            },
+            RpcCustomError::LeaderScheduleIdentityNotFound { identity } => Self {
+                code: ErrorCode::ServerError(
+                    JSON_RPC_SERVER_ERROR_LEADER_SCHEDULE_IDENTITY_NOT_FOUND,
+                ),
+                message: format!(
+                    "Node {identity} was not in the leader schedule for specified epoch"
+                ),
                 data: None,
             },
         }

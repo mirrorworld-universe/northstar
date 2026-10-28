@@ -160,7 +160,7 @@ fn collect_accounts_for_failed_tx<'a>(
 mod tests {
     use {
         super::*,
-        solana_account::{AccountSharedData, ReadableAccount},
+        solana_account::{AccountSharedData, ReadableAccount, state_traits::StateMutWincode as _},
         solana_fee_structure::FeeDetails,
         solana_hash::Hash,
         solana_instruction_error::InstructionError,
@@ -215,6 +215,9 @@ mod tests {
         Ok(ProcessedTransaction::Executed(Box::new(
             ExecutedTransaction {
                 execution_details: TransactionExecutionDetails {
+                    // Sonic: Synthetic saver fixtures do not contain candidate captures.
+                    #[cfg(feature = "vrf-candidate-capture")]
+                    candidate: None,
                     status,
                     log_messages: None,
                     inner_instructions: None,

@@ -129,7 +129,7 @@ mod tests {
         let result = execute_txn_proto(ProtoTxnContext {
             tx: Some(ProtoSanitizedTransaction {
                 message: Some(ProtoTransactionMessage {
-                    is_legacy: true,
+                    version: protosol::protos::TransactionVersion::Legacy as i32,
                     header: Some(ProtoMessageHeader {
                         num_required_signatures: 1,
                         num_readonly_signed_accounts: 0,
@@ -147,6 +147,7 @@ mod tests {
                         data: instruction.data,
                     }],
                     address_table_lookups: vec![],
+                    v1_config: None,
                 }),
                 message_hash: vec![],
                 signatures: vec![],
@@ -177,7 +178,7 @@ mod tests {
                     address: clock_pubkey.to_bytes().to_vec(),
                     lamports: 1,
                     data_repr: Some(DataRepr::Data(
-                        bincode::serialize(&Clock {
+                        wincode::serialize(&Clock {
                             slot: 1,
                             ..Clock::default()
                         })

@@ -4,9 +4,9 @@ mod setup;
 mod shared;
 
 use {
-    bincode::deserialize,
     setup::{setup_stake, setup_vote},
     shared::from_account_info,
+    solana_account::state_traits::StateMutWincode as _,
     solana_account_info::{AccountInfo, next_account_info},
     solana_banks_client::BanksClient,
     solana_clock::Clock,
@@ -59,7 +59,7 @@ async fn clock_sysvar_updated_from_warp() {
 
     let mut context = program_test.start_with_context().await;
     let mut expected_slot = 100_000;
-    let instruction = Instruction::new_with_bincode(
+    let instruction = Instruction::new_with_wincode(
         program_id,
         &expected_slot,
         vec![AccountMeta::new_readonly(clock::id(), false)],
@@ -84,7 +84,7 @@ async fn clock_sysvar_updated_from_warp() {
 
     // Warp to success!
     context.warp_to_slot(expected_slot).unwrap();
-    let instruction = Instruction::new_with_bincode(
+    let instruction = Instruction::new_with_wincode(
         program_id,
         &expected_slot,
         vec![AccountMeta::new_readonly(clock::id(), false)],
@@ -104,7 +104,7 @@ async fn clock_sysvar_updated_from_warp() {
     // Try warping ahead one slot (corner case in warp logic)
     expected_slot += 1;
     assert!(context.warp_to_slot(expected_slot).is_ok());
-    let instruction = Instruction::new_with_bincode(
+    let instruction = Instruction::new_with_wincode(
         program_id,
         &expected_slot,
         vec![AccountMeta::new_readonly(clock::id(), false)],
@@ -192,9 +192,9 @@ async fn stake_rewards_from_warp() {
         .expect("account exists")
         .unwrap();
 
-    let stake_state: StakeStateV2 = deserialize(&account.data).unwrap();
-    let stake_history: StakeHistory = deserialize(&stake_history_account.data).unwrap();
-    let clock: Clock = deserialize(&clock_account.data).unwrap();
+    let stake_state: StakeStateV2 = account.state().unwrap();
+    let stake_history: StakeHistory = stake_history_account.state().unwrap();
+    let clock: Clock = clock_account.state().unwrap();
     let stake = stake_state.stake().unwrap();
     let stake_activation_status =
         stake
@@ -216,7 +216,7 @@ async fn check_credits_observed(
         .await
         .unwrap()
         .unwrap();
-    let stake_state: StakeStateV2 = deserialize(&stake_account.data).unwrap();
+    let stake_state: StakeStateV2 = stake_account.state().unwrap();
     assert_eq!(
         stake_state.stake().unwrap().credits_observed,
         expected_credits
@@ -255,7 +255,7 @@ async fn stake_merge_immediately_after_activation() {
         .await
         .expect("account exists")
         .unwrap();
-    let clock: Clock = deserialize(&clock_account.data).unwrap();
+    let clock: Clock = clock_account.state().unwrap();
     context.warp_to_epoch(clock.epoch + 1).unwrap();
     current_slot += slots_per_epoch;
     context.warp_forward_force_reward_interval_end().unwrap();
@@ -265,8 +265,8 @@ async fn stake_merge_immediately_after_activation() {
         setup_stake(&mut context, &user_keypair, &vote_address, stake_lamports).await;
     // the new stake is at the right value
     check_credits_observed(&mut context.banks_client, absorbed_stake_address, 200).await;
-    // the base stake hasn't been moved forward because no rewards were earned
-    check_credits_observed(&mut context.banks_client, base_stake_address, 100).await;
+    // Credits advance even when no rewards were earned.
+    check_credits_observed(&mut context.banks_client, base_stake_address, 200).await;
 
     context.increment_vote_account_credits(&vote_address, 100);
     current_slot += slots_per_epoch;
@@ -280,7 +280,7 @@ async fn stake_merge_immediately_after_activation() {
         .await
         .unwrap()
         .unwrap();
-    let stake_state: StakeStateV2 = deserialize(&stake_account.data).unwrap();
+    let stake_state: StakeStateV2 = stake_account.state().unwrap();
     assert_eq!(stake_state.stake().unwrap().credits_observed, 300);
     assert!(stake_account.lamports > stake_lamports);
 
@@ -291,7 +291,7 @@ async fn stake_merge_immediately_after_activation() {
         .await
         .unwrap()
         .unwrap();
-    let stake_state: StakeStateV2 = deserialize(&stake_account.data).unwrap();
+    let stake_state: StakeStateV2 = stake_account.state().unwrap();
     assert_eq!(stake_state.stake().unwrap().credits_observed, 300);
     assert_eq!(stake_account.lamports, stake_lamports);
 
@@ -302,7 +302,7 @@ async fn stake_merge_immediately_after_activation() {
         .await
         .unwrap()
         .unwrap();
-    let clock: Clock = deserialize(&clock_account.data).unwrap();
+    let clock: Clock = clock_account.state().unwrap();
     assert_eq!(
         clock.epoch,
         stake_state.delegation().unwrap().activation_epoch + 1

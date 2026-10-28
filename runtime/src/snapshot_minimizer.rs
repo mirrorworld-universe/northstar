@@ -2,8 +2,13 @@
 #![cfg(feature = "dev-context-only-utils")]
 
 use {
-    crate::{bank::Bank, static_ids},
+    crate::{
+        alpenglow_epoch_type::REWARD_EPOCH_DELEGATED_STAKES_ACCOUNT, bank::Bank,
+        block_component_processor::vote_reward::epoch_inflation_account_state::VOTE_REWARD_ACCOUNT_ADDR,
+        static_ids,
+    },
     agave_reserved_account_keys::ReservedAccountKeys,
+    agave_votor_messages::migration::GENESIS_CERTIFICATE_ACCOUNT,
     dashmap::DashSet,
     log::info,
     rayon::{
@@ -129,6 +134,11 @@ impl<'a> SnapshotMinimizer<'a> {
         static_ids::STATIC_IDS.iter().for_each(|pubkey| {
             self.minimized_account_set.insert(*pubkey);
         });
+        self.minimized_account_set
+            .insert(*GENESIS_CERTIFICATE_ACCOUNT);
+        self.minimized_account_set.insert(*VOTE_REWARD_ACCOUNT_ADDR);
+        self.minimized_account_set
+            .insert(*REWARD_EPOCH_DELEGATED_STAKES_ACCOUNT);
     }
 
     /// Used to get reserved accounts in `minimize`
@@ -183,7 +193,7 @@ impl<'a> SnapshotMinimizer<'a> {
             .filter_map(|account| {
                 if let Ok(UpgradeableLoaderState::Program {
                     programdata_address,
-                }) = bincode::deserialize(account.data())
+                }) = wincode::deserialize(account.data())
                 {
                     Some(programdata_address)
                 } else {
@@ -325,7 +335,7 @@ impl<'a> SnapshotMinimizer<'a> {
                 StorableAccountsBySlot::new(slot, &accounts, self.accounts_db());
 
             self.accounts_db()
-                .store_accounts_for_shrink(storable_accounts, new_storage);
+                .store_accounts_for_shrink(&storable_accounts, new_storage);
 
             new_storage.flush().unwrap();
         }
@@ -361,7 +371,9 @@ mod tests {
         },
         agave_snapshots::snapshot_config::SnapshotConfig,
         dashmap::DashSet,
-        solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
+        solana_account::{
+            AccountSharedData, ReadableAccount, WritableAccount, state_traits::StateMutWincode as _,
+        },
         solana_accounts_db::accounts_db::{ACCOUNTS_DB_CONFIG_FOR_TESTING, AccountsDbConfig},
         solana_genesis_config::create_genesis_config,
         solana_hash::Hash,
@@ -664,14 +676,13 @@ mod tests {
         // its bytes stay in tombstone_slot's storage while its index entry is removed
         accounts.set_latest_full_snapshot_slot(tombstone_slot - 1);
         accounts.clean_accounts_for_tests();
-        accounts.shrink_all_slots(false, None);
         assert!(!accounts.contains(&zero_lamport_pubkey));
         assert_eq!(
             accounts
                 .storage
                 .get_slot_storage_entry(tombstone_slot)
                 .unwrap()
-                .count(),
+                .num_alive_accounts(),
             2
         );
 
@@ -738,14 +749,13 @@ mod tests {
         // When minimize is called, it is a tombstone-only storage which should be
         // removed as a dead slot
         accounts.clean_accounts_for_tests();
-        accounts.shrink_all_slots(false, None);
         assert!(!accounts.contains(&zero_lamport_pubkey));
         assert_eq!(
             accounts
                 .storage
                 .get_slot_storage_entry(tombstone_slot)
                 .unwrap()
-                .count(),
+                .num_alive_accounts(),
             1
         );
 
@@ -846,8 +856,6 @@ mod tests {
             None,
             None, // leader_for_tests
             None,
-            false,
-            false,
             false,
             accounts_db_config,
             None,

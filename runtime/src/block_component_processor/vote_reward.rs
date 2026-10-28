@@ -89,10 +89,10 @@ impl VoteState {
             info!("did not find vote account for vote_pubkey={vote_pubkey}");
             return None;
         };
-        let versions = match bincode::deserialize(account.account().data()) {
+        let versions = match wincode::deserialize(account.account().data()) {
             Ok(s) => s,
             Err(e) => {
-                info!("bincode::deserialize for vote_pubkey={vote_pubkey} failed with {e}");
+                info!("wincode::deserialize for vote_pubkey={vote_pubkey} failed with {e}");
                 return None;
             }
         };
@@ -602,9 +602,8 @@ mod tests {
         crate::{
             bank_forks::BankForks,
             genesis_utils::{
-                ValidatorVoteKeypairs, activate_all_features_alpenglow,
-                create_genesis_config_with_alpenglow_vote_accounts,
-                create_genesis_config_with_leader_ex, create_validator,
+                ValidatorVoteKeypairs, create_genesis_config_with_leader_ex,
+                create_genesis_config_with_vote_accounts, create_validator,
             },
             inflation_rewards::{MAX_BPS, commission_split_preserve_lamports},
             stake_utils,
@@ -655,7 +654,7 @@ mod tests {
     }
 
     fn vote_state_from_account(account: &AccountSharedData) -> VoteStateHandler {
-        let versions = bincode::deserialize(account.data()).unwrap();
+        let versions = wincode::deserialize(account.data()).unwrap();
         VoteStateHandler::try_new_from_vote_state_versions(versions).unwrap()
     }
 
@@ -745,7 +744,7 @@ mod tests {
         let validator_keypairs = (0..num_validators)
             .map(|_| ValidatorVoteKeypairs::new_rand())
             .collect::<Vec<_>>();
-        let mut genesis_config = create_genesis_config_with_alpenglow_vote_accounts(
+        let mut genesis_config = create_genesis_config_with_vote_accounts(
             1_000_000_000,
             &validator_keypairs,
             vec![per_validator_stake; validator_keypairs.len()],
@@ -844,7 +843,7 @@ mod tests {
             .map(|_| ValidatorVoteKeypairs::new_rand())
             .collect::<Vec<_>>();
         let per_validator_stake = LAMPORTS_PER_SOL * 100;
-        let mut genesis_config = create_genesis_config_with_alpenglow_vote_accounts(
+        let mut genesis_config = create_genesis_config_with_vote_accounts(
             1_000_000_000,
             &validator_keypairs,
             vec![per_validator_stake; validator_keypairs.len()],
@@ -915,7 +914,7 @@ mod tests {
             .map(|_| ValidatorVoteKeypairs::new_rand())
             .collect::<Vec<_>>();
         let per_validator_stake = LAMPORTS_PER_SOL * 100;
-        let mut genesis_config = create_genesis_config_with_alpenglow_vote_accounts(
+        let mut genesis_config = create_genesis_config_with_vote_accounts(
             1_000_000_000,
             &validator_keypairs,
             vec![per_validator_stake; validator_keypairs.len()],
@@ -996,7 +995,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let mut genesis_config = create_genesis_config_with_alpenglow_vote_accounts(
+        let mut genesis_config = create_genesis_config_with_vote_accounts(
             1_000_000_000,
             &validator_keypairs,
             vec![per_validator_stake; validator_keypairs.len()],
@@ -1053,7 +1052,7 @@ mod tests {
         for validator in validators {
             let vote_pubkey = validator.vote_keypair.pubkey();
             let account = genesis_config.accounts.get_mut(&vote_pubkey).unwrap();
-            let vote_state_versions = bincode::deserialize(&account.data).unwrap();
+            let vote_state_versions = wincode::deserialize(&account.data).unwrap();
             let VoteStateVersions::V4(mut vote_state) = vote_state_versions else {
                 panic!();
             };
@@ -1135,7 +1134,6 @@ mod tests {
                 vec![],
             );
             genesis_config.epoch_schedule = EpochSchedule::without_warmup();
-            activate_all_features_alpenglow(&mut genesis_config);
             for (ind, keypair) in validators.iter().enumerate().skip(1) {
                 let node_pubkey = keypair.node_keypair.pubkey();
                 let vote_pubkey = keypair.vote_keypair.pubkey();
@@ -1644,7 +1642,7 @@ mod tests {
         let slots_per_epoch = 32;
         let stake = 200_000_000 * LAMPORTS_PER_SOL;
         let validators = vec![ValidatorVoteKeypairs::new_rand()];
-        let mut genesis_config = create_genesis_config_with_alpenglow_vote_accounts(
+        let mut genesis_config = create_genesis_config_with_vote_accounts(
             100_000_000 * LAMPORTS_PER_SOL,
             &validators,
             vec![stake],

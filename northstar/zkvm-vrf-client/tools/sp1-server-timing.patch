@@ -1,0 +1,20 @@
+diff --git a/sp1-gpu/crates/server/src/main.rs b/sp1-gpu/crates/server/src/main.rs
+--- a/sp1-gpu/crates/server/src/main.rs
++++ b/sp1-gpu/crates/server/src/main.rs
+@@ -20,7 +20,15 @@ struct Args {
+ #[tokio::main]
+ #[allow(clippy::print_stdout)]
+ async fn main() {
+-    tracing_subscriber::fmt::init();
++    if std::env::var("SP1_TIMING_SPANS").as_deref() == Ok("1") {
++        tracing_subscriber::fmt()
++            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
++            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
++            .with_ansi(false)
++            .init();
++    } else {
++        tracing_subscriber::fmt::init();
++    }
+ 
+     let args = Args::parse();
+ 

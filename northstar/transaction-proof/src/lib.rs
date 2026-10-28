@@ -3,7 +3,16 @@ pub mod commitment;
 #[cfg(feature = "host")]
 pub mod fixture;
 pub mod poseidon;
+#[cfg(not(target_os = "zkvm"))]
+pub mod readiness;
+pub mod vrf_candidate;
+#[cfg(all(feature = "host", not(target_os = "zkvm")))]
+pub mod vrf_coordinator_profile;
 
+#[cfg(not(target_os = "zkvm"))]
+use sha2::{Digest, Sha256};
+#[cfg(target_os = "zkvm")]
+use sha2_sp1::{Digest, Sha256};
 use {
     borsh::{BorshDeserialize, BorshSerialize},
     commitment::{bytes, fr_to_bytes, CommitmentError, SESSION_CONTEXT_TAG},
@@ -12,7 +21,6 @@ use {
         ErStepPublicInputsV1, FrBytes, FullTransactionPublicInputsV1,
         ER_STEP_PROOF_KIND_FULL_TRANSACTION, ER_STEP_PROOF_VERSION_V1,
     },
-    sha2::{Digest, Sha256},
     std::collections::{BTreeMap, BTreeSet},
 };
 

@@ -1585,7 +1585,7 @@ mod tests {
             AccountMeta::new(delegated_account, true)
         );
         let system_instruction: system_instruction::SystemInstruction =
-            bincode::deserialize(&instruction.data).unwrap();
+            wincode::deserialize(&instruction.data).unwrap();
         assert_eq!(
             system_instruction,
             system_instruction::SystemInstruction::CreateAccount {
@@ -1624,7 +1624,7 @@ mod tests {
             vec![AccountMeta::new(delegated_account, true)]
         );
         let system_instruction: system_instruction::SystemInstruction =
-            bincode::deserialize(&instruction.data).unwrap();
+            wincode::deserialize(&instruction.data).unwrap();
         assert_eq!(
             system_instruction,
             system_instruction::SystemInstruction::Assign {

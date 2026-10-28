@@ -1,12 +1,14 @@
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::field_qualifiers;
-// The rng traits come straight from `rand` when sampling for tests, and from frozen-abi's re-export
-// when sampling for abi digests (which enables `frozen-abi` without the `rand` dependency). Both
+// The rng traits come straight from `rand` when sampling for tests, and from the stable-abi re-export
+// when sampling for abi digests (which enables `stable-abi` without the `rand` dependency). Both
 // resolve to the same `rand` crate, so `sample_vote_account` is shared between the two.
 #[cfg(feature = "dev-context-only-utils")]
 use rand::{Rng, RngCore};
-#[cfg(all(feature = "frozen-abi", not(feature = "dev-context-only-utils")))]
+#[cfg(all(feature = "stable-abi", not(feature = "dev-context-only-utils")))]
 use solana_frozen_abi::rand::{Rng, RngCore};
+#[cfg(feature = "stable-abi")]
+use solana_frozen_abi_macro::{StableAbi, StableAbiSample};
 use {
     crate::vote_state_view::VoteStateView,
     log::*,
@@ -27,7 +29,7 @@ use {
         ReadError, ReadResult, SchemaRead, TypeMeta, WriteResult, config::Config, io::Reader,
     },
 };
-#[cfg(any(feature = "dev-context-only-utils", feature = "frozen-abi"))]
+#[cfg(any(feature = "dev-context-only-utils", feature = "stable-abi"))]
 use {
     solana_bls_signatures::Keypair as BLSKeypair,
     solana_clock::Clock,
@@ -38,7 +40,6 @@ use {
     },
 };
 
-#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct VoteAccount(Arc<VoteAccountInner>);
 
@@ -50,7 +51,6 @@ pub enum Error {
     InvalidOwner(/*owner:*/ Pubkey),
 }
 
-#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Debug)]
 struct VoteAccountInner {
     account: AccountSharedData,
@@ -58,7 +58,7 @@ struct VoteAccountInner {
 }
 
 pub type VoteAccountsHashMap = HashMap<Pubkey, (/*stake:*/ u64, VoteAccount)>;
-#[cfg_attr(feature = "frozen-abi", derive(AbiExample, StableAbi, StableAbiSample))]
+#[cfg_attr(feature = "stable-abi", derive(StableAbi, StableAbiSample))]
 #[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 #[cfg_attr(
     feature = "dev-context-only-utils",
@@ -67,7 +67,7 @@ pub type VoteAccountsHashMap = HashMap<Pubkey, (/*stake:*/ u64, VoteAccount)>;
 pub struct VoteAccounts {
     vote_accounts: Arc<VoteAccountsHashMap>,
     // Inner Arc is meant to implement copy-on-write semantics.
-    #[cfg_attr(feature = "frozen-abi", stable_abi_sample(with = "Default::default()"))]
+    #[cfg_attr(feature = "stable-abi", stable_abi_sample(with = "Default::default()"))]
     #[serde(skip)]
     #[wincode(skip)]
     staked_nodes: OnceLock<
@@ -122,8 +122,8 @@ impl VoteAccount {
 
     /// Samples a valid, parseable vote account (owner = vote program, data = a well-formed
     /// `VoteStateV4` with a real BLS keypair derived from `rng`) from `rng`. Shared by `new_random`
-    /// and the frozen-abi `StableAbi` sampler.
-    #[cfg(any(feature = "dev-context-only-utils", feature = "frozen-abi"))]
+    /// and the `StableAbi` sampler.
+    #[cfg(any(feature = "dev-context-only-utils", feature = "stable-abi"))]
     fn sample_vote_account(rng: &mut (impl RngCore + ?Sized)) -> VoteAccount {
         const BLS_KEYPAIR_DERIVE_SEED: &[u8; 9] = b"alpenglow";
 
@@ -213,6 +213,7 @@ impl VoteAccounts {
         &self,
         max_vote_accounts: usize,
         minimum_vote_account_balance: u64,
+        block_revenue_sharing: bool,
     ) -> VoteAccounts {
         assert!(max_vote_accounts > 0, "max_vote_accounts must be > 0");
         let capacity = max_vote_accounts.min(self.vote_accounts.len());
@@ -223,10 +224,14 @@ impl VoteAccounts {
             let has_stake = *stake != 0u64;
             // Pending delegator rewards are deducted at the start of the epoch,
             // so this operation reflects the actual expected balance
-            let has_balance = vote_account
-                .lamports()
-                .saturating_sub(vote_state_view.pending_delegator_rewards())
-                >= minimum_vote_account_balance;
+            let available_balance = if block_revenue_sharing {
+                vote_account
+                    .lamports()
+                    .saturating_sub(vote_state_view.pending_delegator_rewards())
+            } else {
+                vote_account.lamports()
+            };
+            let has_balance = available_balance >= minimum_vote_account_balance;
 
             if !has_bls || !has_stake || !has_balance {
                 continue;
@@ -431,7 +436,7 @@ impl VoteAccounts {
     }
 }
 
-#[cfg(feature = "frozen-abi")]
+#[cfg(feature = "stable-abi")]
 impl solana_frozen_abi::stable_abi::StableAbi for VoteAccount {
     fn random_with_context(rng: &mut (impl RngCore + ?Sized), _ctx: ()) -> Self {
         Self::sample_vote_account(rng)

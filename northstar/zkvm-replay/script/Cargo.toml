@@ -1,5 +1,6 @@
 [package]
 name = "northstar-zkvm-replay-script"
+default-run = "northstar-zkvm-replay-script"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -8,10 +9,19 @@ publish.workspace = true
 default = []
 cuda = ["sp1-sdk/cuda", "sp1-sdk/groth16-cuda"]
 profiling = ["sp1-sdk/profiling"]
+network = ["sp1-sdk/network", "dep:libc", "dep:sha2"]
+
+[[bin]]
+name = "northstar-network-prover"
+path = "src/bin/northstar-network-prover.rs"
+required-features = ["network"]
 
 [dependencies]
 anyhow = "1"
+borsh = "1"
 hex = "0.4"
+libc = { version = "0.2", optional = true }
+sha2 = { version = "0.10", optional = true }
 northstar-zkvm-replay-shared = { path = "../shared" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -21,3 +31,6 @@ tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt-multi-th
 
 [build-dependencies]
 sp1-build.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

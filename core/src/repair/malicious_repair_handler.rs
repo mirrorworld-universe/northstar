@@ -11,9 +11,9 @@ use {
     solana_ledger::{
         blockstore::Blockstore,
         leader_schedule_cache::LeaderScheduleCache,
-        shred::{Nonce, ProcessShredsStats, ReedSolomonCache, Shred, Shredder},
+        shred::{Nonce, ProcessShredsStats, Shred, Shredder},
     },
-    solana_perf::packet::{Packet, PacketBatch, PacketBatchRecycler},
+    solana_perf::packet::{BytesPacket, PacketBatch},
     solana_signer::Signer,
     std::{net::SocketAddr, sync::Arc},
 };
@@ -33,7 +33,6 @@ pub struct MaliciousRepairHandler {
     keypair: Arc<Keypair>,
     leader_schedule_cache: Arc<LeaderScheduleCache>,
     config: MaliciousRepairConfig,
-    reed_solomon_cache: ReedSolomonCache,
     standard_repair_handler: StandardRepairHandler,
 }
 
@@ -50,7 +49,6 @@ impl MaliciousRepairHandler {
             keypair,
             leader_schedule_cache,
             config,
-            reed_solomon_cache: ReedSolomonCache::default(),
         }
     }
 
@@ -123,7 +121,6 @@ impl MaliciousRepairHandler {
             chained_merkle_root,
             shred_index as u32, // next_shred_index
             0,                  // next_code_index
-            &self.reed_solomon_cache,
             &mut ProcessShredsStats::default(),
         );
 
@@ -146,7 +143,7 @@ impl RepairHandler for MaliciousRepairHandler {
         shred_index: u64,
         dest: &SocketAddr,
         nonce: Nonce,
-    ) -> Option<Packet> {
+    ) -> Option<BytesPacket> {
         // Get the original shred from blockstore
         let original_shred_bytes = self
             .blockstore
@@ -177,13 +174,12 @@ impl RepairHandler for MaliciousRepairHandler {
 
     fn run_orphan(
         &self,
-        recycler: &PacketBatchRecycler,
         from_addr: &SocketAddr,
         slot: Slot,
         max_responses: usize,
         nonce: Nonce,
     ) -> Option<PacketBatch> {
         self.standard_repair_handler
-            .run_orphan(recycler, from_addr, slot, max_responses, nonce)
+            .run_orphan(from_addr, slot, max_responses, nonce)
     }
 }

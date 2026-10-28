@@ -1,0 +1,40 @@
+{
+  "schema": "northstar.vrf-candidate-portal-prepared.v1",
+  "binding_sha256": "73e2bd44bb13e4dc5b958335ae31c7256ec71431001df8fe28486098c555547e",
+  "public_inputs_sha256": "aa1f2fe73587212d00b4e3c85249cb10724e70eac87f1d513d5181ce538d83aa",
+  "session": {
+    "schema": "northstar.vrf-candidate-portal-session.v1",
+    "program_id": "5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf",
+    "session": "BH5yRd1S8hW9AejSTFA9o8SuxVGHQ4iSztSXg3xHHqqY",
+    "grid_id": "403",
+    "nonce": "0",
+    "validator": "E3ReDVayvjPhViUcTM83w4pChGq7vxZfqT79wDQtzhvi",
+    "challenger": "HGRwbfUV6tvn9yVcPnjopreiZt6BaPtsT65AVfhGni4E",
+    "session_context_preimage_hex": "6e6f727468737461722d73657373696f6e2d636f6e746578742d7631424242424242424242424242424242424242424242424242424242424242424298b3c8f6941452094cc85a889ede1b573ed2d1450468d5d00e3e5f21be818c9f930100000000000000000000000000000000000000000000c1c6f43d188f8470f5514bf29305a70b2a3acb4a7870cdcc8e64d8734aa2864301",
+    "session_account_sha256": "de9ab5d88d9b8b696026041f4e80fc74a0c257039fc2bdc68a6b2059fecde83b",
+    "created_at_slot": "6",
+    "ttl_slots": "1000000",
+    "genesis_hash": "CsQ5ePMvnusNquyezo7kgLzZZ4HHnYs7kdRKo11gcFBc"
+  },
+  "session_source_sha256": "b37c23584c03dc8a7f22b84a4e563adf118e70754c0106537bad76d4c722d74b",
+  "session_identity_sha256": "c716c0221d9c0c3c4d2a21038bf650eb6a3370321ab773a7a28cbd66054935df",
+  "portal_program": {
+    "schema": "northstar.vrf-candidate-portal-program.v1",
+    "program_id": "5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf",
+    "loader": "BPFLoaderUpgradeab1e11111111111111111111111",
+    "elf_sha256": "174001333ad0126a676953f52f244fb6755355eeab0d181391e20509b2fd728e"
+  },
+  "er_slot": "1099511628263",
+  "step_index": 0,
+  "addresses": {
+    "checkpoint": "71G4Sn96FKHBWmrmZrxBnjPbANLmPA44PPu9NwDM3FZs",
+    "challenge": "8xddcxJqVdG8eZptVvXroLRxcsYB4WCUPqaP1Fy6xtzr",
+    "da": "CmKjd3Thd7sdtxL3G7XJ5Lc5MBQfkpwevDUguCuiv4Va",
+    "proof": "GAbnTRhwizTSrBPeYiFvDCzi1E3iLxSiK4aRCS4bw52r",
+    "cursor": "CPsyHpp9wGSYqWgYoCjW5m4qFgnizcb4PekNEVJfViRR"
+  },
+  "deadline_slot": "776",
+  "prepared_slot": 27,
+  "kind": 3,
+  "version": 1
+}

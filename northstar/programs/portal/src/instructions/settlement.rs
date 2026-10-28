@@ -1,8 +1,8 @@
 use {
     crate::{
         find_checkpoint_cursor_pda, find_checkpoint_pda, find_delegation_record_pda,
-        find_session_pda,
-        state::{Checkpoint, CheckpointCursor, CheckpointStatus, DelegationRecord},
+        find_fee_vault_pda, find_session_pda,
+        state::{Checkpoint, CheckpointCursor, CheckpointStatus, DelegationRecord, FeeVault},
         BeginSettlement, FinishSettlement, PortalError, Session, SettleAccountLamports,
         SettleAccountOwner, SettlementStatus, WriteSettlementChunk, MAX_SETTLEMENT_CHUNK,
         MAX_SETTLEMENT_LAMPORT_ACCOUNTS,
@@ -468,12 +468,35 @@ pub fn process_settle_account_owner(
 pub fn process_settle_account_lamports(
     program_id: &Pubkey,
     accounts: &mut [AccountInfo],
+    settlement: SettleAccountLamports,
+) -> ProgramResult {
+    process_settle_account_lamports_inner(program_id, accounts, settlement, None)
+}
+
+pub fn process_settle_account_lamports_with_surplus(
+    program_id: &Pubkey,
+    accounts: &mut [AccountInfo],
+    settlement: SettleAccountLamports,
+    previous_accumulator: [u8; 32],
+) -> ProgramResult {
+    process_settle_account_lamports_inner(
+        program_id,
+        accounts,
+        settlement,
+        Some(previous_accumulator),
+    )
+}
+
+fn process_settle_account_lamports_inner(
+    program_id: &Pubkey,
+    accounts: &mut [AccountInfo],
     SettleAccountLamports {
         er_slot,
         checksum,
         account_count,
         lamports,
     }: SettleAccountLamports,
+    previous_accumulator: Option<[u8; 32]>,
 ) -> ProgramResult {
     let account_count = account_count as usize;
     if account_count == 0 || account_count > MAX_SETTLEMENT_LAMPORT_ACCOUNTS {
@@ -487,7 +510,8 @@ pub fn process_settle_account_lamports(
     let [validator, session] = prefix else {
         unreachable!();
     };
-    let settlement_accounts = &mut settlement_accounts[..account_count * 2];
+    let (settlement_accounts, trailing_accounts) =
+        settlement_accounts.split_at_mut(account_count * 2);
 
     let mut session_state = load_session(program_id, session)?;
     require_validator(validator, &session_state)?;
@@ -504,6 +528,52 @@ pub fn process_settle_account_lamports(
             }
         }
     }
+
+    let fee_vault = if let Some(previous_accumulator) = previous_accumulator {
+        let fee_vault = trailing_accounts
+            .first_mut()
+            .ok_or(ProgramError::NotEnoughAccountKeys)?;
+        let (expected_vault, vault_bump) = find_fee_vault_pda(program_id);
+        if fee_vault.address() != &expected_vault {
+            return Err(PortalError::InvalidPdaSeeds.into());
+        }
+        if !fee_vault.owned_by(program_id) {
+            return Err(PortalError::InvalidAccountData.into());
+        }
+        let vault_state = FeeVault::try_from_slice(&fee_vault.try_borrow()?)
+            .map_err(|_| PortalError::InvalidAccountData)?;
+        if !vault_state.is_valid()
+            || vault_state.bump != vault_bump
+            || vault_state.authority != session_state.authority.to_bytes()
+            || settlement_accounts
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .any(|pair| pair[0].address() == fee_vault.address())
+        {
+            return Err(PortalError::InvalidAccountData.into());
+        }
+
+        let next_accumulator = settlement_accounts
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(&lamports)
+            .fold(previous_accumulator, |accumulator, (pair, target)| {
+                accumulate_lamports_checksum(accumulator, pair[0].address(), *target)
+            });
+        // A new L1 donation can change balances after success; balance equality alone is
+        // insufficient to identify a retry of this checkpoint-bound operation.
+        if session_state.settlement_accumulator == next_accumulator {
+            return Ok(());
+        }
+        if session_state.settlement_accumulator != previous_accumulator {
+            return Err(PortalError::SettlementChecksumMismatch.into());
+        }
+        Some(fee_vault)
+    } else {
+        None
+    };
 
     let rent = Rent::get()?;
     let mut current_total = 0u128;
@@ -526,12 +596,25 @@ pub fn process_settle_account_lamports(
         already_settled &= account.lamports() == target_lamports;
     }
 
-    if already_settled {
+    if already_settled && previous_accumulator.is_none() {
         return Ok(());
     }
-    if current_total != target_total {
-        return Err(PortalError::SettlementLamportsNotConserved.into());
-    }
+    let surplus = current_total
+        .checked_sub(target_total)
+        .ok_or(PortalError::SettlementLamportsNotConserved)?;
+    let vault_balance = if let Some(vault) = fee_vault.as_ref() {
+        Some(
+            vault
+                .lamports()
+                .checked_add(u64::try_from(surplus).map_err(|_| PortalError::ArithmeticOverflow)?)
+                .ok_or(PortalError::ArithmeticOverflow)?,
+        )
+    } else {
+        if surplus != 0 {
+            return Err(PortalError::SettlementLamportsNotConserved.into());
+        }
+        None
+    };
 
     for index in 0..account_count {
         let account = &mut settlement_accounts[index * 2];
@@ -542,6 +625,9 @@ pub fn process_settle_account_lamports(
             account.address(),
             target_lamports,
         );
+    }
+    if let (Some(fee_vault), Some(vault_balance)) = (fee_vault, vault_balance) {
+        fee_vault.set_lamports(vault_balance);
     }
     store_session(session, &session_state)?;
 

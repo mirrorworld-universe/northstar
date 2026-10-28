@@ -1,0 +1,16 @@
+[
+  {"label":"baseline","witness":"fixture-v1.bin"},
+  {"label":"resolver","witness":"evidence/resolver-v1/witness-v2.bin"},
+  {"label":"partial","witness":"evidence/l40s-v1/live-partial/witness-v2.bin"},
+  {"label":"coordinator","witness":"evidence/proof-coordinator-v1/proving/witness-v2.bin"},
+  {"label":"combined-settlement","witness":"evidence/combined-settlement-v1/witness-v2.bin"},
+  {"label":"hardened-runner","witness":"evidence/hardened-runner-v1/witness-v2.bin"},
+  {"label":"live-01","witness":"evidence/l40s-v1/live-01/witness-v2.bin"},
+  {"label":"live-02","witness":"evidence/l40s-v1/live-02/witness-v2.bin"},
+  {"label":"live-03","witness":"evidence/l40s-v1/live-03/witness-v2.bin"},
+  {"label":"live-guards","witness":"evidence/l40s-v1/live-guards/witness-v2.bin"},
+  {"label":"fast-live-1","witness":"evidence/proof-performance-v1/fast-live-1/witness-v2.bin"},
+  {"label":"fast-live-2","witness":"evidence/proof-performance-v1/fast-live-2/witness-v2.bin"},
+  {"label":"fast-live-3","witness":"evidence/proof-performance-v1/fast-live-3/witness-v2.bin"},
+  {"label":"upload-recovery","witness":"evidence/upload-recovery-v1/witness-v2.bin"}
+]

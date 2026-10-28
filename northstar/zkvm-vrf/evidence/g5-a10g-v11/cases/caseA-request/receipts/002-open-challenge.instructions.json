@@ -1,0 +1,47 @@
+{
+  "label": "open-challenge",
+  "transaction_sha256": "18b0176cdeff4e02f30592a740957c57becd4491ea72f89fad5dbd0880e725df",
+  "ordered_instructions": [
+    {
+      "program": "ComputeBudget111111111111111111111111111111",
+      "data_hex": "02e0930400",
+      "accounts": []
+    },
+    {
+      "program": "5TeWSsjg2gbxCyWVniXeCmwM7UtHTCK7svzJr5xYJzHf",
+      "data_hex": "117000000000010000",
+      "accounts": [
+        {
+          "key": "ETuysoj6jRowbKreLaL9x77ydokqb4BfCm2fvs8Diwni",
+          "signer": true,
+          "writable": true
+        },
+        {
+          "key": "BH5yRd1S8hW9AejSTFA9o8SuxVGHQ4iSztSXg3xHHqqY",
+          "signer": false,
+          "writable": false
+        },
+        {
+          "key": "3rNjJfRYVysKqS6LmCzkNHFTsgxtKktJXtrJPNTirvxX",
+          "signer": false,
+          "writable": true
+        },
+        {
+          "key": "3hHqMNFUX3eyJsMvNwHaVPoTHCBnQkx2751teijTPurt",
+          "signer": false,
+          "writable": true
+        },
+        {
+          "key": "C26uxVH4YkYGxh9b6uXQG2x7kEsB2UmqAxe4V6pDfP3j",
+          "signer": false,
+          "writable": true
+        },
+        {
+          "key": "11111111111111111111111111111111",
+          "signer": false,
+          "writable": false
+        }
+      ]
+    }
+  ]
+}

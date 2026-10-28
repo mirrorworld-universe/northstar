@@ -1,0 +1,23 @@
+--- a/sp1-gpu/crates/prover_components/src/builder.rs
++++ b/sp1-gpu/crates/prover_components/src/builder.rs
+@@ -44,6 +44,20 @@
+         ELEMENT_THRESHOLD
+     };
+ 
++    let shard_threshold = match std::env::var_os("SP1_GPU_ELEMENT_THRESHOLD") {
++        None => shard_threshold,
++        Some(value) => {
++            assert!(opts.full_size_shards, "GPU shard override requires full-size shards");
++            match value.to_str() {
++                Some("402653184") => ELEMENT_THRESHOLD,
++                Some("469762048") => ELEMENT_THRESHOLD + (1 << 26),
++                Some("536870912") => 1 << 29,
++                _ => panic!("GPU shard override must be 402653184, 469762048 or 536870912"),
++            }
++        }
++    };
++    tracing::info!(shard_threshold, "effective CUDA shard element threshold");
++
+     tracing::debug!("Shard threshold: {shard_threshold}");
+     opts.sharding_threshold.element_threshold = shard_threshold;
+ 

@@ -7,7 +7,7 @@ The coordinator is experimental and disabled by default. It prepares restart-dur
 Build the validator with `agave-validator/proof-coordinator` (or `solana-core/proof-coordinator` for an embedding application). Set all three absolute paths:
 
 - `NORTHSTAR_PROOF_JOB_DIR`: private durable directory, retained with the ledger.
-- `NORTHSTAR_PROOF_PROVER`: executable supporting `preflight` and `groth16 WITNESS MEASUREMENTS PROFILE`.
+- `NORTHSTAR_PROOF_PROVER`: executable supporting `preflight` and `groth16 WITNESS MEASUREMENTS PROFILE`. Use the existing CUDA adapter or the opt-in [Succinct Network adapter](succinct-network-prover.md); neither changes the frozen proof relation.
 - `NORTHSTAR_PROOF_CHALLENGER_KEYPAIR`: private keypair file, separate from validator identity. Only challenges belonging to this key are resumed.
 
 `NORTHSTAR_PROOF_CHALLENGE_WINDOW_SLOTS` optionally selects the proposal's challenge window, from 10 through 9,000 slots; the experimental default is 750. Session cadence remains separately bounded by Portal. A future policy can use live validator membership and recent dispute activity; this implementation does not invent that policy. The performance target remains proof submission within two minutes, not merely before the longer protocol deadline. Existing deadlines are never extended during recovery. Validators without this opt-in retain their existing window selection.

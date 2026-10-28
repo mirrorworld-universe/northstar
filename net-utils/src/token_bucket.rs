@@ -5,10 +5,14 @@
 #[cfg(feature = "shuttle-test")]
 use std::sync::Arc;
 use {
-    cfg_if::cfg_if,
     dashmap::{DashMap, mapref::entry::Entry},
     solana_svm_type_overrides::sync::atomic::{AtomicU64, AtomicUsize, Ordering},
-    std::{borrow::Borrow, cmp::Reverse, hash::Hash, time::Instant},
+    std::{
+        borrow::Borrow,
+        cmp::Reverse,
+        hash::{BuildHasher, Hash},
+        time::Instant,
+    },
 };
 
 /// Enforces a rate limit on the volume of requests per unit time.
@@ -149,10 +153,9 @@ impl TokenBucket {
 
     /// Retrieves monotonic time since bucket creation.
     fn time_us(&self) -> u64 {
-        cfg_if! {
-            if #[cfg(feature="shuttle-test")] {
-                self.time_us_override.load(Ordering::Relaxed)
-            } else {
+        cfg_select! {
+            feature = "shuttle-test" => self.time_us_override.load(Ordering::Relaxed),
+            _ => {
                 let now = Instant::now();
                 let elapsed = now.saturating_duration_since(self.base_time);
                 elapsed.as_micros() as u64
@@ -381,12 +384,12 @@ where
                 Reverse(*last_update)
             });
 
-            shard.extend(
-                entries
-                    .drain(..)
-                    .take(target_shard_size)
-                    .map(|(key, _last_update, value)| (key, value)),
-            );
+            for (key, _last_update, value) in entries.drain(..).take(target_shard_size) {
+                let hash = self.data.hasher().hash_one(&key);
+                // SAFETY: re-adding subset of just removed elements requires no allocation and
+                // key is guaranteed to not exist
+                unsafe { shard.insert_no_grow(hash, (key, value)) };
+            }
             debug_assert!(shard.len() <= target_shard_size);
             actual_len += shard.len();
         }

@@ -1,4 +1,5 @@
 use {
+    super::initialize_pda_account,
     crate::{
         error::PortalError,
         pda::{find_delegation_record_pda, find_session_pda},
@@ -12,7 +13,6 @@ use {
         AccountView as AccountInfo, Address as Pubkey, ProgramResult,
     },
     pinocchio_idl_macros::p_instruction,
-    pinocchio_system::instructions::CreateAccount,
 };
 
 /// Delegate one or more accounts into a NorthStar Ephemeral Rollup session.
@@ -151,7 +151,7 @@ fn process_delegate_account(
         return Err(PortalError::InvalidPdaSeeds.into());
     }
 
-    if delegation_record.lamports() > 0 {
+    if !delegation_record.is_data_empty() || !delegation_record.owned_by(&pinocchio_system::ID) {
         return Err(PortalError::DelegationRecordAlreadyInitialized.into());
     }
 
@@ -180,14 +180,14 @@ fn process_delegate_account(
     ];
     let signer = Signer::from(seeds);
 
-    CreateAccount {
-        from: payer,
-        to: delegation_record,
+    initialize_pda_account(
+        payer,
+        delegation_record,
         lamports,
-        space: delegation_size as u64,
-        owner: program_id,
-    }
-    .invoke_signed(&[signer])?;
+        delegation_size as u64,
+        program_id,
+        signer,
+    )?;
 
     let mut delegation_data = delegation_record.try_borrow_mut()?;
     BorshSerialize::serialize(&delegation_state, &mut &mut delegation_data[..]).unwrap();

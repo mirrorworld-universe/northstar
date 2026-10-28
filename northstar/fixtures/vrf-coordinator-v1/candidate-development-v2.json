@@ -1,0 +1,68 @@
+{
+  "schema_version": "northstar-vrf-coordinator-development-contract/v2",
+  "status": "development_candidate_not_human_acceptance",
+  "decision_date": "2026-10-23",
+  "compatibility_sha256": "5891551ac67b003986a300e6b5e92089c886c3584c12c83411cf99374227b95d",
+  "library_commit": "d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd",
+  "algorithm": "ECVRF-EDWARDS25519-SHA512-TAI",
+  "suite": 1,
+  "lifecycle": "er_native_development",
+  "external_library_changes": false,
+  "cross_layer_settlement": "unsupported",
+  "proof": {
+    "kind": 3,
+    "version": 1,
+    "domain_constructor": "FrBytes::er_step_domain_v1(3,1)",
+    "public_fields": 8,
+    "public_bytes": 256,
+    "session_context_bytes": 149,
+    "execution": "actual_bounded_sbpf_interpreter",
+    "legacy_kinds_unchanged": [1, 2],
+    "unknown_kind_or_version": "reject",
+    "trace_only_or_program_specific_effect_assertions": "reject",
+    "profile_sha256": null,
+    "guest_sha256": null,
+    "verification_key_sha256": null
+  },
+  "hardware": {
+    "instance": "g5.xlarge",
+    "gpu_model": "A10G",
+    "gpu_count": 1,
+    "substitutes_historical_target": "L40S",
+    "substitution_authorized": "2026-10-23 user decision; user states target changed after PR #207",
+    "rental_or_paid_proving": false
+  },
+  "runtime_gate": {
+    "minimum_consecutive_successes": 100,
+    "callbacks_per_request": 1,
+    "failed_attempts_in_success_window": 0,
+    "negative_controls": "separate_retained_complete_windows",
+    "timing": "one_collector_wide_monotonic_nanosecond_domain",
+    "execution_state": "authoritative_atomic_input_and_computed_output_with_explicit_absence"
+  },
+  "proof_gate": {
+    "fresh_consecutive_runs": 3,
+    "required_execution_paths": ["request", "fulfillment", "consumer_callback"],
+    "instruction": "ResolveChallenge",
+    "verifier": "Production",
+    "max_prove_and_wrap_ns": 120000000000,
+    "max_full_resolution_cu": 130000,
+    "same_single_device": true,
+    "retained_or_standalone_verifier_results": "not_qualifying",
+    "native_fulfillment_cu": "not_full_resolution_cu",
+    "startup_cold_recovery": "separate_measurements"
+  },
+  "negative_gate": {
+    "invalid_vrf_proof": "reject_and_preserve_state",
+    "callback_failure": "rollback_request_escrow_delivery_fee_and_close",
+    "incorrect_witness": "reject",
+    "unsupported_profile_kind_version_program_or_syscall": "reject",
+    "existing_proof_routes": "regressions_pass"
+  },
+  "independent_acceptance": {
+    "baixiong_integration": "pending",
+    "jonas_reproduction": "pending",
+    "fixture_owner_signoff": "pending",
+    "three_substantive_team_responses": "pending"
+  }
+}

@@ -24,7 +24,7 @@ use {
         },
         blockstore_db::{DBPinnableSlice, WriteBatch},
         blockstore_meta::BlockLocation,
-        shred::{self, ReedSolomonCache, Shred, filter::ShredRecoveryContext},
+        shred::{self, Shred, filter::ShredRecoveryContext},
     },
     solana_measure::measure::Measure,
     solana_net_utils::PinnedXdpSender,
@@ -379,7 +379,6 @@ impl WindowService {
         completed_data_sets_sender: Option<CompletedDataSetsSender>,
         retransmit_sender: EvictingSender<Vec<shred::Payload>>,
     ) -> JoinHandle<()> {
-        let reed_solomon_cache = ReedSolomonCache::default();
         Builder::new()
             .name("solWinInsert".to_string())
             .spawn(move || {
@@ -401,7 +400,6 @@ impl WindowService {
                 let mut ws_metrics = WindowServiceMetrics::default();
                 let mut last_print = Instant::now();
                 let mut shred_recovery_context = ShredRecoveryContext::new(
-                    reed_solomon_cache,
                     retransmit_sender,
                     sharable_banks.root(),
                     shred_version,
@@ -482,12 +480,17 @@ mod test {
         solana_keypair::Keypair,
         solana_ledger::{
             blockstore::{Blockstore, make_many_slot_entries},
-            genesis_utils::create_genesis_config,
             get_tmp_ledger_path_auto_delete,
             shred::{ProcessShredsStats, Shredder},
         },
         solana_net_utils::SocketAddrSpace,
-        solana_runtime::bank::Bank,
+        solana_pubkey::Pubkey,
+        solana_runtime::{
+            bank::Bank,
+            genesis_utils::{
+                bootstrap_validator_stake_lamports, create_genesis_config_with_tower_leader,
+            },
+        },
         solana_signer::Signer,
         solana_time_utils::timestamp,
     };
@@ -507,7 +510,6 @@ mod test {
             Hash::new_from_array(rand::rng().random()),
             0, // next_shred_index
             0, // next_code_index
-            &ReedSolomonCache::default(),
             &mut ProcessShredsStats::default(),
         );
         data_shreds
@@ -531,7 +533,12 @@ mod test {
     #[test]
     fn test_run_check_duplicate() {
         let ledger_path = get_tmp_ledger_path_auto_delete!();
-        let genesis_config = create_genesis_config(10_000).genesis_config;
+        let genesis_config = create_genesis_config_with_tower_leader(
+            10_000,
+            &Pubkey::new_unique(),
+            bootstrap_validator_stake_lamports(),
+        )
+        .genesis_config;
         let bank_forks = BankForks::new_rw_arc(Bank::new_for_tests(&genesis_config));
         let blockstore = Arc::new(Blockstore::open(ledger_path.path()).unwrap());
         let (sender, receiver) = bounded(1024);
@@ -592,7 +599,12 @@ mod test {
             Arc::new(keypair),
             SocketAddrSpace::Unspecified,
         ));
-        let genesis_config = create_genesis_config(10_000).genesis_config;
+        let genesis_config = create_genesis_config_with_tower_leader(
+            10_000,
+            &Pubkey::new_unique(),
+            bootstrap_validator_stake_lamports(),
+        )
+        .genesis_config;
         let bank_forks = BankForks::new_rw_arc(Bank::new_for_tests(&genesis_config));
 
         // Start duplicate thread receiving and inserting duplicates
@@ -628,7 +640,6 @@ mod test {
                     shreds,
                     false, // is_trusted
                     &mut ShredRecoveryContext::new(
-                        ReedSolomonCache::default(),
                         dummy_retransmit_sender,
                         bank_forks.read().unwrap().root_bank(),
                         0, // shred_version

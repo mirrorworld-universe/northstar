@@ -15,6 +15,7 @@ use {
     bip39::{Language, Mnemonic},
     clap::{App, AppSettings, Arg, ArgMatches, SubCommand},
     log::*,
+    solana_account::state_traits::StateMutWincode as _,
     solana_account_decoder::{UiAccount, UiAccountEncoding, UiDataSliceConfig},
     solana_clap_utils::{
         self,
@@ -77,7 +78,7 @@ use {
         node_address_service::LeaderTpuCacheServiceConfig,
         websocket_node_address_service::WebsocketNodeAddressService,
     },
-    solana_transaction::Transaction,
+    solana_transaction::{Transaction, versioned::VersionedTransaction},
     solana_transaction_error::TransactionError,
     std::{
         fs::File,
@@ -1340,7 +1341,7 @@ async fn process_program_deploy(
             true
         } else if let Ok(UpgradeableLoaderState::Program {
             programdata_address,
-        }) = bincode::deserialize(&account.data)
+        }) = account.state()
         {
             if let Some(account) = rpc_client
                 .get_account_with_commitment(&programdata_address, config.commitment)
@@ -1350,7 +1351,7 @@ async fn process_program_deploy(
                 if let Ok(UpgradeableLoaderState::ProgramData {
                     slot: _,
                     upgrade_authority_address: program_authority_pubkey,
-                }) = bincode::deserialize(&account.data)
+                }) = account.state()
                 {
                     if program_authority_pubkey.is_none() {
                         return Err(
@@ -1553,9 +1554,7 @@ async fn fetch_buffer_program_data(
         .into());
     }
 
-    if let Ok(UpgradeableLoaderState::Buffer { authority_address }) =
-        bincode::deserialize(&account.data)
-    {
+    if let Ok(UpgradeableLoaderState::Buffer { authority_address }) = account.state() {
         if authority_address.is_none() {
             return Err(format!("Buffer {buffer_pubkey} is immutable").into());
         }
@@ -1649,7 +1648,8 @@ async fn process_program_upgrade(
         )
         .await?;
 
-        let fee = rpc_client.get_fee_for_message(&message).await?;
+        let message = VersionedMessage::Legacy(message);
+        let fee = rpc_client.get_fee_for_versioned_message(&message).await?;
         check_account_for_spend_and_fee_with_commitment(
             &rpc_client,
             &fee_payer_signer.pubkey(),
@@ -1658,9 +1658,8 @@ async fn process_program_upgrade(
             config.commitment,
         )
         .await?;
-        let mut tx = Transaction::new_unsigned(message);
         let signers = &[fee_payer_signer, upgrade_authority_signer];
-        tx.try_sign(signers, blockhash)?;
+        let tx = VersionedTransaction::try_new(message, &dedup_signers(signers))?;
         let final_tx_sig = rpc_client
             .send_and_confirm_transaction_with_spinner_and_config(
                 &tx,
@@ -1906,6 +1905,14 @@ const SLOT_SIZE: usize = size_of::<u64>();
 const OPTION_SIZE: usize = 1;
 const PUBKEY_LEN: usize = 32;
 
+fn ui_account_payload_len(ui_account: &UiAccount, metadata_len: usize) -> usize {
+    ui_account
+        .space
+        .and_then(|space| usize::try_from(space).ok())
+        .unwrap_or_default()
+        .saturating_sub(metadata_len)
+}
+
 async fn get_buffers(
     rpc_client: &RpcClient,
     authority_pubkey: Option<Pubkey>,
@@ -1939,15 +1946,16 @@ async fn get_buffers(
             "It should be impossible at this point for the account data not to be decodable. \
              Ensure that the account was fetched using a binary encoding.",
         );
-        if let Ok(UpgradeableLoaderState::Buffer { authority_address }) =
-            bincode::deserialize(&account.data)
-        {
+        if let Ok(UpgradeableLoaderState::Buffer { authority_address }) = account.state() {
             buffers.push(CliUpgradeableBuffer {
                 address: address.to_string(),
                 authority: authority_address
                     .map(|pubkey| pubkey.to_string())
                     .unwrap_or_else(|| "none".to_string()),
-                data_len: 0,
+                data_len: ui_account_payload_len(
+                    ui_account,
+                    UpgradeableLoaderState::size_of_buffer_metadata(),
+                ),
                 lamports: account.lamports,
                 use_lamports_unit,
             });
@@ -1997,7 +2005,7 @@ async fn get_programs(
         if let Ok(UpgradeableLoaderState::ProgramData {
             slot,
             upgrade_authority_address,
-        }) = bincode::deserialize(&programdata_account.data)
+        }) = programdata_account.state()
         {
             let mut bytes = vec![2, 0, 0, 0];
             bytes.extend_from_slice(programdata_address.as_ref());
@@ -2019,10 +2027,10 @@ async fn get_programs(
                     .map(|pubkey| pubkey.to_string())
                     .unwrap_or_else(|| "none".to_string()),
                 last_deploy_slot: slot,
-                data_len: programdata_account
-                    .data
-                    .len()
-                    .saturating_sub(UpgradeableLoaderState::size_of_programdata_metadata()),
+                data_len: ui_account_payload_len(
+                    programdata_ui_account,
+                    UpgradeableLoaderState::size_of_programdata_metadata(),
+                ),
                 lamports: programdata_account.lamports,
                 use_lamports_unit,
             });
@@ -2083,7 +2091,7 @@ async fn process_show(
             } else if account.owner == bpf_loader_upgradeable::id() {
                 if let Ok(UpgradeableLoaderState::Program {
                     programdata_address,
-                }) = bincode::deserialize(&account.data)
+                }) = account.state()
                 {
                     if let Some(programdata_account) = rpc_client
                         .get_account_with_commitment(&programdata_address, config.commitment)
@@ -2093,7 +2101,7 @@ async fn process_show(
                         if let Ok(UpgradeableLoaderState::ProgramData {
                             upgrade_authority_address,
                             slot,
-                        }) = bincode::deserialize(&programdata_account.data)
+                        }) = programdata_account.state()
                         {
                             Ok(config
                                 .output_format
@@ -2118,7 +2126,7 @@ async fn process_show(
                         Err(format!("Program {account_pubkey} has been closed").into())
                     }
                 } else if let Ok(UpgradeableLoaderState::Buffer { authority_address }) =
-                    bincode::deserialize(&account.data)
+                    account.state()
                 {
                     Ok(config
                         .output_format
@@ -2178,7 +2186,7 @@ async fn process_dump(
             } else if account.owner == bpf_loader_upgradeable::id() {
                 if let Ok(UpgradeableLoaderState::Program {
                     programdata_address,
-                }) = bincode::deserialize(&account.data)
+                }) = account.state()
                 {
                     if let Some(programdata_account) = rpc_client
                         .get_account_with_commitment(&programdata_address, config.commitment)
@@ -2186,7 +2194,7 @@ async fn process_dump(
                         .value
                     {
                         if let Ok(UpgradeableLoaderState::ProgramData { .. }) =
-                            bincode::deserialize(&programdata_account.data)
+                            programdata_account.state()
                         {
                             let offset = UpgradeableLoaderState::size_of_programdata_metadata();
                             let program_data = &programdata_account.data[offset..];
@@ -2199,9 +2207,7 @@ async fn process_dump(
                     } else {
                         Err(format!("Program {account_pubkey} has been closed").into())
                     }
-                } else if let Ok(UpgradeableLoaderState::Buffer { .. }) =
-                    bincode::deserialize(&account.data)
-                {
+                } else if let Ok(UpgradeableLoaderState::Buffer { .. }) = account.state() {
                     let offset = UpgradeableLoaderState::size_of_buffer_metadata();
                     let program_data = &account.data[offset..];
                     let mut f = File::create(output_location)?;
@@ -2289,7 +2295,7 @@ async fn process_close(
             .await?
             .value
         {
-            match bincode::deserialize(&account.data) {
+            match account.state() {
                 Ok(UpgradeableLoaderState::Buffer { authority_address }) => {
                     if authority_address != Some(authority_signer.pubkey()) {
                         return Err(format!(
@@ -2335,7 +2341,7 @@ async fn process_close(
                         if let Ok(UpgradeableLoaderState::ProgramData {
                             slot: _,
                             upgrade_authority_address: authority_pubkey,
-                        }) = bincode::deserialize(&account.data)
+                        }) = account.state()
                         {
                             if authority_pubkey != Some(authority_signer.pubkey()) {
                                 Err(format!(
@@ -2443,7 +2449,7 @@ async fn process_extend_program(
         return Err(format!("Account {program_pubkey} is not an upgradeable program").into());
     }
 
-    let programdata_pubkey = match bincode::deserialize(&program_account.data) {
+    let programdata_pubkey = match program_account.state() {
         Ok(UpgradeableLoaderState::Program {
             programdata_address: programdata_pubkey,
         }) => Ok(programdata_pubkey),
@@ -2461,7 +2467,7 @@ async fn process_extend_program(
         None => Err(format!("Program {program_pubkey} is closed")),
     }?;
 
-    let upgrade_authority_address = match bincode::deserialize(&programdata_account.data) {
+    let upgrade_authority_address = match programdata_account.state() {
         Ok(UpgradeableLoaderState::ProgramData {
             slot: _,
             upgrade_authority_address,
@@ -2539,7 +2545,7 @@ async fn process_extend_program(
 }
 
 pub fn calculate_max_chunk_size(baseline_msg: Message) -> usize {
-    let tx_size = bincode::serialized_size(&Transaction {
+    let tx_size = wincode::serialized_size(&Transaction {
         signatures: vec![
             Signature::default();
             baseline_msg.header.num_required_signatures as usize
@@ -2624,7 +2630,10 @@ async fn do_process_program_deploy(
     for (chunk, i) in program_data.chunks(chunk_size).zip(0usize..) {
         let offset = i.saturating_mul(chunk_size);
         if chunk != &buffer_program_data[offset..offset.saturating_add(chunk.len())] {
-            write_messages.push(create_msg(offset as u32, chunk.to_vec()));
+            write_messages.push(VersionedMessage::Legacy(create_msg(
+                offset as u32,
+                chunk.to_vec(),
+            )));
         }
     }
 
@@ -2652,6 +2661,9 @@ async fn do_process_program_deploy(
             &blockhash,
         ))
     };
+
+    let initial_message = initial_message.map(VersionedMessage::Legacy);
+    let final_message = final_message.map(VersionedMessage::Legacy);
 
     if !skip_fee_check {
         check_payer(
@@ -2760,9 +2772,14 @@ async fn do_process_write_buffer(
     for (chunk, i) in program_data.chunks(chunk_size).zip(0usize..) {
         let offset = i.saturating_mul(chunk_size);
         if chunk != &buffer_program_data[offset..offset.saturating_add(chunk.len())] {
-            write_messages.push(create_msg(offset as u32, chunk.to_vec()));
+            write_messages.push(VersionedMessage::Legacy(create_msg(
+                offset as u32,
+                chunk.to_vec(),
+            )));
         }
     }
+
+    let initial_message = initial_message.map(VersionedMessage::Legacy);
 
     if !skip_fee_check {
         check_payer(
@@ -2888,7 +2905,10 @@ async fn do_process_program_upgrade(
         for (chunk, i) in program_data.chunks(chunk_size).zip(0usize..) {
             let offset = i.saturating_mul(chunk_size);
             if chunk != &buffer_program_data[offset..offset.saturating_add(chunk.len())] {
-                write_messages.push(create_msg(offset as u32, chunk.to_vec()));
+                write_messages.push(VersionedMessage::Legacy(create_msg(
+                    offset as u32,
+                    chunk.to_vec(),
+                )));
             }
         }
 
@@ -2914,6 +2934,9 @@ async fn do_process_program_upgrade(
         &blockhash,
     );
     let final_message = Some(final_message);
+
+    let initial_message = initial_message.map(VersionedMessage::Legacy);
+    let final_message = final_message.map(VersionedMessage::Legacy);
 
     if !skip_fee_check {
         check_payer(
@@ -2972,7 +2995,7 @@ async fn extend_program_data_if_needed(
         return Ok(());
     };
 
-    let upgrade_authority_address = match bincode::deserialize(&program_data_account.data) {
+    let upgrade_authority_address = match program_data_account.state() {
         Ok(UpgradeableLoaderState::ProgramData {
             slot: _,
             upgrade_authority_address,
@@ -3109,23 +3132,23 @@ async fn check_payer(
     config: &CliConfig<'_>,
     fee_payer_pubkey: Pubkey,
     balance_needed: u64,
-    initial_message: &Option<Message>,
-    write_messages: &[Message],
-    final_message: &Option<Message>,
+    initial_message: &Option<VersionedMessage>,
+    write_messages: &[VersionedMessage],
+    final_message: &Option<VersionedMessage>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut fee = Saturating(0);
     if let Some(message) = initial_message {
-        fee += rpc_client.get_fee_for_message(message).await?;
+        fee += rpc_client.get_fee_for_versioned_message(message).await?;
     }
     // Assume all write messages cost the same
     if let Some(message) = write_messages.first() {
         fee += rpc_client
-            .get_fee_for_message(message)
+            .get_fee_for_versioned_message(message)
             .await?
             .saturating_mul(write_messages.len() as u64);
     }
     if let Some(message) = final_message {
-        fee += rpc_client.get_fee_for_message(message).await?;
+        fee += rpc_client.get_fee_for_versioned_message(message).await?;
     }
     check_account_for_spend_and_fee_with_commitment(
         rpc_client,
@@ -3158,9 +3181,9 @@ fn dedup_signers<'a>(signers: &[&'a dyn Signer]) -> Vec<&'a dyn Signer> {
 async fn send_deploy_messages(
     rpc_client: Arc<RpcClient>,
     config: &CliConfig<'_>,
-    initial_message: Option<Message>,
-    mut write_messages: Vec<Message>,
-    final_message: Option<Message>,
+    initial_message: Option<VersionedMessage>,
+    write_messages: Vec<VersionedMessage>,
+    final_message: Option<VersionedMessage>,
     fee_payer_signer: &dyn Signer,
     initial_signer: Option<&dyn Signer>,
     write_signer: Option<&dyn Signer>,
@@ -3169,6 +3192,16 @@ async fn send_deploy_messages(
     use_rpc: bool,
     compute_unit_limit: &ComputeUnitLimit,
 ) -> Result<Option<Signature>, Box<dyn std::error::Error>> {
+    let into_legacy = |message| match message {
+        VersionedMessage::Legacy(message) => message,
+        _ => unreachable!("program deployment constructs legacy messages"),
+    };
+    let initial_message = initial_message.map(into_legacy);
+    let mut write_messages = write_messages
+        .into_iter()
+        .map(into_legacy)
+        .collect::<Vec<_>>();
+    let final_message = final_message.map(into_legacy);
     if let Some(mut message) = initial_message {
         if let Some(initial_signer) = initial_signer {
             trace!("Preparing the required accounts");

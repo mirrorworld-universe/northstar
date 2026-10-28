@@ -1,0 +1,2713 @@
+{
+  "schema_version": "northstar-vrf-coordinator-compatibility/v1",
+  "status": "DRAFT_OFFLINE_NOT_APPROVED",
+  "source": {
+    "repository": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library",
+    "commit": "d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd",
+    "sdk_package": "@mirrorworld/sonic.vrf-coordinator",
+    "sdk_version": "0.1.0"
+  },
+  "algorithm": {
+    "name": "ECVRF-EDWARDS25519-SHA512-TAI",
+    "standard": "RFC9381",
+    "suite": 1,
+    "public_key_bytes": 32,
+    "alpha_bytes": 32,
+    "proof_bytes": 80,
+    "output_bytes": 64,
+    "proof_parts": [
+      {
+        "name": "Gamma",
+        "bytes": 32
+      },
+      {
+        "name": "c",
+        "bytes": 16
+      },
+      {
+        "name": "s",
+        "bytes": 32
+      }
+    ]
+  },
+  "programs": {
+    "coordinator": {
+      "id": "FTDEMxTj2RsKBSCGETrFXDiSLu1nJLRfAYDsjJ6GXQ4N",
+      "role": "request coordinator",
+      "binary_sha256": null
+    },
+    "reference_verifier": {
+      "id": "FUBz1nvSSoHnMqFoK2CA3jF5ckpYPdF3ZT4SoLzDNzh1",
+      "role": "TEST ONLY; not Portal Production verifier",
+      "binary_sha256": null
+    },
+    "test_consumer": {
+      "id": "HFg1j9ZMixGkMo42ZoeqNpqBZpGcVbsRwfFBLcGCn5Kt",
+      "role": "TEST ONLY consumer",
+      "binary_sha256": null
+    }
+  },
+  "instructions": {
+    "accept_program_main_authority": {
+      "program": "coordinator",
+      "discriminator_hex": "a358787d96f2a938",
+      "accounts": [
+        {
+          "name": "accepting_main_signing_authority",
+          "signer": true,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "program_config",
+          "signer": false,
+          "writable": true,
+          "optional": false
+        }
+      ],
+      "args": [],
+      "constraints": [
+        {},
+        {
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "cancel_program_main_authority": {
+      "program": "coordinator",
+      "discriminator_hex": "847496ab67859b13",
+      "accounts": [
+        {
+          "name": "main_signing_authority",
+          "signer": true,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "program_config",
+          "signer": false,
+          "writable": true,
+          "optional": false
+        }
+      ],
+      "args": [],
+      "constraints": [
+        {},
+        {
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "close_request": {
+      "program": "coordinator",
+      "discriminator_hex": "aa2ea578df667302",
+      "accounts": [
+        {
+          "name": "requester",
+          "signer": true,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "rent_payer",
+          "signer": false,
+          "writable": true,
+          "optional": false
+        },
+        {
+          "name": "request",
+          "signer": false,
+          "writable": true,
+          "optional": false
+        }
+      ],
+      "args": [],
+      "constraints": [
+        {},
+        {},
+        {
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  113,
+                  117,
+                  101,
+                  115,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "request.requester",
+                "account": "RequestAccount"
+              },
+              {
+                "kind": "account",
+                "path": "request.request_key",
+                "account": "RequestAccount"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "expire": {
+      "program": "coordinator",
+      "discriminator_hex": "f353cd3a39c9f792",
+      "accounts": [
+        {
+          "name": "caller",
+          "signer": true,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "fee_payer",
+          "signer": false,
+          "writable": true,
+          "optional": false
+        },
+        {
+          "name": "rent_payer",
+          "signer": false,
+          "writable": true,
+          "optional": false
+        },
+        {
+          "name": "request",
+          "signer": false,
+          "writable": true,
+          "optional": false
+        }
+      ],
+      "args": [],
+      "constraints": [
+        {},
+        {},
+        {},
+        {
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  113,
+                  117,
+                  101,
+                  115,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "request.requester",
+                "account": "RequestAccount"
+              },
+              {
+                "kind": "account",
+                "path": "request.request_key",
+                "account": "RequestAccount"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "fulfill": {
+      "program": "coordinator",
+      "discriminator_hex": "8f0234ceaea4f748",
+      "accounts": [
+        {
+          "name": "fulfiller",
+          "signer": true,
+          "writable": true,
+          "optional": false
+        },
+        {
+          "name": "program_config",
+          "signer": false,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "request",
+          "signer": false,
+          "writable": true,
+          "optional": false
+        },
+        {
+          "name": "rent_payer",
+          "signer": false,
+          "writable": true,
+          "optional": false
+        },
+        {
+          "name": "callback_signer",
+          "signer": false,
+          "writable": false,
+          "optional": true
+        },
+        {
+          "name": "callback_program",
+          "signer": false,
+          "writable": false,
+          "optional": true
+        },
+        {
+          "name": "verify_program",
+          "signer": false,
+          "writable": false,
+          "optional": false
+        }
+      ],
+      "args": [
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "FulfillInputParams"
+            }
+          }
+        }
+      ],
+      "constraints": [
+        {},
+        {
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  113,
+                  117,
+                  101,
+                  115,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "request.requester",
+                "account": "RequestAccount"
+              },
+              {
+                "kind": "account",
+                "path": "request.request_key",
+                "account": "RequestAccount"
+              }
+            ]
+          }
+        },
+        {},
+        {},
+        {},
+        {
+          "address": "FUBz1nvSSoHnMqFoK2CA3jF5ckpYPdF3ZT4SoLzDNzh1"
+        }
+      ]
+    },
+    "initialize": {
+      "program": "coordinator",
+      "discriminator_hex": "afaf6d1f0d989bed",
+      "accounts": [
+        {
+          "name": "fee_and_rent_payer",
+          "signer": true,
+          "writable": true,
+          "optional": false
+        },
+        {
+          "name": "upgrade_authority",
+          "signer": true,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "main_signing_authority",
+          "signer": true,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "program_data",
+          "signer": false,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "program_config",
+          "signer": false,
+          "writable": true,
+          "optional": false
+        },
+        {
+          "name": "system_program",
+          "signer": false,
+          "writable": false,
+          "optional": false
+        }
+      ],
+      "args": [
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "InitializeInputParams"
+            }
+          }
+        }
+      ],
+      "constraints": [
+        {},
+        {},
+        {},
+        {
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  214,
+                  186,
+                  140,
+                  3,
+                  79,
+                  8,
+                  158,
+                  126,
+                  12,
+                  78,
+                  77,
+                  185,
+                  132,
+                  204,
+                  239,
+                  102,
+                  52,
+                  23,
+                  26,
+                  233,
+                  233,
+                  116,
+                  7,
+                  202,
+                  81,
+                  221,
+                  146,
+                  118,
+                  160,
+                  125,
+                  64,
+                  255
+                ]
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                2,
+                168,
+                246,
+                145,
+                78,
+                136,
+                161,
+                176,
+                226,
+                16,
+                21,
+                62,
+                247,
+                99,
+                174,
+                43,
+                0,
+                194,
+                185,
+                61,
+                22,
+                193,
+                36,
+                210,
+                192,
+                83,
+                122,
+                16,
+                4,
+                128,
+                0,
+                0
+              ]
+            }
+          }
+        },
+        {
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "address": "11111111111111111111111111111111"
+        }
+      ]
+    },
+    "request_random": {
+      "program": "coordinator",
+      "discriminator_hex": "cf0e6f2236380c5a",
+      "accounts": [
+        {
+          "name": "payer",
+          "signer": true,
+          "writable": true,
+          "optional": false
+        },
+        {
+          "name": "fee_payer",
+          "signer": true,
+          "writable": true,
+          "optional": false
+        },
+        {
+          "name": "requester",
+          "signer": false,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "requester_identity",
+          "signer": true,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "program_config",
+          "signer": false,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "request",
+          "signer": false,
+          "writable": true,
+          "optional": false
+        },
+        {
+          "name": "slot_hashes",
+          "signer": false,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "system_program",
+          "signer": false,
+          "writable": false,
+          "optional": false
+        }
+      ],
+      "args": [
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "RequestRandomInputParams"
+            }
+          }
+        }
+      ],
+      "constraints": [
+        {},
+        {},
+        {},
+        {},
+        {
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  113,
+                  117,
+                  101,
+                  115,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "requester"
+              },
+              {
+                "kind": "arg",
+                "path": "params.request_key"
+              }
+            ]
+          }
+        },
+        {
+          "address": "SysvarS1otHashes111111111111111111111111111"
+        },
+        {
+          "address": "11111111111111111111111111111111"
+        }
+      ]
+    },
+    "transfer_program_main_authority": {
+      "program": "coordinator",
+      "discriminator_hex": "855190dfa4fdc1cb",
+      "accounts": [
+        {
+          "name": "main_signing_authority",
+          "signer": true,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "program_config",
+          "signer": false,
+          "writable": true,
+          "optional": false
+        }
+      ],
+      "args": [
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "TransferProgramMainAuthorityInputParams"
+            }
+          }
+        }
+      ],
+      "constraints": [
+        {},
+        {
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "update_fulfillers": {
+      "program": "coordinator",
+      "discriminator_hex": "a127ca7b9a647505",
+      "accounts": [
+        {
+          "name": "fulfillers_authority",
+          "signer": true,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "program_config",
+          "signer": false,
+          "writable": true,
+          "optional": false
+        }
+      ],
+      "args": [
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "UpdateFulfillersInputParams"
+            }
+          }
+        }
+      ],
+      "constraints": [
+        {},
+        {
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "update_operations_authority": {
+      "program": "coordinator",
+      "discriminator_hex": "c6fb53c974d99f2b",
+      "accounts": [
+        {
+          "name": "main_signing_authority",
+          "signer": true,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "program_config",
+          "signer": false,
+          "writable": true,
+          "optional": false
+        }
+      ],
+      "args": [
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "UpdateOperationsAuthorityInputParams"
+            }
+          }
+        }
+      ],
+      "constraints": [
+        {},
+        {
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "update_program_status": {
+      "program": "coordinator",
+      "discriminator_hex": "9b10b50f1e57b1ed",
+      "accounts": [
+        {
+          "name": "status_authority",
+          "signer": true,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "program_config",
+          "signer": false,
+          "writable": true,
+          "optional": false
+        }
+      ],
+      "args": [
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "UpdateProgramStatusInputParams"
+            }
+          }
+        }
+      ],
+      "constraints": [
+        {},
+        {
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "update_request_fee": {
+      "program": "coordinator",
+      "discriminator_hex": "9ffd5b97b06d9136",
+      "accounts": [
+        {
+          "name": "main_signing_authority",
+          "signer": true,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "program_config",
+          "signer": false,
+          "writable": true,
+          "optional": false
+        }
+      ],
+      "args": [
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "UpdateRequestFeeInputParams"
+            }
+          }
+        }
+      ],
+      "constraints": [
+        {},
+        {
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "update_request_limits": {
+      "program": "coordinator",
+      "discriminator_hex": "cfc45797d51880b1",
+      "accounts": [
+        {
+          "name": "main_signing_authority",
+          "signer": true,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "program_config",
+          "signer": false,
+          "writable": true,
+          "optional": false
+        }
+      ],
+      "args": [
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "UpdateRequestLimitsInputParams"
+            }
+          }
+        }
+      ],
+      "constraints": [
+        {},
+        {
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "update_vrf_key": {
+      "program": "coordinator",
+      "discriminator_hex": "465d41e9c3c455d4",
+      "accounts": [
+        {
+          "name": "main_signing_authority",
+          "signer": true,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "program_config",
+          "signer": false,
+          "writable": true,
+          "optional": false
+        }
+      ],
+      "args": [
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "UpdateVrfKeyInputParams"
+            }
+          }
+        }
+      ],
+      "constraints": [
+        {},
+        {
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "verify": {
+      "program": "reference_verifier",
+      "discriminator_hex": "85a18d3078c65896",
+      "accounts": [],
+      "args": [
+        "suite:u8",
+        "vrf_key:[u8;32]",
+        "alpha:[u8;32]",
+        "proof:Vec<u8>"
+      ]
+    },
+    "verify_raw_alpha": {
+      "program": "reference_verifier",
+      "discriminator_hex": "3e6753baa037193f",
+      "accounts": [],
+      "args": [
+        "suite:u8",
+        "vrf_key:[u8;32]",
+        "alpha:Vec<u8>",
+        "proof:Vec<u8>"
+      ]
+    },
+    "set_behaviour": {
+      "program": "test_consumer",
+      "discriminator_hex": "2dbbc1c2fb90295d",
+      "accounts": [
+        {
+          "name": "payer",
+          "signer": true,
+          "writable": true,
+          "optional": false
+        },
+        {
+          "name": "slot",
+          "signer": false,
+          "writable": true,
+          "optional": false
+        },
+        {
+          "name": "system_program",
+          "signer": false,
+          "writable": false,
+          "optional": false
+        }
+      ],
+      "args": [
+        "key:[u8;32]",
+        "behaviour:Behaviour"
+      ]
+    },
+    "make_request": {
+      "program": "test_consumer",
+      "discriminator_hex": "2934b1498c249890",
+      "accounts": [
+        {
+          "name": "payer",
+          "signer": true,
+          "writable": true,
+          "optional": false
+        },
+        {
+          "name": "slot",
+          "signer": false,
+          "writable": true,
+          "optional": false
+        },
+        {
+          "name": "identity",
+          "signer": false,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "requester",
+          "signer": false,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "coordinator_config",
+          "signer": false,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "request",
+          "signer": false,
+          "writable": true,
+          "optional": false
+        },
+        {
+          "name": "slot_hashes",
+          "signer": false,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "coordinator_program",
+          "signer": false,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "system_program",
+          "signer": false,
+          "writable": false,
+          "optional": false
+        }
+      ],
+      "args": [
+        "key:[u8;32]",
+        "seed:[u8;32]",
+        "options:RequestOptions"
+      ]
+    },
+    "on_random": {
+      "program": "test_consumer",
+      "discriminator_hex": "3fe44c86f31475aa",
+      "accounts": [
+        {
+          "name": "callback_signer",
+          "signer": true,
+          "writable": false,
+          "optional": false
+        },
+        {
+          "name": "slot",
+          "signer": false,
+          "writable": true,
+          "optional": false
+        }
+      ],
+      "args": [
+        "request:Pubkey",
+        "output:[u8;64]"
+      ]
+    }
+  },
+  "coordinator_accounts": [
+    {
+      "name": "ProgramConfigAccount",
+      "discriminator": [
+        170,
+        196,
+        184,
+        123,
+        44,
+        33,
+        33,
+        214
+      ]
+    },
+    {
+      "name": "RequestAccount",
+      "discriminator": [
+        108,
+        23,
+        6,
+        158,
+        184,
+        6,
+        152,
+        121
+      ]
+    }
+  ],
+  "coordinator_types": [
+    {
+      "name": "AcceptProgramMainAuthorityEvent",
+      "docs": [
+        "Emitted by `accept_program_main_authority`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "timestamp",
+            "type": "i64"
+          },
+          {
+            "name": "previous_main_signing_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_main_signing_authority",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CallbackAccount",
+      "docs": [
+        "One account the Coordinator passes to a consumer's callback, in the order the consumer listed them. 33 bytes."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pubkey",
+            "type": "pubkey"
+          },
+          {
+            "name": "is_writable",
+            "type": "bool"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CallbackSpec",
+      "docs": [
+        "What the consumer's callback should receive (Callback mode)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "discriminator",
+            "docs": [
+              "The consumer instruction the Coordinator calls (its Anchor discriminator)."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
+          },
+          {
+            "name": "compute",
+            "docs": [
+              "Compute units the oracle must budget for the callback: the consumer's measured cost plus a margin. At most",
+              "Config's `max_callback_compute`."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "accounts",
+            "docs": [
+              "The accounts the callback receives after the callback signer, in order. At most 16."
+            ],
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "CallbackAccount"
+                }
+              }
+            }
+          },
+          {
+            "name": "args",
+            "docs": [
+              "Arguments appended to the callback's data, already Borsh-encoded. At most 64 bytes."
+            ],
+            "type": "bytes"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CancelProgramMainAuthorityEvent",
+      "docs": [
+        "Emitted by `cancel_program_main_authority`. `canceled_pending_main_signing_authority` is `None` when nothing was",
+        "pending; the cancel still succeeds."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "timestamp",
+            "type": "i64"
+          },
+          {
+            "name": "main_signing_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "canceled_pending_main_signing_authority",
+            "type": {
+              "option": "pubkey"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "FulfillInputParams",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "proof",
+            "docs": [
+              "The oracle's VRF proof for the request's alpha under the request's key: 80 bytes for suite 1",
+              "(Gamma 32, c 16, s 32)."
+            ],
+            "type": "bytes"
+          }
+        ]
+      }
+    },
+    {
+      "name": "InitializeInputParams",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "operations_authority",
+            "docs": [
+              "The hot key, written straight into the config. A param rather than a signer, so a KMS-held key never has to",
+              "take part in deployment."
+            ],
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Mode",
+      "docs": [
+        "How a request receives its number."
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Callback"
+          },
+          {
+            "name": "Store"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ProgramConfigAccount",
+      "docs": [
+        "The singleton holding the program's governance state and the VRF settings each new request copies.",
+        "",
+        "Requests only read it and never write it, so requests from different programs never contend for this account.",
+        "",
+        "Layout: append-only, with `version` at offset 8 forever. Borsh writes `None` as a single byte, so every field after",
+        "`pending_main_signing_authority` sits 32 bytes earlier while no handover is pending. Decode it with the IDL; never",
+        "read fields past `main_signing_authority` at fixed offsets.",
+        "",
+        "PDA: seeds = [PROGRAM_CONFIG_ACCOUNT_PREFIX]"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "version",
+            "docs": [
+              "Layout version. Fixed at offset 8 forever: never move this field."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "last_block_timestamp",
+            "docs": [
+              "Unix time of the last change to this account."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "main_signing_authority",
+            "docs": [
+              "The multisig: every setting, any status change, the operations authority, and the handover."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "pending_main_signing_authority",
+            "docs": [
+              "The successor named by `transfer_program_main_authority`, cleared by accept or cancel. The current main",
+              "authority keeps full power until the successor accepts."
+            ],
+            "type": {
+              "option": "pubkey"
+            }
+          },
+          {
+            "name": "operations_authority",
+            "docs": [
+              "The hot key (KMS-held). It may replace the fulfiller set and raise the status, never lower it. Always set: to",
+              "stand it down, rotate it to a key nobody holds."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "program_status",
+            "docs": [
+              "The halt level; see `ProgramStatus`."
+            ],
+            "type": {
+              "defined": {
+                "name": "ProgramStatus"
+              }
+            }
+          },
+          {
+            "name": "vrf_key",
+            "docs": [
+              "The oracle's VRF public key (a compressed edwards25519 point). All zero until `update_vrf_key` sets it."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "suite",
+            "docs": [
+              "The VRF suite: `UNCONFIGURED_SUITE` until `update_vrf_key` sets it."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "fulfillers",
+            "docs": [
+              "The keys allowed to call `fulfill`. Only the first `fulfiller_count` entries count; the rest stay default."
+            ],
+            "type": {
+              "array": [
+                "pubkey",
+                4
+              ]
+            }
+          },
+          {
+            "name": "fulfiller_count",
+            "docs": [
+              "How many entries of `fulfillers` are set."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "fee_lamports",
+            "docs": [
+              "The fee per request, paid to the fulfiller that answers it. 0 until `update_request_fee` sets it."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "default_deadline_slots",
+            "docs": [
+              "The deadline, in slots after the request, used when a request names none."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "min_deadline_slots",
+            "docs": [
+              "The shortest deadline a request may name, in slots."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "max_deadline_slots",
+            "docs": [
+              "The longest deadline a request may name, in slots."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "max_callback_compute",
+            "docs": [
+              "The most compute units a consumer's callback may declare."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "Canonical bump of this PDA, stored at initialize so later instructions re-derive the address without a search."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "reserved",
+            "docs": [
+              "Reserved for future fields. Paid once on a singleton, it turns the next field addition into an in-place patch",
+              "instead of a realloc instruction."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                64
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "ProgramStatus",
+      "docs": [
+        "How far the program is halted (architecture \u00a710), from least to most severe.",
+        "",
+        "- `Normal`: everything runs.",
+        "- `RequestsHalted`: `request_random` is refused; pending requests are still answered.",
+        "- `Halted`: `request_random` and `fulfill` are refused; pending requests expire and refund.",
+        "",
+        "Refund paths (`expire`, `close_request`) and the admin instructions are never gated, so a halt cannot trap a fee",
+        "or rent, and un-halting and key rotation keep working while halted."
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Normal"
+          },
+          {
+            "name": "RequestsHalted"
+          },
+          {
+            "name": "Halted"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RandomExpired",
+      "docs": [
+        "Emitted by `expire`: nobody answered in time. The fee went back to `fee_refunded_to` (the fee payer, or the rent",
+        "payer when the fee payer was emptied since its request) and the rent to `rent_payer`; the consumer was not called."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "timestamp",
+            "type": "i64"
+          },
+          {
+            "name": "request",
+            "type": "pubkey"
+          },
+          {
+            "name": "requester",
+            "type": "pubkey"
+          },
+          {
+            "name": "caller",
+            "docs": [
+              "Whoever sent `expire`: anyone may."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "fee_payer",
+            "type": "pubkey"
+          },
+          {
+            "name": "fee_refunded",
+            "type": "u64"
+          },
+          {
+            "name": "rent_payer",
+            "type": "pubkey"
+          },
+          {
+            "name": "rent_refunded",
+            "docs": [
+              "Every lamport left in the request account after the fee, returned as it closed."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "slot",
+            "type": "u64"
+          },
+          {
+            "name": "fee_refunded_to",
+            "docs": [
+              "Where the fee went: `fee_payer`, unless it could not take it (emptied below the rent-exempt minimum), then",
+              "`rent_payer`."
+            ],
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RandomFulfilled",
+      "docs": [
+        "Emitted by `fulfill`. With the proof and `RandomRequested`'s alpha, anyone can re-check the number after the",
+        "request account has closed."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "timestamp",
+            "type": "i64"
+          },
+          {
+            "name": "request",
+            "type": "pubkey"
+          },
+          {
+            "name": "requester",
+            "type": "pubkey"
+          },
+          {
+            "name": "output",
+            "docs": [
+              "The 64-byte VRF output, as the consumer received it (Callback mode) or the request stores it (Store mode)."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                64
+              ]
+            }
+          },
+          {
+            "name": "proof",
+            "type": "bytes"
+          },
+          {
+            "name": "fulfiller",
+            "type": "pubkey"
+          },
+          {
+            "name": "slot",
+            "type": "u64"
+          },
+          {
+            "name": "fee_paid",
+            "docs": [
+              "The escrowed fee, paid to the fulfiller."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "rent_refunded",
+            "docs": [
+              "Callback mode: the rent returned to `rent_payer` as the request closed. Store mode: 0, the rent stays until",
+              "`close_request`."
+            ],
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RandomRequested",
+      "docs": [
+        "Emitted by `request_random`. Carries everything needed to rebuild and check alpha after the request account has",
+        "closed: the request address, the seed, both slots and the slot hash (F-3)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "timestamp",
+            "type": "i64"
+          },
+          {
+            "name": "request",
+            "type": "pubkey"
+          },
+          {
+            "name": "requester",
+            "type": "pubkey"
+          },
+          {
+            "name": "request_key",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "mode",
+            "type": {
+              "defined": {
+                "name": "Mode"
+              }
+            }
+          },
+          {
+            "name": "seed",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "request_slot",
+            "type": "u64"
+          },
+          {
+            "name": "hash_slot",
+            "type": "u64"
+          },
+          {
+            "name": "slot_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "alpha",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "vrf_key",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "suite",
+            "type": "u8"
+          },
+          {
+            "name": "deadline_slot",
+            "type": "u64"
+          },
+          {
+            "name": "fee",
+            "type": "u64"
+          },
+          {
+            "name": "fee_payer",
+            "type": "pubkey"
+          },
+          {
+            "name": "rent_payer",
+            "type": "pubkey"
+          },
+          {
+            "name": "callback_compute",
+            "type": "u32"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RequestAccount",
+      "docs": [
+        "One request for a random number. Its address is its id everywhere: in events, in the callback, and in the oracle's",
+        "API.",
+        "",
+        "Sized to its callback when it is created: `space(callback_accounts, callback_args)`, from 401 bytes (Store mode) to",
+        "993 (16 accounts, 64 bytes of args). The fixed fields come first so their offsets never move: `version` at 8 and",
+        "`status` at 9 forever, then the variable-length callback lists last.",
+        "",
+        "PDA: seeds = [REQUEST_ACCOUNT_PREFIX, requester, request_key]"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "version",
+            "docs": [
+              "Layout version. Fixed at offset 8 forever: never move this field."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "status",
+            "docs": [
+              "Fixed at offset 9 forever: the oracle filters on it."
+            ],
+            "type": {
+              "defined": {
+                "name": "RequestStatus"
+              }
+            }
+          },
+          {
+            "name": "mode",
+            "type": {
+              "defined": {
+                "name": "Mode"
+              }
+            }
+          },
+          {
+            "name": "last_block_timestamp",
+            "docs": [
+              "Unix time of the last change to this account."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "requester",
+            "docs": [
+              "The consumer program (Callback mode), or the app's wallet (Store mode)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "request_key",
+            "docs": [
+              "Chosen by the requester. One open request per requester and key."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "seed",
+            "docs": [
+              "The requester's input to the VRF."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "request_slot",
+            "docs": [
+              "The slot the request landed in."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "hash_slot",
+            "docs": [
+              "The newest SlotHashes entry when the request landed: unknown until the slot before it was produced."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "slot_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "alpha",
+            "docs": [
+              "The VRF input (architecture \u00a79), built from the fields above."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "vrf_key",
+            "docs": [
+              "The VRF key and suite copied from Config when the request landed. A later key change never affects it."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "suite",
+            "type": "u8"
+          },
+          {
+            "name": "deadline_slot",
+            "docs": [
+              "The last slot in which `fulfill` is accepted."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "fee",
+            "docs": [
+              "The fee, escrowed in this account on top of its rent."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "fee_payer",
+            "docs": [
+              "Gets the fee back if the request expires, unless emptied by then (the fee then goes to `rent_payer`)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "rent_payer",
+            "docs": [
+              "Gets the rent back when the request closes."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "callback_discriminator",
+            "docs": [
+              "Callback mode: the consumer instruction to call, and the compute the oracle must budget for it."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
+          },
+          {
+            "name": "callback_compute",
+            "type": "u32"
+          },
+          {
+            "name": "output",
+            "docs": [
+              "Store mode: the number once answered, and the slot it was answered in."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                64
+              ]
+            }
+          },
+          {
+            "name": "fulfilled_slot",
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "Canonical bump of this PDA."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "callback_accounts",
+            "docs": [
+              "Callback mode: the accounts passed to the callback, in callback order (at most 16). Variable length: last."
+            ],
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "CallbackAccount"
+                }
+              }
+            }
+          },
+          {
+            "name": "callback_args",
+            "docs": [
+              "Callback mode: the callback's arguments, already Borsh-encoded (at most 64 bytes). Variable length: last."
+            ],
+            "type": "bytes"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RequestClosed",
+      "docs": [
+        "Emitted by `close_request`. The number itself stays public in `RandomFulfilled`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "timestamp",
+            "type": "i64"
+          },
+          {
+            "name": "request",
+            "type": "pubkey"
+          },
+          {
+            "name": "requester",
+            "type": "pubkey"
+          },
+          {
+            "name": "rent_payer",
+            "docs": [
+              "Where the rent went: the request's `rent_payer`."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "rent_refunded",
+            "docs": [
+              "Every lamport the request account held as it closed."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "slot",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RequestRandomInputParams",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "request_key",
+            "docs": [
+              "Chosen by the requester; one open request per requester and key. Part of the request's address."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "seed",
+            "docs": [
+              "The requester's own input to the VRF."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "mode",
+            "type": {
+              "defined": {
+                "name": "Mode"
+              }
+            }
+          },
+          {
+            "name": "deadline_slots",
+            "docs": [
+              "Slots after this one in which the request may be answered. `None` takes Config's default."
+            ],
+            "type": {
+              "option": "u16"
+            }
+          },
+          {
+            "name": "callback",
+            "docs": [
+              "Callback mode: the callback. Store mode: none."
+            ],
+            "type": {
+              "option": {
+                "defined": {
+                  "name": "CallbackSpec"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "RequestStatus",
+      "docs": [
+        "Where a request is in its life. Stored at byte offset 9 of the request account, forever: the oracle finds open",
+        "requests by filtering on it."
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Pending"
+          },
+          {
+            "name": "Fulfilled"
+          }
+        ]
+      }
+    },
+    {
+      "name": "TransferProgramMainAuthorityEvent",
+      "docs": [
+        "Emitted by `transfer_program_main_authority`. A transfer replaces any successor already pending; that one is",
+        "`previous_pending_main_signing_authority`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "timestamp",
+            "type": "i64"
+          },
+          {
+            "name": "main_signing_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "previous_pending_main_signing_authority",
+            "type": {
+              "option": "pubkey"
+            }
+          },
+          {
+            "name": "pending_main_signing_authority",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "TransferProgramMainAuthorityInputParams",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "new_main_signing_authority",
+            "docs": [
+              "The proposed successor. It takes over only when it signs `accept_program_main_authority`."
+            ],
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "UpdateFulfillersEvent",
+      "docs": [
+        "Emitted by `update_fulfillers`. The sets are the active ones (the first `fulfiller_count` entries)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "timestamp",
+            "type": "i64"
+          },
+          {
+            "name": "signer",
+            "docs": [
+              "The main authority or the operations authority, whichever signed."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "previous_fulfillers",
+            "type": {
+              "vec": "pubkey"
+            }
+          },
+          {
+            "name": "new_fulfillers",
+            "type": {
+              "vec": "pubkey"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "UpdateFulfillersInputParams",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "fulfillers",
+            "docs": [
+              "The complete new set: at most 4 distinct, non-default keys. It replaces the current set entirely; an empty set",
+              "stands every fulfiller down."
+            ],
+            "type": {
+              "vec": "pubkey"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "UpdateOperationsAuthorityEvent",
+      "docs": [
+        "Emitted by `update_operations_authority`. On a no-op rotation `previous` equals `new`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "timestamp",
+            "type": "i64"
+          },
+          {
+            "name": "main_signing_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "previous_operations_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_operations_authority",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "UpdateOperationsAuthorityInputParams",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "new_operations_authority",
+            "docs": [
+              "The new hot key. A param rather than a signer, so a KMS-held key never has to sign its own appointment. There",
+              "is no unset state: to stand the role down, rotate it to a key nobody holds."
+            ],
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "UpdateProgramStatusEvent",
+      "docs": [
+        "Emitted by `update_program_status`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "timestamp",
+            "type": "i64"
+          },
+          {
+            "name": "signer",
+            "docs": [
+              "The main authority or the operations authority, whichever signed."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "previous_program_status",
+            "type": {
+              "defined": {
+                "name": "ProgramStatus"
+              }
+            }
+          },
+          {
+            "name": "new_program_status",
+            "type": {
+              "defined": {
+                "name": "ProgramStatus"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "UpdateProgramStatusInputParams",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "program_status",
+            "type": {
+              "defined": {
+                "name": "ProgramStatus"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "UpdateRequestFeeEvent",
+      "docs": [
+        "Emitted by `update_request_fee`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "timestamp",
+            "type": "i64"
+          },
+          {
+            "name": "main_signing_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "previous_fee_lamports",
+            "type": "u64"
+          },
+          {
+            "name": "new_fee_lamports",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "UpdateRequestFeeInputParams",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "fee_lamports",
+            "docs": [
+              "The fee, in lamports, each new request pays to the fulfiller that answers it. At most 0.1 SOL."
+            ],
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "UpdateRequestLimitsEvent",
+      "docs": [
+        "Emitted by `update_request_limits`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "timestamp",
+            "type": "i64"
+          },
+          {
+            "name": "main_signing_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "previous_default_deadline_slots",
+            "type": "u16"
+          },
+          {
+            "name": "previous_min_deadline_slots",
+            "type": "u16"
+          },
+          {
+            "name": "previous_max_deadline_slots",
+            "type": "u16"
+          },
+          {
+            "name": "previous_max_callback_compute",
+            "type": "u32"
+          },
+          {
+            "name": "new_default_deadline_slots",
+            "type": "u16"
+          },
+          {
+            "name": "new_min_deadline_slots",
+            "type": "u16"
+          },
+          {
+            "name": "new_max_deadline_slots",
+            "type": "u16"
+          },
+          {
+            "name": "new_max_callback_compute",
+            "type": "u32"
+          }
+        ]
+      }
+    },
+    {
+      "name": "UpdateRequestLimitsInputParams",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "default_deadline_slots",
+            "docs": [
+              "The deadline, in slots after the request, used when a request names none."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "min_deadline_slots",
+            "docs": [
+              "The shortest deadline a request may name, in slots. At least 2."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "max_deadline_slots",
+            "docs": [
+              "The longest deadline a request may name, in slots. At most 1,000."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "max_callback_compute",
+            "docs": [
+              "The most compute units a consumer's callback may declare. At most 1,200,000."
+            ],
+            "type": "u32"
+          }
+        ]
+      }
+    },
+    {
+      "name": "UpdateVrfKeyEvent",
+      "docs": [
+        "Emitted by `update_vrf_key`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "timestamp",
+            "type": "i64"
+          },
+          {
+            "name": "main_signing_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "previous_vrf_key",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "previous_suite",
+            "type": "u8"
+          },
+          {
+            "name": "new_vrf_key",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "new_suite",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "UpdateVrfKeyInputParams",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vrf_key",
+            "docs": [
+              "The oracle's VRF public key: a compressed edwards25519 point for suite 1."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "suite",
+            "docs": [
+              "The VRF suite; 1 (RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI) is the only one in v1."
+            ],
+            "type": "u8"
+          }
+        ]
+      }
+    }
+  ],
+  "test_consumer_types": {
+    "RequestOptions": [
+      "mode:Mode",
+      "with_callback:bool",
+      "compute:u32",
+      "deadline_slots:Option<u16>",
+      "args:Vec<u8>"
+    ],
+    "Behaviour": [
+      "Ok:0",
+      "Fail:1",
+      "Burn:2:u32",
+      "Forward:3"
+    ],
+    "Slot": [
+      "key:[u8;32]",
+      "behaviour:Behaviour",
+      "request:Pubkey",
+      "output:[u8;64]",
+      "delivered_slot:u64",
+      "deliveries:u32",
+      "bump:u8"
+    ]
+  },
+  "pdas": {
+    "config": [
+      "config"
+    ],
+    "request": [
+      "request",
+      "requester:32",
+      "request_key:32"
+    ],
+    "requester_identity_under_consumer": [
+      "vrf_requester"
+    ],
+    "callback_signer_under_coordinator": [
+      "vrf_callback",
+      "consumer_program_id:32"
+    ],
+    "test_consumer_slot": [
+      "slot",
+      "request_key:32"
+    ]
+  },
+  "callback": {
+    "data": [
+      "discriminator:8",
+      "request_address:32",
+      "output:64",
+      "raw_borsh_args:0..64"
+    ],
+    "accounts": [
+      "callback_signer:signer:readonly",
+      "stored_callback_accounts:ordered:non_signers"
+    ],
+    "max_accounts": 16,
+    "max_args_bytes": 64,
+    "remaining_outer_signers": false,
+    "writable_rule": "outer may promote stored readonly; CPI uses stored writability",
+    "atomic_failure": true
+  },
+  "lifecycle": {
+    "model": "one request PDA per requester/key; no arena queue or delegation ABI",
+    "mode_bytes": {
+      "Callback": 0,
+      "Store": 1
+    },
+    "request_version": 1,
+    "status_offset": 9,
+    "request_bytes": "401 + 33*callback_accounts + callback_args",
+    "fulfillment_slot_rule": "request_slot < fulfill_slot <= deadline_slot",
+    "callback_success": "fee to fulfiller; close request; rent to recorded rent_payer",
+    "store_success": "output retained until requester close_request",
+    "verifier_return": "pinned verifier program ID and exactly 64 bytes"
+  },
+  "sources": [
+    {
+      "path": "sdks/packages/vrf-coordinator/src/idl/vrf_coordinator.json",
+      "bytes": 65002,
+      "sha256": "b2e739a5ec36581074025dd175c1f73e6405242d8c997c6d57c10f4cfd526129",
+      "url": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library/blob/d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd/sdks/packages/vrf-coordinator/src/idl/vrf_coordinator.json"
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 1078,
+      "sha256": "5e42cfc954def7c8b421264f5d464e0e7c9787ae52aba13aa2ff9bc01861a24a",
+      "url": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library/blob/d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd/LICENSE"
+    },
+    {
+      "path": "Cargo.lock",
+      "bytes": 43291,
+      "sha256": "bd28333f10d550b3ef56ee418bdc26f706db87db192324b277f0ee41383ff608",
+      "url": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library/blob/d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd/Cargo.lock"
+    },
+    {
+      "path": "sdks/yarn.lock",
+      "bytes": 179004,
+      "sha256": "5f7e9e80458a51fe15b3d54e453fcbfcf26747d81526d55f87d6b1970d76262c",
+      "url": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library/blob/d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd/sdks/yarn.lock"
+    },
+    {
+      "path": "programs/vrf-coordinator/src/lib.rs",
+      "bytes": 5581,
+      "sha256": "f6a75da3d4d482cca0c5c34b7a8daa1fddb2d9a24122b8ee2a5591f64b639bd8",
+      "url": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library/blob/d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd/programs/vrf-coordinator/src/lib.rs"
+    },
+    {
+      "path": "programs/vrf-coordinator/src/ids.rs",
+      "bytes": 1916,
+      "sha256": "10e404e5243d3620aca67b0fce882e9b7c97144293012f752aa3c9e62fcb7048",
+      "url": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library/blob/d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd/programs/vrf-coordinator/src/ids.rs"
+    },
+    {
+      "path": "programs/vrf-coordinator/src/alpha.rs",
+      "bytes": 3765,
+      "sha256": "c556d9834e5fd19e1ebc886f905356b889e763ae3cb2ffb53da264ac9250772e",
+      "url": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library/blob/d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd/programs/vrf-coordinator/src/alpha.rs"
+    },
+    {
+      "path": "programs/vrf-coordinator/src/verify.rs",
+      "bytes": 3188,
+      "sha256": "a264083b5e58f380c3ca0e5dfdeffdf3209c2152407866d003971175748da0f7",
+      "url": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library/blob/d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd/programs/vrf-coordinator/src/verify.rs"
+    },
+    {
+      "path": "programs/vrf-coordinator/src/utils.rs",
+      "bytes": 32062,
+      "sha256": "4a55f9f83b45c7630c165cf8d5a52d7413ad829021fa4b8b61fac60e248e5af8",
+      "url": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library/blob/d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd/programs/vrf-coordinator/src/utils.rs"
+    },
+    {
+      "path": "programs/vrf-coordinator/src/states/request_account.rs",
+      "bytes": 7228,
+      "sha256": "5a3964b71bd7aad6b13554333a44dc25c6ca0ad92664793a71e4f711b1386818",
+      "url": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library/blob/d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd/programs/vrf-coordinator/src/states/request_account.rs"
+    },
+    {
+      "path": "programs/vrf-coordinator/src/states/request_mode.rs",
+      "bytes": 361,
+      "sha256": "ef903dad7ba13905c6401a1cacd11ee41345c2fcc7e8ce3cfa039c047bf95629",
+      "url": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library/blob/d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd/programs/vrf-coordinator/src/states/request_mode.rs"
+    },
+    {
+      "path": "programs/vrf-coordinator/src/instructions/request/request_random.rs",
+      "bytes": 8709,
+      "sha256": "37eaf9a6a0ebd3edeb304e29704971435d80377708a1a4e0a3c618e50cf50414",
+      "url": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library/blob/d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd/programs/vrf-coordinator/src/instructions/request/request_random.rs"
+    },
+    {
+      "path": "programs/vrf-coordinator/src/instructions/fulfillment/fulfill.rs",
+      "bytes": 8566,
+      "sha256": "9ca2cf2ff868dc7191213fe2522f48a4552ae85188da19a48e4fb21e6cb5050d",
+      "url": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library/blob/d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd/programs/vrf-coordinator/src/instructions/fulfillment/fulfill.rs"
+    },
+    {
+      "path": "programs/reference-verify/src/lib.rs",
+      "bytes": 4324,
+      "sha256": "d655ebc9b87c0fd493c2ff380fba5c89f2f22c455271fc46de28842ab461f682",
+      "url": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library/blob/d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd/programs/reference-verify/src/lib.rs"
+    },
+    {
+      "path": "programs/reference-verify/src/ecvrf.rs",
+      "bytes": 12521,
+      "sha256": "e517638ebcd83ff836d3ab232c692b03da5433be463b59109f7faeddef11cd39",
+      "url": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library/blob/d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd/programs/reference-verify/src/ecvrf.rs"
+    },
+    {
+      "path": "programs/test-consumer/src/lib.rs",
+      "bytes": 12409,
+      "sha256": "f53c60ef73c2ae9bacb6d045ef3c80839c5cb969fea88c94fb026d89d895abdc",
+      "url": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library/blob/d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd/programs/test-consumer/src/lib.rs"
+    },
+    {
+      "path": "sdks/packages/vrf-coordinator/src/alpha.ts",
+      "bytes": 2056,
+      "sha256": "9eedea3c137b627b319f457076cece9b58b55d0c0da7f966092c873d71e1f5f3",
+      "url": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library/blob/d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd/sdks/packages/vrf-coordinator/src/alpha.ts"
+    },
+    {
+      "path": "sdks/packages/vrf-coordinator/src/vrf-coordinator-lib.ts",
+      "bytes": 23980,
+      "sha256": "1891d1c74b1fb5fe08468023f9510ecc7658cfc0ed992c3264462c76735225cb",
+      "url": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library/blob/d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd/sdks/packages/vrf-coordinator/src/vrf-coordinator-lib.ts"
+    },
+    {
+      "path": "sdks/packages/vrf-coordinator/test/alpha.spec.ts",
+      "bytes": 1663,
+      "sha256": "dd75cbdc48a5a1f64316a59c1760ee309265c84e1e6ffffdc4d0a296a63f1283",
+      "url": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library/blob/d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd/sdks/packages/vrf-coordinator/test/alpha.spec.ts"
+    },
+    {
+      "path": "sdks/packages/vrf-coordinator/package.json",
+      "bytes": 993,
+      "sha256": "c7184213636c499b9d2f849b5f877bc101b45b9173ede3a3029b357606a89de9",
+      "url": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library/blob/d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd/sdks/packages/vrf-coordinator/package.json"
+    },
+    {
+      "path": "sdks/packages/vrf-services/package.json",
+      "bytes": 562,
+      "sha256": "37a16d4323537f2ae9847db40f46bb27321cefcdd6142671d48ff9b9618e95fa",
+      "url": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library/blob/d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd/sdks/packages/vrf-services/package.json"
+    },
+    {
+      "path": "sdks/packages/vrf-services/src/ecvrf.ts",
+      "bytes": 7164,
+      "sha256": "7a401fc88425cf6612d2baf4227b85ddf9c4075c55f90ec09df3067170518b19",
+      "url": "https://github.com/mirrorworld-universe/vrf-coordinator-program-library/blob/d1b8c3ffc57a0d6caa50b8d17893f036bf61cabd/sdks/packages/vrf-services/src/ecvrf.ts"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "alpha-golden.json",
+      "sha256": "f3bbcbb561de091d8066ea48e25add6e54421e14da4bf1b8274aeedc97e1efb4",
+      "bytes": 874,
+      "provenance": "offline_derived"
+    },
+    {
+      "path": "rfc9381-vectors.json",
+      "sha256": "9bff3c9794397fdb6179e576ff5b31a3c90ba770f541f1257c4c0a03bc014b53",
+      "bytes": 1587,
+      "provenance": "offline_derived"
+    },
+    {
+      "path": "encoding-only.json",
+      "sha256": "4b6f1020ce96385b74b6467a76ed77fecfd906edc1e3d0860cd172d5c5de0d75",
+      "bytes": 1401,
+      "provenance": "synthetic"
+    },
+    {
+      "path": "UPSTREAM-LICENSE.txt",
+      "sha256": "5e42cfc954def7c8b421264f5d464e0e7c9787ae52aba13aa2ff9bc01861a24a",
+      "bytes": 1078,
+      "provenance": "offline_derived"
+    }
+  ],
+  "acceptance": {
+    "runtime": "not_run",
+    "execution_proof": "unsupported_by_current_relation",
+    "portal": "not_run",
+    "baixiong": "pending",
+    "jonas": "pending",
+    "stable_fixtures": "pending"
+  }
+}

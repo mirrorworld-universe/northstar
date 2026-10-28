@@ -1,7 +1,6 @@
 use {
-    crate::{AccountWitnessV1, ReplayError, ReplayWitnessV1},
+    crate::{AccountWitnessV1, Digest, ReplayError, ReplayWitnessV1, Sha256},
     borsh::{BorshDeserialize, BorshSerialize},
-    sha2::{Digest, Sha256},
     std::collections::{BTreeMap, BTreeSet},
 };
 

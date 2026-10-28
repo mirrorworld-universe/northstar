@@ -1,0 +1,251 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:northstar:vrf-evidence:v1",
+  "title": "Northstar offline VRF evidence interchange v1 (not an acceptance certificate)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "evidence_class", "window", "revisions", "environment", "profile", "bindings", "artifacts", "er_handoff", "application", "resolutions", "lifecycle", "rejection_cases", "reviews", "limitations"],
+  "properties": {
+    "schema_version": {"const": "northstar-vrf-evidence/v1"},
+    "evidence_class": {"enum": ["synthetic", "cpu_development", "live_candidate"]},
+    "window": {"$ref": "#/$defs/window"},
+    "revisions": {"$ref": "#/$defs/revisions"},
+    "environment": {"$ref": "#/$defs/environment"},
+    "profile": {"$ref": "#/$defs/profile"},
+    "bindings": {"$ref": "#/$defs/bindings"},
+    "artifacts": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/artifact"}},
+    "er_handoff": {"$ref": "#/$defs/callback_series"},
+    "application": {"$ref": "#/$defs/callback_series"},
+    "resolutions": {"type": "array", "maxItems": 3, "items": {"$ref": "#/$defs/resolution"}},
+    "lifecycle": {"$ref": "#/$defs/lifecycle"},
+    "rejection_cases": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/rejection_case"}},
+    "reviews": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/review"}},
+    "limitations": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/text"}}
+  },
+  "$defs": {
+    "text": {"type": "string", "minLength": 1, "maxLength": 1024},
+    "id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+    "optional_text": {"type": ["string", "null"], "minLength": 1, "maxLength": 256},
+    "ref": {"type": ["string", "null"], "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "optional_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "optional_commit": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"},
+    "counter": {"type": "integer", "minimum": 1, "maximum": 10000},
+    "time": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+    "optional_time": {"type": ["integer", "null"], "minimum": 0, "maximum": 9223372036854775807},
+    "date": {"type": "string", "minLength": 1, "maxLength": 64},
+    "paths": {"type": "array", "maxItems": 3, "uniqueItems": true, "items": {"enum": ["request", "vrf_verification", "consumer_callback"]}},
+    "window": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "collector", "started_at", "ended_at", "attempts_artifact"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"}, "collector": {"$ref": "#/$defs/text"},
+        "started_at": {"$ref": "#/$defs/date"}, "ended_at": {"$ref": "#/$defs/date"},
+        "attempts_artifact": {"$ref": "#/$defs/ref"}
+      }
+    },
+    "revisions": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_commit", "oracle_revision", "application_revision", "sdk_revision", "consumer_revision", "portal_program", "portal_binary_sha256"],
+      "properties": {
+        "source_commit": {"$ref": "#/$defs/optional_commit"},
+        "oracle_revision": {"$ref": "#/$defs/optional_commit"},
+        "application_revision": {"$ref": "#/$defs/optional_commit"},
+        "sdk_revision": {"$ref": "#/$defs/optional_commit"},
+        "consumer_revision": {"$ref": "#/$defs/optional_commit"},
+        "portal_program": {"$ref": "#/$defs/optional_text"},
+        "portal_binary_sha256": {"$ref": "#/$defs/optional_sha256"}
+      }
+    },
+    "environment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "kind", "er_genesis_hash", "l1_genesis_hash", "runtime_revision", "feature_set_sha256", "oracle_public_key", "configuration_artifact"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "kind": {"enum": ["cpu", "solana_devnet_only", "northstar_er"]},
+        "er_genesis_hash": {"$ref": "#/$defs/optional_text"},
+        "l1_genesis_hash": {"$ref": "#/$defs/optional_text"},
+        "runtime_revision": {"$ref": "#/$defs/optional_commit"},
+        "feature_set_sha256": {"$ref": "#/$defs/optional_sha256"},
+        "oracle_public_key": {"$ref": "#/$defs/optional_text"},
+        "configuration_artifact": {"$ref": "#/$defs/ref"}
+      }
+    },
+    "profile": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "version", "relation_version", "profile_sha256", "fixtures_sha256", "guest_sha256", "verification_key_sha256", "rejection_corpus_sha256", "paths"],
+      "properties": {
+        "id": {"$ref": "#/$defs/optional_text"},
+        "version": {"$ref": "#/$defs/optional_text"},
+        "relation_version": {"$ref": "#/$defs/optional_text"},
+        "profile_sha256": {"$ref": "#/$defs/optional_sha256"},
+        "fixtures_sha256": {"$ref": "#/$defs/optional_sha256"},
+        "guest_sha256": {"$ref": "#/$defs/optional_sha256"},
+        "verification_key_sha256": {"$ref": "#/$defs/optional_sha256"},
+        "rejection_corpus_sha256": {"$ref": "#/$defs/optional_sha256"},
+        "paths": {"$ref": "#/$defs/paths"}
+      }
+    },
+    "bindings": {
+      "type": "object", "additionalProperties": false,
+      "required": ["profile", "fixtures", "guest", "verification_key", "rejection_corpus"],
+      "properties": {
+        "profile": {"$ref": "#/$defs/ref"}, "fixtures": {"$ref": "#/$defs/ref"},
+        "guest": {"$ref": "#/$defs/ref"}, "verification_key": {"$ref": "#/$defs/ref"},
+        "rejection_corpus": {"$ref": "#/$defs/ref"}
+      }
+    },
+    "artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "path", "sha256", "bytes", "source", "kind", "producer", "command", "captured_at", "origin"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "path": {"type": "string", "minLength": 1, "maxLength": 512},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "bytes": {"type": "integer", "minimum": 1, "maximum": 67108864},
+        "source": {"enum": ["captured", "synthetic", "retained"]},
+        "kind": {"enum": ["log", "proof", "witness", "history", "checkpoint", "isolation", "receipt", "outcome", "configuration", "review", "corpus", "fixtures", "fixture", "guest", "key", "profile"]},
+        "producer": {"$ref": "#/$defs/text"}, "command": {"$ref": "#/$defs/text"},
+        "captured_at": {"$ref": "#/$defs/date"}, "origin": {"$ref": "#/$defs/text"}
+      }
+    },
+    "callback_series": {
+      "type": "object", "additionalProperties": false,
+      "required": ["identity_sha256", "clock_id", "capture_artifact", "requests", "callbacks"],
+      "properties": {
+        "identity_sha256": {"$ref": "#/$defs/sha256"}, "clock_id": {"$ref": "#/$defs/id"},
+        "capture_artifact": {"$ref": "#/$defs/ref"},
+        "requests": {"type": "array", "maxItems": 2000, "items": {"$ref": "#/$defs/request"}},
+        "callbacks": {"type": "array", "maxItems": 4000, "items": {"$ref": "#/$defs/callback"}}
+      }
+    },
+    "request": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "sequence", "submitted_ns", "status"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"}, "sequence": {"$ref": "#/$defs/counter"},
+        "submitted_ns": {"$ref": "#/$defs/time"},
+        "status": {"enum": ["fulfilled", "pending", "missing", "failed"]}
+      }
+    },
+    "callback": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "request_id", "sequence", "observed_ns", "status"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"}, "request_id": {"$ref": "#/$defs/id"},
+        "sequence": {"$ref": "#/$defs/counter"}, "observed_ns": {"$ref": "#/$defs/time"},
+        "status": {"enum": ["success", "failed"]}
+      }
+    },
+    "hardware": {
+      "type": "object", "additionalProperties": false,
+      "required": ["model", "count", "device_id"],
+      "properties": {
+        "model": {"$ref": "#/$defs/text"}, "count": {"type": "integer", "minimum": 0, "maximum": 64},
+        "device_id": {"$ref": "#/$defs/id"}
+      }
+    },
+    "timing": {
+      "type": "object", "additionalProperties": false,
+      "required": ["clock_id", "witness_start_ns", "witness_ready_ns", "submitted_ns", "core_done_ns", "wrapped_ns", "uploaded_ns", "resolve_submitted_ns", "resolved_ns"],
+      "properties": {
+        "clock_id": {"$ref": "#/$defs/id"},
+        "witness_start_ns": {"$ref": "#/$defs/optional_time"}, "witness_ready_ns": {"$ref": "#/$defs/optional_time"},
+        "submitted_ns": {"$ref": "#/$defs/optional_time"}, "core_done_ns": {"$ref": "#/$defs/optional_time"},
+        "wrapped_ns": {"$ref": "#/$defs/optional_time"}, "uploaded_ns": {"$ref": "#/$defs/optional_time"},
+        "resolve_submitted_ns": {"$ref": "#/$defs/optional_time"}, "resolved_ns": {"$ref": "#/$defs/optional_time"}
+      }
+    },
+    "resolve": {
+      "type": "object", "additionalProperties": false,
+      "required": ["instruction", "verifier", "status", "compute_units", "transaction", "receipt_artifact", "outcome_artifact"],
+      "properties": {
+        "instruction": {"enum": ["ResolveChallenge", "StandaloneVerifier", "none"]},
+        "verifier": {"enum": ["Production", "test", "none"]},
+        "status": {"enum": ["success", "rejected", "not_run"]},
+        "compute_units": {"type": ["integer", "null"], "minimum": 0, "maximum": 10000000},
+        "transaction": {"$ref": "#/$defs/optional_text"},
+        "receipt_artifact": {"$ref": "#/$defs/ref"}, "outcome_artifact": {"$ref": "#/$defs/ref"}
+      }
+    },
+    "resolution": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "sequence", "identity_sha256", "checkpoint_id", "fixture_id", "status", "proof_kind", "proof_origin", "paths", "hardware", "timing", "witness_artifact", "history_artifact", "checkpoint_artifact", "isolation_artifact", "proof_artifact", "prover_log_artifact", "resolve"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"}, "sequence": {"$ref": "#/$defs/counter"},
+        "identity_sha256": {"$ref": "#/$defs/sha256"}, "checkpoint_id": {"$ref": "#/$defs/id"},
+        "fixture_id": {"$ref": "#/$defs/ref"},
+        "status": {"enum": ["completed", "rejected", "unsupported", "missing"]},
+        "proof_kind": {"enum": ["execution", "vrf", "none"]},
+        "proof_origin": {"enum": ["generated", "retained", "synthetic", "missing"]},
+        "paths": {"$ref": "#/$defs/paths"}, "hardware": {"$ref": "#/$defs/hardware"},
+        "timing": {"$ref": "#/$defs/timing"},
+        "witness_artifact": {"$ref": "#/$defs/ref"}, "history_artifact": {"$ref": "#/$defs/ref"},
+        "checkpoint_artifact": {"$ref": "#/$defs/ref"}, "isolation_artifact": {"$ref": "#/$defs/ref"},
+        "proof_artifact": {"$ref": "#/$defs/ref"}, "prover_log_artifact": {"$ref": "#/$defs/ref"},
+        "resolve": {"$ref": "#/$defs/resolve"}
+      }
+    },
+    "lifecycle": {
+      "type": "object", "additionalProperties": false,
+      "required": ["startup_ms", "cold_start_ms", "recovery_ms", "capture_artifact", "notes"],
+      "properties": {
+        "startup_ms": {"$ref": "#/$defs/optional_time"}, "cold_start_ms": {"$ref": "#/$defs/optional_time"},
+        "recovery_ms": {"$ref": "#/$defs/optional_time"}, "capture_artifact": {"$ref": "#/$defs/ref"},
+        "notes": {"$ref": "#/$defs/text"}
+      }
+    },
+    "rejection_case": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "identity_sha256", "category", "observed", "capture_artifact"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"}, "identity_sha256": {"$ref": "#/$defs/sha256"},
+        "category": {"enum": ["incorrect_witness", "unsupported_path", "existing_route"]},
+        "observed": {"enum": ["rejected", "accepted", "not_run"]},
+        "capture_artifact": {"$ref": "#/$defs/ref"}
+      }
+    },
+    "fixtures_manifest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "fixtures"],
+      "properties": {
+        "schema_version": {"const": "northstar-vrf-fixtures/v1"},
+        "fixtures": {"type": "array", "minItems": 1, "maxItems": 128, "items": {
+          "type": "object", "additionalProperties": false, "required": ["id", "paths", "artifact", "sha256"],
+          "properties": {
+            "id": {"$ref": "#/$defs/id"},
+            "paths": {"type": "array", "minItems": 1, "maxItems": 3, "uniqueItems": true,
+              "items": {"enum": ["request", "vrf_verification", "consumer_callback"]}},
+            "artifact": {"$ref": "#/$defs/id"},
+            "sha256": {"$ref": "#/$defs/sha256"}
+          }
+        }}
+      }
+    },
+    "corpus_manifest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "cases"],
+      "properties": {
+        "schema_version": {"const": "northstar-vrf-rejection-corpus/v1"},
+        "cases": {"type": "array", "minItems": 1, "maxItems": 128, "items": {
+          "type": "object", "additionalProperties": false, "required": ["id", "category"],
+          "properties": {
+            "id": {"$ref": "#/$defs/id"},
+            "category": {"enum": ["incorrect_witness", "unsupported_path", "existing_route"]}
+          }
+        }}
+      }
+    },
+    "review": {
+      "type": "object", "additionalProperties": false,
+      "required": ["role", "reviewer", "decision", "identity_sha256", "run_ids", "record_artifact", "reproduction_artifact"],
+      "properties": {
+        "role": {"enum": ["bilal_profile", "baixiong_integration", "collins_environment", "jonas_proof"]},
+        "reviewer": {"$ref": "#/$defs/text"}, "decision": {"enum": ["accepted", "rejected", "pending"]},
+        "identity_sha256": {"$ref": "#/$defs/sha256"},
+        "run_ids": {"type": "array", "maxItems": 3, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "record_artifact": {"$ref": "#/$defs/ref"}, "reproduction_artifact": {"$ref": "#/$defs/ref"}
+      }
+    }
+  }
+}

@@ -470,6 +470,31 @@ fn verify_trace_authentication_path(
         == checkpoint.trace_root
 }
 
+fn verify_step_tx_effect_binding(
+    checkpoint: &Checkpoint,
+    step_index: u64,
+    proof_selector: (u8, u8),
+    commitment: &[u8; 32],
+    path_len: u8,
+    path: &[[u8; 32]; TX_EFFECT_AUTH_PATH_NODES],
+) -> bool {
+    #[cfg(feature = "zk-verifier-bounded-vrf")]
+    if proof_selector.0 == northstar_zk_types::ER_STEP_PROOF_KIND_BOUNDED_VRF {
+        // Kind 3 proves its own bounded inclusion path in the guest and exposes
+        // the complete candidate tree root, not kind 2's selected leaf.
+        return proof_selector.1 == northstar_zk_types::ER_STEP_PROOF_VERSION_V1
+            && checkpoint.step_count == super::verifier::bounded_vrf_checkpoint_steps()
+            && step_index < checkpoint.step_count
+            && commitment == &checkpoint.tx_effect_root
+            && FrBytes::new(*commitment).is_ok()
+            && *commitment != [0; 32]
+            && path_len == 0
+            && path.iter().all(|node| *node == [0; 32]);
+    }
+    let _ = proof_selector;
+    verify_tx_effect_authentication_path(checkpoint, step_index, commitment, path_len, path)
+}
+
 fn verify_tx_effect_authentication_path(
     checkpoint: &Checkpoint,
     step_index: u64,
@@ -1347,9 +1372,10 @@ pub fn process_create_step_proof(
         return Err(PortalError::Unauthorized.into());
     }
 
-    if !verify_tx_effect_authentication_path(
+    if !verify_step_tx_effect_binding(
         &checkpoint_state,
         step_index,
+        (proof_kind, proof_version),
         &tx_effect_root,
         tx_effect_path_len,
         &tx_effect_path,
@@ -1566,6 +1592,20 @@ fn verify_step_proof(
     }
 }
 
+#[cfg(feature = "zk-verifier-bounded-vrf")]
+fn bounded_vrf_checkpoint_binding(
+    checkpoint: &Checkpoint,
+    challenge: &Challenge,
+    proof: &StepProofAccount,
+) -> bool {
+    checkpoint.step_count == super::verifier::bounded_vrf_checkpoint_steps()
+        && proof.tx_effect_root == checkpoint.tx_effect_root
+        && proof.step_index == challenge.start_step
+        && proof.step_index < checkpoint.step_count
+        && proof.readonly_l1_root == checkpoint.readonly_l1_root
+        && proof.settlement_effect_root == checkpoint.effect_commitment
+}
+
 fn verify_step_proof_production(
     checkpoint_state: &Checkpoint,
     challenge_state: &Challenge,
@@ -1573,6 +1613,12 @@ fn verify_step_proof_production(
 ) -> StepProofVerification {
     #[cfg(feature = "zk-verifier-prototype")]
     {
+        #[cfg(feature = "zk-verifier-bounded-vrf")]
+        if proof_state.proof_kind == northstar_zk_types::ER_STEP_PROOF_KIND_BOUNDED_VRF
+            && !bounded_vrf_checkpoint_binding(checkpoint_state, challenge_state, proof_state)
+        {
+            return StepProofVerification::Invalid;
+        }
         let Ok(session_context) = FrBytes::new(proof_state.session_context) else {
             return StepProofVerification::Invalid;
         };
@@ -1898,6 +1944,91 @@ mod tests {
             witness.checkpoint.transaction_effect_path.siblings.len() as u8,
             &path,
         ));
+        assert!(verify_step_tx_effect_binding(
+            &checkpoint,
+            witness.step_index,
+            (2, 1),
+            &public.tx_effect_root.to_bytes(),
+            witness.checkpoint.transaction_effect_path.siblings.len() as u8,
+            &path,
+        ));
+        #[cfg(feature = "zk-verifier-bounded-vrf")]
+        {
+            let mut candidate = checkpoint;
+            candidate.step_count = super::super::verifier::bounded_vrf_checkpoint_steps();
+            candidate.tx_effect_root = FrBytes::from_u64(17).to_bytes();
+            let empty = [[0; 32]; TX_EFFECT_AUTH_PATH_NODES];
+            assert!(verify_step_tx_effect_binding(
+                &candidate,
+                0,
+                (3, 1),
+                &candidate.tx_effect_root,
+                0,
+                &empty
+            ));
+            assert!(!verify_step_tx_effect_binding(
+                &candidate,
+                candidate.step_count,
+                (3, 1),
+                &candidate.tx_effect_root,
+                0,
+                &empty
+            ));
+            assert!(!verify_step_tx_effect_binding(
+                &candidate,
+                0,
+                (3, 2),
+                &candidate.tx_effect_root,
+                0,
+                &empty
+            ));
+            assert!(!verify_step_tx_effect_binding(
+                &candidate,
+                0,
+                (3, 1),
+                &public.tx_effect_root.to_bytes(),
+                0,
+                &empty
+            ));
+            assert!(!verify_step_tx_effect_binding(
+                &candidate,
+                0,
+                (3, 1),
+                &candidate.tx_effect_root,
+                1,
+                &empty
+            ));
+            assert!(!verify_step_tx_effect_binding(
+                &candidate,
+                0,
+                (3, 1),
+                &candidate.tx_effect_root,
+                0,
+                &path
+            ));
+            assert!(!verify_step_tx_effect_binding(
+                &candidate,
+                0,
+                (2, 1),
+                &candidate.tx_effect_root,
+                0,
+                &empty
+            ));
+            for count in [1, 2, 3] {
+                if count == super::super::verifier::bounded_vrf_checkpoint_steps() {
+                    continue;
+                }
+                candidate.step_count = count;
+                assert!(!verify_step_tx_effect_binding(
+                    &candidate,
+                    0,
+                    (3, 1),
+                    &candidate.tx_effect_root,
+                    0,
+                    &empty
+                ));
+            }
+        }
     }
 
     #[test]
@@ -1979,5 +2110,42 @@ mod tests {
                 0x01, 0x21, 0x1c, 0x5c,
             ]
         );
+        #[cfg(feature = "zk-verifier-bounded-vrf")]
+        {
+            let mut candidate_checkpoint = checkpoint;
+            candidate_checkpoint.step_count =
+                super::super::verifier::bounded_vrf_checkpoint_steps();
+            candidate_checkpoint.tx_effect_root = proof.tx_effect_root;
+            let mut candidate_challenge = challenge;
+            candidate_challenge.start_step = 0;
+            candidate_challenge.end_step = 1;
+            let mut candidate_proof = proof;
+            candidate_proof.proof_kind = 3;
+            candidate_proof.step_index = 0;
+            assert!(bounded_vrf_checkpoint_binding(
+                &candidate_checkpoint,
+                &candidate_challenge,
+                &candidate_proof
+            ));
+            for count in [1, 2, 3] {
+                if count == super::super::verifier::bounded_vrf_checkpoint_steps() {
+                    continue;
+                }
+                candidate_checkpoint.step_count = count;
+                assert!(!bounded_vrf_checkpoint_binding(
+                    &candidate_checkpoint,
+                    &candidate_challenge,
+                    &candidate_proof
+                ));
+                assert!(matches!(
+                    verify_step_proof_production(
+                        &candidate_checkpoint,
+                        &candidate_challenge,
+                        &candidate_proof
+                    ),
+                    StepProofVerification::Invalid
+                ));
+            }
+        }
     }
 }

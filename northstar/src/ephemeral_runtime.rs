@@ -17,9 +17,11 @@ use {
     },
     crossbeam_channel::{unbounded, Sender},
     log::{debug, info, warn},
-    solana_account::{state_traits::StateMut, AccountSharedData, ReadableAccount, WritableAccount},
-    solana_accounts_db::accounts_db::AccountsDb,
-    solana_clock::{BankId, Slot},
+    solana_account::{
+        state_traits::StateMutWincode, AccountSharedData, ReadableAccount, WritableAccount,
+    },
+    solana_accounts_db::{accounts_db::AccountsDb, bank_id::BankId},
+    solana_clock::Slot,
     solana_gossip::cluster_info::ClusterInfo,
     solana_instruction::{AccountMeta, Instruction},
     solana_keypair::Keypair,
@@ -859,6 +861,15 @@ impl EphemeralRuntime {
             _ledger_dir: ledger_dir,
             _runtime: runtime,
         })
+    }
+
+    #[cfg(feature = "vrf-candidate-capture")]
+    pub fn set_vrf_candidate_capture(
+        &self,
+        sink: Arc<crate::vrf_candidate_capture::CandidateCaptureSink>,
+    ) {
+        let _guard = self.bank_operation_lock.lock().unwrap();
+        self._tx_client.set_candidate_capture(sink);
     }
 
     pub fn rpc_addr(&self) -> String {
@@ -2435,7 +2446,8 @@ mod tests {
         base64::{prelude::BASE64_STANDARD, Engine as _},
         northstar_portal::{DelegationRecord, DepositReceipt, NorthstarTransferEvent},
         solana_account::{
-            state_traits::StateMut, Account, AccountSharedData, ReadableAccount, WritableAccount,
+            state_traits::StateMutWincode, Account, AccountSharedData, ReadableAccount,
+            WritableAccount,
         },
         solana_compute_budget_interface::ComputeBudgetInstruction,
         solana_fee_structure::FeeStructure,

@@ -2,7 +2,7 @@
 
 use {
     crate::{
-        bank::{Bank, SquashTiming, bank_hash_details},
+        bank::{Bank, BankId, SquashTiming, bank_hash_details},
         installed_scheduler_pool::{
             BankWithScheduler, InstalledSchedulerPoolArc, SchedulingContext,
         },
@@ -12,7 +12,7 @@ use {
     agave_votor_messages::migration::MigrationStatus,
     arc_swap::ArcSwap,
     log::*,
-    solana_clock::{BankId, Slot},
+    solana_clock::Slot,
     solana_hash::Hash,
     solana_measure::measure::Measure,
     solana_program_runtime::loaded_programs::{BlockRelation, ForkGraph},
@@ -886,6 +886,7 @@ mod tests {
             block_component_processor::vote_reward::epoch_inflation_account_state::EpochInflationAccountState,
             genesis_utils::{
                 GenesisConfigInfo, create_genesis_config, create_genesis_config_with_leader,
+                create_genesis_config_with_tower_leader,
             },
             installed_scheduler_pool::{
                 InstalledScheduler, ResultWithTimings, ScheduleResult, SchedulerId,
@@ -908,6 +909,7 @@ mod tests {
         solana_epoch_schedule::EpochSchedule,
         solana_keypair::Keypair,
         solana_leader_schedule::SlotLeader,
+        solana_pubkey::Pubkey,
         solana_rent::Rent,
         solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
         solana_sdk_ids::system_program,
@@ -1098,7 +1100,7 @@ mod tests {
     ) -> Bank {
         let GenesisConfigInfo {
             mut genesis_config, ..
-        } = create_genesis_config(10_000);
+        } = create_genesis_config_with_tower_leader(10_000, &Pubkey::new_unique(), 0);
         genesis_config.epoch_schedule = EpochSchedule::new(32);
 
         if let Some(genesis_cert) = genesis_cert {
@@ -1206,7 +1208,7 @@ mod tests {
             genesis_config,
             mint_keypair,
             ..
-        } = create_genesis_config(10_000);
+        } = create_genesis_config_with_tower_leader(10_000, &Pubkey::new_unique(), 0);
         let bank_forks = BankForks::new_rw_arc(Bank::new_for_tests(&genesis_config));
         let root_bank = bank_forks.read().unwrap().root_bank();
 
