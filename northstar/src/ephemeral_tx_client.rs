@@ -455,6 +455,11 @@ impl EphemeralTransactionClient {
         self.checkpoint_capture.read().unwrap().completed.clone()
     }
 
+    fn checkpoint_awaits_settlement(&self) -> bool {
+        let capture = self.checkpoint_capture.read().unwrap();
+        capture.completed.is_some() || capture.steps.len() == CANONICAL_CHECKPOINT_STEPS_V1
+    }
+
     pub(crate) fn seal_checkpoint_if_nonempty(&self) -> bool {
         let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
         let mut capture = self.checkpoint_capture.write().unwrap();
@@ -868,14 +873,10 @@ impl EphemeralTransactionClient {
         }
 
         let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
-        let checkpoint_capture = self.checkpoint_capture.read().unwrap();
-        if checkpoint_capture.completed.is_some()
-            || checkpoint_capture.steps.len() == CANONICAL_CHECKPOINT_STEPS_V1
-        {
+        if self.checkpoint_awaits_settlement() {
             warn!("ER transaction rejected: canonical checkpoint awaits settlement");
             return;
         }
-        drop(checkpoint_capture);
         let bank = self.bank();
         let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
         let mut frozen_accounts = self.frozen_accounts.read().unwrap().clone();
@@ -1899,6 +1900,11 @@ impl solana_rpc::rpc::ErTxExecutor for EphemeralTransactionClient {
             })?;
 
         let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
+        if self.checkpoint_awaits_settlement() {
+            return Err(solana_rpc::rpc::ErTxError::Rejected(
+                "canonical checkpoint awaits settlement; retry after settlement".to_string(),
+            ));
+        }
         let enforce_account_access = self.session_pda.read().unwrap().is_some();
         if enforce_account_access && self.has_processed_signature(&tx) {
             return Err(solana_rpc::rpc::ErTxError::Rejected(
@@ -2561,6 +2567,90 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn rpc_checkpoint_backpressure_preserves_state_across_settlement() {
+        use solana_rpc::rpc::{ErTxError, ErTxExecutor};
+
+        for step_count in [1, CANONICAL_CHECKPOINT_STEPS_V1] {
+            let payer = Keypair::new();
+            let bank = create_test_bank();
+            fund_account(&bank, &payer.pubkey(), 100_000_000);
+            let blockhash = bank.last_blockhash();
+            let history = Arc::new(ErHistoryStore::default());
+            let client = create_client_with_history(
+                BankForks::new_rw_arc(bank),
+                vec![payer.pubkey()],
+                Arc::clone(&history),
+            );
+            *client.session_pda.write().unwrap() = Some(Pubkey::new_unique());
+            let next_transaction = || {
+                let recipient = Pubkey::new_unique();
+                let transaction = create_transfer_tx(&payer, payer.pubkey(), recipient, blockhash);
+                (
+                    recipient,
+                    transaction.signatures[0],
+                    bincode::serialize(&transaction).unwrap(),
+                )
+            };
+            let (mut recipient, mut signature, mut wire) = next_transaction();
+            let mut previous_state_root = None;
+
+            for _ in 0..3 {
+                for _ in 0..step_count {
+                    client.execute_wire(wire).unwrap();
+                    assert_eq!(client.bank().get_balance(&recipient), 1_000_000);
+                    assert!(history
+                        .get_signature_status(&signature)
+                        .unwrap()
+                        .status
+                        .is_ok());
+                    (recipient, signature, wire) = next_transaction();
+                }
+                assert!(client.seal_checkpoint_if_nonempty());
+                let artifact = client.checkpoint_artifact_v1().unwrap();
+                artifact.verify().unwrap();
+                assert_eq!(artifact.checkpoint.step_count as usize, step_count);
+                if let Some(root) = previous_state_root {
+                    assert_eq!(artifact.checkpoint.previous_state_root, root);
+                }
+                previous_state_root = Some(artifact.checkpoint.new_state_root);
+                let payer_balance = client.bank().get_balance(&payer.pubkey());
+
+                for _ in 0..3 {
+                    assert!(matches!(
+                        client.execute_wire(wire.clone()),
+                        Err(ErTxError::Rejected(message))
+                            if message == "canonical checkpoint awaits settlement; retry after settlement"
+                    ));
+                    assert_eq!(client.bank().get_balance(&payer.pubkey()), payer_balance);
+                    assert_eq!(client.bank().get_balance(&recipient), 0);
+                    assert!(history.get_signature_status(&signature).is_none());
+                    assert!(!client
+                        .er_account_overlay
+                        .read()
+                        .unwrap()
+                        .contains_key(&recipient));
+                    assert!(!client.touched_accounts.read().unwrap().contains(&recipient));
+                    assert_eq!(client.checkpoint_artifact_v1().unwrap(), artifact);
+                    assert!(client.active.load(Ordering::Relaxed));
+                }
+                assert!(!client.consume_checkpoint_artifact_v1(artifact.checkpoint.er_slot + 1));
+                assert!(client.consume_checkpoint_artifact_v1(artifact.checkpoint.er_slot));
+            }
+
+            client.execute_wire(wire).unwrap();
+            assert_eq!(client.bank().get_balance(&recipient), 1_000_000);
+            assert!(client.seal_checkpoint_if_nonempty());
+            let artifact = client.checkpoint_artifact_v1().unwrap();
+            artifact.verify().unwrap();
+            assert_eq!(
+                Some(artifact.checkpoint.previous_state_root),
+                previous_state_root
+            );
+            assert!(client.active.load(Ordering::Relaxed));
+        }
+    }
+
+    #[test]
     fn supported_sbf_checkpoint_retains_replay_account_values() {
         supported_sbf_checkpoint_with_fee(5_000, Pubkey::new_from_array([9; 32]));
     }
@@ -2936,6 +3026,11 @@ pub(crate) mod tests {
         let next_transaction =
             create_transfer_tx_with_amount(&source, source.pubkey(), recipient, 100, blockhash);
         let next_wire = bincode::serialize(&next_transaction).unwrap();
+        assert!(matches!(
+            solana_rpc::rpc::ErTxExecutor::execute_wire(&client, next_wire.clone()),
+            Err(solana_rpc::rpc::ErTxError::Rejected(_))
+        ));
+        assert_eq!(bank.get_balance(&recipient), balance_after_checkpoint);
         <EphemeralTransactionClient as TransactionClient>::send_transactions_in_batch(
             &client,
             vec![next_wire.clone()],
@@ -2954,6 +3049,11 @@ pub(crate) mod tests {
             vec![next_wire.clone()],
             &SendTransactionServiceStats::default(),
         );
+        assert_eq!(bank.get_balance(&recipient), balance_after_checkpoint);
+        assert!(matches!(
+            solana_rpc::rpc::ErTxExecutor::execute_wire(&client, next_wire.clone()),
+            Err(solana_rpc::rpc::ErTxError::Rejected(_))
+        ));
         assert_eq!(bank.get_balance(&recipient), balance_after_checkpoint);
         client.checkpoint_capture.write().unwrap().completed = Some(sealed);
 
