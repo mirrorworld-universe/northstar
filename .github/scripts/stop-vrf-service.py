@@ -54,6 +54,18 @@ def inspect_journal(config_path=CONFIG, state_root=STATE):
         or directory.parent != state_root
     ):
         raise RuntimeError("managed VRF journal path is not deployment-bound")
+    marker = DEPLOYMENT / "worker-state.json"
+    if os.path.lexists(marker):
+        reservation = load(marker, 65_536)
+        if (
+            not isinstance(reservation, dict)
+            or type(reservation.get("version")) is not int
+            or reservation
+            != {"version": 1, "binding": directory.name, "config": config}
+        ):
+            raise RuntimeError(
+                "worker reservation differs from installed configuration"
+            )
     snapshot = validate_state(config_path)
     if (
         snapshot["version"] != 1
@@ -83,8 +95,11 @@ def audit_controls():
     markers = [
         CONFIG,
         STATE,
+        STATE.parent,
         DEPLOYMENT / "keys",
         DEPLOYMENT / "keys-established.json",
+        DEPLOYMENT / "worker-state.json",
+        DEPLOYMENT / "activated.json",
         DEPLOYMENT / "deployments",
     ]
     if not index.exists():
@@ -135,6 +150,15 @@ def audit_controls():
         )
 
 
+def active_state(run):
+    return run(
+        ["systemctl", "show", "--property=ActiveState", "--value", UNIT],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
 def _stop(run, inspect):
     loaded = run(
         ["systemctl", "show", "--property=LoadState", "--value", UNIT],
@@ -142,25 +166,36 @@ def _stop(run, inspect):
         capture_output=True,
         text=True,
     ).stdout.strip()
-    if loaded == "not-found":
-        if os.path.lexists(CONFIG) or os.path.lexists(STATE):
-            inspect()
-        audit_controls()
-        return
-    if loaded != "loaded":
+    if loaded not in {"loaded", "not-found"}:
         raise RuntimeError("managed VRF unit cannot be inspected")
-    active = (
-        run(["systemctl", "is-active", "--quiet", UNIT], check=False).returncode == 0
-    )
-    run(["systemctl", "stop", UNIT], check=True)
+    active = active_state(run) not in {"inactive", "failed"}
+    if loaded == "loaded" or active:
+        run(["systemctl", "stop", UNIT], check=True)
+        if active_state(run) not in {"inactive", "failed"}:
+            raise RuntimeError("managed VRF shutdown could not be confirmed")
     try:
-        inspect()
+        if (
+            loaded == "loaded"
+            or active
+            or any(
+                os.path.lexists(path)
+                for path in (
+                    CONFIG,
+                    STATE,
+                    STATE.parent,
+                    DEPLOYMENT / "worker-state.json",
+                    DEPLOYMENT / "activated.json",
+                )
+            )
+        ):
+            inspect()
         audit_controls()
     except Exception:
         if active:
             run(["systemctl", "start", UNIT], check=True)
         raise
-    run(["systemctl", "disable", UNIT], check=True)
+    if loaded == "loaded":
+        run(["systemctl", "disable", UNIT], check=True)
 
 
 def stop(run=subprocess.run, inspect=inspect_journal):
