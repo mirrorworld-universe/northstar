@@ -1665,7 +1665,8 @@ impl EphemeralRuntime {
                     return None;
                 };
                 let escrow_balance = receipt_account.lamports().saturating_sub(
-                    solana_rent::Rent::default().minimum_balance(receipt_account.data().len()),
+                    self.l1_anchor_bank
+                        .get_minimum_balance_for_rent_exemption(receipt_account.data().len()),
                 );
                 Some((
                     *er_source,
@@ -2535,8 +2536,13 @@ mod tests {
     }
 
     fn create_test_bank() -> Bank {
+        create_test_bank_with_rent(solana_rent::Rent::default())
+    }
+
+    fn create_test_bank_with_rent(rent: solana_rent::Rent) -> Bank {
         use solana_genesis_config::GenesisConfig;
         let mut genesis_config = GenesisConfig::new(&[], &[]);
+        genesis_config.rent = rent;
         let program_data = solana_runtime::loader_utils::load_program_from_file("northstar_portal");
         genesis_config.add_account(
             PORTAL_PROGRAM_ID,
@@ -3220,6 +3226,97 @@ mod tests {
         assert_eq!(receipt_balances[0].payout_lamports, withdraw_amount);
 
         runtime.shutdown();
+    }
+
+    #[test]
+    fn regression_receipt_settlement_uses_anchor_rent() {
+        for lamports_per_byte in [5_080, 6_960, 9_000] {
+            let parent_bank = create_test_bank_with_rent(solana_rent::Rent {
+                lamports_per_byte,
+                ..solana_rent::Rent::default()
+            });
+            let portal_program_id = PORTAL_PROGRAM_ID;
+            let session_pda = Pubkey::new_unique();
+            let payer = Keypair::new();
+            let source = payer.pubkey();
+            let deposit_amount = 10_000_000;
+            fund_account(&parent_bank, &source, 1_000_000_000);
+            store_unsettled_deposit_receipt(
+                &parent_bank,
+                &portal_program_id,
+                &session_pda,
+                &source,
+                deposit_amount,
+            );
+            let (receipt_pda, _) = northstar_portal::find_deposit_receipt_pda(
+                &portal_program_id,
+                &session_pda,
+                &source,
+            );
+            let mut receipt = parent_bank.get_account(&receipt_pda).unwrap();
+            let reserve = parent_bank.get_minimum_balance_for_rent_exemption(receipt.data().len());
+            assert_eq!(
+                reserve,
+                (solana_rent::ACCOUNT_STORAGE_OVERHEAD + receipt.data().len() as u64)
+                    * lamports_per_byte
+            );
+            receipt.set_lamports(reserve + deposit_amount);
+            parent_bank.store_account(&receipt_pda, &receipt);
+            parent_bank.freeze();
+
+            let settings = EphemeralRollupSettings {
+                session_pda,
+                grid_id: 0,
+                ttl_slots: 100,
+                fee_cap: 1_000,
+                er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+                delegated_accounts: vec![],
+            };
+            let mut runtime = EphemeralRuntime::new(
+                Arc::new(parent_bank),
+                create_test_cluster_info(),
+                settings,
+                find_free_addr(),
+                find_free_addr(),
+                find_free_addr(),
+                portal_program_id,
+                Arc::new(Keypair::new()),
+            )
+            .unwrap();
+            runtime.set_session_pda(session_pda);
+            runtime.activate();
+            runtime.credit_deposit(&source, deposit_amount);
+            let withdrawal = crate::er_withdrawal_instruction(
+                &portal_program_id,
+                &source,
+                &source,
+                deposit_amount,
+            );
+            let transaction = Transaction::new_signed_with_payer(
+                &[withdrawal],
+                Some(&source),
+                &[&payer],
+                runtime.bank().last_blockhash(),
+            );
+            let wire = bincode::serialize(&VersionedTransaction::from(transaction)).unwrap();
+            TransactionClient::send_transactions_in_batch(
+                &runtime._tx_client,
+                vec![wire],
+                &SendTransactionServiceStats::default(),
+            );
+            assert_eq!(runtime.bank().get_balance(&source), 0);
+            assert_eq!(runtime.withdrawal_payout_events.read().unwrap().len(), 1);
+            let payouts = runtime.settlement_receipt_balances(session_pda);
+            runtime.shutdown();
+            assert_eq!(
+                payouts.len(),
+                1,
+                "a full withdrawal must retain its payout when bank rent differs from the SDK \
+                 default"
+            );
+            assert_eq!(payouts[0].payout_lamports, deposit_amount);
+            assert_eq!(payouts[0].withdrawn, deposit_amount);
+        }
     }
 
     #[test]
