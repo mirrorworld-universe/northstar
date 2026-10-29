@@ -3,7 +3,7 @@ set -euo pipefail
 
 L1_LOCAL_RPC=${L1_LOCAL_RPC:-http://localhost:8899}
 DEVNET_RPC=${DEVNET_RPC:-https://api.devnet.solana.com}
-ER_RPC=${ER_RPC:-https://ephemeral.devnet.sonic.game}
+ER_RPC=${ER_RPC:-http://localhost:8910}
 SERVICE=${SERVICE:-northstar-validator}
 RESTART_COMMAND=${RESTART_COMMAND:-}
 CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-/solana/northstar}
