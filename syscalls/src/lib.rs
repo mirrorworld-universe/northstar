@@ -13,10 +13,7 @@ pub use self::{
 };
 use {
     crate::mem_ops::is_nonoverlapping,
-    solana_big_mod_exp::{
-        BIG_MOD_EXP_MAX_BYTES, BIG_MOD_EXP_MIN_EXPONENT_LENGTH,
-        BIG_MOD_EXP_MOD_REDUCTION_COMPLEXITY_FACTOR, BigModExpParams, big_mod_exp,
-    },
+    solana_big_mod_exp::{BIG_MOD_EXP_MAX_BYTES, BigModExpParams, big_mod_exp},
     solana_blake3_hasher as blake3,
     solana_cpi::MAX_RETURN_DATA,
     solana_hash::Hash,
@@ -321,8 +318,6 @@ pub fn create_program_runtime_environment(
     let enable_alt_bn128_compression_syscall = feature_set.enable_alt_bn128_compression_syscall;
     let enable_big_mod_exp_syscall = feature_set.enable_big_mod_exp_syscall;
     let blake3_syscall_enabled = feature_set.blake3_syscall_enabled;
-    let curve25519_syscall_enabled = feature_set.curve25519_syscall_enabled;
-    let enable_bls12_381_syscall = feature_set.enable_bls12_381_syscall;
     let enable_sha512_syscall = feature_set.enable_sha512_syscall;
     let disable_fees_sysvar = feature_set.disable_fees_sysvar;
     let last_restart_slot_syscall_enabled = feature_set.last_restart_slot_sysvar;
@@ -347,7 +342,6 @@ pub fn create_program_runtime_environment(
         enable_stack_frame_gaps: !feature_set.virtual_address_space_adjustments,
         instruction_meter_checkpoint_distance: 10000,
         enable_instruction_meter: true,
-        enable_register_tracing: debugging_features,
         enable_symbol_and_section_labels: debugging_features,
         reject_broken_elfs: reject_deployment_of_broken_elfs,
         // Sonic: these fields do not exist in the zkVM interpreter-only build.
@@ -408,36 +402,11 @@ pub fn create_program_runtime_environment(
     )?;
 
     // Elliptic Curve Operations
-    register_feature_gated_function!(
-        result,
-        curve25519_syscall_enabled,
-        "sol_curve_validate_point",
-        SyscallCurvePointValidation
-    )?;
-    register_feature_gated_function!(
-        result,
-        curve25519_syscall_enabled,
-        "sol_curve_group_op",
-        SyscallCurveGroupOps
-    )?;
-    register_feature_gated_function!(
-        result,
-        curve25519_syscall_enabled,
-        "sol_curve_multiscalar_mul",
-        SyscallCurveMultiscalarMultiplication
-    )?;
-    register_feature_gated_function!(
-        result,
-        enable_bls12_381_syscall,
-        "sol_curve_decompress",
-        SyscallCurveDecompress
-    )?;
-    register_feature_gated_function!(
-        result,
-        enable_bls12_381_syscall,
-        "sol_curve_pairing_map",
-        SyscallCurvePairingMap
-    )?;
+    SyscallCurvePointValidation::register(&mut result, "sol_curve_validate_point")?;
+    SyscallCurveGroupOps::register(&mut result, "sol_curve_group_op")?;
+    SyscallCurveMultiscalarMultiplication::register(&mut result, "sol_curve_multiscalar_mul")?;
+    SyscallCurveDecompress::register(&mut result, "sol_curve_decompress")?;
+    SyscallCurvePairingMap::register(&mut result, "sol_curve_pairing_map")?;
 
     // Sysvars
     SyscallGetClockSysvar::register(&mut result, "sol_get_clock_sysvar")?;
@@ -747,7 +716,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallPanic {
         column: u64,
         _: u64,
     ) -> Result<u64, Error> {
-        invoke_context.compute_meter.consume_checked(len)?;
+        invoke_context.consume_checked(len)?;
 
         let check_aligned = invoke_context.get_check_aligned();
         translate_string_and_do(
@@ -841,7 +810,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCreateProgramAd
         let cost = invoke_context
             .get_execution_cost()
             .create_program_address_units;
-        invoke_context.compute_meter.consume_checked(cost)?;
+        invoke_context.consume_checked(cost)?;
 
         let check_aligned = invoke_context.get_check_aligned();
         let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
@@ -881,7 +850,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallTryFindProgramA
         let cost = invoke_context
             .get_execution_cost()
             .create_program_address_units;
-        invoke_context.compute_meter.consume_checked(cost)?;
+        invoke_context.consume_checked(cost)?;
 
         let check_aligned = invoke_context.get_check_aligned();
         let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
@@ -914,7 +883,10 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallTryFindProgramA
                 }
             }
             bump_seed[0] = bump_seed[0].saturating_sub(1);
-            invoke_context.compute_meter.consume_checked(cost)?;
+            invoke_context
+                .transaction_context
+                .compute_meter
+                .consume_checked(cost)?;
         }
         Ok(1)
     }
@@ -933,7 +905,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallSecp256k1Recove
         _: u64,
     ) -> Result<u64, Error> {
         let cost = invoke_context.get_execution_cost().secp256k1_recover_cost;
-        invoke_context.compute_meter.consume_checked(cost)?;
+        invoke_context.consume_checked(cost)?;
 
         let check_aligned = invoke_context.get_check_aligned();
         let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
@@ -995,6 +967,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallSecp256k1Recove
 /// Currently, the following curves are supported:
 /// - Curve25519 Edwards and Ristretto representations
 /// - BLS12-381
+/// - secp256r1
 pub struct SyscallCurvePointValidation {}
 impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurvePointValidation {
     type Error = Error;
@@ -1009,14 +982,11 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurvePointValid
         use {
             solana_curve25519::{edwards, ristretto},
             solana_define_syscall::curve_constants::*,
+            solana_secp256r1::{Endianness, group::AffinePoint},
         };
 
-        // SIMD-0388: BLS12-381 syscalls
-        if !invoke_context.get_feature_set().enable_bls12_381_syscall
-            && matches!(
-                curve_id,
-                BLS12_381_G1_BE | BLS12_381_G1_LE | BLS12_381_G2_BE | BLS12_381_G2_LE
-            )
+        if !invoke_context.get_feature_set().secp256r1_syscall_enabled
+            && matches!(curve_id, SECP256R1_LE | SECP256R1_BE)
         {
             return Err(SyscallError::InvalidAttribute.into());
         }
@@ -1028,7 +998,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurvePointValid
                 let cost = invoke_context
                     .get_execution_cost()
                     .curve25519_edwards_validate_point_cost;
-                invoke_context.compute_meter.consume_checked(cost)?;
+                invoke_context.consume_checked(cost)?;
 
                 let point = translate_type::<edwards::PodEdwardsPoint>(
                     memory_mapping,
@@ -1046,7 +1016,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurvePointValid
                 let cost = invoke_context
                     .get_execution_cost()
                     .curve25519_ristretto_validate_point_cost;
-                invoke_context.compute_meter.consume_checked(cost)?;
+                invoke_context.consume_checked(cost)?;
 
                 let point = translate_type::<ristretto::PodRistrettoPoint>(
                     memory_mapping,
@@ -1064,7 +1034,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurvePointValid
                 let cost = invoke_context
                     .get_execution_cost()
                     .bls12_381_g1_validate_cost;
-                invoke_context.compute_meter.consume_checked(cost)?;
+                invoke_context.consume_checked(cost)?;
 
                 let point = translate_type::<solana_bls12_381_syscall::PodG1Point>(
                     memory_mapping,
@@ -1092,7 +1062,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurvePointValid
                 let cost = invoke_context
                     .get_execution_cost()
                     .bls12_381_g2_validate_cost;
-                invoke_context.compute_meter.consume_checked(cost)?;
+                invoke_context.consume_checked(cost)?;
 
                 let point = translate_type::<solana_bls12_381_syscall::PodG2Point>(
                     memory_mapping,
@@ -1116,13 +1086,25 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurvePointValid
                     Ok(1)
                 }
             }
-            _ => {
-                if invoke_context.get_feature_set().abort_on_invalid_curve {
-                    Err(SyscallError::InvalidAttribute.into())
+            SECP256R1_LE | SECP256R1_BE => {
+                let cost = invoke_context.get_execution_cost().secp256r1_validate_cost;
+                invoke_context.consume_checked(cost)?;
+
+                let endianness = if curve_id == SECP256R1_LE {
+                    Endianness::Little
+                } else {
+                    Endianness::Big
+                };
+                let point_input =
+                    translate_type::<[u8; 64]>(memory_mapping, point_addr, check_aligned)?;
+
+                if AffinePoint::from_uncompressed(point_input, endianness).is_some() {
+                    Ok(SUCCESS)
                 } else {
                     Ok(1)
                 }
             }
+            _ => Err(SyscallError::InvalidAttribute.into()),
         }
     }
 }
@@ -1131,6 +1113,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurvePointValid
 ///
 /// Currently, the following curves are supported:
 /// - BLS12-381
+/// - secp256r1
 pub struct SyscallCurveDecompress {}
 impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveDecompress {
     type Error = Error;
@@ -1148,7 +1131,14 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveDecompress
                 PodG2Compressed as PodBLSG2Compressed, PodG2Point as PodBLSG2Point,
             },
             solana_define_syscall::curve_constants::*,
+            solana_secp256r1::{Endianness, group::AffinePoint},
         };
+
+        if !invoke_context.get_feature_set().secp256r1_syscall_enabled
+            && matches!(curve_id, SECP256R1_LE | SECP256R1_BE)
+        {
+            return Err(SyscallError::InvalidAttribute.into());
+        }
 
         let check_aligned = invoke_context.get_check_aligned();
         match curve_id {
@@ -1156,7 +1146,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveDecompress
                 let cost = invoke_context
                     .get_execution_cost()
                     .bls12_381_g1_decompress_cost;
-                invoke_context.compute_meter.consume_checked(cost)?;
+                invoke_context.consume_checked(cost)?;
 
                 let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
                 let compressed_point = translate_type::<PodBLSG1Compressed>(
@@ -1191,7 +1181,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveDecompress
                 let cost = invoke_context
                     .get_execution_cost()
                     .bls12_381_g2_decompress_cost;
-                invoke_context.compute_meter.consume_checked(cost)?;
+                invoke_context.consume_checked(cost)?;
 
                 let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
                 let compressed_point = translate_type::<PodBLSG2Compressed>(
@@ -1222,6 +1212,36 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveDecompress
                     Ok(1)
                 }
             }
+            SECP256R1_LE | SECP256R1_BE => {
+                let cost = invoke_context
+                    .get_execution_cost()
+                    .secp256r1_decompress_cost;
+                invoke_context.consume_checked(cost)?;
+
+                let endianness = if curve_id == SECP256R1_LE {
+                    Endianness::Little
+                } else {
+                    Endianness::Big
+                };
+                let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
+
+                let compressed_input =
+                    translate_type::<[u8; 33]>(memory_mapping, point_addr, check_aligned)?;
+
+                if let Some(affine_point) =
+                    AffinePoint::from_compressed(compressed_input, endianness)
+                {
+                    translate_mut!(
+                        memory_mapping,
+                        check_aligned,
+                        let result_ref_mut: (&mut MaybeUninit<[u8; 64]>) = map(result_addr)?;
+                    );
+                    result_ref_mut.write(affine_point.to_uncompressed(endianness));
+                    Ok(SUCCESS)
+                } else {
+                    Ok(1)
+                }
+            }
             _ => Err(SyscallError::InvalidAttribute.into()),
         }
     }
@@ -1232,6 +1252,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveDecompress
 /// Currently, the following curves are supported:
 /// - Curve25519 Edwards and Ristretto representations
 /// - BLS12-381
+/// - secp256r1
 pub struct SyscallCurveGroupOps {}
 impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveGroupOps {
     type Error = Error;
@@ -1253,13 +1274,12 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveGroupOps {
                 scalar,
             },
             solana_define_syscall::curve_constants::*,
+            solana_secp256r1::{Endianness, group::AffinePoint},
+            std::ops::Neg,
         };
 
-        if !invoke_context.get_feature_set().enable_bls12_381_syscall
-            && matches!(
-                curve_id,
-                BLS12_381_G1_BE | BLS12_381_G1_LE | BLS12_381_G2_BE | BLS12_381_G2_LE
-            )
+        if !invoke_context.get_feature_set().secp256r1_syscall_enabled
+            && matches!(curve_id, SECP256R1_LE | SECP256R1_BE)
         {
             return Err(SyscallError::InvalidAttribute.into());
         }
@@ -1271,7 +1291,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveGroupOps {
                     let cost = invoke_context
                         .get_execution_cost()
                         .curve25519_edwards_add_cost;
-                    invoke_context.compute_meter.consume_checked(cost)?;
+                    invoke_context.consume_checked(cost)?;
 
                     let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
                     let left_point = translate_type::<PodEdwardsPoint>(
@@ -1301,7 +1321,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveGroupOps {
                     let cost = invoke_context
                         .get_execution_cost()
                         .curve25519_edwards_subtract_cost;
-                    invoke_context.compute_meter.consume_checked(cost)?;
+                    invoke_context.consume_checked(cost)?;
 
                     let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
                     let left_point = translate_type::<PodEdwardsPoint>(
@@ -1331,7 +1351,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveGroupOps {
                     let cost = invoke_context
                         .get_execution_cost()
                         .curve25519_edwards_multiply_cost;
-                    invoke_context.compute_meter.consume_checked(cost)?;
+                    invoke_context.consume_checked(cost)?;
 
                     let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
                     let scalar = translate_type::<scalar::PodScalar>(
@@ -1357,13 +1377,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveGroupOps {
                         Ok(1)
                     }
                 }
-                _ => {
-                    if invoke_context.get_feature_set().abort_on_invalid_curve {
-                        Err(SyscallError::InvalidAttribute.into())
-                    } else {
-                        Ok(1)
-                    }
-                }
+                _ => Err(SyscallError::InvalidAttribute.into()),
             },
 
             CURVE25519_RISTRETTO => match group_op {
@@ -1371,7 +1385,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveGroupOps {
                     let cost = invoke_context
                         .get_execution_cost()
                         .curve25519_ristretto_add_cost;
-                    invoke_context.compute_meter.consume_checked(cost)?;
+                    invoke_context.consume_checked(cost)?;
 
                     let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
                     let left_point = translate_type::<PodRistrettoPoint>(
@@ -1401,7 +1415,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveGroupOps {
                     let cost = invoke_context
                         .get_execution_cost()
                         .curve25519_ristretto_subtract_cost;
-                    invoke_context.compute_meter.consume_checked(cost)?;
+                    invoke_context.consume_checked(cost)?;
 
                     let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
                     let left_point = translate_type::<PodRistrettoPoint>(
@@ -1433,7 +1447,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveGroupOps {
                     let cost = invoke_context
                         .get_execution_cost()
                         .curve25519_ristretto_multiply_cost;
-                    invoke_context.compute_meter.consume_checked(cost)?;
+                    invoke_context.consume_checked(cost)?;
 
                     let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
                     let scalar = translate_type::<scalar::PodScalar>(
@@ -1459,13 +1473,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveGroupOps {
                         Ok(1)
                     }
                 }
-                _ => {
-                    if invoke_context.get_feature_set().abort_on_invalid_curve {
-                        Err(SyscallError::InvalidAttribute.into())
-                    } else {
-                        Ok(1)
-                    }
-                }
+                _ => Err(SyscallError::InvalidAttribute.into()),
             },
 
             BLS12_381_G1_LE | BLS12_381_G1_BE => {
@@ -1478,7 +1486,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveGroupOps {
                 match group_op {
                     GROUP_OP_ADD => {
                         let cost = invoke_context.get_execution_cost().bls12_381_g1_add_cost;
-                        invoke_context.compute_meter.consume_checked(cost)?;
+                        invoke_context.consume_checked(cost)?;
 
                         let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
                         let left_point = translate_type::<PodBLSG1Point>(
@@ -1515,7 +1523,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveGroupOps {
                         let cost = invoke_context
                             .get_execution_cost()
                             .bls12_381_g1_subtract_cost;
-                        invoke_context.compute_meter.consume_checked(cost)?;
+                        invoke_context.consume_checked(cost)?;
 
                         let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
                         let left_point = translate_type::<PodBLSG1Point>(
@@ -1552,7 +1560,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveGroupOps {
                         let cost = invoke_context
                             .get_execution_cost()
                             .bls12_381_g1_multiply_cost;
-                        invoke_context.compute_meter.consume_checked(cost)?;
+                        invoke_context.consume_checked(cost)?;
 
                         let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
                         let scalar = translate_type::<PodBLSScalar>(
@@ -1600,7 +1608,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveGroupOps {
                 match group_op {
                     GROUP_OP_ADD => {
                         let cost = invoke_context.get_execution_cost().bls12_381_g2_add_cost;
-                        invoke_context.compute_meter.consume_checked(cost)?;
+                        invoke_context.consume_checked(cost)?;
 
                         let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
                         let left_point = translate_type::<PodBLSG2Point>(
@@ -1637,7 +1645,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveGroupOps {
                         let cost = invoke_context
                             .get_execution_cost()
                             .bls12_381_g2_subtract_cost;
-                        invoke_context.compute_meter.consume_checked(cost)?;
+                        invoke_context.consume_checked(cost)?;
 
                         let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
                         let left_point = translate_type::<PodBLSG2Point>(
@@ -1674,7 +1682,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveGroupOps {
                         let cost = invoke_context
                             .get_execution_cost()
                             .bls12_381_g2_multiply_cost;
-                        invoke_context.compute_meter.consume_checked(cost)?;
+                        invoke_context.consume_checked(cost)?;
 
                         let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
                         let scalar = translate_type::<PodBLSScalar>(
@@ -1711,13 +1719,100 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveGroupOps {
                 }
             }
 
-            _ => {
-                if invoke_context.get_feature_set().abort_on_invalid_curve {
-                    Err(SyscallError::InvalidAttribute.into())
+            SECP256R1_LE | SECP256R1_BE => {
+                let endianness = if curve_id == SECP256R1_LE {
+                    Endianness::Little
                 } else {
-                    Ok(1)
+                    Endianness::Big
+                };
+                match group_op {
+                    GROUP_OP_ADD | GROUP_OP_SUB => {
+                        let cost = if group_op == GROUP_OP_ADD {
+                            invoke_context.get_execution_cost().secp256r1_add_cost
+                        } else {
+                            invoke_context.get_execution_cost().secp256r1_subtract_cost
+                        };
+                        invoke_context.consume_checked(cost)?;
+
+                        let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
+                        let left_input = translate_type::<[u8; 64]>(
+                            memory_mapping,
+                            left_input_addr,
+                            check_aligned,
+                        )?;
+                        let right_input = translate_type::<[u8; 64]>(
+                            memory_mapping,
+                            right_input_addr,
+                            check_aligned,
+                        )?;
+
+                        let left_point = AffinePoint::from_uncompressed(left_input, endianness);
+                        let right_point = AffinePoint::from_uncompressed(right_input, endianness);
+
+                        if let (Some(left), Some(right)) = (left_point, right_point) {
+                            let right = if group_op == GROUP_OP_SUB {
+                                right.neg()
+                            } else {
+                                right
+                            };
+                            let result_point = left.to_projective().add_mixed(right);
+
+                            translate_mut!(
+                                memory_mapping,
+                                check_aligned,
+                                let result_point_ref_mut:
+                                    (&mut MaybeUninit<[u8; 64]>) = map(result_point_addr)?;
+                            );
+                            result_point_ref_mut.write(result_point.to_uncompressed(endianness));
+                            Ok(SUCCESS)
+                        } else {
+                            Ok(1)
+                        }
+                    }
+                    GROUP_OP_MUL => {
+                        let cost = invoke_context.get_execution_cost().secp256r1_multiply_cost;
+                        invoke_context.consume_checked(cost)?;
+
+                        let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
+                        let scalar_input = translate_type::<[u8; 32]>(
+                            memory_mapping,
+                            left_input_addr,
+                            check_aligned,
+                        )?;
+                        let point_input = translate_type::<[u8; 64]>(
+                            memory_mapping,
+                            right_input_addr,
+                            check_aligned,
+                        )?;
+
+                        let mut scalar = *scalar_input;
+                        if endianness == Endianness::Little {
+                            scalar.reverse();
+                        }
+
+                        // `mul_scalar_vartime` returns `None` for scalars >= n, which
+                        // SIMD-0565 requires rejecting.
+                        let result_point = AffinePoint::from_uncompressed(point_input, endianness)
+                            .and_then(|point| point.to_projective().mul_scalar_vartime(scalar));
+
+                        if let Some(result_point) = result_point {
+                            translate_mut!(
+                                memory_mapping,
+                                check_aligned,
+                                let result_point_ref_mut:
+                                    (&mut MaybeUninit<[u8; 64]>) = map(result_point_addr)?;
+                            );
+                            result_point_ref_mut.write(result_point.to_uncompressed(endianness));
+                            Ok(SUCCESS)
+                        } else {
+                            Ok(1)
+                        }
+                    }
+                    _ => Err(SyscallError::InvalidAttribute.into()),
                 }
             }
+
+            _ => Err(SyscallError::InvalidAttribute.into()),
         }
     }
 }
@@ -1726,6 +1821,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveGroupOps {
 ///
 /// Currently, the following curves are supported:
 /// - Curve25519 Edwards and Ristretto representations
+/// - secp256r1
 pub struct SyscallCurveMultiscalarMultiplication {}
 impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveMultiscalarMultiplication {
     type Error = Error;
@@ -1744,10 +1840,20 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveMultiscala
                 scalar,
             },
             solana_define_syscall::curve_constants::*,
+            solana_secp256r1::{
+                Endianness,
+                group::{AffinePoint, ProjectivePoint},
+            },
         };
 
         if points_len > 512 {
             return Err(Box::new(SyscallError::InvalidLength));
+        }
+
+        if !invoke_context.get_feature_set().secp256r1_syscall_enabled
+            && matches!(curve_id, SECP256R1_LE | SECP256R1_BE)
+        {
+            return Err(SyscallError::InvalidAttribute.into());
         }
 
         let check_aligned = invoke_context.get_check_aligned();
@@ -1762,7 +1868,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveMultiscala
                             .curve25519_edwards_msm_incremental_cost
                             .saturating_mul(points_len.saturating_sub(1)),
                     );
-                invoke_context.compute_meter.consume_checked(cost)?;
+                invoke_context.consume_checked(cost)?;
 
                 let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
                 let scalars = translate_slice::<scalar::PodScalar>(
@@ -1802,7 +1908,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveMultiscala
                             .curve25519_ristretto_msm_incremental_cost
                             .saturating_mul(points_len.saturating_sub(1)),
                     );
-                invoke_context.compute_meter.consume_checked(cost)?;
+                invoke_context.consume_checked(cost)?;
 
                 let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
                 let scalars = translate_slice::<scalar::PodScalar>(
@@ -1834,13 +1940,75 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurveMultiscala
                 }
             }
 
-            _ => {
-                if invoke_context.get_feature_set().abort_on_invalid_curve {
-                    Err(SyscallError::InvalidAttribute.into())
+            SECP256R1_LE | SECP256R1_BE => {
+                let cost = invoke_context
+                    .get_execution_cost()
+                    .secp256r1_msm_base_cost
+                    .saturating_add(
+                        invoke_context
+                            .get_execution_cost()
+                            .secp256r1_msm_incremental_cost
+                            .saturating_mul(points_len.saturating_sub(1)),
+                    );
+                invoke_context.consume_checked(cost)?;
+
+                let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
+                let endianness = if curve_id == SECP256R1_LE {
+                    Endianness::Little
+                } else {
+                    Endianness::Big
+                };
+
+                let scalars_input = translate_slice::<[u8; 32]>(
+                    memory_mapping,
+                    scalars_addr,
+                    points_len,
+                    check_aligned,
+                )?;
+
+                let points_input = translate_slice::<[u8; 64]>(
+                    memory_mapping,
+                    points_addr,
+                    points_len,
+                    check_aligned,
+                )?;
+
+                let mut scalars = Vec::with_capacity(points_len as usize);
+                let mut points = Vec::with_capacity(points_len as usize);
+
+                for (scalar_input, point_input) in scalars_input.iter().zip(points_input) {
+                    let Some(point) = AffinePoint::from_uncompressed(point_input, endianness)
+                    else {
+                        return Ok(1);
+                    };
+
+                    let mut scalar = *scalar_input;
+                    if endianness == Endianness::Little {
+                        scalar.reverse();
+                    }
+
+                    scalars.push(scalar);
+                    points.push(point);
+                }
+
+                // `multi_scalar_mul_vartime` returns `None` if any scalar is >= n, which
+                // SIMD-0565 requires rejecting.
+                if let Some(result_point) =
+                    ProjectivePoint::multi_scalar_mul_vartime(&points, &scalars)
+                {
+                    translate_mut!(
+                        memory_mapping,
+                        check_aligned,
+                        let result_point_ref_mut: (&mut MaybeUninit<[u8; 64]>) = map(result_point_addr)?;
+                    );
+                    result_point_ref_mut.write(result_point.to_uncompressed(endianness));
+                    Ok(SUCCESS)
                 } else {
                     Ok(1)
                 }
             }
+
+            _ => Err(SyscallError::InvalidAttribute.into()),
         }
     }
 }
@@ -1877,7 +2045,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallCurvePairingMap
                         .bls12_381_additional_pair_cost
                         .saturating_mul(num_pairs.saturating_sub(1)),
                 );
-                invoke_context.compute_meter.consume_checked(cost)?;
+                invoke_context.consume_checked(cost)?;
 
                 let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
                 let g1_points = translate_slice::<PodBLSG1Point>(
@@ -1940,7 +2108,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallSetReturnData {
             .checked_div(execution_cost.cpi_bytes_per_unit)
             .unwrap_or(u64::MAX)
             .saturating_add(execution_cost.syscall_base_cost);
-        invoke_context.compute_meter.consume_checked(cost)?;
+        invoke_context.consume_checked(cost)?;
 
         if len > MAX_RETURN_DATA as u64 {
             return Err(SyscallError::ReturnDataTooLarge(len, MAX_RETURN_DATA as u64).into());
@@ -1978,9 +2146,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallGetReturnData {
     ) -> Result<u64, Error> {
         let execution_cost = invoke_context.get_execution_cost();
 
-        invoke_context
-            .compute_meter
-            .consume_checked(execution_cost.syscall_base_cost)?;
+        invoke_context.consume_checked(execution_cost.syscall_base_cost)?;
 
         let (program_id, return_data) = invoke_context.transaction_context.get_return_data();
         let length = length.min(return_data.len() as u64);
@@ -1989,7 +2155,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallGetReturnData {
                 .saturating_add(size_of::<Pubkey>() as u64)
                 .checked_div(execution_cost.cpi_bytes_per_unit)
                 .unwrap_or(u64::MAX);
-            invoke_context.compute_meter.consume_checked(cost)?;
+            invoke_context.consume_checked(cost)?;
             let check_aligned = invoke_context.get_check_aligned();
             let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
             translate_mut!(
@@ -2028,9 +2194,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallGetProcessedSib
     ) -> Result<u64, Error> {
         let execution_cost = invoke_context.get_execution_cost();
 
-        invoke_context
-            .compute_meter
-            .consume_checked(execution_cost.syscall_base_cost)?;
+        invoke_context.consume_checked(execution_cost.syscall_base_cost)?;
 
         let stack_height = invoke_context.get_stack_height();
         let mut reverse_index_at_stack_height = 0;
@@ -2140,9 +2304,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallGetStackHeight 
     ) -> Result<u64, Error> {
         let execution_cost = invoke_context.get_execution_cost();
 
-        invoke_context
-            .compute_meter
-            .consume_checked(execution_cost.syscall_base_cost)?;
+        invoke_context.consume_checked(execution_cost.syscall_base_cost)?;
 
         Ok(invoke_context.get_stack_height() as u64)
     }
@@ -2235,7 +2397,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallAltBn128 {
             }
         };
 
-        invoke_context.compute_meter.consume_checked(cost)?;
+        invoke_context.consume_checked(cost)?;
 
         let check_aligned = invoke_context.get_check_aligned();
         let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
@@ -2308,79 +2470,6 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallAltBn128 {
     }
 }
 
-fn big_mod_exp_mult_complexity(input_len: u64) -> Option<u128> {
-    let input_len = input_len as u128;
-    let input_len_squared = input_len.checked_mul(input_len)?;
-    if input_len <= 64 {
-        Some(input_len_squared)
-    } else if input_len <= 1024 {
-        input_len_squared
-            .checked_div(4)?
-            .checked_add(96_u128.checked_mul(input_len)?)?
-            .checked_sub(3_072)
-    } else {
-        input_len_squared
-            .checked_div(16)?
-            .checked_add(480_u128.checked_mul(input_len)?)?
-            .checked_sub(199_680)
-    }
-}
-
-fn big_mod_exp_highest_set_bit_index_le(bytes: &[u8]) -> Option<u64> {
-    bytes.iter().enumerate().rev().find_map(|(index, byte)| {
-        (*byte != 0).then(|| {
-            (index as u64)
-                .saturating_mul(u64::from(u8::BITS))
-                .saturating_add(u64::from(7_u32.saturating_sub(byte.leading_zeros())))
-        })
-    })
-}
-
-fn big_mod_exp_adjusted_exponent_length(exponent: &[u8]) -> u64 {
-    if exponent.len() <= 32 {
-        big_mod_exp_highest_set_bit_index_le(exponent).unwrap_or(0)
-    } else {
-        let trailing_bytes = exponent.len().saturating_sub(32);
-        let most_significant_32_bytes = &exponent[trailing_bytes..];
-        (trailing_bytes as u64)
-            .saturating_mul(u64::from(u8::BITS))
-            .saturating_add(
-                big_mod_exp_highest_set_bit_index_le(most_significant_32_bytes).unwrap_or(0),
-            )
-    }
-}
-
-fn big_mod_exp_is_one_le(bytes: &[u8]) -> bool {
-    matches!(bytes.first(), Some(1)) && bytes[1..].iter().all(|byte| *byte == 0)
-}
-
-/// Compute the operation cost of a big integer modular exponentiation, i.e. the
-/// cost charged on top of the flat `big_modular_exponentiation_base_cost`.
-fn big_mod_exp_operation_cost(
-    cost_divisor: u64,
-    params: &BigModExpParams,
-    exponent: &[u8],
-) -> Option<u64> {
-    let input_len = params.base_len.max(params.modulus_len);
-    let mult_complexity = big_mod_exp_mult_complexity(input_len)?;
-    let operation_complexity = if big_mod_exp_is_one_le(exponent) {
-        mult_complexity.checked_mul(u128::from(BIG_MOD_EXP_MOD_REDUCTION_COMPLEXITY_FACTOR))?
-    } else {
-        let adjusted_exponent_length =
-            big_mod_exp_adjusted_exponent_length(exponent).max(BIG_MOD_EXP_MIN_EXPONENT_LENGTH);
-        mult_complexity.checked_mul(u128::from(adjusted_exponent_length))?
-    };
-    let divisor = u128::from(cost_divisor);
-    if divisor == 0 {
-        return None;
-    }
-
-    let operation_cost = operation_complexity
-        .checked_add(divisor.checked_sub(1)?)?
-        .checked_div(divisor)?;
-    u64::try_from(operation_cost).ok()
-}
-
 /// Big integer modular exponentiation
 pub struct SyscallBigModExp {}
 impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallBigModExp {
@@ -2399,8 +2488,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallBigModExp {
         // translation or work that could fail without being paid for.
         let execution_cost = invoke_context.get_execution_cost();
         let base_cost = execution_cost.big_modular_exponentiation_base_cost;
-        let cost_divisor = execution_cost.big_modular_exponentiation_cost_divisor;
-        invoke_context.compute_meter.consume_checked(base_cost)?;
+        invoke_context.consume_checked(base_cost)?;
 
         let memory_mapping = invoke_context.memory_contexts.memory_mapping()?;
         let params =
@@ -2422,13 +2510,17 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallBigModExp {
             params.exponent_len,
             check_aligned,
         )?;
-        let Some(cost) = big_mod_exp_operation_cost(cost_divisor, &params, exponent) else {
+        let Some(cost) = execution_cost.big_mod_exp_operation_cost(
+            params.base_len,
+            params.modulus_len,
+            exponent,
+        ) else {
             // The operation cost cannot be represented as a `u64`, so it can
             // never be paid for; drain the remaining budget and fail.
-            invoke_context.compute_meter.consume_checked(u64::MAX)?;
+            invoke_context.consume_checked(u64::MAX)?;
             return Err(Box::new(InstructionError::ComputationalBudgetExceeded));
         };
-        invoke_context.compute_meter.consume_checked(cost)?;
+        invoke_context.consume_checked(cost)?;
 
         let base =
             translate_slice::<u8>(memory_mapping, params.base, params.base_len, check_aligned)?;
@@ -2487,9 +2579,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallPoseidon {
             );
             return Err(SyscallError::ArithmeticOverflow.into());
         };
-        invoke_context
-            .compute_meter
-            .consume_checked(cost.to_owned())?;
+        invoke_context.consume_checked(cost.to_owned())?;
 
         let check_aligned = invoke_context.get_check_aligned();
         let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
@@ -2539,9 +2629,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallRemainingComput
         _arg5: u64,
     ) -> Result<u64, Error> {
         let execution_cost = invoke_context.get_execution_cost();
-        invoke_context
-            .compute_meter
-            .consume_checked(execution_cost.syscall_base_cost)?;
+        invoke_context.consume_checked(execution_cost.syscall_base_cost)?;
 
         use solana_sbpf::vm::ContextObject;
         Ok(invoke_context.get_remaining())
@@ -2610,7 +2698,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallAltBn128Compres
             }
         };
 
-        invoke_context.compute_meter.consume_checked(cost)?;
+        invoke_context.consume_checked(cost)?;
 
         let check_aligned = invoke_context.get_check_aligned();
         let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
@@ -2750,9 +2838,7 @@ impl<H: HasherImpl> BuiltinFunctionDefinition<InvokeContext<'_, '_>> for Syscall
             return Err(SyscallError::TooManySlices.into());
         }
 
-        invoke_context
-            .compute_meter
-            .consume_checked(hash_base_cost)?;
+        invoke_context.consume_checked(hash_base_cost)?;
         let check_aligned = invoke_context.get_check_aligned();
         let mem_op_base_cost = compute_cost.mem_op_base_cost;
         let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
@@ -2776,7 +2862,10 @@ impl<H: HasherImpl> BuiltinFunctionDefinition<InvokeContext<'_, '_>> for Syscall
                     .max(hash_byte_cost.saturating_mul(
                         val.len().checked_div(2).expect("div by non-zero literal"),
                     ));
-                invoke_context.compute_meter.consume_checked(cost)?;
+                invoke_context
+                    .transaction_context
+                    .compute_meter
+                    .consume_checked(cost)?;
                 hasher.hash(bytes);
             }
         }
@@ -2814,9 +2903,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallGetEpochStake {
             // syscall_base
             // ```
             let compute_units = compute_cost.syscall_base_cost;
-            invoke_context
-                .compute_meter
-                .consume_checked(compute_units)?;
+            invoke_context.consume_checked(compute_units)?;
             //
             // Control flow:
             //
@@ -2841,9 +2928,7 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallGetEpochStake {
                         .unwrap_or(u64::MAX),
                 )
                 .saturating_add(compute_cost.mem_op_base_cost);
-            invoke_context
-                .compute_meter
-                .consume_checked(compute_units)?;
+            invoke_context.consume_checked(compute_units)?;
             //
             // Control flow:
             //
@@ -2874,7 +2959,7 @@ mod tests {
         super::*,
         assert_matches::assert_matches,
         core::slice,
-        solana_account::{AccountSharedData, WritableAccount},
+        solana_account::{AccountSharedData, state_traits::StateMutWincode as _},
         solana_account_info::AccountInfo,
         solana_clock::Clock,
         solana_epoch_rewards::EpochRewards,
@@ -2919,13 +3004,13 @@ mod tests {
 
     fn create_account_shared_data_for_test<T>(value: &T, data_len: usize) -> AccountSharedData
     where
-        T: wincode::Serialize<Src = T>,
+        T: wincode::SchemaWrite<solana_account::WincodeConfig, Src = T>
+            + for<'de> wincode::SchemaRead<'de, solana_account::WincodeConfig, Dst = T>,
     {
-        let serialized_len = wincode::serialized_size(value).unwrap() as usize;
+        let serialized_len = wincode::config::serialized_size(value, solana_account::WINCODE_CONFIG)
+            .unwrap() as usize;
         let data_len = data_len.max(serialized_len);
-        let mut account = AccountSharedData::new(1, data_len, &sysvar::id());
-        wincode::serialize_into(account.data_as_mut_slice(), value).unwrap();
-        account
+        AccountSharedData::new_data_with_space(1, value, data_len, &sysvar::id()).unwrap()
     }
 
     macro_rules! assert_access_violation {
@@ -3241,9 +3326,7 @@ mod tests {
         invoke_context
             .memory_contexts
             .mock_set_mapping_abi_v1(memory_mapping);
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(string.len() as u64 - 1);
+        invoke_context.mock_set_remaining(string.len() as u64 - 1);
         let result = SyscallPanic::rust(
             &mut invoke_context,
             0x100000000,
@@ -3257,9 +3340,7 @@ mod tests {
             Result::Err(error) if error.downcast_ref::<InstructionError>().unwrap() == &InstructionError::ComputationalBudgetExceeded
         );
 
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(string.len() as u64);
+        invoke_context.mock_set_remaining(string.len() as u64);
         let result = SyscallPanic::rust(
             &mut invoke_context,
             0x100000000,
@@ -3291,7 +3372,7 @@ mod tests {
         invoke_context
             .memory_contexts
             .mock_set_mapping_abi_v1(memory_mapping);
-        invoke_context.compute_meter.mock_set_remaining(400 - 1);
+        invoke_context.mock_set_remaining(400 - 1);
         let result = SyscallLog::rust(
             &mut invoke_context,
             0x100000001, // AccessViolation
@@ -3348,7 +3429,7 @@ mod tests {
         prepare_mockup!(invoke_context, program_id, bpf_loader::id());
         let cost = invoke_context.get_execution_cost().log_64_units;
 
-        invoke_context.compute_meter.mock_set_remaining(cost);
+        invoke_context.mock_set_remaining(cost);
         let config = Config::default();
         let memory_mapping =
             unsafe { MemoryMapping::new(vec![], &config, SBPFVersion::V3).unwrap() };
@@ -3397,14 +3478,14 @@ mod tests {
         );
         assert_access_violation!(result, 0x100000001, 32);
 
-        invoke_context.compute_meter.mock_set_remaining(1);
+        invoke_context.mock_set_remaining(1);
         let result = SyscallLogPubkey::rust(&mut invoke_context, 100, 32, 0, 0, 0);
         assert_matches!(
             result,
             Result::Err(error) if error.downcast_ref::<InstructionError>().unwrap() == &InstructionError::ComputationalBudgetExceeded
         );
 
-        invoke_context.compute_meter.mock_set_remaining(cost);
+        invoke_context.mock_set_remaining(cost);
         let result = SyscallLogPubkey::rust(&mut invoke_context, 0x100000000, 0, 0, 0, 0);
         result.unwrap();
 
@@ -3558,7 +3639,7 @@ mod tests {
         invoke_context
             .memory_contexts
             .mock_set_mapping_abi_v1(memory_mapping);
-        invoke_context.compute_meter.mock_set_remaining(
+        invoke_context.mock_set_remaining(
             (invoke_context.get_execution_cost().sha256_base_cost
                 + invoke_context.get_execution_cost().mem_op_base_cost.max(
                     invoke_context
@@ -3644,7 +3725,7 @@ mod tests {
         invoke_context
             .memory_contexts
             .mock_set_mapping_abi_v1(memory_mapping);
-        invoke_context.compute_meter.mock_set_remaining(
+        invoke_context.mock_set_remaining(
             (invoke_context
                 .get_execution_cost()
                 .curve25519_edwards_validate_point_cost)
@@ -3719,7 +3800,7 @@ mod tests {
         invoke_context
             .memory_contexts
             .mock_set_mapping_abi_v1(memory_mapping);
-        invoke_context.compute_meter.mock_set_remaining(
+        invoke_context.mock_set_remaining(
             (invoke_context
                 .get_execution_cost()
                 .curve25519_ristretto_validate_point_cost)
@@ -3808,7 +3889,7 @@ mod tests {
         invoke_context
             .memory_contexts
             .mock_set_mapping_abi_v1(memory_mapping);
-        invoke_context.compute_meter.mock_set_remaining(
+        invoke_context.mock_set_remaining(
             (invoke_context
                 .get_execution_cost()
                 .curve25519_edwards_add_cost
@@ -3961,7 +4042,7 @@ mod tests {
         invoke_context
             .memory_contexts
             .mock_set_mapping_abi_v1(memory_mapping);
-        invoke_context.compute_meter.mock_set_remaining(
+        invoke_context.mock_set_remaining(
             (invoke_context
                 .get_execution_cost()
                 .curve25519_ristretto_add_cost
@@ -4129,7 +4210,7 @@ mod tests {
         invoke_context
             .memory_contexts
             .mock_set_mapping_abi_v1(memory_mapping);
-        invoke_context.compute_meter.mock_set_remaining(
+        invoke_context.mock_set_remaining(
             invoke_context
                 .get_execution_cost()
                 .curve25519_edwards_msm_base_cost
@@ -4226,7 +4307,7 @@ mod tests {
         invoke_context
             .memory_contexts
             .mock_set_mapping_abi_v1(memory_mapping);
-        invoke_context.compute_meter.mock_set_remaining(500_000);
+        invoke_context.mock_set_remaining(500_000);
         let result = SyscallCurveMultiscalarMultiplication::rust(
             &mut invoke_context,
             CURVE25519_EDWARDS,
@@ -4243,7 +4324,7 @@ mod tests {
         ];
         assert_eq!(expected_product, result_point);
 
-        invoke_context.compute_meter.mock_set_remaining(500_000);
+        invoke_context.mock_set_remaining(500_000);
         let result = SyscallCurveMultiscalarMultiplication::rust(
             &mut invoke_context,
             CURVE25519_EDWARDS,
@@ -4259,7 +4340,7 @@ mod tests {
         assert_eq!(*result, SyscallError::InvalidLength);
 
         // test Ristretto
-        invoke_context.compute_meter.mock_set_remaining(500_000);
+        invoke_context.mock_set_remaining(500_000);
         let result = SyscallCurveMultiscalarMultiplication::rust(
             &mut invoke_context,
             CURVE25519_RISTRETTO,
@@ -4276,7 +4357,7 @@ mod tests {
         ];
         assert_eq!(expected_product, result_point);
 
-        invoke_context.compute_meter.mock_set_remaining(500_000);
+        invoke_context.mock_set_remaining(500_000);
         let result = SyscallCurveMultiscalarMultiplication::rust(
             &mut invoke_context,
             CURVE25519_RISTRETTO,
@@ -5284,9 +5365,7 @@ mod tests {
         processed_sibling_instruction.accounts_len = 1;
 
         let syscall_base_cost = invoke_context.get_execution_cost().syscall_base_cost;
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(syscall_base_cost);
+        invoke_context.mock_set_remaining(syscall_base_cost);
         let result = SyscallGetProcessedSiblingInstruction::rust(
             &mut invoke_context,
             0,
@@ -5337,9 +5416,7 @@ mod tests {
         }
 
         let syscall_base_cost = invoke_context.get_execution_cost().syscall_base_cost;
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(syscall_base_cost);
+        invoke_context.mock_set_remaining(syscall_base_cost);
         let result = SyscallGetProcessedSiblingInstruction::rust(
             &mut invoke_context,
             1,
@@ -5391,9 +5468,7 @@ mod tests {
         }
 
         let syscall_base_cost = invoke_context.get_execution_cost().syscall_base_cost;
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(syscall_base_cost);
+        invoke_context.mock_set_remaining(syscall_base_cost);
         let result = SyscallGetProcessedSiblingInstruction::rust(
             &mut invoke_context,
             2,
@@ -5405,9 +5480,7 @@ mod tests {
 
         assert_eq!(result.unwrap(), 0);
 
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(syscall_base_cost);
+        invoke_context.mock_set_remaining(syscall_base_cost);
         let result = SyscallGetProcessedSiblingInstruction::rust(
             &mut invoke_context,
             0,
@@ -5562,9 +5635,7 @@ mod tests {
         invoke_context.transaction_context.push(true).unwrap();
 
         // Invoking the syscall from B5 should return false
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(syscall_base_cost);
+        invoke_context.mock_set_remaining(syscall_base_cost);
         let result = SyscallGetProcessedSiblingInstruction::rust(
             &mut invoke_context,
             0,
@@ -5601,9 +5672,7 @@ mod tests {
         invoke_context.transaction_context.pop().unwrap();
 
         // Invoking the syscall from B6 with index zero should return ix B5
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(syscall_base_cost);
+        invoke_context.mock_set_remaining(syscall_base_cost);
         let result = SyscallGetProcessedSiblingInstruction::rust(
             &mut invoke_context,
             0,
@@ -5655,9 +5724,7 @@ mod tests {
         }
 
         // Invoking the syscall from B6 with index one should return false
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(syscall_base_cost);
+        invoke_context.mock_set_remaining(syscall_base_cost);
         let result = SyscallGetProcessedSiblingInstruction::rust(
             &mut invoke_context,
             1,
@@ -5683,9 +5750,7 @@ mod tests {
         invoke_context.transaction_context.push(true).unwrap();
 
         // Invoking the syscall from B8 with index zero should return ix B6
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(syscall_base_cost);
+        invoke_context.mock_set_remaining(syscall_base_cost);
         let result = SyscallGetProcessedSiblingInstruction::rust(
             &mut invoke_context,
             0,
@@ -5737,9 +5802,7 @@ mod tests {
         }
 
         // Invoking the syscall from B6 with index one should return ix B5
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(syscall_base_cost);
+        invoke_context.mock_set_remaining(syscall_base_cost);
         let result = SyscallGetProcessedSiblingInstruction::rust(
             &mut invoke_context,
             1,
@@ -5791,9 +5854,7 @@ mod tests {
         }
 
         // Invoking the syscall from B8 with index two should return false
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(syscall_base_cost);
+        invoke_context.mock_set_remaining(syscall_base_cost);
         let result = SyscallGetProcessedSiblingInstruction::rust(
             &mut invoke_context,
             2,
@@ -5815,9 +5876,7 @@ mod tests {
         invoke_context.transaction_context.push(true).unwrap();
 
         // Invoking the syscall from B with index zero should return ix C
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(syscall_base_cost);
+        invoke_context.mock_set_remaining(syscall_base_cost);
         processed_sibling_instruction.data_len = 1;
         let result = SyscallGetProcessedSiblingInstruction::rust(
             &mut invoke_context,
@@ -5881,9 +5940,7 @@ mod tests {
         invoke_context.transaction_context.push(true).unwrap();
 
         // Invoking the CPI from C1 with index zero should return false.
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(syscall_base_cost);
+        invoke_context.mock_set_remaining(syscall_base_cost);
         let result = SyscallGetProcessedSiblingInstruction::rust(
             &mut invoke_context,
             0,
@@ -5908,9 +5965,7 @@ mod tests {
         invoke_context.transaction_context.push(true).unwrap();
 
         // Invoking the syscall from C2 with index zero should return ix C1
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(syscall_base_cost);
+        invoke_context.mock_set_remaining(syscall_base_cost);
         processed_sibling_instruction.data_len = 2;
         let result = SyscallGetProcessedSiblingInstruction::rust(
             &mut invoke_context,
@@ -5963,9 +6018,7 @@ mod tests {
         }
 
         // Invoking the CPI from C2 with index one should return false.
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(syscall_base_cost);
+        invoke_context.mock_set_remaining(syscall_base_cost);
         let result = SyscallGetProcessedSiblingInstruction::rust(
             &mut invoke_context,
             1,
@@ -6073,7 +6126,7 @@ mod tests {
                 .unwrap(),
             create_program_address(&mut invoke_context, &[b"Talking"], &address).unwrap(),
         );
-        invoke_context.compute_meter.mock_set_remaining(0);
+        invoke_context.mock_set_remaining(0);
         assert_matches!(
             create_program_address(&mut invoke_context, &[b"", &[1]], &address),
             Result::Err(error) if error.downcast_ref::<InstructionError>().unwrap() == &InstructionError::ComputationalBudgetExceeded
@@ -6091,9 +6144,7 @@ mod tests {
 
         for _ in 0..1_000 {
             let address = Pubkey::new_unique();
-            invoke_context
-                .compute_meter
-                .mock_set_remaining(cost * max_tries);
+            invoke_context.mock_set_remaining(cost * max_tries);
             let (found_address, bump_seed) =
                 try_find_program_address(&mut invoke_context, &[b"Lil'", b"Bits"], &address)
                     .unwrap();
@@ -6109,27 +6160,19 @@ mod tests {
         }
 
         let seeds: &[&[u8]] = &[b""];
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(cost * max_tries);
+        invoke_context.mock_set_remaining(cost * max_tries);
         let (_, bump_seed) =
             try_find_program_address(&mut invoke_context, seeds, &address).unwrap();
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(cost * (max_tries - bump_seed as u64));
+        invoke_context.mock_set_remaining(cost * (max_tries - bump_seed as u64));
         try_find_program_address(&mut invoke_context, seeds, &address).unwrap();
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(cost * (max_tries - bump_seed as u64 - 1));
+        invoke_context.mock_set_remaining(cost * (max_tries - bump_seed as u64 - 1));
         assert_matches!(
             try_find_program_address(&mut invoke_context, seeds, &address),
             Result::Err(error) if error.downcast_ref::<InstructionError>().unwrap() == &InstructionError::ComputationalBudgetExceeded
         );
 
         let exceeded_seed = &[127; MAX_SEED_LEN + 1];
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(cost * (max_tries - 1));
+        invoke_context.mock_set_remaining(cost * (max_tries - 1));
         assert_matches!(
             try_find_program_address(&mut invoke_context, &[exceeded_seed], &address),
             Result::Err(error) if error.downcast_ref::<SyscallError>().unwrap() == &SyscallError::BadSeeds(PubkeyError::MaxSeedLengthExceeded)
@@ -6153,9 +6196,7 @@ mod tests {
             &[16],
             &[17],
         ];
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(cost * (max_tries - 1));
+        invoke_context.mock_set_remaining(cost * (max_tries - 1));
         assert_matches!(
             try_find_program_address(&mut invoke_context, exceeded_seeds, &address),
             Result::Err(error) if error.downcast_ref::<SyscallError>().unwrap() == &SyscallError::BadSeeds(PubkeyError::MaxSeedLengthExceeded)
@@ -6230,13 +6271,10 @@ mod tests {
             .mock_set_mapping_abi_v1(memory_mapping);
         let budget = invoke_context.get_execution_cost();
         let cost = budget.big_modular_exponentiation_base_cost
-            + big_mod_exp_operation_cost(
-                budget.big_modular_exponentiation_cost_divisor,
-                &params,
-                &exponent,
-            )
-            .unwrap();
-        invoke_context.compute_meter.mock_set_remaining(cost);
+            + budget
+                .big_mod_exp_operation_cost(params.base_len, params.modulus_len, &exponent)
+                .unwrap();
+        invoke_context.mock_set_remaining(cost);
 
         let result = SyscallBigModExp::rust(&mut invoke_context, VADDR_PARAMS, VADDR_OUT, 0, 0, 0);
 
@@ -6287,13 +6325,10 @@ mod tests {
             .mock_set_mapping_abi_v1(memory_mapping);
         let budget = invoke_context.get_execution_cost();
         let cost = budget.big_modular_exponentiation_base_cost
-            + big_mod_exp_operation_cost(
-                budget.big_modular_exponentiation_cost_divisor,
-                &params,
-                &exponent,
-            )
-            .unwrap();
-        invoke_context.compute_meter.mock_set_remaining(cost);
+            + budget
+                .big_mod_exp_operation_cost(params.base_len, params.modulus_len, &exponent)
+                .unwrap();
+        invoke_context.mock_set_remaining(cost);
 
         let result = SyscallBigModExp::rust(&mut invoke_context, VADDR_PARAMS, VADDR_OUT, 0, 0, 0);
 
@@ -6344,13 +6379,10 @@ mod tests {
             .mock_set_mapping_abi_v1(memory_mapping);
         let budget = invoke_context.get_execution_cost();
         let cost = budget.big_modular_exponentiation_base_cost
-            + big_mod_exp_operation_cost(
-                budget.big_modular_exponentiation_cost_divisor,
-                &params,
-                &exponent,
-            )
-            .unwrap();
-        invoke_context.compute_meter.mock_set_remaining(cost);
+            + budget
+                .big_mod_exp_operation_cost(params.base_len, params.modulus_len, &exponent)
+                .unwrap();
+        invoke_context.mock_set_remaining(cost);
 
         let result = SyscallBigModExp::rust(&mut invoke_context, VADDR_PARAMS, VADDR_BASE, 0, 0, 0);
 
@@ -6437,9 +6469,7 @@ mod tests {
             &program_runtime_environments,
             &sysvar_cache,
         );
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(compute_budget.compute_unit_limit);
+        invoke_context.mock_set_remaining(compute_budget.compute_unit_limit);
 
         let null_pointer_var = std::ptr::null::<Pubkey>() as u64;
 
@@ -6529,9 +6559,7 @@ mod tests {
             assert_access_violation!(result, vote_address_var, 32);
         }
 
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(compute_budget.compute_unit_limit);
+        invoke_context.mock_set_remaining(compute_budget.compute_unit_limit);
         {
             // Otherwise, the syscall returns a `u64` integer representing the
             // total active stake delegated to the vote account at the provided
@@ -6560,9 +6588,7 @@ mod tests {
             assert_eq!(result, EXPECTED_EPOCH_STAKE);
         }
 
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(compute_budget.compute_unit_limit);
+        invoke_context.mock_set_remaining(compute_budget.compute_unit_limit);
         {
             // If the provided vote address corresponds to an account that is
             // not a vote account or does not exist, the syscall will write
@@ -6820,12 +6846,7 @@ mod tests {
         };
 
         let config = Config::default();
-        let feature_set = SVMFeatureSet {
-            enable_bls12_381_syscall: true,
-            ..Default::default()
-        };
-        let feature_set = &feature_set;
-        prepare_mock_with_feature_set!(invoke_context, program_id, bpf_loader::id(), feature_set);
+        prepare_mockup!(invoke_context, program_id, bpf_loader::id());
 
         let p1_bytes_be: [u8; 96] = [
             9, 86, 169, 212, 236, 245, 17, 101, 127, 183, 56, 13, 99, 100, 183, 133, 57, 107, 96,
@@ -6903,9 +6924,7 @@ mod tests {
             .mock_set_mapping_abi_v1(memory_mapping);
 
         let bls12_381_g1_add_cost = invoke_context.get_execution_cost().bls12_381_g1_add_cost;
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(2 * bls12_381_g1_add_cost);
+        invoke_context.mock_set_remaining(2 * bls12_381_g1_add_cost);
 
         let result = SyscallCurveGroupOps::rust(
             &mut invoke_context,
@@ -6940,12 +6959,7 @@ mod tests {
         };
 
         let config = Config::default();
-        let feature_set = SVMFeatureSet {
-            enable_bls12_381_syscall: true,
-            ..Default::default()
-        };
-        let feature_set = &feature_set;
-        prepare_mock_with_feature_set!(invoke_context, program_id, bpf_loader::id(), feature_set);
+        prepare_mockup!(invoke_context, program_id, bpf_loader::id());
 
         let sub_p1_be: [u8; 96] = [
             6, 126, 67, 177, 221, 168, 219, 147, 17, 32, 109, 112, 204, 95, 207, 179, 227, 202, 32,
@@ -7026,9 +7040,7 @@ mod tests {
         let bls12_381_g1_subtract_cost = invoke_context
             .get_execution_cost()
             .bls12_381_g1_subtract_cost;
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(2 * bls12_381_g1_subtract_cost);
+        invoke_context.mock_set_remaining(2 * bls12_381_g1_subtract_cost);
 
         let result = SyscallCurveGroupOps::rust(
             &mut invoke_context,
@@ -7063,12 +7075,7 @@ mod tests {
         };
 
         let config = Config::default();
-        let feature_set = SVMFeatureSet {
-            enable_bls12_381_syscall: true,
-            ..Default::default()
-        };
-        let feature_set = &feature_set;
-        prepare_mock_with_feature_set!(invoke_context, program_id, bpf_loader::id(), feature_set);
+        prepare_mockup!(invoke_context, program_id, bpf_loader::id());
 
         let mul_point_be: [u8; 96] = [
             20, 18, 233, 201, 110, 206, 56, 32, 8, 44, 140, 121, 37, 196, 157, 56, 180, 134, 164,
@@ -7142,9 +7149,7 @@ mod tests {
         let bls12_381_g1_multiply_cost = invoke_context
             .get_execution_cost()
             .bls12_381_g1_multiply_cost;
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(2 * bls12_381_g1_multiply_cost);
+        invoke_context.mock_set_remaining(2 * bls12_381_g1_multiply_cost);
 
         let result = SyscallCurveGroupOps::rust(
             &mut invoke_context,
@@ -7179,13 +7184,7 @@ mod tests {
         };
 
         let config = Config::default();
-        let feature_set = SVMFeatureSet {
-            enable_bls12_381_syscall: true,
-            ..Default::default()
-        };
-        let feature_set = &feature_set;
-
-        prepare_mock_with_feature_set!(invoke_context, program_id, bpf_loader::id(), feature_set,);
+        prepare_mockup!(invoke_context, program_id, bpf_loader::id());
 
         let p1_bytes_be: [u8; 192] = [
             11, 83, 21, 62, 4, 174, 123, 131, 163, 19, 62, 216, 192, 48, 25, 184, 57, 207, 80, 70,
@@ -7294,9 +7293,7 @@ mod tests {
             .mock_set_mapping_abi_v1(memory_mapping);
 
         let bls12_381_g2_add_cost = invoke_context.get_execution_cost().bls12_381_g2_add_cost;
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(2 * bls12_381_g2_add_cost);
+        invoke_context.mock_set_remaining(2 * bls12_381_g2_add_cost);
 
         let result = SyscallCurveGroupOps::rust(
             &mut invoke_context,
@@ -7331,12 +7328,7 @@ mod tests {
         };
 
         let config = Config::default();
-        let feature_set = SVMFeatureSet {
-            enable_bls12_381_syscall: true,
-            ..Default::default()
-        };
-        let feature_set = &feature_set;
-        prepare_mock_with_feature_set!(invoke_context, program_id, bpf_loader::id(), feature_set);
+        prepare_mockup!(invoke_context, program_id, bpf_loader::id());
 
         let sub_p1_be: [u8; 192] = [
             1, 111, 113, 42, 165, 128, 194, 26, 130, 142, 58, 198, 61, 244, 113, 64, 25, 96, 196,
@@ -7449,9 +7441,7 @@ mod tests {
         let bls12_381_g2_subtract_cost = invoke_context
             .get_execution_cost()
             .bls12_381_g2_subtract_cost;
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(2 * bls12_381_g2_subtract_cost);
+        invoke_context.mock_set_remaining(2 * bls12_381_g2_subtract_cost);
 
         let result = SyscallCurveGroupOps::rust(
             &mut invoke_context,
@@ -7486,12 +7476,7 @@ mod tests {
         };
 
         let config = Config::default();
-        let feature_set = SVMFeatureSet {
-            enable_bls12_381_syscall: true,
-            ..Default::default()
-        };
-        let feature_set = &feature_set;
-        prepare_mock_with_feature_set!(invoke_context, program_id, bpf_loader::id(), feature_set);
+        prepare_mockup!(invoke_context, program_id, bpf_loader::id());
 
         let mul_point_be: [u8; 192] = [
             1, 95, 16, 90, 117, 185, 253, 76, 25, 68, 54, 111, 154, 161, 125, 203, 121, 4, 154, 67,
@@ -7586,9 +7571,7 @@ mod tests {
         let bls12_381_g2_multiply_cost = invoke_context
             .get_execution_cost()
             .bls12_381_g2_multiply_cost;
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(2 * bls12_381_g2_multiply_cost);
+        invoke_context.mock_set_remaining(2 * bls12_381_g2_multiply_cost);
 
         let result = SyscallCurveGroupOps::rust(
             &mut invoke_context,
@@ -7620,13 +7603,7 @@ mod tests {
         use solana_define_syscall::curve_constants::BLS12_381_BE;
 
         let config = Config::default();
-        let feature_set = SVMFeatureSet {
-            enable_bls12_381_syscall: true,
-            ..Default::default()
-        };
-        let feature_set = &feature_set;
-
-        prepare_mock_with_feature_set!(invoke_context, program_id, bpf_loader::id(), feature_set,);
+        prepare_mockup!(invoke_context, program_id, bpf_loader::id());
 
         let g1_bytes: [u8; 96] = [
             3, 161, 104, 54, 242, 116, 16, 50, 15, 113, 42, 38, 108, 11, 127, 64, 43, 249, 50, 133,
@@ -7705,9 +7682,7 @@ mod tests {
             .mock_set_mapping_abi_v1(memory_mapping);
 
         let bls12_381_one_pair_cost = invoke_context.get_execution_cost().bls12_381_one_pair_cost;
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(bls12_381_one_pair_cost);
+        invoke_context.mock_set_remaining(bls12_381_one_pair_cost);
 
         let result = SyscallCurvePairingMap::rust(
             &mut invoke_context,
@@ -7727,13 +7702,7 @@ mod tests {
         use solana_define_syscall::curve_constants::BLS12_381_LE;
 
         let config = Config::default();
-        let feature_set = SVMFeatureSet {
-            enable_bls12_381_syscall: true,
-            ..Default::default()
-        };
-        let feature_set = &feature_set;
-
-        prepare_mock_with_feature_set!(invoke_context, program_id, bpf_loader::id(), feature_set,);
+        prepare_mockup!(invoke_context, program_id, bpf_loader::id());
 
         let g1_bytes: [u8; 96] = [
             35, 204, 210, 14, 243, 251, 68, 127, 25, 203, 200, 133, 109, 90, 249, 87, 65, 75, 36,
@@ -7812,9 +7781,7 @@ mod tests {
             .mock_set_mapping_abi_v1(memory_mapping);
 
         let bls12_381_one_pair_cost = invoke_context.get_execution_cost().bls12_381_one_pair_cost;
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(bls12_381_one_pair_cost);
+        invoke_context.mock_set_remaining(bls12_381_one_pair_cost);
 
         let result = SyscallCurvePairingMap::rust(
             &mut invoke_context,
@@ -7834,13 +7801,7 @@ mod tests {
         use solana_define_syscall::curve_constants::{BLS12_381_G1_BE, BLS12_381_G1_LE};
 
         let config = Config::default();
-        let feature_set = SVMFeatureSet {
-            enable_bls12_381_syscall: true,
-            ..Default::default()
-        };
-        let feature_set = &feature_set;
-
-        prepare_mock_with_feature_set!(invoke_context, program_id, bpf_loader::id(), feature_set,);
+        prepare_mockup!(invoke_context, program_id, bpf_loader::id());
 
         let compressed_be: [u8; 48] = [
             175, 159, 245, 68, 142, 96, 188, 154, 113, 143, 70, 58, 193, 2, 189, 111, 135, 114,
@@ -7896,9 +7857,7 @@ mod tests {
         let bls12_381_g2_decompress_cost = invoke_context
             .get_execution_cost()
             .bls12_381_g2_decompress_cost;
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(2 * bls12_381_g2_decompress_cost);
+        invoke_context.mock_set_remaining(2 * bls12_381_g2_decompress_cost);
 
         let result = SyscallCurveDecompress::rust(
             &mut invoke_context,
@@ -7930,13 +7889,7 @@ mod tests {
         use solana_define_syscall::curve_constants::{BLS12_381_G2_BE, BLS12_381_G2_LE};
 
         let config = Config::default();
-        let feature_set = SVMFeatureSet {
-            enable_bls12_381_syscall: true,
-            ..Default::default()
-        };
-        let feature_set = &feature_set;
-
-        prepare_mock_with_feature_set!(invoke_context, program_id, bpf_loader::id(), feature_set,);
+        prepare_mockup!(invoke_context, program_id, bpf_loader::id());
 
         let compressed_be: [u8; 96] = [
             143, 106, 18, 220, 40, 152, 4, 228, 139, 35, 104, 146, 179, 74, 205, 172, 146, 137, 11,
@@ -8008,9 +7961,7 @@ mod tests {
         let bls12_381_g2_decompress_cost = invoke_context
             .get_execution_cost()
             .bls12_381_g2_decompress_cost;
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(2 * bls12_381_g2_decompress_cost);
+        invoke_context.mock_set_remaining(2 * bls12_381_g2_decompress_cost);
 
         let result = SyscallCurveDecompress::rust(
             &mut invoke_context,
@@ -8042,13 +7993,7 @@ mod tests {
         use solana_define_syscall::curve_constants::{BLS12_381_G1_BE, BLS12_381_G1_LE};
 
         let config = Config::default();
-        let feature_set = SVMFeatureSet {
-            enable_bls12_381_syscall: true,
-            ..Default::default()
-        };
-        let feature_set = &feature_set;
-
-        prepare_mock_with_feature_set!(invoke_context, program_id, bpf_loader::id(), feature_set,);
+        prepare_mockup!(invoke_context, program_id, bpf_loader::id());
 
         let point_bytes_be: [u8; 96] = [
             22, 163, 250, 67, 197, 168, 103, 201, 128, 33, 170, 96, 74, 40, 45, 90, 105, 181, 244,
@@ -8087,9 +8032,7 @@ mod tests {
         let bls12_381_g1_validate_cost = invoke_context
             .get_execution_cost()
             .bls12_381_g1_validate_cost;
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(2 * bls12_381_g1_validate_cost);
+        invoke_context.mock_set_remaining(2 * bls12_381_g1_validate_cost);
 
         let result = SyscallCurvePointValidation::rust(
             &mut invoke_context,
@@ -8119,13 +8062,7 @@ mod tests {
         use solana_define_syscall::curve_constants::{BLS12_381_G2_BE, BLS12_381_G2_LE};
 
         let config = Config::default();
-        let feature_set = SVMFeatureSet {
-            enable_bls12_381_syscall: true,
-            ..Default::default()
-        };
-        let feature_set = &feature_set;
-
-        prepare_mock_with_feature_set!(invoke_context, program_id, bpf_loader::id(), feature_set,);
+        prepare_mockup!(invoke_context, program_id, bpf_loader::id());
 
         let point_bytes_be: [u8; 192] = [
             0, 79, 207, 115, 91, 72, 0, 80, 49, 59, 203, 189, 178, 240, 18, 141, 223, 147, 62, 79,
@@ -8176,9 +8113,7 @@ mod tests {
         let bls12_381_g2_validate_cost = invoke_context
             .get_execution_cost()
             .bls12_381_g2_validate_cost;
-        invoke_context
-            .compute_meter
-            .mock_set_remaining(2 * bls12_381_g2_validate_cost);
+        invoke_context.mock_set_remaining(2 * bls12_381_g2_validate_cost);
 
         let result = SyscallCurvePointValidation::rust(
             &mut invoke_context,
@@ -8201,6 +8136,819 @@ mod tests {
         );
 
         assert_eq!(0, result.unwrap());
+    }
+
+    #[test]
+    fn test_syscall_secp256r1_validate() {
+        use solana_define_syscall::curve_constants::{SECP256R1_BE, SECP256R1_LE};
+
+        let config = Config::default();
+        let feature_set = SVMFeatureSet {
+            secp256r1_syscall_enabled: true,
+            ..Default::default()
+        };
+        let feature_set = &feature_set;
+        prepare_mock_with_feature_set!(invoke_context, program_id, bpf_loader::id(), feature_set);
+
+        let point_bytes_be: [u8; 64] = [
+            227, 94, 177, 158, 183, 157, 183, 136, 81, 250, 147, 122, 247, 57, 167, 230, 116, 168,
+            146, 47, 216, 146, 254, 135, 144, 160, 32, 182, 38, 148, 174, 214, 67, 181, 43, 184,
+            139, 34, 134, 238, 88, 197, 105, 67, 244, 45, 111, 160, 107, 205, 99, 167, 132, 105,
+            249, 146, 194, 158, 163, 69, 27, 141, 229, 202,
+        ];
+        let point_bytes_le: [u8; 64] = [
+            214, 174, 148, 38, 182, 32, 160, 144, 135, 254, 146, 216, 47, 146, 168, 116, 230, 167,
+            57, 247, 122, 147, 250, 81, 136, 183, 157, 183, 158, 177, 94, 227, 202, 229, 141, 27,
+            69, 163, 158, 194, 146, 249, 105, 132, 167, 99, 205, 107, 160, 111, 45, 244, 67, 105,
+            197, 88, 238, 134, 34, 139, 184, 43, 181, 67,
+        ];
+        // `point_bytes` with the Y-coordinate incremented by one, which is off the curve.
+        let invalid_bytes_be: [u8; 64] = [
+            227, 94, 177, 158, 183, 157, 183, 136, 81, 250, 147, 122, 247, 57, 167, 230, 116, 168,
+            146, 47, 216, 146, 254, 135, 144, 160, 32, 182, 38, 148, 174, 214, 67, 181, 43, 184,
+            139, 34, 134, 238, 88, 197, 105, 67, 244, 45, 111, 160, 107, 205, 99, 167, 132, 105,
+            249, 146, 194, 158, 163, 69, 27, 141, 229, 203,
+        ];
+        let invalid_bytes_le: [u8; 64] = [
+            214, 174, 148, 38, 182, 32, 160, 144, 135, 254, 146, 216, 47, 146, 168, 116, 230, 167,
+            57, 247, 122, 147, 250, 81, 136, 183, 157, 183, 158, 177, 94, 227, 203, 229, 141, 27,
+            69, 163, 158, 194, 146, 249, 105, 132, 167, 99, 205, 107, 160, 111, 45, 244, 67, 105,
+            197, 88, 238, 134, 34, 139, 184, 43, 181, 67,
+        ];
+
+        let point_be_va = 0x100000000;
+        let point_le_va = 0x200000000;
+        let invalid_be_va = 0x300000000;
+        let invalid_le_va = 0x400000000;
+
+        let memory_mapping = unsafe {
+            MemoryMapping::new(
+                vec![
+                    MemoryRegion::new(&raw const point_bytes_be, point_be_va),
+                    MemoryRegion::new(&raw const point_bytes_le, point_le_va),
+                    MemoryRegion::new(&raw const invalid_bytes_be, invalid_be_va),
+                    MemoryRegion::new(&raw const invalid_bytes_le, invalid_le_va),
+                ],
+                &config,
+                SBPFVersion::V3,
+            )
+            .unwrap()
+        };
+        invoke_context
+            .memory_contexts
+            .mock_set_mapping_abi_v1(memory_mapping);
+
+        let secp256r1_validate_cost = invoke_context.get_execution_cost().secp256r1_validate_cost;
+        invoke_context.mock_set_remaining(4 * secp256r1_validate_cost);
+
+        let result = SyscallCurvePointValidation::rust(
+            &mut invoke_context,
+            SECP256R1_BE,
+            point_be_va,
+            0,
+            0,
+            0,
+        );
+        assert_eq!(0, result.unwrap());
+
+        let result = SyscallCurvePointValidation::rust(
+            &mut invoke_context,
+            SECP256R1_LE,
+            point_le_va,
+            0,
+            0,
+            0,
+        );
+        assert_eq!(0, result.unwrap());
+
+        let result = SyscallCurvePointValidation::rust(
+            &mut invoke_context,
+            SECP256R1_BE,
+            invalid_be_va,
+            0,
+            0,
+            0,
+        );
+        assert_eq!(1, result.unwrap());
+
+        let result = SyscallCurvePointValidation::rust(
+            &mut invoke_context,
+            SECP256R1_LE,
+            invalid_le_va,
+            0,
+            0,
+            0,
+        );
+        assert_eq!(1, result.unwrap());
+
+        let result = SyscallCurvePointValidation::rust(
+            &mut invoke_context,
+            SECP256R1_BE,
+            point_be_va,
+            0,
+            0,
+            0,
+        );
+        assert_matches!(
+            result,
+            Result::Err(error) if error.downcast_ref::<InstructionError>().unwrap() == &InstructionError::ComputationalBudgetExceeded
+        );
+    }
+
+    #[test]
+    fn test_syscall_secp256r1_decompress() {
+        use solana_define_syscall::curve_constants::{SECP256R1_BE, SECP256R1_LE};
+
+        let config = Config::default();
+        let feature_set = SVMFeatureSet {
+            secp256r1_syscall_enabled: true,
+            ..Default::default()
+        };
+        let feature_set = &feature_set;
+        prepare_mock_with_feature_set!(invoke_context, program_id, bpf_loader::id(), feature_set);
+
+        let compressed_be: [u8; 33] = [
+            2, 227, 94, 177, 158, 183, 157, 183, 136, 81, 250, 147, 122, 247, 57, 167, 230, 116,
+            168, 146, 47, 216, 146, 254, 135, 144, 160, 32, 182, 38, 148, 174, 214,
+        ];
+        let expected_affine_be: [u8; 64] = [
+            227, 94, 177, 158, 183, 157, 183, 136, 81, 250, 147, 122, 247, 57, 167, 230, 116, 168,
+            146, 47, 216, 146, 254, 135, 144, 160, 32, 182, 38, 148, 174, 214, 67, 181, 43, 184,
+            139, 34, 134, 238, 88, 197, 105, 67, 244, 45, 111, 160, 107, 205, 99, 167, 132, 105,
+            249, 146, 194, 158, 163, 69, 27, 141, 229, 202,
+        ];
+        let compressed_le: [u8; 33] = [
+            2, 214, 174, 148, 38, 182, 32, 160, 144, 135, 254, 146, 216, 47, 146, 168, 116, 230,
+            167, 57, 247, 122, 147, 250, 81, 136, 183, 157, 183, 158, 177, 94, 227,
+        ];
+        let expected_affine_le: [u8; 64] = [
+            214, 174, 148, 38, 182, 32, 160, 144, 135, 254, 146, 216, 47, 146, 168, 116, 230, 167,
+            57, 247, 122, 147, 250, 81, 136, 183, 157, 183, 158, 177, 94, 227, 202, 229, 141, 27,
+            69, 163, 158, 194, 146, 249, 105, 132, 167, 99, 205, 107, 160, 111, 45, 244, 67, 105,
+            197, 88, 238, 134, 34, 139, 184, 43, 181, 67,
+        ];
+
+        let input_be_va = 0x100000000;
+        let result_be_va = 0x200000000;
+        let input_le_va = 0x300000000;
+        let result_le_va = 0x400000000;
+        let mut result_be_buf = [0u8; 64];
+        let mut result_le_buf = [0u8; 64];
+
+        let memory_mapping = unsafe {
+            MemoryMapping::new(
+                vec![
+                    MemoryRegion::new(&raw const compressed_be, input_be_va),
+                    MemoryRegion::new(&raw mut result_be_buf, result_be_va),
+                    MemoryRegion::new(&raw const compressed_le, input_le_va),
+                    MemoryRegion::new(&raw mut result_le_buf, result_le_va),
+                ],
+                &config,
+                SBPFVersion::V3,
+            )
+            .unwrap()
+        };
+        invoke_context
+            .memory_contexts
+            .mock_set_mapping_abi_v1(memory_mapping);
+
+        let secp256r1_decompress_cost = invoke_context
+            .get_execution_cost()
+            .secp256r1_decompress_cost;
+        invoke_context.mock_set_remaining(2 * secp256r1_decompress_cost);
+
+        let result = SyscallCurveDecompress::rust(
+            &mut invoke_context,
+            SECP256R1_BE,
+            input_be_va,
+            result_be_va,
+            0,
+            0,
+        );
+        assert_eq!(0, result.unwrap());
+        assert_eq!(result_be_buf, expected_affine_be);
+
+        let result = SyscallCurveDecompress::rust(
+            &mut invoke_context,
+            SECP256R1_LE,
+            input_le_va,
+            result_le_va,
+            0,
+            0,
+        );
+        assert_eq!(0, result.unwrap());
+        assert_eq!(result_le_buf, expected_affine_le);
+
+        let result = SyscallCurveDecompress::rust(
+            &mut invoke_context,
+            SECP256R1_BE,
+            input_be_va,
+            result_be_va,
+            0,
+            0,
+        );
+        assert_matches!(
+            result,
+            Result::Err(error) if error.downcast_ref::<InstructionError>().unwrap() == &InstructionError::ComputationalBudgetExceeded
+        );
+    }
+
+    #[test]
+    fn test_syscall_secp256r1_add() {
+        use {
+            solana_curve25519::curve_syscall_traits::ADD,
+            solana_define_syscall::curve_constants::{SECP256R1_BE, SECP256R1_LE},
+        };
+
+        let config = Config::default();
+        let feature_set = SVMFeatureSet {
+            secp256r1_syscall_enabled: true,
+            ..Default::default()
+        };
+        let feature_set = &feature_set;
+        prepare_mock_with_feature_set!(invoke_context, program_id, bpf_loader::id(), feature_set);
+
+        let p1_bytes_be: [u8; 64] = [
+            227, 94, 177, 158, 183, 157, 183, 136, 81, 250, 147, 122, 247, 57, 167, 230, 116, 168,
+            146, 47, 216, 146, 254, 135, 144, 160, 32, 182, 38, 148, 174, 214, 67, 181, 43, 184,
+            139, 34, 134, 238, 88, 197, 105, 67, 244, 45, 111, 160, 107, 205, 99, 167, 132, 105,
+            249, 146, 194, 158, 163, 69, 27, 141, 229, 202,
+        ];
+        let p2_bytes_be: [u8; 64] = [
+            19, 83, 106, 78, 50, 201, 180, 8, 250, 247, 235, 195, 252, 108, 54, 5, 194, 39, 20, 70,
+            182, 229, 168, 172, 129, 242, 53, 56, 175, 232, 26, 67, 228, 2, 126, 213, 149, 61, 96,
+            80, 250, 86, 94, 145, 245, 20, 97, 64, 247, 106, 59, 173, 156, 236, 27, 172, 192, 45,
+            5, 119, 235, 170, 240, 203,
+        ];
+        let expected_sum_be: [u8; 64] = [
+            79, 177, 77, 125, 177, 59, 48, 83, 180, 204, 102, 217, 114, 1, 16, 74, 65, 142, 201,
+            23, 133, 5, 184, 208, 242, 1, 196, 55, 101, 85, 183, 14, 53, 184, 232, 199, 8, 28, 155,
+            49, 125, 132, 107, 246, 57, 243, 121, 241, 99, 157, 14, 231, 191, 97, 204, 158, 85,
+            107, 145, 208, 167, 10, 129, 28,
+        ];
+        let p1_bytes_le: [u8; 64] = [
+            214, 174, 148, 38, 182, 32, 160, 144, 135, 254, 146, 216, 47, 146, 168, 116, 230, 167,
+            57, 247, 122, 147, 250, 81, 136, 183, 157, 183, 158, 177, 94, 227, 202, 229, 141, 27,
+            69, 163, 158, 194, 146, 249, 105, 132, 167, 99, 205, 107, 160, 111, 45, 244, 67, 105,
+            197, 88, 238, 134, 34, 139, 184, 43, 181, 67,
+        ];
+        let p2_bytes_le: [u8; 64] = [
+            67, 26, 232, 175, 56, 53, 242, 129, 172, 168, 229, 182, 70, 20, 39, 194, 5, 54, 108,
+            252, 195, 235, 247, 250, 8, 180, 201, 50, 78, 106, 83, 19, 203, 240, 170, 235, 119, 5,
+            45, 192, 172, 27, 236, 156, 173, 59, 106, 247, 64, 97, 20, 245, 145, 94, 86, 250, 80,
+            96, 61, 149, 213, 126, 2, 228,
+        ];
+        let expected_sum_le: [u8; 64] = [
+            14, 183, 85, 101, 55, 196, 1, 242, 208, 184, 5, 133, 23, 201, 142, 65, 74, 16, 1, 114,
+            217, 102, 204, 180, 83, 48, 59, 177, 125, 77, 177, 79, 28, 129, 10, 167, 208, 145, 107,
+            85, 158, 204, 97, 191, 231, 14, 157, 99, 241, 121, 243, 57, 246, 107, 132, 125, 49,
+            155, 28, 8, 199, 232, 184, 53,
+        ];
+
+        let p1_be_va = 0x100000000;
+        let p2_be_va = 0x200000000;
+        let p1_le_va = 0x300000000;
+        let p2_le_va = 0x400000000;
+        let result_be_va = 0x500000000;
+        let result_le_va = 0x600000000;
+
+        let mut result_be_buf = [0u8; 64];
+        let mut result_le_buf = [0u8; 64];
+
+        let memory_mapping = unsafe {
+            MemoryMapping::new(
+                vec![
+                    MemoryRegion::new(&raw const p1_bytes_be, p1_be_va),
+                    MemoryRegion::new(&raw const p2_bytes_be, p2_be_va),
+                    MemoryRegion::new(&raw mut result_be_buf, result_be_va),
+                    MemoryRegion::new(&raw const p1_bytes_le, p1_le_va),
+                    MemoryRegion::new(&raw const p2_bytes_le, p2_le_va),
+                    MemoryRegion::new(&raw mut result_le_buf, result_le_va),
+                ],
+                &config,
+                SBPFVersion::V3,
+            )
+            .unwrap()
+        };
+        invoke_context
+            .memory_contexts
+            .mock_set_mapping_abi_v1(memory_mapping);
+
+        let secp256r1_add_cost = invoke_context.get_execution_cost().secp256r1_add_cost;
+        invoke_context.mock_set_remaining(2 * secp256r1_add_cost);
+
+        let result = SyscallCurveGroupOps::rust(
+            &mut invoke_context,
+            SECP256R1_BE,
+            ADD,
+            p1_be_va,
+            p2_be_va,
+            result_be_va,
+        );
+        assert_eq!(0, result.unwrap());
+        assert_eq!(result_be_buf, expected_sum_be);
+
+        let result = SyscallCurveGroupOps::rust(
+            &mut invoke_context,
+            SECP256R1_LE,
+            ADD,
+            p1_le_va,
+            p2_le_va,
+            result_le_va,
+        );
+        assert_eq!(0, result.unwrap());
+        assert_eq!(result_le_buf, expected_sum_le);
+
+        let result = SyscallCurveGroupOps::rust(
+            &mut invoke_context,
+            SECP256R1_BE,
+            ADD,
+            p1_be_va,
+            p2_be_va,
+            result_be_va,
+        );
+        assert_matches!(
+            result,
+            Result::Err(error) if error.downcast_ref::<InstructionError>().unwrap() == &InstructionError::ComputationalBudgetExceeded
+        );
+    }
+
+    #[test]
+    fn test_syscall_secp256r1_sub() {
+        use {
+            solana_curve25519::curve_syscall_traits::SUB,
+            solana_define_syscall::curve_constants::{SECP256R1_BE, SECP256R1_LE},
+        };
+
+        let config = Config::default();
+        let feature_set = SVMFeatureSet {
+            secp256r1_syscall_enabled: true,
+            ..Default::default()
+        };
+        let feature_set = &feature_set;
+        prepare_mock_with_feature_set!(invoke_context, program_id, bpf_loader::id(), feature_set);
+
+        let p1_bytes_be: [u8; 64] = [
+            227, 94, 177, 158, 183, 157, 183, 136, 81, 250, 147, 122, 247, 57, 167, 230, 116, 168,
+            146, 47, 216, 146, 254, 135, 144, 160, 32, 182, 38, 148, 174, 214, 67, 181, 43, 184,
+            139, 34, 134, 238, 88, 197, 105, 67, 244, 45, 111, 160, 107, 205, 99, 167, 132, 105,
+            249, 146, 194, 158, 163, 69, 27, 141, 229, 202,
+        ];
+        let p2_bytes_be: [u8; 64] = [
+            19, 83, 106, 78, 50, 201, 180, 8, 250, 247, 235, 195, 252, 108, 54, 5, 194, 39, 20, 70,
+            182, 229, 168, 172, 129, 242, 53, 56, 175, 232, 26, 67, 228, 2, 126, 213, 149, 61, 96,
+            80, 250, 86, 94, 145, 245, 20, 97, 64, 247, 106, 59, 173, 156, 236, 27, 172, 192, 45,
+            5, 119, 235, 170, 240, 203,
+        ];
+        let expected_difference_be: [u8; 64] = [
+            156, 237, 27, 186, 204, 90, 88, 179, 41, 238, 7, 33, 199, 112, 209, 16, 92, 167, 168,
+            182, 144, 245, 3, 51, 67, 221, 142, 59, 130, 240, 96, 4, 218, 236, 152, 175, 235, 185,
+            52, 210, 233, 205, 114, 45, 65, 173, 150, 115, 245, 136, 9, 226, 140, 214, 17, 95, 168,
+            81, 117, 43, 29, 125, 72, 254,
+        ];
+        let p1_bytes_le: [u8; 64] = [
+            214, 174, 148, 38, 182, 32, 160, 144, 135, 254, 146, 216, 47, 146, 168, 116, 230, 167,
+            57, 247, 122, 147, 250, 81, 136, 183, 157, 183, 158, 177, 94, 227, 202, 229, 141, 27,
+            69, 163, 158, 194, 146, 249, 105, 132, 167, 99, 205, 107, 160, 111, 45, 244, 67, 105,
+            197, 88, 238, 134, 34, 139, 184, 43, 181, 67,
+        ];
+        let p2_bytes_le: [u8; 64] = [
+            67, 26, 232, 175, 56, 53, 242, 129, 172, 168, 229, 182, 70, 20, 39, 194, 5, 54, 108,
+            252, 195, 235, 247, 250, 8, 180, 201, 50, 78, 106, 83, 19, 203, 240, 170, 235, 119, 5,
+            45, 192, 172, 27, 236, 156, 173, 59, 106, 247, 64, 97, 20, 245, 145, 94, 86, 250, 80,
+            96, 61, 149, 213, 126, 2, 228,
+        ];
+        let expected_difference_le: [u8; 64] = [
+            4, 96, 240, 130, 59, 142, 221, 67, 51, 3, 245, 144, 182, 168, 167, 92, 16, 209, 112,
+            199, 33, 7, 238, 41, 179, 88, 90, 204, 186, 27, 237, 156, 254, 72, 125, 29, 43, 117,
+            81, 168, 95, 17, 214, 140, 226, 9, 136, 245, 115, 150, 173, 65, 45, 114, 205, 233, 210,
+            52, 185, 235, 175, 152, 236, 218,
+        ];
+
+        let p1_be_va = 0x100000000;
+        let p2_be_va = 0x200000000;
+        let p1_le_va = 0x300000000;
+        let p2_le_va = 0x400000000;
+        let result_be_va = 0x500000000;
+        let result_le_va = 0x600000000;
+
+        let mut result_be_buf = [0u8; 64];
+        let mut result_le_buf = [0u8; 64];
+
+        let memory_mapping = unsafe {
+            MemoryMapping::new(
+                vec![
+                    MemoryRegion::new(&raw const p1_bytes_be, p1_be_va),
+                    MemoryRegion::new(&raw const p2_bytes_be, p2_be_va),
+                    MemoryRegion::new(&raw mut result_be_buf, result_be_va),
+                    MemoryRegion::new(&raw const p1_bytes_le, p1_le_va),
+                    MemoryRegion::new(&raw const p2_bytes_le, p2_le_va),
+                    MemoryRegion::new(&raw mut result_le_buf, result_le_va),
+                ],
+                &config,
+                SBPFVersion::V3,
+            )
+            .unwrap()
+        };
+        invoke_context
+            .memory_contexts
+            .mock_set_mapping_abi_v1(memory_mapping);
+
+        let secp256r1_subtract_cost = invoke_context.get_execution_cost().secp256r1_subtract_cost;
+        invoke_context.mock_set_remaining(2 * secp256r1_subtract_cost);
+
+        let result = SyscallCurveGroupOps::rust(
+            &mut invoke_context,
+            SECP256R1_BE,
+            SUB,
+            p1_be_va,
+            p2_be_va,
+            result_be_va,
+        );
+        assert_eq!(0, result.unwrap());
+        assert_eq!(result_be_buf, expected_difference_be);
+
+        let result = SyscallCurveGroupOps::rust(
+            &mut invoke_context,
+            SECP256R1_LE,
+            SUB,
+            p1_le_va,
+            p2_le_va,
+            result_le_va,
+        );
+        assert_eq!(0, result.unwrap());
+        assert_eq!(result_le_buf, expected_difference_le);
+
+        let result = SyscallCurveGroupOps::rust(
+            &mut invoke_context,
+            SECP256R1_BE,
+            SUB,
+            p1_be_va,
+            p2_be_va,
+            result_be_va,
+        );
+        assert_matches!(
+            result,
+            Result::Err(error) if error.downcast_ref::<InstructionError>().unwrap() == &InstructionError::ComputationalBudgetExceeded
+        );
+    }
+
+    #[test]
+    fn test_syscall_secp256r1_mul() {
+        use {
+            solana_curve25519::curve_syscall_traits::MUL,
+            solana_define_syscall::curve_constants::{SECP256R1_BE, SECP256R1_LE},
+        };
+
+        let config = Config::default();
+        let feature_set = SVMFeatureSet {
+            secp256r1_syscall_enabled: true,
+            ..Default::default()
+        };
+        let feature_set = &feature_set;
+        prepare_mock_with_feature_set!(invoke_context, program_id, bpf_loader::id(), feature_set);
+
+        let mul_point_be: [u8; 64] = [
+            227, 94, 177, 158, 183, 157, 183, 136, 81, 250, 147, 122, 247, 57, 167, 230, 116, 168,
+            146, 47, 216, 146, 254, 135, 144, 160, 32, 182, 38, 148, 174, 214, 67, 181, 43, 184,
+            139, 34, 134, 238, 88, 197, 105, 67, 244, 45, 111, 160, 107, 205, 99, 167, 132, 105,
+            249, 146, 194, 158, 163, 69, 27, 141, 229, 202,
+        ];
+        let mul_scalar_be: [u8; 32] = [
+            123, 75, 87, 241, 163, 30, 217, 99, 108, 128, 103, 18, 169, 189, 3, 188, 131, 100, 221,
+            154, 64, 69, 146, 192, 147, 126, 244, 138, 161, 116, 163, 106,
+        ];
+        let expected_mul_be: [u8; 64] = [
+            160, 74, 108, 116, 82, 60, 178, 227, 119, 110, 53, 216, 127, 75, 145, 74, 35, 220, 208,
+            81, 5, 96, 107, 57, 180, 234, 165, 74, 30, 176, 31, 83, 184, 105, 135, 163, 132, 230,
+            125, 221, 166, 72, 232, 92, 131, 114, 52, 115, 9, 143, 90, 36, 162, 39, 52, 170, 83,
+            232, 188, 104, 67, 87, 6, 226,
+        ];
+        let mul_point_le: [u8; 64] = [
+            214, 174, 148, 38, 182, 32, 160, 144, 135, 254, 146, 216, 47, 146, 168, 116, 230, 167,
+            57, 247, 122, 147, 250, 81, 136, 183, 157, 183, 158, 177, 94, 227, 202, 229, 141, 27,
+            69, 163, 158, 194, 146, 249, 105, 132, 167, 99, 205, 107, 160, 111, 45, 244, 67, 105,
+            197, 88, 238, 134, 34, 139, 184, 43, 181, 67,
+        ];
+        let mul_scalar_le: [u8; 32] = [
+            106, 163, 116, 161, 138, 244, 126, 147, 192, 146, 69, 64, 154, 221, 100, 131, 188, 3,
+            189, 169, 18, 103, 128, 108, 99, 217, 30, 163, 241, 87, 75, 123,
+        ];
+        let expected_mul_le: [u8; 64] = [
+            83, 31, 176, 30, 74, 165, 234, 180, 57, 107, 96, 5, 81, 208, 220, 35, 74, 145, 75, 127,
+            216, 53, 110, 119, 227, 178, 60, 82, 116, 108, 74, 160, 226, 6, 87, 67, 104, 188, 232,
+            83, 170, 52, 39, 162, 36, 90, 143, 9, 115, 52, 114, 131, 92, 232, 72, 166, 221, 125,
+            230, 132, 163, 135, 105, 184,
+        ];
+        // The group order n, the smallest scalar that must be rejected.
+        let order_be: [u8; 32] = [
+            0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84, 0xf3, 0xb9, 0xca, 0xc2,
+            0xfc, 0x63, 0x25, 0x51,
+        ];
+        let mut order_le = order_be;
+        order_le.reverse();
+
+        let scalar_be_va = 0x100000000;
+        let point_be_va = 0x200000000;
+        let scalar_le_va = 0x300000000;
+        let point_le_va = 0x400000000;
+        let result_be_va = 0x500000000;
+        let result_le_va = 0x600000000;
+        let order_be_va = 0x700000000;
+        let order_le_va = 0x800000000;
+
+        let mut result_be_buf = [0u8; 64];
+        let mut result_le_buf = [0u8; 64];
+
+        let memory_mapping = unsafe {
+            MemoryMapping::new(
+                vec![
+                    MemoryRegion::new(&raw const mul_scalar_be, scalar_be_va),
+                    MemoryRegion::new(&raw const mul_point_be, point_be_va),
+                    MemoryRegion::new(&raw mut result_be_buf, result_be_va),
+                    MemoryRegion::new(&raw const mul_scalar_le, scalar_le_va),
+                    MemoryRegion::new(&raw const mul_point_le, point_le_va),
+                    MemoryRegion::new(&raw mut result_le_buf, result_le_va),
+                    MemoryRegion::new(&raw const order_be, order_be_va),
+                    MemoryRegion::new(&raw const order_le, order_le_va),
+                ],
+                &config,
+                SBPFVersion::V3,
+            )
+            .unwrap()
+        };
+        invoke_context
+            .memory_contexts
+            .mock_set_mapping_abi_v1(memory_mapping);
+
+        let secp256r1_multiply_cost = invoke_context.get_execution_cost().secp256r1_multiply_cost;
+        invoke_context.mock_set_remaining(4 * secp256r1_multiply_cost);
+
+        let result = SyscallCurveGroupOps::rust(
+            &mut invoke_context,
+            SECP256R1_BE,
+            MUL,
+            scalar_be_va,
+            point_be_va,
+            result_be_va,
+        );
+        assert_eq!(0, result.unwrap());
+        assert_eq!(result_be_buf, expected_mul_be);
+
+        let result = SyscallCurveGroupOps::rust(
+            &mut invoke_context,
+            SECP256R1_LE,
+            MUL,
+            scalar_le_va,
+            point_le_va,
+            result_le_va,
+        );
+        assert_eq!(0, result.unwrap());
+        assert_eq!(result_le_buf, expected_mul_le);
+
+        let result = SyscallCurveGroupOps::rust(
+            &mut invoke_context,
+            SECP256R1_BE,
+            MUL,
+            order_be_va,
+            point_be_va,
+            result_be_va,
+        );
+        assert_eq!(1, result.unwrap());
+
+        let result = SyscallCurveGroupOps::rust(
+            &mut invoke_context,
+            SECP256R1_LE,
+            MUL,
+            order_le_va,
+            point_le_va,
+            result_le_va,
+        );
+        assert_eq!(1, result.unwrap());
+
+        let result = SyscallCurveGroupOps::rust(
+            &mut invoke_context,
+            SECP256R1_BE,
+            MUL,
+            scalar_be_va,
+            point_be_va,
+            result_be_va,
+        );
+        assert_matches!(
+            result,
+            Result::Err(error) if error.downcast_ref::<InstructionError>().unwrap() == &InstructionError::ComputationalBudgetExceeded
+        );
+    }
+
+    #[test]
+    fn test_syscall_secp256r1_multiscalar_multiplication() {
+        use solana_define_syscall::curve_constants::{SECP256R1_BE, SECP256R1_LE};
+
+        let config = Config::default();
+        let feature_set = SVMFeatureSet {
+            secp256r1_syscall_enabled: true,
+            ..Default::default()
+        };
+        let feature_set = &feature_set;
+        prepare_mock_with_feature_set!(invoke_context, program_id, bpf_loader::id(), feature_set);
+
+        let scalar_a_be: [u8; 32] = [
+            123, 75, 87, 241, 163, 30, 217, 99, 108, 128, 103, 18, 169, 189, 3, 188, 131, 100, 221,
+            154, 64, 69, 146, 192, 147, 126, 244, 138, 161, 116, 163, 106,
+        ];
+        let scalar_b_be: [u8; 32] = [
+            73, 47, 162, 181, 116, 139, 241, 139, 136, 14, 209, 4, 221, 4, 131, 50, 31, 83, 248,
+            125, 99, 218, 113, 37, 212, 18, 10, 176, 8, 83, 154, 219,
+        ];
+        let point_a_be: [u8; 64] = [
+            227, 94, 177, 158, 183, 157, 183, 136, 81, 250, 147, 122, 247, 57, 167, 230, 116, 168,
+            146, 47, 216, 146, 254, 135, 144, 160, 32, 182, 38, 148, 174, 214, 67, 181, 43, 184,
+            139, 34, 134, 238, 88, 197, 105, 67, 244, 45, 111, 160, 107, 205, 99, 167, 132, 105,
+            249, 146, 194, 158, 163, 69, 27, 141, 229, 202,
+        ];
+        let point_b_be: [u8; 64] = [
+            19, 83, 106, 78, 50, 201, 180, 8, 250, 247, 235, 195, 252, 108, 54, 5, 194, 39, 20, 70,
+            182, 229, 168, 172, 129, 242, 53, 56, 175, 232, 26, 67, 228, 2, 126, 213, 149, 61, 96,
+            80, 250, 86, 94, 145, 245, 20, 97, 64, 247, 106, 59, 173, 156, 236, 27, 172, 192, 45,
+            5, 119, 235, 170, 240, 203,
+        ];
+        let expected_msm_be: [u8; 64] = [
+            24, 153, 93, 59, 179, 147, 184, 24, 208, 98, 132, 137, 74, 176, 184, 215, 255, 90, 175,
+            129, 136, 251, 70, 188, 197, 137, 248, 239, 47, 79, 69, 193, 252, 148, 215, 203, 227,
+            137, 121, 121, 180, 246, 0, 218, 12, 102, 199, 45, 40, 216, 128, 231, 217, 19, 179, 57,
+            94, 150, 113, 232, 93, 246, 60, 177,
+        ];
+        let scalar_a_le: [u8; 32] = [
+            106, 163, 116, 161, 138, 244, 126, 147, 192, 146, 69, 64, 154, 221, 100, 131, 188, 3,
+            189, 169, 18, 103, 128, 108, 99, 217, 30, 163, 241, 87, 75, 123,
+        ];
+        let scalar_b_le: [u8; 32] = [
+            219, 154, 83, 8, 176, 10, 18, 212, 37, 113, 218, 99, 125, 248, 83, 31, 50, 131, 4, 221,
+            4, 209, 14, 136, 139, 241, 139, 116, 181, 162, 47, 73,
+        ];
+        let point_a_le: [u8; 64] = [
+            214, 174, 148, 38, 182, 32, 160, 144, 135, 254, 146, 216, 47, 146, 168, 116, 230, 167,
+            57, 247, 122, 147, 250, 81, 136, 183, 157, 183, 158, 177, 94, 227, 202, 229, 141, 27,
+            69, 163, 158, 194, 146, 249, 105, 132, 167, 99, 205, 107, 160, 111, 45, 244, 67, 105,
+            197, 88, 238, 134, 34, 139, 184, 43, 181, 67,
+        ];
+        let point_b_le: [u8; 64] = [
+            67, 26, 232, 175, 56, 53, 242, 129, 172, 168, 229, 182, 70, 20, 39, 194, 5, 54, 108,
+            252, 195, 235, 247, 250, 8, 180, 201, 50, 78, 106, 83, 19, 203, 240, 170, 235, 119, 5,
+            45, 192, 172, 27, 236, 156, 173, 59, 106, 247, 64, 97, 20, 245, 145, 94, 86, 250, 80,
+            96, 61, 149, 213, 126, 2, 228,
+        ];
+        let expected_msm_le: [u8; 64] = [
+            193, 69, 79, 47, 239, 248, 137, 197, 188, 70, 251, 136, 129, 175, 90, 255, 215, 184,
+            176, 74, 137, 132, 98, 208, 24, 184, 147, 179, 59, 93, 153, 24, 177, 60, 246, 93, 232,
+            113, 150, 94, 57, 179, 19, 217, 231, 128, 216, 40, 45, 199, 102, 12, 218, 0, 246, 180,
+            121, 121, 137, 227, 203, 215, 148, 252,
+        ];
+        // The group order n, the smallest scalar that must be rejected.
+        let order_be: [u8; 32] = [
+            0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84, 0xf3, 0xb9, 0xca, 0xc2,
+            0xfc, 0x63, 0x25, 0x51,
+        ];
+        let mut order_le = order_be;
+        order_le.reverse();
+
+        let scalars_be = [scalar_a_be, scalar_b_be];
+        let points_be = [point_a_be, point_b_be];
+        let scalars_le = [scalar_a_le, scalar_b_le];
+        let points_le = [point_a_le, point_b_le];
+        let invalid_scalars_be = [scalar_a_be, order_be];
+        let invalid_scalars_le = [scalar_a_le, order_le];
+
+        let scalars_be_va = 0x100000000;
+        let points_be_va = 0x200000000;
+        let scalars_le_va = 0x300000000;
+        let points_le_va = 0x400000000;
+        let result_be_va = 0x500000000;
+        let result_le_va = 0x600000000;
+        let invalid_scalars_be_va = 0x700000000;
+        let invalid_scalars_le_va = 0x800000000;
+
+        let mut result_be_buf = [0u8; 64];
+        let mut result_le_buf = [0u8; 64];
+
+        let memory_mapping = unsafe {
+            MemoryMapping::new(
+                vec![
+                    MemoryRegion::new(bytes_of_slice(&scalars_be), scalars_be_va),
+                    MemoryRegion::new(bytes_of_slice(&points_be), points_be_va),
+                    MemoryRegion::new(&raw mut result_be_buf, result_be_va),
+                    MemoryRegion::new(bytes_of_slice(&scalars_le), scalars_le_va),
+                    MemoryRegion::new(bytes_of_slice(&points_le), points_le_va),
+                    MemoryRegion::new(&raw mut result_le_buf, result_le_va),
+                    MemoryRegion::new(bytes_of_slice(&invalid_scalars_be), invalid_scalars_be_va),
+                    MemoryRegion::new(bytes_of_slice(&invalid_scalars_le), invalid_scalars_le_va),
+                ],
+                &config,
+                SBPFVersion::V3,
+            )
+            .unwrap()
+        };
+        invoke_context
+            .memory_contexts
+            .mock_set_mapping_abi_v1(memory_mapping);
+
+        let execution_cost = invoke_context.get_execution_cost();
+        let secp256r1_msm_cost =
+            execution_cost.secp256r1_msm_base_cost + execution_cost.secp256r1_msm_incremental_cost;
+        invoke_context.mock_set_remaining(4 * secp256r1_msm_cost);
+
+        let result = SyscallCurveMultiscalarMultiplication::rust(
+            &mut invoke_context,
+            SECP256R1_BE,
+            scalars_be_va,
+            points_be_va,
+            2,
+            result_be_va,
+        );
+        assert_eq!(0, result.unwrap());
+        assert_eq!(result_be_buf, expected_msm_be);
+
+        let result = SyscallCurveMultiscalarMultiplication::rust(
+            &mut invoke_context,
+            SECP256R1_LE,
+            scalars_le_va,
+            points_le_va,
+            2,
+            result_le_va,
+        );
+        assert_eq!(0, result.unwrap());
+        assert_eq!(result_le_buf, expected_msm_le);
+
+        // An out-of-range scalar fails without overwriting the previous result.
+        let result = SyscallCurveMultiscalarMultiplication::rust(
+            &mut invoke_context,
+            SECP256R1_BE,
+            invalid_scalars_be_va,
+            points_be_va,
+            2,
+            result_be_va,
+        );
+        assert_eq!(1, result.unwrap());
+        assert_eq!(result_be_buf, expected_msm_be);
+
+        let result = SyscallCurveMultiscalarMultiplication::rust(
+            &mut invoke_context,
+            SECP256R1_LE,
+            invalid_scalars_le_va,
+            points_le_va,
+            2,
+            result_le_va,
+        );
+        assert_eq!(1, result.unwrap());
+        assert_eq!(result_le_buf, expected_msm_le);
+
+        let result = SyscallCurveMultiscalarMultiplication::rust(
+            &mut invoke_context,
+            SECP256R1_BE,
+            scalars_be_va,
+            points_be_va,
+            2,
+            result_be_va,
+        );
+        assert_matches!(
+            result,
+            Result::Err(error) if error.downcast_ref::<InstructionError>().unwrap() == &InstructionError::ComputationalBudgetExceeded
+        );
+    }
+
+    #[test]
+    fn test_syscall_secp256r1_feature_disabled() {
+        use {
+            solana_curve25519::curve_syscall_traits::ADD,
+            solana_define_syscall::curve_constants::{SECP256R1_BE, SECP256R1_LE},
+        };
+
+        let feature_set = SVMFeatureSet::default();
+        let feature_set = &feature_set;
+        prepare_mock_with_feature_set!(invoke_context, program_id, bpf_loader::id(), feature_set);
+
+        for curve_id in [SECP256R1_BE, SECP256R1_LE] {
+            for result in [
+                SyscallCurvePointValidation::rust(&mut invoke_context, curve_id, 0, 0, 0, 0),
+                SyscallCurveDecompress::rust(&mut invoke_context, curve_id, 0, 0, 0, 0),
+                SyscallCurveGroupOps::rust(&mut invoke_context, curve_id, ADD, 0, 0, 0),
+                SyscallCurveMultiscalarMultiplication::rust(
+                    &mut invoke_context,
+                    curve_id,
+                    0,
+                    0,
+                    1,
+                    0,
+                ),
+            ] {
+                assert_matches!(
+                    result,
+                    Result::Err(error) if error.downcast_ref::<SyscallError>().unwrap() == &SyscallError::InvalidAttribute
+                );
+            }
+        }
     }
 
     #[test]
@@ -8312,7 +9060,7 @@ mod tests {
         invoke_context
             .memory_contexts
             .mock_set_mapping_abi_v1(memory_mapping);
-        invoke_context.compute_meter.mock_set_remaining(
+        invoke_context.mock_set_remaining(
             (invoke_context.get_execution_cost().sha256_base_cost
                 + invoke_context.get_execution_cost().mem_op_base_cost.max(
                     invoke_context

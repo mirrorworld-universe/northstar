@@ -57,10 +57,13 @@ sol_curve_validate_point     sol_curve_group_op
 sol_curve_multiscalar_mul    sol_invoke_signed_rust  sol_memcpy_
 ```
 
-The Bank tests construct feature-enabled and feature-disabled parent banks
-before creating Northstar isolated ER banks. They check inherited activation
-and exercise the same ELF in both environments. They do not globally enable a
-feature or modify `Bank::feature_set` after syscall-environment construction.
+The Bank tests construct parent banks with and without the legacy curve feature
+account before creating Northstar isolated ER banks. They check inherited feature
+metadata and exercise the same ELF in both environments. Agave 4.5.0-alpha.4
+registers curve syscalls unconditionally, so both executions must succeed. The
+feature-disabled rejection recorded below belongs to the older alpha.2 runtime.
+The tests do not change feature activation or `Bank::feature_set` after
+syscall-environment construction.
 
 The RPC client reads the three feature records from **the supplied endpoint**:
 curve enablement, historical MSM-length compatibility, and invalid-curve

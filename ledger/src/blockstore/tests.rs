@@ -5,7 +5,7 @@ use {
         shred::{
             DATA_SHREDS_PER_FEC_BLOCK, MAX_DATA_SHREDS_PER_SLOT, ShredFlags,
             max_ticks_per_n_shreds,
-            merkle::finish_erasure_batch_for_tests,
+            merkle::{finish_erasure_batch_for_tests, sign_with_duplicate_coding_index_for_tests},
             merkle_tree::{
                 SIZE_OF_MERKLE_PROOF_ENTRY, get_proof_size, hash_as_merkle_proof_entry,
                 verify_merkle_proof,
@@ -97,7 +97,11 @@ fn create_update_parent_shreds_with_shred_parent(
         )
 }
 
-fn create_block_header_shreds(slot: Slot, parent_slot: Slot, parent_block_id: Hash) -> Vec<Shred> {
+fn create_block_header_shreds(
+    slot: Slot,
+    parent_slot: Slot,
+    parent_block_id: BlockId,
+) -> Vec<Shred> {
     create_block_header_shreds_with_shred_parent(slot, parent_slot, parent_slot, parent_block_id)
 }
 
@@ -105,7 +109,7 @@ fn create_block_header_shreds_with_shred_parent(
     slot: Slot,
     shred_parent_slot: Slot,
     parent_slot: Slot,
-    parent_block_id: Hash,
+    parent_block_id: BlockId,
 ) -> Vec<Shred> {
     use solana_entry::block_component::BlockHeaderV1;
     let component = VersionedBlockMarker::from_block_header(BlockHeaderV1 {
@@ -1762,8 +1766,8 @@ fn test_should_insert_data_shred() {
             &[],
             true,
             Hash::default(), // merkle_root
-            6,               // next_shred_index,
-            6,               // next_code_index
+            32,              // next_shred_index,
+            32,              // next_code_index
             &mut ProcessShredsStats::default(),
         )
         .0;
@@ -1822,8 +1826,8 @@ fn test_should_insert_data_shred() {
             &entries,
             true,
             Hash::default(), // merkle_root
-            last_idx,        // next_shred_index,
-            last_idx,        // next_code_index
+            last_idx + 1,    // next_shred_index,
+            last_idx + 1,    // next_code_index
             &mut ProcessShredsStats::default(),
         )
         .0;
@@ -1854,34 +1858,47 @@ fn test_should_insert_data_shred() {
     assert!(blockstore.has_duplicate_shreds_in_slot(0));
 }
 
+/// A shred arriving at an occupied index is a duplicate only if its Merkle root
+/// differs: then the proof is stored, but the slot is not marked dead at insert time.
 #[test]
-fn test_handle_duplicate_shred_returns_duplicate_proof() {
+fn test_existing_shred_index_with_different_merkle_root() {
     let ledger_path = get_tmp_ledger_path_auto_delete!();
     let blockstore = Blockstore::open(ledger_path.path()).unwrap();
-    let (shreds, _) = make_many_slot_entries(5, 5, 10);
-    blockstore.insert_shreds(shreds.clone(), false).unwrap();
-    let duplicate_index = 0;
-    let original_shred = shreds[duplicate_index].clone();
+    let (shreds, _) = make_many_slot_entries(5, 1, 10);
+    let original_shred = shreds[0].clone();
     let duplicate_shred = {
         let (mut shreds, _) = make_many_slot_entries(5, 1, 10);
-        shreds.swap_remove(duplicate_index)
+        shreds.swap_remove(0)
     };
-    let duplicate_shred_slot = duplicate_shred.slot();
-    assert!(!blockstore.has_duplicate_shreds_in_slot(duplicate_shred_slot));
+    let slot = original_shred.slot();
+    assert_eq!(duplicate_shred.id(), original_shred.id());
+    assert_ne!(
+        duplicate_shred.merkle_root().unwrap(),
+        original_shred.merkle_root().unwrap()
+    );
+    blockstore
+        .insert_shreds(vec![original_shred.clone()], false)
+        .unwrap();
 
-    let (returned_shred, conflicting_payload) = handle_duplicate_shred(
-        &blockstore,
-        PossibleDuplicateShred::Exists(duplicate_shred.clone()),
-        true,
-    )
-    .unwrap()
-    .unwrap();
+    blockstore
+        .insert_shreds(vec![original_shred.clone()], false)
+        .unwrap();
+    assert!(
+        !blockstore.has_duplicate_shreds_in_slot(slot),
+        "same Merkle root is not a duplicate"
+    );
+    assert!(!blockstore.is_dead(slot));
 
-    assert_eq!(returned_shred.payload(), duplicate_shred.payload());
-    assert_eq!(conflicting_payload, *original_shred.payload());
-    let duplicate_proof = blockstore.get_duplicate_slot(duplicate_shred_slot).unwrap();
+    blockstore
+        .insert_shreds(vec![duplicate_shred.clone()], false)
+        .unwrap();
+    let duplicate_proof = blockstore.get_duplicate_slot(slot).unwrap();
     assert_eq!(duplicate_proof.shred1, *original_shred.payload());
     assert_eq!(duplicate_proof.shred2, *duplicate_shred.payload());
+    assert!(
+        !blockstore.is_dead(slot),
+        "window_service marks the slot dead once the write batch is committed"
+    );
 }
 
 #[test]
@@ -2053,7 +2070,7 @@ fn test_merkle_root_metas_coding() {
     );
 
     // Add a shred from different fec set
-    let new_index = index + 31;
+    let new_index = index + 32;
     let (_, coding_shreds) = setup_erasure_shreds_with_index(slot, parent_slot, 10, new_index);
     let new_coding_shred = coding_shreds[0].clone();
 
@@ -2117,8 +2134,8 @@ fn test_merkle_root_metas_data() {
 
     let parent_slot = 0;
     let slot = 1;
-    let index = 11;
-    let fec_set_index = 11;
+    let index = 32;
+    let fec_set_index = 32;
     let (data_shreds, _) = setup_erasure_shreds_with_index(slot, parent_slot, 10, fec_set_index);
     let data_shred = data_shreds[0].clone();
 
@@ -2257,7 +2274,7 @@ fn test_merkle_root_metas_data() {
 
     let shredder = Shredder::new(slot, slot.saturating_sub(1), 0, 0).unwrap();
     let keypair = Keypair::new();
-    let new_index = fec_set_index + 31;
+    let new_index = fec_set_index + 32;
     // Add a shred from different fec set
     let new_data_shred = shredder
         .make_shreds_from_data_slice(
@@ -2373,9 +2390,173 @@ fn test_check_insert_coding_shred() {
         ),
         Err(InsertCodingShredError::Exists)
     ));
+    assert!(shred_insertion_tracker.duplicate_shreds.is_empty());
+}
+
+/// A shred at an occupied index with the same Merkle root but a different leader
+/// signature is a duplicate: the proof is stored, but the slot is not marked dead.
+#[test]
+fn test_existing_shred_index_with_different_signature() {
+    let ledger_path = get_tmp_ledger_path_auto_delete!();
+    let blockstore = Blockstore::open(ledger_path.path()).unwrap();
+    let mut pinnable_slice = blockstore.new_pinnable_slice();
+
+    let slot = 1;
+    let (_data_shreds, code_shreds) =
+        setup_erasure_shreds_with_index_and_chained_merkle_and_last_in_slot(
+            slot,
+            0,
+            10,
+            0,
+            Hash::default(),
+            true,
+        );
+    let original_shred = code_shreds[0].clone();
+    let conflicting_shred = {
+        let mut payload = original_shred.payload().clone();
+        payload.as_mut()[0] ^= 1;
+        Shred::new_from_serialized_shred(payload).unwrap()
+    };
+    assert_eq!(conflicting_shred.id(), original_shred.id());
+    assert_eq!(
+        conflicting_shred.merkle_root().unwrap(),
+        original_shred.merkle_root().unwrap()
+    );
+    assert_ne!(conflicting_shred.signature(), original_shred.signature());
+
+    let mut write_batch = blockstore.get_write_batch();
+    let mut shred_insertion_tracker = ShredInsertionTracker::new(1, &mut write_batch);
+    let is_trusted = false;
+    blockstore
+        .check_insert_coding_shred(
+            Cow::Borrowed(&original_shred),
+            &mut shred_insertion_tracker,
+            is_trusted,
+            ShredSource::Turbine,
+            &mut pinnable_slice,
+        )
+        .unwrap();
+    assert!(matches!(
+        blockstore.check_insert_coding_shred(
+            Cow::Borrowed(&conflicting_shred),
+            &mut shred_insertion_tracker,
+            is_trusted,
+            ShredSource::Turbine,
+            &mut pinnable_slice,
+        ),
+        Err(InsertCodingShredError::Exists)
+    ));
+
     assert_eq!(
         shred_insertion_tracker.duplicate_shreds,
-        vec![PossibleDuplicateShred::Exists(coding_shred)]
+        vec![PossibleDuplicateShred::PayloadConflict(
+            conflicting_shred.clone(),
+            original_shred.payload().clone(),
+        )]
+    );
+    let duplicate_proof = blockstore.get_duplicate_slot(slot).unwrap();
+    assert_eq!(duplicate_proof.shred1, *original_shred.payload());
+    assert_eq!(duplicate_proof.shred2, *conflicting_shred.payload());
+    assert!(
+        !blockstore.is_dead(slot),
+        "window_service marks the slot dead once the write batch is committed"
+    );
+}
+
+/// A byzantine leader may sign an erasure batch in which two coding shreds at
+/// different erasure positions share an index. Both pass sigverify and share the
+/// Merkle root and the signature, yet their payloads differ, so the second one
+/// to arrive is a duplicate: the proof is stored, but the slot is not marked dead.
+#[test_case(false; "honest shred first")]
+#[test_case(true; "relabeled shred first")]
+fn test_existing_coding_shred_index_with_different_position(relabeled_first: bool) {
+    let ledger_path = get_tmp_ledger_path_auto_delete!();
+    let blockstore = Blockstore::open(ledger_path.path()).unwrap();
+    let mut pinnable_slice = blockstore.new_pinnable_slice();
+
+    let slot = 1;
+    let (data_shreds, code_shreds, leader_keypair) =
+        setup_erasure_shreds_with_index_and_chained_merkle_and_last_in_slot_and_keypair(
+            slot,
+            0,
+            10,
+            0,
+            Hash::default(),
+            true,
+        );
+    let mut batch: Vec<_> = data_shreds
+        .into_iter()
+        .chain(code_shreds)
+        .filter(|shred| shred.fec_set_index() == 0)
+        .collect();
+    batch.sort_unstable_by_key(|shred| (shred.is_code(), shred.index()));
+    assert_eq!(batch.len(), 2 * DATA_SHREDS_PER_FEC_BLOCK);
+    sign_with_duplicate_coding_index_for_tests(&leader_keypair, &mut batch);
+
+    let relabeled_shred = batch[DATA_SHREDS_PER_FEC_BLOCK].clone();
+    let honest_shred = batch[DATA_SHREDS_PER_FEC_BLOCK + 1].clone();
+    for shred in [&relabeled_shred, &honest_shred] {
+        assert!(
+            shred.verify(&leader_keypair.pubkey()),
+            "the leader signed the erasure batch"
+        );
+        let deserialized_shred = Shred::new_from_serialized_shred(shred.payload().clone())
+            .expect("the shred should deserialize and sanitize");
+        assert_eq!(&deserialized_shred, shred);
+    }
+    assert_eq!(relabeled_shred.id(), honest_shred.id());
+    assert_eq!(
+        relabeled_shred.merkle_root().unwrap(),
+        honest_shred.merkle_root().unwrap()
+    );
+    assert_eq!(relabeled_shred.signature(), honest_shred.signature());
+    assert_ne!(
+        relabeled_shred.first_coding_index(),
+        honest_shred.first_coding_index()
+    );
+    assert_ne!(relabeled_shred.payload(), honest_shred.payload());
+
+    let (original_shred, conflicting_shred) = if relabeled_first {
+        (relabeled_shred, honest_shred)
+    } else {
+        (honest_shred, relabeled_shred)
+    };
+    let mut write_batch = blockstore.get_write_batch();
+    let mut shred_insertion_tracker = ShredInsertionTracker::new(1, &mut write_batch);
+    let is_trusted = false;
+    blockstore
+        .check_insert_coding_shred(
+            Cow::Borrowed(&original_shred),
+            &mut shred_insertion_tracker,
+            is_trusted,
+            ShredSource::Turbine,
+            &mut pinnable_slice,
+        )
+        .unwrap();
+    assert!(matches!(
+        blockstore.check_insert_coding_shred(
+            Cow::Borrowed(&conflicting_shred),
+            &mut shred_insertion_tracker,
+            is_trusted,
+            ShredSource::Turbine,
+            &mut pinnable_slice,
+        ),
+        Err(InsertCodingShredError::Exists)
+    ));
+
+    assert_eq!(
+        shred_insertion_tracker.duplicate_shreds,
+        vec![PossibleDuplicateShred::PayloadConflict(
+            conflicting_shred.clone(),
+            original_shred.payload().clone(),
+        )]
+    );
+    let duplicate_proof = blockstore.get_duplicate_slot(slot).unwrap();
+    assert_eq!(duplicate_proof.shred1, *original_shred.payload());
+    assert_eq!(duplicate_proof.shred2, *conflicting_shred.payload());
+    assert!(
+        !blockstore.is_dead(slot),
+        "window_service marks the slot dead once the write batch is committed"
     );
 }
 
@@ -3058,7 +3239,7 @@ fn test_get_complete_block_with_block_markers() {
     let slot = parent_slot + 1;
 
     let parent_entries = create_ticks(4, 0, Hash::new_unique());
-    let parent_blockhash = parent_entries.last().unwrap().hash;
+    let parent_block_id = BlockId::from(parent_entries.last().unwrap().hash);
     blockstore
         .insert_shreds(
             entries_to_test_shreds(&parent_entries, parent_slot, parent_slot - 1, true, 0),
@@ -3069,11 +3250,11 @@ fn test_get_complete_block_with_block_markers() {
     let block_header_shreds = data_shreds(create_block_header_shreds(
         slot,
         parent_slot,
-        parent_blockhash,
+        parent_block_id,
     ));
     let entry_start_index = block_header_shreds.last().unwrap().index() + 1;
 
-    let entries = create_ticks(4, 0, parent_blockhash);
+    let entries = create_ticks(4, 0, parent_block_id.to_hash());
     let entry_shreds = Shredder::new(slot, parent_slot, 0, 0)
         .unwrap()
         .make_merkle_shreds_from_entries(
@@ -3139,7 +3320,7 @@ fn test_get_complete_block_with_block_markers() {
     assert_eq!(complete_block.parent_slot, parent_slot);
     assert_eq!(
         complete_block.previous_blockhash,
-        parent_blockhash.to_string()
+        parent_block_id.to_string()
     );
     assert_eq!(
         complete_block.blockhash,
@@ -5200,7 +5381,6 @@ fn test_duplicate_slot() {
     );
     let shred = shreds[0].clone();
     let duplicate_shred = duplicate_shreds[0].clone();
-    let non_duplicate_shred = shred.clone();
 
     let ledger_path = get_tmp_ledger_path_auto_delete!();
     let blockstore = Blockstore::open(ledger_path.path()).unwrap();
@@ -5211,17 +5391,6 @@ fn test_duplicate_slot() {
 
     // No duplicate shreds exist yet
     assert!(!blockstore.has_duplicate_shreds_in_slot(slot));
-
-    // Check if shreds are duplicated
-    assert_eq!(
-        blockstore.is_shred_duplicate(&duplicate_shred).as_deref(),
-        Some(shred.payload().as_ref())
-    );
-    assert!(
-        blockstore
-            .is_shred_duplicate(&non_duplicate_shred)
-            .is_none()
-    );
 
     // Store a duplicate shred
     blockstore
@@ -5906,537 +6075,6 @@ fn test_get_slot_entries_dead_slot_race() {
 }
 
 #[test]
-fn test_chained_merkle_root_consistency_backwards() {
-    // Insert a coding shred then consistent data and coding shreds from the next FEC set
-    let ledger_path = get_tmp_ledger_path_auto_delete!();
-    let blockstore = Blockstore::open(ledger_path.path()).unwrap();
-
-    let parent_slot = 0;
-    let slot = 1;
-    let fec_set_index = 0;
-    let (data_shreds, coding_shreds) =
-        setup_erasure_shreds_with_index(slot, parent_slot, 10, fec_set_index);
-    let coding_shred = coding_shreds[0].clone();
-    let next_fec_set_index = fec_set_index + data_shreds.len() as u32;
-
-    assert!(
-        blockstore
-            .insert_shred_return_duplicate(coding_shred.clone())
-            .is_empty()
-    );
-
-    let merkle_root = coding_shred.merkle_root().unwrap();
-
-    // Correctly chained merkle
-    let (data_shreds, coding_shreds) = setup_erasure_shreds_with_index_and_chained_merkle(
-        slot,
-        parent_slot,
-        10,
-        next_fec_set_index,
-        merkle_root,
-    );
-    let data_shred = data_shreds[0].clone();
-    let coding_shred = coding_shreds[0].clone();
-    assert!(
-        blockstore
-            .insert_shred_return_duplicate(coding_shred)
-            .is_empty()
-    );
-    assert!(
-        blockstore
-            .insert_shred_return_duplicate(data_shred)
-            .is_empty()
-    );
-}
-
-#[test]
-fn test_chained_merkle_root_consistency_forwards() {
-    // Insert a coding shred, then a consistent coding shred from the previous FEC set
-    let ledger_path = get_tmp_ledger_path_auto_delete!();
-    let blockstore = Blockstore::open(ledger_path.path()).unwrap();
-
-    let parent_slot = 0;
-    let slot = 1;
-    let fec_set_index = 0;
-    let (data_shreds, coding_shreds) =
-        setup_erasure_shreds_with_index(slot, parent_slot, 10, fec_set_index);
-    let coding_shred = coding_shreds[0].clone();
-    let next_fec_set_index = fec_set_index + data_shreds.len() as u32;
-
-    // Correctly chained merkle
-    let merkle_root = coding_shred.merkle_root().unwrap();
-    let (_, next_coding_shreds) = setup_erasure_shreds_with_index_and_chained_merkle(
-        slot,
-        parent_slot,
-        10,
-        next_fec_set_index,
-        merkle_root,
-    );
-    let next_coding_shred = next_coding_shreds[0].clone();
-
-    assert!(
-        blockstore
-            .insert_shred_return_duplicate(next_coding_shred)
-            .is_empty()
-    );
-
-    // Insert previous FEC set
-    assert!(
-        blockstore
-            .insert_shred_return_duplicate(coding_shred)
-            .is_empty()
-    );
-}
-
-#[test]
-fn test_chained_merkle_root_across_slots_backwards() {
-    let ledger_path = get_tmp_ledger_path_auto_delete!();
-    let blockstore = Blockstore::open(ledger_path.path()).unwrap();
-
-    let parent_slot = 0;
-    let slot = 1;
-    let fec_set_index = 0;
-    let (data_shreds, _) = setup_erasure_shreds_with_index(slot, parent_slot, 10, fec_set_index);
-    let data_shred = data_shreds[0].clone();
-
-    assert!(
-        blockstore
-            .insert_shred_return_duplicate(data_shred.clone())
-            .is_empty()
-    );
-
-    // Incorrectly chained merkle for next slot
-    let merkle_root = Hash::new_unique();
-    assert!(merkle_root != data_shred.merkle_root().unwrap());
-    let (next_slot_data_shreds, next_slot_coding_shreds) =
-        setup_erasure_shreds_with_index_and_chained_merkle(
-            slot + 1,
-            slot,
-            10,
-            fec_set_index,
-            merkle_root,
-        );
-    let next_slot_data_shred = next_slot_data_shreds[0].clone();
-    let next_slot_coding_shred = next_slot_coding_shreds[0].clone();
-    assert!(
-        blockstore
-            .insert_shred_return_duplicate(next_slot_coding_shred)
-            .is_empty()
-    );
-    assert!(
-        blockstore
-            .insert_shred_return_duplicate(next_slot_data_shred)
-            .is_empty()
-    );
-}
-
-#[test]
-fn test_chained_merkle_root_across_slots_forwards() {
-    let ledger_path = get_tmp_ledger_path_auto_delete!();
-    let blockstore = Blockstore::open(ledger_path.path()).unwrap();
-
-    let parent_slot = 0;
-    let slot = 1;
-    let fec_set_index = 0;
-    let (_, coding_shreds) = setup_erasure_shreds_with_index(slot, parent_slot, 10, fec_set_index);
-    let coding_shred = coding_shreds[0].clone();
-
-    // Incorrectly chained merkle for next slot
-    let merkle_root = Hash::new_unique();
-    assert!(merkle_root != coding_shred.merkle_root().unwrap());
-    let (next_slot_data_shreds, _) = setup_erasure_shreds_with_index_and_chained_merkle(
-        slot + 1,
-        slot,
-        10,
-        fec_set_index,
-        merkle_root,
-    );
-    let next_slot_data_shred = next_slot_data_shreds[0].clone();
-
-    assert!(
-        blockstore
-            .insert_shred_return_duplicate(next_slot_data_shred)
-            .is_empty()
-    );
-
-    // Insert for previous slot
-    assert!(
-        blockstore
-            .insert_shred_return_duplicate(coding_shred)
-            .is_empty()
-    );
-}
-
-#[test]
-fn test_chained_merkle_root_inconsistency_backwards_insert_code() {
-    // Insert a coding shred then inconsistent coding shred then inconsistent data shred from the next FEC set
-    let ledger_path = get_tmp_ledger_path_auto_delete!();
-    let blockstore = Blockstore::open(ledger_path.path()).unwrap();
-
-    let parent_slot = 0;
-    let slot = 1;
-    let fec_set_index = 0;
-    let (data_shreds, coding_shreds) =
-        setup_erasure_shreds_with_index(slot, parent_slot, 10, fec_set_index);
-    let coding_shred_previous = coding_shreds[0].clone();
-    let next_fec_set_index = fec_set_index + data_shreds.len() as u32;
-
-    assert!(
-        blockstore
-            .insert_shred_return_duplicate(coding_shred_previous.clone())
-            .is_empty()
-    );
-
-    // Incorrectly chained merkle
-    let merkle_root = Hash::new_unique();
-    assert!(merkle_root != coding_shred_previous.merkle_root().unwrap());
-    let (data_shreds, coding_shreds) = setup_erasure_shreds_with_index_and_chained_merkle(
-        slot,
-        parent_slot,
-        10,
-        next_fec_set_index,
-        merkle_root,
-    );
-    let data_shred = data_shreds[0].clone();
-    let coding_shred = coding_shreds[0].clone();
-    let duplicate_shreds = blockstore.insert_shred_return_duplicate(coding_shred.clone());
-    assert_eq!(duplicate_shreds.len(), 1);
-    assert_eq!(
-        duplicate_shreds[0],
-        PossibleDuplicateShred::FixedFECChainedMerkleRootConflict(coding_shred.slot())
-    );
-
-    // Should not check again, even though this shred conflicts as well
-    assert!(
-        blockstore
-            .insert_shred_return_duplicate(data_shred)
-            .is_empty()
-    );
-}
-
-#[test]
-fn test_chained_merkle_root_inconsistency_backwards_insert_data() {
-    // Insert a coding shred then inconsistent data shred then inconsistent coding shred from the next FEC set
-    let ledger_path = get_tmp_ledger_path_auto_delete!();
-    let blockstore = Blockstore::open(ledger_path.path()).unwrap();
-
-    let parent_slot = 0;
-    let slot = 1;
-    let fec_set_index = 0;
-    let (data_shreds, coding_shreds) =
-        setup_erasure_shreds_with_index(slot, parent_slot, 10, fec_set_index);
-    let coding_shred_previous = coding_shreds[0].clone();
-    let next_fec_set_index = fec_set_index + data_shreds.len() as u32;
-
-    assert!(
-        blockstore
-            .insert_shred_return_duplicate(coding_shred_previous.clone())
-            .is_empty()
-    );
-
-    // Incorrectly chained merkle
-    let merkle_root = Hash::new_unique();
-    assert!(merkle_root != coding_shred_previous.merkle_root().unwrap());
-    let (data_shreds, coding_shreds) = setup_erasure_shreds_with_index_and_chained_merkle(
-        slot,
-        parent_slot,
-        10,
-        next_fec_set_index,
-        merkle_root,
-    );
-    let data_shred = data_shreds[0].clone();
-    let coding_shred = coding_shreds[0].clone();
-
-    let duplicate_shreds = blockstore.insert_shred_return_duplicate(data_shred.clone());
-    assert_eq!(duplicate_shreds.len(), 1);
-    assert_eq!(
-        duplicate_shreds[0],
-        PossibleDuplicateShred::FixedFECChainedMerkleRootConflict(data_shred.slot())
-    );
-    // Should not check again, even though this shred conflicts as well
-    assert!(
-        blockstore
-            .insert_shred_return_duplicate(coding_shred)
-            .is_empty()
-    );
-}
-
-#[test]
-fn test_chained_merkle_root_inconsistency_forwards() {
-    // Insert a data shred, then an inconsistent coding shred from the previous FEC set
-    let ledger_path = get_tmp_ledger_path_auto_delete!();
-    let blockstore = Blockstore::open(ledger_path.path()).unwrap();
-
-    let parent_slot = 0;
-    let slot = 1;
-    let fec_set_index = 0;
-    let (data_shreds, coding_shreds) =
-        setup_erasure_shreds_with_index(slot, parent_slot, 10, fec_set_index);
-    let coding_shred = coding_shreds[0].clone();
-    let next_fec_set_index = fec_set_index + data_shreds.len() as u32;
-
-    // Incorrectly chained merkle
-    let merkle_root = Hash::new_unique();
-    assert!(merkle_root != coding_shred.merkle_root().unwrap());
-    let (next_data_shreds, _) = setup_erasure_shreds_with_index_and_chained_merkle(
-        slot,
-        parent_slot,
-        10,
-        next_fec_set_index,
-        merkle_root,
-    );
-    let next_data_shred = next_data_shreds[0].clone();
-
-    assert!(
-        blockstore
-            .insert_shred_return_duplicate(next_data_shred.clone())
-            .is_empty()
-    );
-
-    // Insert previous FEC set
-    let duplicate_shreds = blockstore.insert_shred_return_duplicate(coding_shred.clone());
-
-    assert_eq!(duplicate_shreds.len(), 1);
-    assert_eq!(
-        duplicate_shreds[0],
-        PossibleDuplicateShred::FixedFECChainedMerkleRootConflict(coding_shred.slot(),)
-    );
-}
-
-#[test]
-fn test_chained_merkle_root_inconsistency_data_shreds_only() {
-    // Insert data shreds from consecutive FEC sets without any coding shreds.
-    // The ErasureMeta-based SIMD-0340 check cannot run, so the fixed-FEC
-    // MerkleRootMeta check must catch the inconsistent chain.
-    let ledger_path = get_tmp_ledger_path_auto_delete!();
-    let blockstore = Blockstore::open(ledger_path.path()).unwrap();
-
-    let parent_slot = 0;
-    let slot = 1;
-    let fec_set_index = 0;
-    let (data_shreds, _) = setup_erasure_shreds_with_index(slot, parent_slot, 10, fec_set_index);
-    let data_shred_previous = data_shreds[0].clone();
-    let next_fec_set_index = fec_set_index + data_shreds.len() as u32;
-
-    assert!(
-        blockstore
-            .insert_shred_return_duplicate(data_shred_previous.clone())
-            .is_empty()
-    );
-
-    let merkle_root = Hash::new_unique();
-    assert!(merkle_root != data_shred_previous.merkle_root().unwrap());
-    let (data_shreds, _) = setup_erasure_shreds_with_index_and_chained_merkle(
-        slot,
-        parent_slot,
-        10,
-        next_fec_set_index,
-        merkle_root,
-    );
-    let data_shred = data_shreds[0].clone();
-
-    let duplicate_shreds = blockstore.insert_shred_return_duplicate(data_shred.clone());
-    assert_eq!(duplicate_shreds.len(), 1);
-    assert_eq!(
-        duplicate_shreds[0],
-        PossibleDuplicateShred::FixedFECChainedMerkleRootConflict(data_shred.slot())
-    );
-}
-
-#[test]
-fn test_chained_merkle_root_inconsistency_both() {
-    // Insert a coding shred from fec_set - 1, and a data shred from fec_set + 10
-    // Then insert an inconsistent data shred from fec_set, and finally an
-    // inconsistent coding shred from fec_set
-    let ledger_path = get_tmp_ledger_path_auto_delete!();
-    let blockstore = Blockstore::open(ledger_path.path()).unwrap();
-
-    let parent_slot = 0;
-    let slot = 1;
-    let prev_fec_set_index = 0;
-    let (prev_data_shreds, prev_coding_shreds) =
-        setup_erasure_shreds_with_index(slot, parent_slot, 10, prev_fec_set_index);
-    let prev_coding_shred = prev_coding_shreds[0].clone();
-    let fec_set_index = prev_fec_set_index + prev_data_shreds.len() as u32;
-
-    // Incorrectly chained merkle
-    let merkle_root = Hash::new_unique();
-    assert!(merkle_root != prev_coding_shred.merkle_root().unwrap());
-    let (data_shreds, coding_shreds) = setup_erasure_shreds_with_index_and_chained_merkle(
-        slot,
-        parent_slot,
-        10,
-        fec_set_index,
-        merkle_root,
-    );
-    let data_shred = data_shreds[0].clone();
-    let coding_shred = coding_shreds[0].clone();
-    let next_fec_set_index = fec_set_index + prev_data_shreds.len() as u32;
-
-    // Incorrectly chained merkle
-    let merkle_root = Hash::new_unique();
-    assert!(merkle_root != data_shred.merkle_root().unwrap());
-    let (next_data_shreds, _) = setup_erasure_shreds_with_index_and_chained_merkle(
-        slot,
-        parent_slot,
-        10,
-        next_fec_set_index,
-        merkle_root,
-    );
-    let next_data_shred = next_data_shreds[0].clone();
-
-    assert!(
-        blockstore
-            .insert_shred_return_duplicate(prev_coding_shred.clone())
-            .is_empty()
-    );
-
-    assert!(
-        blockstore
-            .insert_shred_return_duplicate(next_data_shred.clone())
-            .is_empty()
-    );
-
-    // Insert data shred
-    let duplicate_shreds = blockstore.insert_shred_return_duplicate(data_shred.clone());
-
-    // Only the backwards check will be performed
-    assert_eq!(duplicate_shreds.len(), 1);
-    assert_eq!(
-        duplicate_shreds[0],
-        PossibleDuplicateShred::FixedFECChainedMerkleRootConflict(data_shred.slot())
-    );
-
-    // Insert coding shred
-    let duplicate_shreds = blockstore.insert_shred_return_duplicate(coding_shred.clone());
-
-    // Since we already have reported the duplicate, no additional are reported
-    assert!(duplicate_shreds.is_empty());
-}
-
-#[test]
-fn test_chained_merkle_root_upgrade_inconsistency_backwards() {
-    // Insert a coding shred (with an old erasure meta and no merkle root meta) then inconsistent shreds from the next FEC set
-    let ledger_path = get_tmp_ledger_path_auto_delete!();
-    let blockstore = Blockstore::open(ledger_path.path()).unwrap();
-
-    let parent_slot = 0;
-    let slot = 1;
-    let fec_set_index = 0;
-    let (data_shreds, coding_shreds) =
-        setup_erasure_shreds_with_index(slot, parent_slot, 10, fec_set_index);
-    let coding_shred_previous = coding_shreds[1].clone();
-    let next_fec_set_index = fec_set_index + data_shreds.len() as u32;
-
-    assert!(
-        blockstore
-            .insert_shred_return_duplicate(coding_shred_previous.clone())
-            .is_empty()
-    );
-
-    // Set the first received coding shred index to 0 and remove merkle root meta to simulate this insertion coming from an
-    // older version.
-    let mut erasure_meta = blockstore
-        .erasure_meta(coding_shred_previous.erasure_set())
-        .unwrap()
-        .unwrap();
-    erasure_meta.clear_first_received_coding_shred_index();
-    blockstore
-        .put_erasure_meta(coding_shred_previous.erasure_set(), &erasure_meta)
-        .unwrap();
-    let mut write_batch = blockstore.get_write_batch();
-    blockstore
-        .merkle_root_meta_cf
-        .delete_range_in_batch(&mut write_batch, slot, slot);
-    blockstore.write_batch(write_batch).unwrap();
-    assert!(
-        blockstore
-            .merkle_root_meta(coding_shred_previous.erasure_set())
-            .unwrap()
-            .is_none()
-    );
-
-    // Add an incorrectly chained merkle from the next set. Although incorrectly chained
-    // we skip the duplicate check as the first received coding shred index shred is missing
-    let merkle_root = Hash::new_unique();
-    assert!(merkle_root != coding_shred_previous.merkle_root().unwrap());
-    let (data_shreds, coding_shreds) = setup_erasure_shreds_with_index_and_chained_merkle(
-        slot,
-        parent_slot,
-        10,
-        next_fec_set_index,
-        merkle_root,
-    );
-    let data_shred = data_shreds[0].clone();
-    let coding_shred = coding_shreds[0].clone();
-    assert!(
-        blockstore
-            .insert_shred_return_duplicate(coding_shred)
-            .is_empty()
-    );
-    assert!(
-        blockstore
-            .insert_shred_return_duplicate(data_shred)
-            .is_empty()
-    );
-}
-
-#[test]
-fn test_chained_merkle_root_upgrade_inconsistency_forwards() {
-    // Insert a data shred (without a merkle root), then an inconsistent coding shred from the previous FEC set.
-    let ledger_path = get_tmp_ledger_path_auto_delete!();
-    let blockstore = Blockstore::open(ledger_path.path()).unwrap();
-
-    let parent_slot = 0;
-    let slot = 1;
-    let fec_set_index = 0;
-    let (data_shreds, coding_shreds) =
-        setup_erasure_shreds_with_index(slot, parent_slot, 10, fec_set_index);
-    let coding_shred = coding_shreds[0].clone();
-    let next_fec_set_index = fec_set_index + data_shreds.len() as u32;
-
-    // Incorrectly chained merkle
-    let merkle_root = Hash::new_unique();
-    assert!(merkle_root != coding_shred.merkle_root().unwrap());
-    let (next_data_shreds, next_coding_shreds) = setup_erasure_shreds_with_index_and_chained_merkle(
-        slot,
-        parent_slot,
-        10,
-        next_fec_set_index,
-        merkle_root,
-    );
-    let next_data_shred = next_data_shreds[0].clone();
-
-    assert!(
-        blockstore
-            .insert_shred_return_duplicate(next_data_shred)
-            .is_empty()
-    );
-
-    // Remove the merkle root meta in order to simulate this blockstore originating from
-    // an older version.
-    let mut write_batch = blockstore.get_write_batch();
-    blockstore
-        .merkle_root_meta_cf
-        .delete_range_in_batch(&mut write_batch, slot, slot);
-    blockstore.write_batch(write_batch).unwrap();
-    assert!(
-        blockstore
-            .merkle_root_meta(next_coding_shreds[0].erasure_set())
-            .unwrap()
-            .is_none()
-    );
-
-    // Insert previous FEC set, although incorrectly chained we skip the duplicate check
-    // as the merkle root meta is missing.
-    assert!(
-        blockstore
-            .insert_shred_return_duplicate(coding_shred)
-            .is_empty()
-    );
-}
-
-#[test]
 fn test_write_transaction_memos() {
     let ledger_path = get_tmp_ledger_path_auto_delete!();
     let blockstore =
@@ -6963,8 +6601,7 @@ fn test_invalid_parent_info_marks_dead(block_header_first: bool, case: (u64, u64
         BlockId::new_unique()
     };
 
-    let block_header_shreds =
-        create_block_header_shreds(slot, bh_parent_slot, bh_block_id.to_hash());
+    let block_header_shreds = create_block_header_shreds(slot, bh_parent_slot, bh_block_id);
     let update_parent_shreds = create_update_parent_shreds_with_shred_parent(
         slot,
         bh_parent_slot,
@@ -7021,7 +6658,7 @@ fn test_invalid_block_header_parent_info_marks_dead() {
             slot,
             shred_parent_slot,
             block_header_parent_slot,
-            Hash::new_unique(),
+            BlockId::new_unique(),
         );
         blockstore.insert_shreds(shreds, false).unwrap();
 
@@ -7084,7 +6721,7 @@ fn test_update_parent_non_first_leader_window_marks_dead() {
     let slot = 10;
     let shred_parent_slot = 5;
     let update_parent_slot = 3;
-    let mut shreds = create_block_header_shreds(slot, shred_parent_slot, Hash::new_unique());
+    let mut shreds = create_block_header_shreds(slot, shred_parent_slot, BlockId::new_unique());
     shreds.extend(create_update_parent_shreds_with_shred_parent(
         slot,
         shred_parent_slot,
@@ -7108,7 +6745,7 @@ fn test_block_header_followed_by_update_parent() {
     let blockstore = Blockstore::open(ledger_path.path()).unwrap();
 
     let slot = 12;
-    let parent_5_id = Hash::new_unique();
+    let parent_5_id = BlockId::new_unique();
     blockstore
         .insert_shreds(create_block_header_shreds(slot, 5, parent_5_id), true)
         .unwrap();
@@ -7151,7 +6788,7 @@ fn test_post_update_orig_after() {
             data_shreds(create_block_header_shreds(
                 slot,
                 original_parent,
-                Hash::new_unique(),
+                BlockId::new_unique(),
             )),
             false,
         )
@@ -7200,7 +6837,7 @@ fn transaction_signatures(entries: &[Entry]) -> Vec<Signature> {
         .collect()
 }
 
-fn write_transaction_statuses_for_entries(
+pub(crate) fn write_transaction_statuses_for_entries(
     blockstore: &Blockstore,
     slot: Slot,
     entries: &[Entry],
@@ -7248,8 +6885,9 @@ fn write_transaction_statuses_for_entries(
 pub(crate) struct UpdateParentSlotFixture {
     previous_blockhash: String,
     post_update_blockhash: String,
+    pub(crate) pre_update_address: Pubkey,
     pub(crate) post_update_address: Pubkey,
-    pre_update_signatures: Vec<Signature>,
+    pub(crate) pre_update_signatures: Vec<Signature>,
     pub(crate) post_update_signatures: Vec<Signature>,
     post_update_starting_transaction_indexes: Vec<usize>,
     post_update_num_entries: usize,
@@ -7280,10 +6918,14 @@ pub(crate) fn insert_complete_update_parent_slot(
 
     let pre_update_entries = make_slot_entries_with_transactions(1);
     let post_update_entries = make_slot_entries_with_transactions(2);
+    let pre_update_address = pre_update_entries[0].transactions[0]
+        .message
+        .static_account_keys()[0];
     let post_update_address = post_update_entries[0].transactions[0]
         .message
         .static_account_keys()[0];
-    let pre_update_signatures = transaction_signatures(&pre_update_entries);
+    let pre_update_signatures =
+        write_transaction_statuses_for_entries(blockstore, slot, &pre_update_entries);
     let post_update_signatures =
         write_transaction_statuses_for_entries(blockstore, slot, &post_update_entries);
     let post_update_blockhash = post_update_entries.last().unwrap().hash.to_string();
@@ -7295,7 +6937,7 @@ pub(crate) fn insert_complete_update_parent_slot(
     let update_parent_fec_set_index = fec_set_size * 2;
     let post_update_fec_set_index = fec_set_size * 3;
     let footer_fec_set_index = fec_set_size * 4;
-    let mut shreds = create_block_header_shreds(slot, original_parent, Hash::new_unique());
+    let mut shreds = create_block_header_shreds(slot, original_parent, BlockId::new_unique());
     shreds.extend(create_entry_batch_shreds(
         slot,
         original_parent,
@@ -7328,6 +6970,7 @@ pub(crate) fn insert_complete_update_parent_slot(
     UpdateParentSlotFixture {
         previous_blockhash,
         post_update_blockhash,
+        pre_update_address,
         post_update_address,
         pre_update_signatures,
         post_update_signatures,
@@ -7372,7 +7015,7 @@ fn test_purge_exact_recovers_malformed_update_parent_slot(
     let malformed_fec_set_index = fec_set_size * 2;
     let update_parent_fec_set_index = fec_set_size * 3;
     let post_update_fec_set_index = fec_set_size * 4;
-    let mut shreds = create_block_header_shreds(slot, original_parent, Hash::new_unique());
+    let mut shreds = create_block_header_shreds(slot, original_parent, BlockId::new_unique());
     shreds.extend(create_entry_batch_shreds(
         slot,
         original_parent,
@@ -7448,6 +7091,243 @@ fn test_purge_exact_recovers_malformed_update_parent_slot(
                 .is_none()
         );
     }
+}
+
+#[test]
+fn test_purge_transaction_history_before_missing_shred_and_update_parent() {
+    let ledger_path = get_tmp_ledger_path_auto_delete!();
+    let blockstore = Blockstore::open(ledger_path.path()).unwrap();
+
+    let slot = 104;
+    let original_parent = 103;
+    let update_parent = 100;
+    let pre_update_entries = make_slot_entries_with_transactions(1);
+    let pre_update_address = pre_update_entries[0].transactions[0]
+        .message
+        .static_account_keys()[0];
+    let pre_update_signature =
+        write_transaction_statuses_for_entries(&blockstore, slot, &pre_update_entries)[0];
+    blockstore
+        .write_transaction_memos(&pre_update_signature, slot, "memo".to_string())
+        .unwrap();
+
+    let fec_set_size = u32::try_from(DATA_SHREDS_PER_FEC_BLOCK).unwrap();
+    let incomplete_fec_set_index = fec_set_size * 2;
+    let update_parent_fec_set_index = fec_set_size * 3;
+    let mut shreds = create_block_header_shreds(slot, original_parent, BlockId::new_unique());
+    shreds.extend(create_entry_batch_shreds(
+        slot,
+        original_parent,
+        pre_update_entries,
+        fec_set_size,
+        false,
+    ));
+    shreds.extend(create_entry_batch_shreds(
+        slot,
+        original_parent,
+        make_slot_entries_with_transactions(1),
+        incomplete_fec_set_index,
+        false,
+    ));
+    shreds.extend(create_update_parent_shreds_with_shred_parent(
+        slot,
+        original_parent,
+        update_parent,
+        BlockId::new_unique(),
+        update_parent_fec_set_index,
+        false,
+    ));
+    let mut shreds = data_shreds(shreds);
+    let missing_shred_position = shreds
+        .iter()
+        .position(|shred| shred.index() == incomplete_fec_set_index)
+        .unwrap();
+    shreds.remove(missing_shred_position);
+    blockstore.insert_shreds(shreds, true).unwrap();
+
+    let slot_meta = blockstore.meta(slot).unwrap().unwrap();
+    assert_eq!(slot_meta.consumed, u64::from(incomplete_fec_set_index));
+    assert_eq!(slot_meta.replay_fec_set_index, update_parent_fec_set_index);
+
+    let stats = blockstore
+        .purge_transaction_history_for_replay_slot_exact(slot)
+        .unwrap();
+    assert_eq!(stats.transactions_processed, 1);
+    assert!(
+        blockstore
+            .read_transaction_status((pre_update_signature, slot))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        blockstore
+            .read_transaction_memos(pre_update_signature, slot)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        blockstore
+            .address_signatures_cf
+            .get((pre_update_address, slot, 0, pre_update_signature))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test_case(vec![1, 1, 1]; "invalid shred data")]
+#[test_case(0u64.to_le_bytes().to_vec(); "block aborted")]
+fn test_purge_transaction_history_before_malformed_component_and_update_parent(
+    malformed_component: Vec<u8>,
+) {
+    let ledger_path = get_tmp_ledger_path_auto_delete!();
+    let blockstore = Blockstore::open(ledger_path.path()).unwrap();
+
+    let slot = 104;
+    let original_parent = 103;
+    let update_parent = 100;
+    let pre_update_entries = make_slot_entries_with_transactions(1);
+    let pre_update_address = pre_update_entries[0].transactions[0]
+        .message
+        .static_account_keys()[0];
+    let pre_update_signature =
+        write_transaction_statuses_for_entries(&blockstore, slot, &pre_update_entries)[0];
+    blockstore
+        .write_transaction_memos(&pre_update_signature, slot, "memo".to_string())
+        .unwrap();
+
+    let fec_set_size = u32::try_from(DATA_SHREDS_PER_FEC_BLOCK).unwrap();
+    let malformed_fec_set_index = fec_set_size * 2;
+    let update_parent_fec_set_index = fec_set_size * 3;
+    let mut shreds = create_block_header_shreds(slot, original_parent, BlockId::new_unique());
+    shreds.extend(create_entry_batch_shreds(
+        slot,
+        original_parent,
+        pre_update_entries,
+        fec_set_size,
+        false,
+    ));
+    shreds.extend(
+        Shredder::new(slot, original_parent, 0, 0)
+            .unwrap()
+            .make_shreds_from_data_slice(
+                &Keypair::new(),
+                &malformed_component,
+                false,
+                Hash::new_unique(),
+                malformed_fec_set_index,
+                malformed_fec_set_index,
+                &mut ProcessShredsStats::default(),
+            )
+            .unwrap(),
+    );
+    shreds.extend(create_update_parent_shreds_with_shred_parent(
+        slot,
+        original_parent,
+        update_parent,
+        BlockId::new_unique(),
+        update_parent_fec_set_index,
+        false,
+    ));
+    blockstore.insert_shreds(shreds, true).unwrap();
+
+    assert!(blockstore.meta(slot).unwrap().unwrap().has_update_parent());
+    assert!(
+        blockstore
+            .read_transaction_status((pre_update_signature, slot))
+            .unwrap()
+            .is_some()
+    );
+    let stats = blockstore
+        .purge_transaction_history_for_replay_slot_exact(slot)
+        .unwrap();
+    assert_eq!(stats.transactions_processed, 1);
+    assert!(
+        blockstore
+            .read_transaction_status((pre_update_signature, slot))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        blockstore
+            .read_transaction_memos(pre_update_signature, slot)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        blockstore
+            .address_signatures_cf
+            .get((pre_update_address, slot, 0, pre_update_signature))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test_case(vec![1, 1, 1]; "invalid shred data")]
+#[test_case(0u64.to_le_bytes().to_vec(); "block aborted")]
+fn test_purge_switch_bank_transaction_history_before_malformed_component(
+    malformed_component: Vec<u8>,
+) {
+    let ledger_path = get_tmp_ledger_path_auto_delete!();
+    let blockstore = Blockstore::open(ledger_path.path()).unwrap();
+
+    let slot = 104;
+    let parent_slot = 103;
+    let entries = make_slot_entries_with_transactions(1);
+    let address = entries[0].transactions[0].message.static_account_keys()[0];
+    let signature = write_transaction_statuses_for_entries(&blockstore, slot, &entries)[0];
+    blockstore
+        .write_transaction_memos(&signature, slot, "memo".to_string())
+        .unwrap();
+
+    let fec_set_size = u32::try_from(DATA_SHREDS_PER_FEC_BLOCK).unwrap();
+    let malformed_fec_set_index = fec_set_size * 2;
+    let mut shreds = create_block_header_shreds(slot, parent_slot, BlockId::new_unique());
+    shreds.extend(create_entry_batch_shreds(
+        slot,
+        parent_slot,
+        entries,
+        fec_set_size,
+        false,
+    ));
+    shreds.extend(
+        Shredder::new(slot, parent_slot, 0, 0)
+            .unwrap()
+            .make_shreds_from_data_slice(
+                &Keypair::new(),
+                &malformed_component,
+                true,
+                Hash::new_unique(),
+                malformed_fec_set_index,
+                malformed_fec_set_index,
+                &mut ProcessShredsStats::default(),
+            )
+            .unwrap(),
+    );
+    blockstore.insert_shreds(shreds, true).unwrap();
+
+    let stats = blockstore
+        .purge_transaction_history_for_slot_exact(slot)
+        .unwrap();
+    assert_eq!(stats.transactions_processed, 1);
+    assert!(
+        blockstore
+            .read_transaction_status((signature, slot))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        blockstore
+            .read_transaction_memos(signature, slot)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        blockstore
+            .address_signatures_cf
+            .get((address, slot, 0, signature))
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -7668,7 +7548,7 @@ fn test_marker_boundary_ooo() {
             data_shreds(create_block_header_shreds(
                 slot,
                 original_parent,
-                Hash::new_unique(),
+                BlockId::new_unique(),
             )),
             false,
         )
@@ -7724,7 +7604,7 @@ fn test_multiple_children_reparenting() {
     let ledger_path = get_tmp_ledger_path_auto_delete!();
     let blockstore = Blockstore::open(ledger_path.path()).unwrap();
 
-    let parent_id = Hash::new_unique();
+    let parent_id = BlockId::new_unique();
     for slot in [44, 40, 48] {
         blockstore
             .insert_shreds(create_block_header_shreds(slot, 35, parent_id), true)
@@ -7781,7 +7661,10 @@ fn test_interleaved_shred_arrival() {
     let blockstore = Blockstore::open(ledger_path.path()).unwrap();
 
     blockstore
-        .insert_shreds(create_block_header_shreds(52, 48, Hash::new_unique()), true)
+        .insert_shreds(
+            create_block_header_shreds(52, 48, BlockId::new_unique()),
+            true,
+        )
         .unwrap();
     assert_eq!(blockstore.meta(52).unwrap().unwrap().parent_slot, Some(48));
 
@@ -7806,7 +7689,7 @@ fn test_same_batch_block_header_then_update_parent() {
 
     // Insert both BlockHeader and UpdateParent in the same batch,
     // with BlockHeader shreds first (lower indices)
-    let mut shreds = create_block_header_shreds(60, 55, Hash::new_unique());
+    let mut shreds = create_block_header_shreds(60, 55, BlockId::new_unique());
     shreds.extend(create_update_parent_shreds_with_shred_parent(
         60,
         55,
@@ -7833,7 +7716,7 @@ fn test_same_batch_update_parent_then_block_header() {
     // with UpdateParent shreds first (but BlockHeader is at index 0)
     let mut shreds =
         create_update_parent_shreds_with_shred_parent(72, 68, 65, BlockId::new_unique(), 32, true);
-    shreds.extend(create_block_header_shreds(72, 68, Hash::new_unique()));
+    shreds.extend(create_block_header_shreds(72, 68, BlockId::new_unique()));
 
     blockstore.insert_shreds(shreds, true).unwrap();
 
@@ -7851,7 +7734,7 @@ fn test_multiple_update_parents_out_of_order_marks_dead() {
     let slot = 80;
     blockstore
         .insert_shreds(
-            data_shreds(create_block_header_shreds(slot, 75, Hash::new_unique())),
+            data_shreds(create_block_header_shreds(slot, 75, BlockId::new_unique())),
             true,
         )
         .unwrap();
@@ -7916,7 +7799,10 @@ fn test_update_parent_propagates_connectivity() {
 
     // Slot 8 with BlockHeader pointing to disconnected parent
     blockstore
-        .insert_shreds(create_block_header_shreds(8, 5, Hash::new_unique()), true)
+        .insert_shreds(
+            create_block_header_shreds(8, 5, BlockId::new_unique()),
+            true,
+        )
         .unwrap();
     assert!(!blockstore.meta(8).unwrap().unwrap().is_connected());
 
@@ -7946,7 +7832,7 @@ fn test_update_parent_propagates_connectivity_to_descendants() {
     // Slot 100 starts incomplete with BlockHeader pointing to disconnected parent
     blockstore
         .insert_shreds(
-            create_block_header_shreds(100, 50, Hash::new_unique()),
+            create_block_header_shreds(100, 50, BlockId::new_unique()),
             true,
         )
         .unwrap();
@@ -7996,7 +7882,10 @@ fn test_update_parent_clears_connectivity() {
 
     // Slot 8 with BlockHeader pointing to connected parent 5
     blockstore
-        .insert_shreds(create_block_header_shreds(8, 5, Hash::new_unique()), true)
+        .insert_shreds(
+            create_block_header_shreds(8, 5, BlockId::new_unique()),
+            true,
+        )
         .unwrap();
     let meta = blockstore.meta(8).unwrap().unwrap();
     assert!(meta.is_parent_connected());
@@ -8033,7 +7922,10 @@ fn test_connectivity_does_not_propagate_through_incomplete_slot() {
 
     // Slot 48 incomplete, pointing to disconnected parent 40
     blockstore
-        .insert_shreds(create_block_header_shreds(48, 40, Hash::new_unique()), true)
+        .insert_shreds(
+            create_block_header_shreds(48, 40, BlockId::new_unique()),
+            true,
+        )
         .unwrap();
 
     // Full children chain from incomplete slot 48

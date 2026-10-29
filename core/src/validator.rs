@@ -4,10 +4,10 @@ pub use solana_perf::report_target_features;
 use {
     crate::{
         admin_rpc_post_init::{AdminRpcRequestMetadataPostInit, KeyUpdaterType, KeyUpdaters},
+        banking_channels::Channels,
         banking_stage::{
             BankingStage, transaction_scheduler::scheduler_controller::SchedulerConfig,
         },
-        banking_trace::{self, BankingTracer, TraceError},
         block_creation_loop::{BlockCreationLoop, BlockCreationLoopConfig, ReplayHighestFrozen},
         cluster_info_vote_listener::VoteTracker,
         completed_data_sets_service::CompletedDataSetsService,
@@ -31,6 +31,7 @@ use {
         tpu::{Tpu, TpuSockets},
         tvu::{AlpenglowInitializationState, Tvu, TvuConfig, TvuSockets},
     },
+    agave_event_system::{EventSystem, stream_policy::StreamPolicy},
     agave_jemalloc::group::ArenaGroup,
     agave_snapshots::{
         SnapshotInterval, snapshot_archive_info::SnapshotArchiveInfoGetter as _,
@@ -46,7 +47,7 @@ use {
     arc_swap::ArcSwap,
     crossbeam_channel::{Receiver, bounded, unbounded},
     serde::{Deserialize, Serialize},
-    solana_account::{ReadableAccount, state_traits::StateMutWincode as _},
+    solana_account::{ReadableAccount, WINCODE_CONFIG},
     solana_accounts_db::{
         accounts_db::{ACCOUNTS_DB_CONFIG_FOR_TESTING, AccountsDbConfig},
         accounts_index::{
@@ -337,7 +338,6 @@ pub struct ValidatorConfig {
     pub expected_shred_version: Option<u16>,
     pub voting_disabled: bool,
     pub account_paths: Vec<PathBuf>,
-    pub account_snapshot_paths: Vec<PathBuf>,
     pub rpc_config: JsonRpcConfig,
     /// Specifies which plugins to start up with
     pub on_start_geyser_plugin_config_files: Option<Vec<PathBuf>>,
@@ -394,7 +394,6 @@ pub struct ValidatorConfig {
     pub no_wait_for_vote_to_start_leader: bool,
     pub wait_to_vote_slot: Option<Slot>,
     pub runtime_config: RuntimeConfig,
-    pub banking_trace_dir_byte_limit: banking_trace::DirByteLimit,
     pub block_verification_method: BlockVerificationMethod,
     pub block_production_method: BlockProductionMethod,
     pub block_production_num_workers: NonZeroUsize,
@@ -404,7 +403,7 @@ pub struct ValidatorConfig {
     pub generator_config: Option<GeneratorConfig>,
     pub use_snapshot_archives_at_startup: UseSnapshotArchivesAtStartup,
     pub unified_scheduler_handler_threads: Option<usize>,
-    pub replay_arenas: Option<usize>,
+    pub execution_arenas: Option<usize>,
     pub ip_echo_server_threads: NonZeroUsize,
     pub rayon_global_threads: NonZeroUsize,
     pub replay_forks_threads: NonZeroUsize,
@@ -438,7 +437,6 @@ impl ValidatorConfig {
             blockstore_cleanup_strategy: BlockstoreCleanupStrategy::None,
             blockstore_options: BlockstoreOptions::default_for_tests(),
             account_paths: Vec::new(),
-            account_snapshot_paths: Vec::new(),
             rpc_config: JsonRpcConfig::default_for_test(),
             on_start_geyser_plugin_config_files: None,
             geyser_plugin_always_enabled: false,
@@ -486,7 +484,6 @@ impl ValidatorConfig {
             accounts_db_config: ACCOUNTS_DB_CONFIG_FOR_TESTING,
             wait_to_vote_slot: None,
             runtime_config: RuntimeConfig::default(),
-            banking_trace_dir_byte_limit: 0,
             block_verification_method: BlockVerificationMethod::default(),
             block_production_method: BlockProductionMethod::default(),
             block_production_num_workers: BankingStage::default_num_workers(),
@@ -497,7 +494,7 @@ impl ValidatorConfig {
             generator_config: None,
             use_snapshot_archives_at_startup: UseSnapshotArchivesAtStartup::default(),
             unified_scheduler_handler_threads: None,
-            replay_arenas: None,
+            execution_arenas: None,
             // Fix threadpools to small and reasonable sizes; unit tests should
             // not be creating excessive load and benches can configure more
             ip_echo_server_threads: NonZeroUsize::new(1).expect("1 is non-zero"),
@@ -744,6 +741,9 @@ pub struct Validator {
     pub cluster_info: Arc<ClusterInfo>,
     pub bank_forks: Arc<RwLock<BankForks>>,
     pub blockstore: Arc<Blockstore>,
+    /// Keep the event directory alive even when no admin RPC metadata or event
+    /// producers retain a handle yet.
+    _event_system: EventSystem,
     geyser_plugin_service: Option<GeyserPluginService>,
     /// Held for the lifetime of the validator so the dispatch thread keeps
     /// running. `None` when no loaded plugin opted into contact info
@@ -1010,6 +1010,8 @@ impl Validator {
         )
         .map_err(ValidatorError::Other)?;
 
+        let event_system = initialize_event_system(&blockstore)?;
+
         let migration_status = bank_forks.read().unwrap().migration_status();
 
         if !config.no_poh_speed_test && !migration_status.is_alpenglow_enabled() {
@@ -1163,49 +1165,38 @@ impl Validator {
             BankForksControllerHandle::new();
         let bank_forks_controller = Arc::new(bank_forks_controller);
 
-        let (banking_tracer, tracer_thread) =
-            BankingTracer::new((config.banking_trace_dir_byte_limit > 0).then_some((
-                &blockstore.banking_trace_path(),
-                exit.clone(),
-                config.banking_trace_dir_byte_limit,
-            )))?;
-        if banking_tracer.is_enabled() {
-            info!(
-                "Enabled banking trace (dir_byte_limit: {})",
-                config.banking_trace_dir_byte_limit
-            );
-        } else {
-            info!("Disabled banking trace");
-        }
-        let banking_tracer_channels = banking_tracer.create_channels();
+        let banking_channels = Channels::new();
+        // Sonic: settlement propagation shares the TPU forwarding channel.
         let (forward_stage_sender, forward_stage_receiver) = bounded(1024);
         let settlement_forward_sender = forward_stage_sender.clone();
 
         // This threshold is the size above which jemalloc will allocate straight from the kernel
         // instead of the arena. The default is 8MB, which is not good for us since accounts can be
         // 10MB.
-        const REPLAY_ARENA_OVERSIZE_THRESHOLD: usize = 16 * 1024 * 1024;
+        const EXECUTION_ARENA_OVERSIZE_THRESHOLD: usize = 16 * 1024 * 1024;
         // Jemalloc allows an allocation to reuse a dirty extent if the allocation is at least
         // 1/64th the size of the extent. Around the epoch boundary we can spike +-3GB. Cap extent
         // size so that the memory allocated to serve spikes stays reusable and doesn't become dirty
         // but unsplittable forever. See jemalloc's lg_extent_max_active_fit.
-        const REPLAY_ARENA_RETAIN_GROW_LIMIT: usize = 64 * 1024 * 1024;
-        let replay_arenas = config.replay_arenas.map(|arena_count| {
-            ArenaGroup::new(
-                arena_count,
-                REPLAY_ARENA_OVERSIZE_THRESHOLD,
-                REPLAY_ARENA_RETAIN_GROW_LIMIT,
+        const EXECUTION_ARENA_RETAIN_GROW_LIMIT: usize = 64 * 1024 * 1024;
+        let execution_arenas = config.execution_arenas.map(|arena_count| {
+            Arc::new(
+                ArenaGroup::new(
+                    arena_count,
+                    EXECUTION_ARENA_OVERSIZE_THRESHOLD,
+                    EXECUTION_ARENA_RETAIN_GROW_LIMIT,
+                )
+                .expect("failed to create execution arenas"),
             )
-            .expect("failed to create replay arenas")
         });
-        let replay_arena = replay_arenas.as_ref().map(|arenas| arenas[0]);
+        let replay_arena = execution_arenas.as_ref().map(|arenas| arenas[0]);
         let scheduler_pool = DefaultSchedulerPool::new(
             config.unified_scheduler_handler_threads,
             config.runtime_config.log_messages_bytes_limit,
             transaction_status_sender.clone(),
             Some(replay_vote_sender.clone()),
             prioritization_fee_cache.clone(),
-            replay_arenas,
+            execution_arenas.clone(),
         );
         bank_forks
             .write()
@@ -1357,7 +1348,6 @@ impl Validator {
                 block_commitment_cache: block_commitment_cache.clone(),
                 blockstore: blockstore.clone(),
                 cluster_info: cluster_info.clone(),
-                poh_recorder: Some(poh_recorder.clone()),
                 genesis_hash: genesis_config.hash(),
                 ledger_path: ledger_path.to_path_buf(),
                 validator_exit: config.validator_exit.clone(),
@@ -1480,7 +1470,7 @@ impl Validator {
                             .unwrap(),
                         slot_duration: northstar::DEFAULT_ER_SLOT_DURATION,
                         er_history_max_retained_slots: config.er_history_max_retained_slots,
-                        settlement_sender: Some(banking_tracer_channels.non_vote_sender.clone()),
+                        settlement_sender: Some(banking_channels.non_vote_sender.clone()),
                         settlement_forward_sender: Some(settlement_forward_sender.clone()),
                     },
                     exit.clone(),
@@ -1694,7 +1684,7 @@ impl Validator {
         // debug if things go off the rails.
         let (optimistic_parent_sender, optimistic_parent_receiver) = bounded(100);
 
-        let banking_stage_sender_for_bcl = banking_tracer_channels.non_vote_sender.clone();
+        let banking_stage_sender_for_bcl = banking_channels.non_vote_sender.clone();
         let entry_notification_sender = entry_notifier_service
             .as_ref()
             .map(|service| service.sender_cloned());
@@ -1709,9 +1699,9 @@ impl Validator {
             poh_recorder: poh_recorder.clone(),
             leader_schedule_cache: leader_schedule_cache.clone(),
             rpc_subscriptions: rpc_subscriptions.clone(),
-            banking_tracer: banking_tracer.clone(),
             slot_status_notifier: slot_status_notifier.clone(),
             entry_notification_sender: entry_notification_sender.clone(),
+            transaction_status_sender: transaction_status_sender.clone(),
             leader_window_info_receiver,
             highest_parent_ready: highest_parent_ready.clone(),
             replay_highest_frozen: replay_highest_frozen.clone(),
@@ -1827,9 +1817,8 @@ impl Validator {
             block_metadata_notifier,
             config.wait_to_vote_slot,
             Some(snapshot_controller.clone()),
-            banking_tracer,
             outstanding_repair_requests.clone(),
-            cluster_slots.clone(),
+            cluster_slots,
             slot_status_notifier,
             vote_connection_cache,
             AlpenglowInitializationState {
@@ -1907,10 +1896,9 @@ impl Validator {
             config.runtime_config.log_messages_bytes_limit,
             &staked_nodes,
             config.staked_nodes_overrides.clone(),
-            banking_tracer_channels,
+            banking_channels,
             forward_stage_sender,
             forward_stage_receiver,
-            tracer_thread,
             tpu_quic_server_config,
             tpu_fwd_quic_server_config,
             vote_quic_server_config,
@@ -1919,6 +1907,7 @@ impl Validator {
             config.block_production_method.clone(),
             config.block_production_num_workers,
             config.block_production_scheduler_config.clone(),
+            execution_arenas,
             config.filter_keys.clone(),
             config.enable_block_production_forwarding,
             config.generator_config.clone(),
@@ -1953,6 +1942,7 @@ impl Validator {
         }
 
         *admin_rpc_service_post_init.write().unwrap() = Some(AdminRpcRequestMetadataPostInit {
+            event_system: event_system.clone(),
             bank_forks: bank_forks.clone(),
             cluster_info: cluster_info.clone(),
             vote_account: *vote_account,
@@ -1960,7 +1950,6 @@ impl Validator {
             notifies: key_notifiers,
             repair_socket: Arc::new(node.sockets.repair),
             outstanding_repair_requests,
-            cluster_slots,
             node: Some(node_multihoming),
             banking_control_sender,
             snapshot_controller,
@@ -1995,6 +1984,7 @@ impl Validator {
             cluster_info,
             bank_forks,
             blockstore,
+            _event_system: event_system,
             geyser_plugin_service,
             _contact_info_notifier: contact_info_notifier,
             blockstore_metric_report_service,
@@ -2207,7 +2197,10 @@ pub fn should_require_vote_history_file(
         return false;
     };
 
-    let Some(Ok(vote_state)) = bank.get_account(vote_account).map(|acct| acct.state()) else {
+    let Some(Ok(vote_state)) = bank
+        .get_account(vote_account)
+        .map(|acct| wincode::config::deserialize(acct.data(), WINCODE_CONFIG))
+    else {
         // Must have a vote account
         return false;
     };
@@ -2519,6 +2512,60 @@ fn accounts_db_config_for_validator(config: &ValidatorConfig) -> AccountsDbConfi
     }
 
     accounts_db_config
+}
+
+#[derive(Debug, Error)]
+enum InitializeEventSystemError {
+    #[error("event system initialization requires primary blockstore access")]
+    PrimaryAccessRequired,
+    #[error("failed to clear event directory {path:?}: {source}")]
+    ClearDirectory {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to initialize event system at {path:?}: {source}")]
+    Create {
+        path: PathBuf,
+        source: agave_event_system::CreateEventSystemError,
+    },
+}
+
+/// The validator owns the event directory for the lifetime of its primary ledger access.
+fn initialize_event_system(
+    blockstore: &Blockstore,
+) -> std::result::Result<EventSystem, InitializeEventSystemError> {
+    if !blockstore.is_primary_access() {
+        return Err(InitializeEventSystemError::PrimaryAccessRequired);
+    }
+    let stream_policy = match std::env::var("AGAVE_EVENTS") {
+        Ok(filter) => filter.parse::<StreamPolicy>().unwrap_or_else(|err| {
+            warn!("Invalid AGAVE_EVENTS filter: {err}; disabling all events");
+            StreamPolicy::default()
+        }),
+        Err(std::env::VarError::NotPresent) => StreamPolicy::default(),
+        Err(err) => {
+            warn!("Failed to read AGAVE_EVENTS: {err}; disabling all events");
+            StreamPolicy::default()
+        }
+    };
+    let events_path = blockstore.ledger_path().join("events");
+    match std::fs::remove_dir_all(&events_path) {
+        Ok(()) => (),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => (),
+        Err(err) => {
+            return Err(InitializeEventSystemError::ClearDirectory {
+                path: events_path,
+                source: err,
+            });
+        }
+    }
+    let event_system =
+        EventSystem::new(&events_path).map_err(|source| InitializeEventSystemError::Create {
+            path: events_path,
+            source,
+        })?;
+    event_system.set_stream_policy(stream_policy);
+    Ok(event_system)
 }
 
 #[allow(clippy::type_complexity)]
@@ -3141,9 +3188,6 @@ pub enum ValidatorError {
 
     #[error("shred version mismatch: actual {actual}, expected {expected}")]
     ShredVersionMismatch { actual: u16, expected: u16 },
-
-    #[error(transparent)]
-    TraceError(#[from] TraceError),
 }
 
 // Return if the validator waited on other nodes to start. In this case
@@ -3251,25 +3295,22 @@ fn get_stake_percent_in_gossip(bank: &Bank, cluster_info: &ClusterInfo, log: boo
         .collect();
     let my_id = cluster_info.id();
 
-    for (activated_stake, vote_account) in bank.vote_accounts().values() {
+    let staked_nodes = bank
+        .epoch_staked_nodes(bank.epoch())
+        .expect("epoch stakes for the current epoch must exist");
+
+    for (node_pubkey, activated_stake) in staked_nodes.iter() {
         let activated_stake = *activated_stake;
         total_activated_stake += activated_stake;
 
-        if activated_stake == 0 {
-            continue;
-        }
-        let vote_state_node_pubkey = *vote_account.node_pubkey();
-
-        if peers.contains_key(&vote_state_node_pubkey) {
-            trace!(
-                "observed {vote_state_node_pubkey} in gossip, (activated_stake={activated_stake})"
-            );
+        if peers.contains_key(node_pubkey) {
+            trace!("observed {node_pubkey} in gossip, (activated_stake={activated_stake})");
             online_stake += activated_stake;
-        } else if vote_state_node_pubkey == my_id {
+        } else if *node_pubkey == my_id {
             online_stake += activated_stake; // This node is online
         } else {
             offline_stake += activated_stake;
-            offline_nodes.push((activated_stake, vote_state_node_pubkey));
+            offline_nodes.push((activated_stake, *node_pubkey));
         }
     }
 
@@ -3305,15 +3346,11 @@ fn get_stake_percent_in_gossip(bank: &Bank, cluster_info: &ClusterInfo, log: boo
 fn validate_account_paths(config: &ValidatorConfig) -> std::io::Result<()> {
     validate_account_paths_for_direct_io(
         config.snapshot_config.use_direct_io,
-        config
-            .account_paths
-            .iter()
-            .chain(&config.account_snapshot_paths)
-            .chain([
-                &config.snapshot_config.full_snapshot_archives_dir,
-                &config.snapshot_config.incremental_snapshot_archives_dir,
-                &config.snapshot_config.bank_snapshots_dir,
-            ]),
+        config.account_paths.iter().chain([
+            &config.snapshot_config.full_snapshot_archives_dir,
+            &config.snapshot_config.incremental_snapshot_archives_dir,
+            &config.snapshot_config.bank_snapshots_dir,
+        ]),
     )
 }
 
@@ -3344,13 +3381,14 @@ mod tests {
         super::*,
         agave_votor_messages::certificate::{CertSignature, GenesisCert},
         crossbeam_channel::{RecvTimeoutError, bounded},
+        solana_account::state_traits::StateMutWincode,
         solana_entry::entry,
         solana_genesis_config::create_genesis_config,
         solana_gossip::contact_info::ContactInfo,
         solana_leader_schedule::SlotLeader,
         solana_ledger::{
-            blockstore, create_new_tmp_ledger, genesis_utils::create_genesis_config_with_leader,
-            get_tmp_ledger_path_auto_delete,
+            blockstore, blockstore_options::AccessType, create_new_tmp_ledger,
+            genesis_utils::create_genesis_config_with_leader, get_tmp_ledger_path_auto_delete,
         },
         solana_poh_config::PohConfig,
         solana_sha256_hasher::hash,
@@ -3375,6 +3413,47 @@ mod tests {
         );
         assert!(account_indexes.include_key(&portal));
         assert!(!account_indexes.include_key(&Pubkey::new_unique()));
+    }
+
+    #[test]
+    fn test_initialize_event_system() {
+        let ledger_path = get_tmp_ledger_path_auto_delete!();
+        let blockstore = Blockstore::open(ledger_path.path()).unwrap();
+        let events_path = ledger_path.path().join("events");
+
+        std::fs::create_dir_all(events_path.join("stale")).unwrap();
+        let stale_event = events_path.join("stale/event");
+        std::fs::write(&stale_event, b"stale").unwrap();
+
+        // Opening the ledger, including for maintenance, must not reset events.
+        drop(blockstore);
+        let blockstore = Blockstore::open_with_options(
+            ledger_path.path(),
+            BlockstoreOptions {
+                access_type: AccessType::PrimaryForMaintenance,
+                ..BlockstoreOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(stale_event.exists());
+        let reader = Blockstore::open_with_options(
+            ledger_path.path(),
+            BlockstoreOptions {
+                access_type: AccessType::ReadOnly,
+                ..BlockstoreOptions::default()
+            },
+        )
+        .unwrap();
+        assert_matches!(
+            initialize_event_system(&reader),
+            Err(InitializeEventSystemError::PrimaryAccessRequired)
+        );
+        assert!(stale_event.exists());
+
+        let _event_system = initialize_event_system(&blockstore).unwrap();
+        assert!(!stale_event.exists());
+        #[cfg(target_os = "linux")]
+        assert!(events_path.join("event-streams").is_dir());
     }
 
     #[test]
@@ -3420,8 +3499,11 @@ mod tests {
             node_pubkey: identity,
             ..VoteStateV4::default()
         };
-        let mut vote_account =
-            AccountSharedData::new(1, VoteStateV4::size_of(), &solana_vote_program::id());
+        let mut vote_account = AccountSharedData::new_with_data(
+            1,
+            vec![0; VoteStateV4::size_of()],
+            &solana_vote_program::id(),
+        );
         vote_account
             .set_state(&VoteStateVersions::new_v4(vote_state.clone()))
             .unwrap();

@@ -757,7 +757,7 @@ async fn process_portal_instructions(
     if sign_only {
         tx.try_partial_sign(&all_signers, recent_blockhash)?;
         return return_signers_with_config(
-            &tx,
+            &tx.into(),
             &config.output_format,
             &ReturnSignersConfig {
                 dump_transaction_message,

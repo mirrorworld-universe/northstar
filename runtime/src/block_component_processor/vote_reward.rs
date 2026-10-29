@@ -113,17 +113,13 @@ impl VoteState {
     }
 
     fn serialize(self) -> Option<(Pubkey, AccountSharedData)> {
-        let mut updated_account = AccountSharedData::new_rent_epoch(
-            self.lamports,
-            self.space,
-            &self.owner,
-            RENT_EXEMPT_RENT_EPOCH,
-        );
-        match self
-            .handler
-            .serialize_into(updated_account.data_as_mut_slice())
-        {
-            Ok(()) => Some((self.vote_pubkey, updated_account)),
+        match self.handler.serialize_padded(self.space) {
+            Ok(data) => {
+                let mut updated_account =
+                    AccountSharedData::new_with_data(self.lamports, data, &self.owner);
+                updated_account.set_rent_epoch(RENT_EXEMPT_RENT_EPOCH);
+                Some((self.vote_pubkey, updated_account))
+            }
             Err(e) => {
                 info!(
                     "serializing account vote_pubkey={} failed with {e}",
@@ -427,15 +423,17 @@ fn update_accounts(
 
 /// Calculates voting rewards based on the `reward_cert` and updates fields in the vote account
 /// based on the calculated rewards and the `final_cert_input`.
+///
+/// Returns number of vote accounts updated.
 pub(super) fn calc_vote_rewards_update_vote_states(
     bank: &Bank,
     reward_cert: Option<ValidatedRewardCert>,
     final_cert_input: Option<(&HashSet<Pubkey>, Slot)>,
     block_producer_time_nanos: i64,
-) -> Result<(), CalcVoteRewardUpdateVoteStatesError> {
+) -> Result<usize, CalcVoteRewardUpdateVoteStatesError> {
     let Some(updated_accounts) = allocate_updated_accounts(bank, &reward_cert, &final_cert_input)?
     else {
-        return Ok(());
+        return Ok(0);
     };
     let reward_state = match &reward_cert {
         Some(c) => Some(RewardState::try_new(
@@ -452,7 +450,7 @@ pub(super) fn calc_vote_rewards_update_vote_states(
     let vote_accounts = bank.vote_accounts();
 
     let updated_accounts = match (&reward_state, &final_cert_state) {
-        (None, None) => return Ok(()),
+        (None, None) => return Ok(0),
         (Some(state), None) => update_accounts(
             &reward_state,
             &final_cert_state,
@@ -477,7 +475,7 @@ pub(super) fn calc_vote_rewards_update_vote_states(
     };
 
     bank.store_accounts((bank.slot(), updated_accounts.as_slice()), None);
-    Ok(())
+    Ok(updated_accounts.len())
 }
 
 /// Computes the voting reward in Lamports.
@@ -617,7 +615,9 @@ mod tests {
         },
         bitvec::prelude::*,
         rand::seq::IndexedRandom,
-        solana_account::{Account, ReadableAccount, WritableAccount},
+        solana_account::{
+            Account, ReadableAccount, WritableAccount, state_traits::StateMutWincode as _,
+        },
         solana_bls_signatures::{BLS_SIGNATURE_AFFINE_SIZE, Signature as BLSSignature},
         solana_cluster_type::ClusterType,
         solana_epoch_schedule::EpochSchedule,
@@ -1052,7 +1052,7 @@ mod tests {
         for validator in validators {
             let vote_pubkey = validator.vote_keypair.pubkey();
             let account = genesis_config.accounts.get_mut(&vote_pubkey).unwrap();
-            let vote_state_versions = wincode::deserialize(&account.data).unwrap();
+            let vote_state_versions = account.state().unwrap();
             let VoteStateVersions::V4(mut vote_state) = vote_state_versions else {
                 panic!();
             };
