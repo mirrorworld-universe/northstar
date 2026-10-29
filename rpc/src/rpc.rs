@@ -310,6 +310,14 @@ pub enum ErTxError {
 /// `SendTransactionService` (queue/batch/retry are pointless on a single
 /// in-process ER node).
 pub trait ErTxExecutor: std::marker::Send + std::marker::Sync {
+    // Sonic: Recover verified L1 bindings before sendTransaction selects its preflight bank.
+    fn prepare_preflight(
+        &self,
+        _transaction: &VersionedTransaction,
+    ) -> std::result::Result<(), ErTxError> {
+        Ok(())
+    }
+
     /// Execute one wire-encoded transaction synchronously.
     fn execute_wire(&self, wire_transaction: Vec<u8>) -> std::result::Result<(), ErTxError>;
 }
@@ -4320,6 +4328,21 @@ pub mod rpc_full {
             } else {
                 preflight_commitment.map(|commitment| CommitmentConfig { commitment })
             };
+            // Sonic: Existing delegations may need bounded recovery before simulation reads their owner.
+            if !skip_preflight && let Some(executor) = meta.er_tx_executor.as_ref() {
+                executor
+                    .prepare_preflight(&unsanitized_tx)
+                    .map_err(|err| match err {
+                        ErTxError::NotActive => {
+                            Error::from(RpcCustomError::EphemeralRollupNotActive)
+                        }
+                        ErTxError::Rejected(message) => Error {
+                            code: error::ErrorCode::InvalidRequest,
+                            message,
+                            data: None,
+                        },
+                    })?;
+            }
             let preflight_bank = meta.get_bank_with_config(RpcContextConfig {
                 commitment: preflight_commitment,
                 min_context_slot,

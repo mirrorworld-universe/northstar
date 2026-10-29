@@ -15,14 +15,18 @@ use {
             ReadonlyL1ValueV1, StateAccountValueV1, CANONICAL_CHECKPOINT_STEPS_V1,
             CHECKPOINT_FORMAT_VERSION_V1,
         },
+        portal_state::{try_parse_raw_portal_account, PortalAccount},
         settlement::{TokenWithdrawalPayoutEvent, WithdrawalPayoutEvent},
         unsettled_state::UnsettledStateStore,
     },
     log::{debug, trace, warn},
-    solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
+    solana_account::{
+        state_traits::StateMutWincode, AccountSharedData, ReadableAccount, WritableAccount,
+    },
     solana_clock::Slot,
     solana_keypair::Keypair,
     solana_leader_schedule::SlotLeader,
+    solana_loader_v3_interface::state::UpgradeableLoaderState,
     solana_message::{v0::LoadedAddresses, AddressLoader, VersionedMessage},
     solana_pubkey::Pubkey,
     solana_rpc::{
@@ -36,11 +40,12 @@ use {
         commitment::{BlockCommitmentCache, CommitmentSlots},
         transaction_balances::compile_collected_balances,
     },
-    solana_sdk_ids::{bpf_loader, bpf_loader_upgradeable, system_program, sysvar},
+    solana_sdk_ids::{bpf_loader, bpf_loader_upgradeable, native_loader, system_program, sysvar},
     solana_send_transaction_service::send_transaction_service_stats::SendTransactionServiceStats,
     solana_sha256_hasher::hashv,
     solana_svm::{
-        transaction_balances::BalanceCollector, transaction_commit_result::TransactionCommitResult,
+        account_loader::PROGRAM_OWNERS, transaction_balances::BalanceCollector,
+        transaction_commit_result::TransactionCommitResult,
         transaction_processor::ExecutionRecordingConfig,
     },
     solana_svm_timings::ExecuteTimings,
@@ -78,7 +83,14 @@ struct CheckpointCaptureV1 {
     completed: Option<CheckpointArtifactV1>,
 }
 
+#[derive(Clone)]
+struct L1DelegationContext {
+    bank: Arc<Bank>,
+    grid_id: u64,
+}
+
 pub struct EphemeralTransactionClient {
+    l1_delegation_context: Arc<RwLock<Option<L1DelegationContext>>>,
     bank_forks: Arc<RwLock<BankForks>>,
     /// Serializes ER bank mutations with SlotAdvancer and deposit/delegation writes.
     bank_operation_lock: Arc<Mutex<()>>,
@@ -122,6 +134,7 @@ pub struct EphemeralTransactionClient {
 impl Clone for EphemeralTransactionClient {
     fn clone(&self) -> Self {
         Self {
+            l1_delegation_context: Arc::clone(&self.l1_delegation_context),
             bank_forks: Arc::clone(&self.bank_forks),
             bank_operation_lock: Arc::clone(&self.bank_operation_lock),
             delegated_accounts: Arc::clone(&self.delegated_accounts),
@@ -148,6 +161,7 @@ impl Clone for EphemeralTransactionClient {
 }
 
 pub(crate) struct EphemeralTransactionClientOptions {
+    l1_delegation_context: Option<L1DelegationContext>,
     er_account_overlay: Arc<RwLock<HashMap<Pubkey, AccountSharedData>>>,
     frozen_accounts: Arc<RwLock<HashSet<Pubkey>>>,
     er_history_store: Arc<ErHistoryStore>,
@@ -168,6 +182,7 @@ impl EphemeralTransactionClientOptions {
         block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
     ) -> Self {
         Self {
+            l1_delegation_context: None,
             er_account_overlay,
             frozen_accounts: Arc::new(RwLock::new(HashSet::new())),
             er_history_store,
@@ -180,6 +195,11 @@ impl EphemeralTransactionClientOptions {
             token_withdrawal_payout_events: Arc::new(RwLock::new(Vec::new())),
             sync_status: Arc::new(NorthStarSyncStatus::new(0)),
         }
+    }
+
+    pub(crate) fn with_l1_delegation_bank(mut self, bank: Arc<Bank>, grid_id: u64) -> Self {
+        self.l1_delegation_context = Some(L1DelegationContext { bank, grid_id });
+        self
     }
 
     pub(crate) fn with_transaction_max_age(mut self, transaction_max_age: usize) -> Self {
@@ -355,6 +375,7 @@ impl EphemeralTransactionClient {
         options: EphemeralTransactionClientOptions,
     ) -> Self {
         Self {
+            l1_delegation_context: Arc::new(RwLock::new(options.l1_delegation_context)),
             bank_forks,
             bank_operation_lock,
             delegated_accounts,
@@ -393,6 +414,152 @@ impl EphemeralTransactionClient {
                 highest_super_majority_root: slot,
             },
         )))
+    }
+
+    /// Update alongside ER bank replacement while bank_operation_lock is held.
+    pub(crate) fn set_l1_delegation_bank(&self, bank: Arc<Bank>, grid_id: u64) {
+        *self.l1_delegation_context.write().unwrap() = Some(L1DelegationContext { bank, grid_id });
+    }
+
+    fn recover_l1_delegations(
+        &self,
+        bank: &Bank,
+        transaction: &VersionedTransaction,
+    ) -> std::io::Result<usize> {
+        let Some(context) = self.l1_delegation_context.read().unwrap().clone() else {
+            return Ok(0);
+        };
+        if self.session_pda.read().unwrap().is_none() || transaction.sanitize().is_err() {
+            return Ok(0);
+        }
+        let mut delegated = self.delegated_accounts.read().unwrap().clone();
+        let touched = self.touched_accounts.read().unwrap().clone();
+        let frozen = self.frozen_accounts.read().unwrap().clone();
+        let mut accounts = Vec::new();
+        let mut programs = HashMap::new();
+        let mut signature_verified = false;
+        for key in Self::writable_accounts_for_batch(bank, std::slice::from_ref(transaction)) {
+            if delegated.contains(&key) || frozen.contains(&key) {
+                continue;
+            }
+            let Some(mut account) = context.bank.get_account(&key) else {
+                continue;
+            };
+            if account.owner() != &self.portal_program_id || account.executable() {
+                continue;
+            }
+            if !signature_verified {
+                if transaction.verify_and_hash_message().is_err() {
+                    return Ok(0);
+                }
+                signature_verified = true;
+            }
+            let (record_key, bump) =
+                northstar_portal::find_delegation_record_pda(&self.portal_program_id, &key);
+            let Some(record_account) = context.bank.get_account(&record_key) else {
+                continue;
+            };
+            if record_account.owner() != &self.portal_program_id {
+                continue;
+            }
+            let Some(PortalAccount::DelegationRecord(record)) =
+                try_parse_raw_portal_account(record_account.data())
+            else {
+                continue;
+            };
+            if record.grid_id != context.grid_id || record.bump != bump {
+                continue;
+            }
+            let (request_key, _) = Pubkey::find_program_address(
+                &[b"undelegation_request", key.as_ref()],
+                &self.portal_program_id,
+            );
+            if context
+                .bank
+                .get_account(&request_key)
+                .is_some_and(|request| {
+                    request.owner() != &system_program::id()
+                        || !request.data().is_empty()
+                        || request.executable()
+                })
+            {
+                self.frozen_accounts.write().unwrap().insert(key);
+                return Ok(0);
+            }
+            let Some(program) = context.bank.get_account(&record.owner_program) else {
+                continue;
+            };
+            if !program.executable() {
+                continue;
+            }
+            if program.owner() != &native_loader::id() {
+                if program.owner() == &bpf_loader_upgradeable::id() {
+                    let Ok(UpgradeableLoaderState::Program {
+                        programdata_address,
+                    }) = program.state()
+                    else {
+                        continue;
+                    };
+                    let Some(programdata) = context.bank.get_account(&programdata_address) else {
+                        continue;
+                    };
+                    if programdata.owner() != &bpf_loader_upgradeable::id() {
+                        continue;
+                    }
+                    programs.insert(programdata_address, programdata);
+                }
+                programs.insert(record.owner_program, program);
+            }
+            account.set_owner(record.owner_program);
+            if touched.contains(&key) {
+                // Recovered ER state may be newer than L1; restore its binding, not its baseline.
+                let Some(restored) = self.er_account_overlay.read().unwrap().get(&key).cloned()
+                else {
+                    continue;
+                };
+                if restored.owner() != &record.owner_program {
+                    continue;
+                }
+                account = restored;
+            }
+            accounts.push((key, account));
+            delegated.insert(key);
+        }
+        if accounts.is_empty()
+            || !Self::is_transaction_allowed_on_bank_with_policy(
+                bank,
+                transaction,
+                &delegated,
+                &touched,
+                true,
+            )
+        {
+            return Ok(0);
+        }
+        let keys = accounts.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+        self.unsettled_state_store
+            .append_update(&accounts, &keys, None, None, &[])?;
+        let mut reloadable = Vec::new();
+        for (key, account) in programs {
+            if account.executable() && PROGRAM_OWNERS.contains(account.owner()) {
+                reloadable.push(key);
+            }
+            bank.store_account(&key, &account);
+        }
+        bank.remove_programs_from_cache(reloadable);
+        for (key, account) in &accounts {
+            bank.store_account(key, account);
+        }
+        self.er_account_overlay.write().unwrap().extend(accounts);
+        self.delegated_accounts
+            .write()
+            .unwrap()
+            .extend(keys.iter().copied());
+        self.touched_accounts
+            .write()
+            .unwrap()
+            .extend(keys.iter().copied());
+        Ok(keys.len())
     }
 
     pub fn set_rpc_subscriptions(&self, rpc_subscriptions: Arc<RpcSubscriptions>) {
@@ -878,6 +1045,21 @@ impl EphemeralTransactionClient {
             return;
         }
         let bank = self.bank();
+        if deposit_context.is_none() {
+            for transaction in &txs {
+                let frozen = self.frozen_accounts.read().unwrap().clone();
+                if Self::transaction_writes_frozen_account(&bank, transaction, &frozen)
+                    || self.has_processed_signature(transaction)
+                {
+                    continue;
+                }
+                if let Err(error) = self.recover_l1_delegations(&bank, transaction) {
+                    self.active.store(false, Ordering::Relaxed);
+                    warn!("Failed to persist recovered L1 delegation: {error}");
+                    return;
+                }
+            }
+        }
         let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
         let mut frozen_accounts = self.frozen_accounts.read().unwrap().clone();
         if let Some((account, payer, _)) = deposit_context {
@@ -1047,7 +1229,7 @@ impl EphemeralTransactionClient {
         let fee_structure = bank.fee_structure().clone();
         let max_processing_age = bank.max_processing_age();
 
-        debug!("ER loader tx: freezing slot {current_slot} and rotating to slot {next_slot}");
+        debug!("ER state update: freezing slot {current_slot} and rotating to slot {next_slot}");
         bank.freeze();
         self.er_history_store.finalize_slot(bank);
 
@@ -1879,6 +2061,47 @@ impl NotifyKeyUpdate for EphemeralTransactionClient {
 }
 
 impl solana_rpc::rpc::ErTxExecutor for EphemeralTransactionClient {
+    fn prepare_preflight(
+        &self,
+        transaction: &VersionedTransaction,
+    ) -> std::result::Result<(), solana_rpc::rpc::ErTxError> {
+        if self.session_pda.read().unwrap().is_none()
+            || self.l1_delegation_context.read().unwrap().is_none()
+            || transaction.sanitize().is_err()
+        {
+            return Ok(());
+        }
+        if !self.active.load(Ordering::Relaxed) {
+            return Err(solana_rpc::rpc::ErTxError::NotActive);
+        }
+        let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
+        if self.checkpoint_awaits_settlement() {
+            return Err(solana_rpc::rpc::ErTxError::Rejected(
+                "canonical checkpoint awaits settlement; retry after settlement".to_string(),
+            ));
+        }
+        let bank = self.bank();
+        let frozen = self.frozen_accounts.read().unwrap().clone();
+        if self.has_processed_signature(transaction)
+            || Self::transaction_writes_frozen_account(&bank, transaction, &frozen)
+        {
+            return Ok(());
+        }
+        let recovered = self
+            .recover_l1_delegations(&bank, transaction)
+            .map_err(|error| {
+                self.active.store(false, Ordering::Relaxed);
+                solana_rpc::rpc::ErTxError::Rejected(format!(
+                    "failed to persist recovered L1 delegation: {error}"
+                ))
+            })?;
+        if recovered > 0 {
+            // Preflight may read confirmed/finalized banks instead of the working bank.
+            self.freeze_and_rotate_bank(&bank);
+        }
+        Ok(())
+    }
+
     fn execute_wire(
         &self,
         wire_transaction: Vec<u8>,
@@ -1912,14 +2135,31 @@ impl solana_rpc::rpc::ErTxExecutor for EphemeralTransactionClient {
             ));
         }
         let bank = self.bank();
-        let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
-        let touched_accounts = self.touched_accounts.read().unwrap().clone();
         let frozen_accounts = self.frozen_accounts.read().unwrap().clone();
         if Self::transaction_writes_frozen_account(&bank, &tx, &frozen_accounts) {
             return Err(solana_rpc::rpc::ErTxError::Rejected(
                 "transaction writes to account pending undelegation".to_string(),
             ));
         }
+        if enforce_account_access {
+            self.recover_l1_delegations(&bank, &tx).map_err(|error| {
+                self.active.store(false, Ordering::Relaxed);
+                solana_rpc::rpc::ErTxError::Rejected(format!(
+                    "failed to persist recovered L1 delegation: {error}"
+                ))
+            })?;
+        }
+        if Self::transaction_writes_frozen_account(
+            &bank,
+            &tx,
+            &self.frozen_accounts.read().unwrap(),
+        ) {
+            return Err(solana_rpc::rpc::ErTxError::Rejected(
+                "transaction writes to account pending undelegation".to_string(),
+            ));
+        }
+        let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
+        let touched_accounts = self.touched_accounts.read().unwrap().clone();
         if !Self::is_transaction_allowed_on_bank_with_policy(
             &bank,
             &tx,
@@ -2008,6 +2248,217 @@ pub(crate) mod tests {
     fn fund_account(bank: &solana_runtime::bank::Bank, pubkey: &Pubkey, lamports: u64) {
         let account = AccountSharedData::new(lamports, 0, &system_program::id());
         bank.store_account(pubkey, &account);
+    }
+
+    #[test]
+    fn regression_recovery_preserves_guards_and_durability() {
+        for case in [
+            "missing_record",
+            "foreign_record_owner",
+            "wrong_grid",
+            "wrong_bump",
+            "invalid_layout",
+            "pending_undelegation",
+            "er_only_record",
+            "foreign_account_owner",
+            "unrelated_l1_write",
+            "frozen_account",
+            "invalid_signature",
+            "invalid_message",
+            "journal_failure",
+            "restored_binding",
+            "restored_pending_undelegation",
+        ] {
+            let l1 = create_test_bank();
+            let portal = Pubkey::new_unique();
+            let payer = Keypair::new();
+            let destination = Pubkey::new_unique();
+            let account_owner = if case == "foreign_account_owner" {
+                system_program::id()
+            } else {
+                portal
+            };
+            l1.store_account(
+                &payer.pubkey(),
+                &AccountSharedData::new(100_000_000, 0, &account_owner),
+            );
+            let (record_key, bump) =
+                northstar_portal::find_delegation_record_pda(&portal, &payer.pubkey());
+            let record = northstar_portal::DelegationRecord {
+                discriminator: northstar_portal::DelegationRecord::DISCRIMINATOR,
+                owner_program: system_program::id(),
+                grid_id: if case == "wrong_grid" { 1 } else { 0 },
+                bump: if case == "wrong_bump" {
+                    bump.wrapping_add(1)
+                } else {
+                    bump
+                },
+            };
+            let mut data = borsh::to_vec(&record).unwrap();
+            if case == "invalid_layout" {
+                data[0] ^= 1;
+            }
+            let record_owner = if case == "foreign_record_owner" {
+                system_program::id()
+            } else {
+                portal
+            };
+            let mut record_account = AccountSharedData::new(2_000_000, data.len(), &record_owner);
+            record_account.set_data_from_slice(&data);
+            if !matches!(case, "missing_record" | "er_only_record") {
+                l1.store_account(&record_key, &record_account);
+            }
+            if matches!(
+                case,
+                "pending_undelegation" | "restored_pending_undelegation"
+            ) {
+                let request = Pubkey::find_program_address(
+                    &[b"undelegation_request", payer.pubkey().as_ref()],
+                    &portal,
+                )
+                .0;
+                l1.store_account(&request, &AccountSharedData::new(1_000_000, 1, &portal));
+            }
+            if case == "unrelated_l1_write" {
+                fund_account(&l1, &destination, 1_000_000);
+            }
+            l1.freeze();
+            let l1 = Arc::new(l1);
+            let mut bank = Bank::new_from_parent_ephemeral_isolated(
+                l1.clone(),
+                SlotLeader::default(),
+                1u64 << 40,
+            );
+            bank.configure_er(
+                &crate::EphemeralRollupSettings::zero_fee_structure(),
+                crate::DEFAULT_ER_TRANSACTION_MAX_AGE,
+            );
+            if case == "er_only_record" {
+                bank.store_account(&record_key, &record_account);
+            }
+            let forks = BankForks::new_rw_arc_ephemeral(bank);
+            let bank = forks.read().unwrap().working_bank();
+            let mut client = EphemeralTransactionClient::new(
+                forks,
+                Arc::new(Mutex::new(())),
+                Arc::new(RwLock::new(HashSet::new())),
+                Arc::new(RwLock::new(HashSet::new())),
+                Arc::new(AtomicBool::new(true)),
+            );
+            client.portal_program_id = portal;
+            *client.session_pda.write().unwrap() = Some(Pubkey::new_unique());
+            client.set_l1_delegation_bank(l1, 0);
+            if matches!(case, "restored_binding" | "restored_pending_undelegation") {
+                let restored = AccountSharedData::new(10_000_000, 0, &system_program::id());
+                bank.store_account(&payer.pubkey(), &restored);
+                client
+                    .er_account_overlay
+                    .write()
+                    .unwrap()
+                    .insert(payer.pubkey(), restored);
+                client
+                    .touched_accounts
+                    .write()
+                    .unwrap()
+                    .insert(payer.pubkey());
+            }
+            if case == "frozen_account" {
+                client
+                    .frozen_accounts
+                    .write()
+                    .unwrap()
+                    .insert(payer.pubkey());
+            }
+            let transaction = Transaction::new_signed_with_payer(
+                &[solana_system_interface::instruction::transfer(
+                    &payer.pubkey(),
+                    &destination,
+                    1_000_000,
+                )],
+                Some(&payer.pubkey()),
+                &[&payer],
+                bank.last_blockhash(),
+            );
+            let mut transaction = VersionedTransaction::from(transaction);
+            if case == "invalid_signature" {
+                transaction.signatures[0] = solana_signature::Signature::default();
+            }
+            if case == "invalid_message" {
+                if let VersionedMessage::Legacy(message) = &mut transaction.message {
+                    message.header.num_readonly_signed_accounts = 2;
+                }
+            }
+            let directory = tempfile::TempDir::new().unwrap();
+            if case == "journal_failure" {
+                let state_dir = directory.path().join("state");
+                client.unsettled_state_store.configure(state_dir.clone());
+                client
+                    .unsettled_state_store
+                    .begin_session(crate::unsettled_state::UnsettledSessionIdentity {
+                        format_version: 1,
+                        portal_program_id: portal.to_bytes(),
+                        session_pda: client.session_pda.read().unwrap().unwrap().to_bytes(),
+                        nonce: 3,
+                        created_at: 10,
+                        authority: Pubkey::new_unique().to_bytes(),
+                        validator: Pubkey::new_unique().to_bytes(),
+                        grid_id: 0,
+                        ttl_slots: 100,
+                        fee_cap: 1_000,
+                        settlement_interval_slots: 75,
+                        bump: 254,
+                    })
+                    .unwrap();
+                client.unsettled_state_store.enable_writes();
+                std::fs::remove_dir_all(&state_dir).unwrap();
+                std::fs::write(&state_dir, b"regular file barrier").unwrap();
+            }
+            let before = bank.get_account(&payer.pubkey()).unwrap();
+            let touched_before = client.touched_accounts.read().unwrap().clone();
+            let recovered = client.recover_l1_delegations(&bank, &transaction);
+            if case == "journal_failure" {
+                assert!(recovered.is_err());
+                assert!(solana_rpc::rpc::ErTxExecutor::execute_wire(
+                    &client,
+                    bincode::serialize(&transaction).unwrap()
+                )
+                .is_err());
+                assert!(!client.active.load(Ordering::Relaxed));
+            } else {
+                assert_eq!(
+                    recovered.unwrap(),
+                    usize::from(case == "restored_binding"),
+                    "case={case}"
+                );
+            }
+            if case == "restored_pending_undelegation" {
+                assert!(solana_rpc::rpc::ErTxExecutor::execute_wire(
+                    &client,
+                    bincode::serialize(&transaction).unwrap()
+                )
+                .is_err());
+                assert!(client.active.load(Ordering::Relaxed));
+            }
+            assert_eq!(
+                client
+                    .delegated_accounts
+                    .read()
+                    .unwrap()
+                    .contains(&payer.pubkey()),
+                case == "restored_binding",
+                "case={case}"
+            );
+            assert_eq!(
+                *client.touched_accounts.read().unwrap(),
+                touched_before,
+                "case={case}"
+            );
+            assert_eq!(
+                bank.get_account(&payer.pubkey()).unwrap(),
+                before,
+                "case={case}"
+            );
+        }
     }
 
     #[test]
