@@ -9,7 +9,8 @@ use {
         mem_pool::VmMemoryPool,
         memory_context::{MemoryContext, SerializedAccountMetadata},
         program_cache_entry::ProgramCacheEntry,
-        serialization, stable_log,
+        serialization::{self, SerializationResult},
+        stable_log,
     },
     solana_instruction_error::InstructionError,
     solana_program_entrypoint::{MAX_PERMITTED_DATA_INCREASE, SUCCESS},
@@ -27,6 +28,9 @@ use {
     solana_transaction_context::IndexOfAccount,
     std::{cell::RefCell, mem, time::Duration},
 };
+
+// Sonic: exposed so replay profiles bind the build-wide tracing mode.
+pub const REGISTER_TRACING_ENABLED: bool = cfg!(feature = "northstar-trace");
 
 thread_local! {
     pub static MEMORY_POOL: RefCell<VmMemoryPool> = RefCell::new(VmMemoryPool::new());
@@ -113,12 +117,10 @@ macro_rules! create_vm {
         let stack_size = $program.get_config().stack_size();
         let heap_size = invoke_context.get_compute_budget().heap_size;
         let heap_cost_result =
-            invoke_context
-                .compute_meter
-                .consume_checked($crate::__private::calculate_heap_cost(
-                    heap_size,
-                    invoke_context.get_execution_cost().heap_cost,
-                ));
+            invoke_context.consume_checked($crate::__private::calculate_heap_cost(
+                heap_size,
+                invoke_context.get_execution_cost().heap_cost,
+            ));
         let $vm = heap_cost_result.and_then(|_| {
             let (mut stack, mut heap) = $crate::__private::MEMORY_POOL
                 .with_borrow_mut(|pool| (pool.get_stack(stack_size), pool.get_heap(heap_size)));
@@ -210,16 +212,27 @@ pub fn execute<'a, 'b: 'a>(
     let direct_account_pointers_in_program_input = invoke_context
         .get_feature_set()
         .direct_account_pointers_in_program_input;
+    let pass_input_metadata_in_vm_r3_r5 = invoke_context
+        .get_feature_set()
+        .pass_input_metadata_in_vm_r3_r5;
 
     let mut serialize_time = Measure::start("serialize");
-    let (parameter_bytes, regions, accounts_metadata, instruction_data_offset) =
-        serialization::serialize_parameters(
-            &instruction_context,
-            virtual_address_space_adjustments,
-            account_data_direct_mapping,
-            direct_account_pointers_in_program_input,
-        )?;
+    let SerializationResult {
+        parameter_bytes,
+        regions,
+        accounts_metadata,
+        instruction_data_offset,
+        account_pointers_offset,
+    } = serialization::serialize_parameters(
+        &instruction_context,
+        virtual_address_space_adjustments,
+        account_data_direct_mapping,
+        direct_account_pointers_in_program_input,
+    )?;
     serialize_time.stop();
+
+    let instruction_data_len = instruction_context.get_instruction_data().len();
+    let number_of_instruction_accounts = instruction_context.get_number_of_instruction_accounts();
 
     // save the account addresses so in case we hit an AccessViolation error we
     // can map to a more specific error
@@ -278,8 +291,9 @@ pub fn execute<'a, 'b: 'a>(
         )?
     };
 
-    // Sonic: collect witness data only in an explicitly trace-enabled environment.
-    let trace_enabled = executable.get_config().enable_register_tracing;
+    // Sonic: register tracing is build-wide; witness collection remains replay-only.
+    let trace_enabled =
+        REGISTER_TRACING_ENABLED && executable.get_config().enable_symbol_and_section_labels;
     let trace_input_before = trace_enabled.then(|| parameter_bytes.as_slice().to_vec());
     let execution_result = {
         let mut execution_mode = ExecutionMode::PreferJit;
@@ -316,6 +330,26 @@ pub fn execute<'a, 'b: 'a>(
 
         vm.registers[1] = ebpf::MM_INPUT_START;
         vm.registers[2] = instruction_data_offset as u64;
+
+        // SIMD-0683: Pass ABIv1 input metadata via registers r3–r5.
+        if !is_loader_deprecated && pass_input_metadata_in_vm_r3_r5 {
+            vm.registers[3] = instruction_data_len as u64;
+            vm.registers[4] = if let Some(account_pointers_offset) = account_pointers_offset {
+                account_pointers_offset as u64
+            } else {
+                // SIMD-0683 depends on SIMD-0449, which provides the account
+                // pointers array. Since this path only handles ABIv1, the offset
+                // should always be present when SIMD-0683 is enabled so this error
+                // should never happen.
+                ic_logger_msg!(
+                    log_collector,
+                    "Failed to create SBF VM: cannot determine account pointers offset"
+                );
+                return Err(Box::new(InstructionError::ProgramEnvironmentSetupFailure));
+            };
+            vm.registers[5] = number_of_instruction_accounts as u64;
+        }
+
         let mut call_frames =
             MEMORY_POOL.with_borrow_mut(|memory_pool| memory_pool.get_call_frames());
         let (compute_units_consumed, result) =

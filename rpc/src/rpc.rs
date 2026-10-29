@@ -84,7 +84,7 @@ use {
     solana_signature::Signature,
     solana_signer::Signer,
     solana_storage_bigtable::Error as StorageError,
-    solana_svm_transaction::svm_message::SVMMessage,
+    solana_svm_transaction::svm_message::SVMStaticMessage,
     solana_transaction::{
         sanitized::{MAX_TX_ACCOUNT_LOCKS, MessageHash, SanitizedTransaction},
         versioned::VersionedTransaction,
@@ -600,7 +600,6 @@ impl JsonRpcRequestProcessor {
         let slot = bank.slot();
         let optimistically_confirmed_bank =
             Arc::new(RwLock::new(OptimisticallyConfirmedBank { bank }));
-        let migration_status = bank_forks.read().unwrap().migration_status();
         Self {
             config,
             snapshot_config: None,
@@ -614,9 +613,7 @@ impl JsonRpcRequestProcessor {
             validator_exit: create_validator_exit(exit.clone()),
             health: Arc::new(RpcHealth::new(
                 Arc::clone(&optimistically_confirmed_bank),
-                blockstore,
                 Arc::default(),
-                migration_status,
                 0,
                 exit,
             )),
@@ -2753,9 +2750,7 @@ impl JsonRpcRequestProcessor {
 
     fn get_stake_minimum_delegation(&self, config: RpcContextConfig) -> Result<RpcResponse<u64>> {
         let bank = self.get_bank_with_config(config)?;
-        let stake_minimum_delegation = stake_utils::get_minimum_delegation(
-            bank.feature_set.snapshot().upgrade_bpf_stake_program_to_v5,
-        );
+        let stake_minimum_delegation = stake_utils::get_minimum_delegation();
         Ok(new_response(&bank, stake_minimum_delegation))
     }
 
@@ -3103,6 +3098,22 @@ pub mod rpc_minimal {
     pub trait Minimal {
         type Metadata;
 
+        #[rpc(meta, name = "getAccountInfo")]
+        fn get_account_info(
+            &self,
+            meta: Self::Metadata,
+            pubkey_str: String,
+            config: Option<RpcAccountInfoConfig>,
+        ) -> BoxFuture<Result<RpcResponse<Option<UiAccount>>>>;
+
+        #[rpc(meta, name = "getMultipleAccounts")]
+        fn get_multiple_accounts(
+            &self,
+            meta: Self::Metadata,
+            pubkey_strs: Vec<String>,
+            config: Option<RpcAccountInfoConfig>,
+        ) -> BoxFuture<Result<RpcResponse<Vec<Option<UiAccount>>>>>;
+
         #[rpc(meta, name = "getBalance")]
         fn get_balance(
             &self,
@@ -3173,6 +3184,49 @@ pub mod rpc_minimal {
     pub struct MinimalImpl;
     impl Minimal for MinimalImpl {
         type Metadata = JsonRpcRequestProcessor;
+
+        fn get_account_info(
+            &self,
+            meta: Self::Metadata,
+            pubkey_str: String,
+            config: Option<RpcAccountInfoConfig>,
+        ) -> BoxFuture<Result<RpcResponse<Option<UiAccount>>>> {
+            debug!("get_account_info rpc request received: {pubkey_str:?}");
+            async move {
+                let pubkey = verify_pubkey(&pubkey_str)?;
+                meta.get_account_info(pubkey, config).await
+            }
+            .boxed()
+        }
+
+        fn get_multiple_accounts(
+            &self,
+            meta: Self::Metadata,
+            pubkey_strs: Vec<String>,
+            config: Option<RpcAccountInfoConfig>,
+        ) -> BoxFuture<Result<RpcResponse<Vec<Option<UiAccount>>>>> {
+            debug!(
+                "get_multiple_accounts rpc request received: {:?}",
+                pubkey_strs.len()
+            );
+            async move {
+                let max_multiple_accounts = meta
+                    .config
+                    .max_multiple_accounts
+                    .unwrap_or(MAX_MULTIPLE_ACCOUNTS);
+                if pubkey_strs.len() > max_multiple_accounts {
+                    return Err(Error::invalid_params(format!(
+                        "Too many inputs provided; max {max_multiple_accounts}"
+                    )));
+                }
+                let pubkeys = pubkey_strs
+                    .into_iter()
+                    .map(|pubkey_str| verify_pubkey(&pubkey_str))
+                    .collect::<Result<Vec<_>>>()?;
+                meta.get_multiple_accounts(pubkeys, config).await
+            }
+            .boxed()
+        }
 
         fn get_balance(
             &self,
@@ -3621,29 +3675,12 @@ pub mod rpc_bank {
     }
 }
 
-// RPC interface that depends on AccountsDB
-// Expected to be provided by API nodes
+// Remaining account RPC methods expected to be provided by API nodes.
 pub mod rpc_accounts {
     use super::*;
     #[rpc]
     pub trait AccountsData {
         type Metadata;
-
-        #[rpc(meta, name = "getAccountInfo")]
-        fn get_account_info(
-            &self,
-            meta: Self::Metadata,
-            pubkey_str: String,
-            config: Option<RpcAccountInfoConfig>,
-        ) -> BoxFuture<Result<RpcResponse<Option<UiAccount>>>>;
-
-        #[rpc(meta, name = "getMultipleAccounts")]
-        fn get_multiple_accounts(
-            &self,
-            meta: Self::Metadata,
-            pubkey_strs: Vec<String>,
-            config: Option<RpcAccountInfoConfig>,
-        ) -> BoxFuture<Result<RpcResponse<Vec<Option<UiAccount>>>>>;
 
         #[rpc(meta, name = "getBlockCommitment")]
         fn get_block_commitment(
@@ -3676,49 +3713,6 @@ pub mod rpc_accounts {
     pub struct AccountsDataImpl;
     impl AccountsData for AccountsDataImpl {
         type Metadata = JsonRpcRequestProcessor;
-
-        fn get_account_info(
-            &self,
-            meta: Self::Metadata,
-            pubkey_str: String,
-            config: Option<RpcAccountInfoConfig>,
-        ) -> BoxFuture<Result<RpcResponse<Option<UiAccount>>>> {
-            debug!("get_account_info rpc request received: {pubkey_str:?}");
-            async move {
-                let pubkey = verify_pubkey(&pubkey_str)?;
-                meta.get_account_info(pubkey, config).await
-            }
-            .boxed()
-        }
-
-        fn get_multiple_accounts(
-            &self,
-            meta: Self::Metadata,
-            pubkey_strs: Vec<String>,
-            config: Option<RpcAccountInfoConfig>,
-        ) -> BoxFuture<Result<RpcResponse<Vec<Option<UiAccount>>>>> {
-            debug!(
-                "get_multiple_accounts rpc request received: {:?}",
-                pubkey_strs.len()
-            );
-            async move {
-                let max_multiple_accounts = meta
-                    .config
-                    .max_multiple_accounts
-                    .unwrap_or(MAX_MULTIPLE_ACCOUNTS);
-                if pubkey_strs.len() > max_multiple_accounts {
-                    return Err(Error::invalid_params(format!(
-                        "Too many inputs provided; max {max_multiple_accounts}"
-                    )));
-                }
-                let pubkeys = pubkey_strs
-                    .into_iter()
-                    .map(|pubkey_str| verify_pubkey(&pubkey_str))
-                    .collect::<Result<Vec<_>>>()?;
-                meta.get_multiple_accounts(pubkeys, config).await
-            }
-            .boxed()
-        }
 
         fn get_block_commitment(
             &self,
@@ -3919,7 +3913,9 @@ pub mod rpc_full {
     use {
         super::*,
         solana_message::{SanitizedVersionedMessage, VersionedMessage},
-        solana_transaction_status::{UiLoadedAddresses, parse_ui_inner_instructions},
+        solana_transaction_status::{
+            UiInnerInstructions, UiLoadedAddresses, parse_ui_inner_instructions,
+        },
     };
     #[rpc]
     pub trait Full {
@@ -4137,7 +4133,6 @@ pub mod rpc_full {
                     tpu_quic: Some(er_node_info.tpu_quic),
                     tpu_forwards: None,
                     tpu_forwards_quic: None,
-                    tpu_vote: None,
                     serve_repair: None,
                     rpc: Some(er_node_info.rpc),
                     pubsub: Some(er_node_info.pubsub),
@@ -4173,9 +4168,6 @@ pub mod rpc_full {
                             tpu_forwards: None,
                             tpu_forwards_quic: contact_info
                                 .tpu_forwards(Protocol::QUIC)
-                                .filter(|addr| socket_addr_space.check(addr)),
-                            tpu_vote: contact_info
-                                .tpu_vote(Protocol::UDP)
                                 .filter(|addr| socket_addr_space.check(addr)),
                             serve_repair: contact_info
                                 .serve_repair(Protocol::UDP)
@@ -4339,7 +4331,7 @@ pub mod rpc_full {
                 .unwrap_or(0);
 
             let durable_nonce_info = transaction
-                .get_durable_nonce()
+                .get_durable_nonce(false)
                 .map(|&pubkey| (pubkey, blockhash));
             if durable_nonce_info.is_some() || (skip_preflight && last_valid_block_height == 0) {
                 // While it uses a defined constant, this last_valid_block_height value is chosen arbitrarily.
@@ -4509,7 +4501,19 @@ pub mod rpc_full {
                 accounts: config_accounts,
                 min_context_slot,
                 inner_instructions: enable_cpi_recording,
+                inner_instructions_encoding,
             } = config.unwrap_or_default();
+            let inner_instructions_encoding =
+                inner_instructions_encoding.unwrap_or(UiTransactionEncoding::JsonParsed);
+            if !matches!(
+                inner_instructions_encoding,
+                UiTransactionEncoding::Json | UiTransactionEncoding::JsonParsed
+            ) {
+                return Err(Error::invalid_params(format!(
+                    "unsupported inner instructions encoding: {inner_instructions_encoding}. \
+                     Supported encodings: json, jsonParsed"
+                )));
+            }
             let tx_encoding = encoding.unwrap_or(UiTransactionEncoding::Base58);
             let binary_encoding = tx_encoding.into_binary_encoding().ok_or_else(|| {
                 Error::invalid_params(format!(
@@ -4628,7 +4632,10 @@ pub mod rpc_full {
 
             let inner_instructions = inner_instructions.map(|info| {
                 map_inner_instructions(info)
-                    .map(|converted| parse_ui_inner_instructions(converted, &account_keys))
+                    .map(|converted| match inner_instructions_encoding {
+                        UiTransactionEncoding::Json => UiInnerInstructions::from(converted),
+                        _ => parse_ui_inner_instructions(converted, &account_keys),
+                    })
                     .collect()
             });
 
@@ -5072,10 +5079,7 @@ pub fn populate_blockstore_for_tests(
 
     // Check that process_entries successfully writes can_commit transactions statuses, and
     // that they are matched properly by get_rooted_block
-    assert_eq!(
-        solana_ledger::blockstore_processor::process_entries_for_tests(&bank, entries),
-        Ok(())
-    );
+    solana_ledger::blockstore_processor::process_entries_for_tests(&bank, entries).unwrap();
 
     transaction_status_service.quiesce_and_join_for_tests(tss_exit);
 }
@@ -5250,9 +5254,7 @@ pub mod tests {
         invoke_context: &mut InvokeContext,
     ) -> std::result::Result<u64, Box<dyn std::error::Error>> {
         let log_collector = invoke_context.get_log_collector();
-        invoke_context
-            .compute_meter
-            .consume_checked(TestBuiltinEntrypoint::COMPUTE_UNITS)?;
+        invoke_context.consume_checked(TestBuiltinEntrypoint::COMPUTE_UNITS)?;
 
         let transaction_context = &invoke_context.transaction_context;
         let instruction_context = transaction_context.get_current_instruction_context()?;
@@ -5428,7 +5430,7 @@ pub mod tests {
                 block_commitment_cache.clone(),
                 blockstore.clone(),
                 validator_exit,
-                RpcHealth::stub(optimistically_confirmed_bank.clone(), blockstore.clone()),
+                RpcHealth::stub(optimistically_confirmed_bank.clone()),
                 cluster_info,
                 Hash::default(),
                 None,
@@ -5738,6 +5740,39 @@ pub mod tests {
     }
 
     #[test]
+    fn test_minimal_rpc_account_reads() {
+        let genesis = create_genesis_config(20);
+        let mint_pubkey = genesis.mint_keypair.pubkey();
+        let missing_pubkey = Pubkey::new_unique();
+        let bank = Bank::new_for_tests(&genesis.genesis_config);
+        let meta = JsonRpcRequestProcessor::new_from_bank(bank, SocketAddrSpace::Unspecified);
+
+        let mut io = MetaIoHandler::default();
+        io.extend_with(rpc_minimal::MinimalImpl.to_delegate());
+
+        let request = create_test_request("getAccountInfo", Some(json!([mint_pubkey.to_string()])));
+        let response = io
+            .handle_request_sync(&request.to_string(), meta.clone())
+            .unwrap();
+        let account: RpcResponse<Option<UiAccount>> =
+            parse_success_result(serde_json::from_str(&response).unwrap());
+        assert_eq!(account.value.unwrap().lamports, 20);
+
+        let request = create_test_request(
+            "getMultipleAccounts",
+            Some(json!([[
+                mint_pubkey.to_string(),
+                missing_pubkey.to_string()
+            ]])),
+        );
+        let response = io.handle_request_sync(&request.to_string(), meta).unwrap();
+        let accounts: RpcResponse<Vec<Option<UiAccount>>> =
+            parse_success_result(serde_json::from_str(&response).unwrap());
+        assert_eq!(accounts.value[0].as_ref().unwrap().lamports, 20);
+        assert!(accounts.value[1].is_none());
+    }
+
+    #[test]
     fn test_rpc_get_balance_via_client() {
         let genesis = create_genesis_config(20);
         let mint_pubkey = genesis.mint_keypair.pubkey();
@@ -6012,7 +6047,6 @@ pub mod tests {
             "tpuQuic": "127.0.0.1:8009",
             "tpuForwards": null,
             "tpuForwardsQuic": "127.0.0.1:8010",
-            "tpuVote": "127.0.0.1:8005",
             "serveRepair": "127.0.0.1:8008",
             "rpc": "127.0.0.1:8899",
             "pubsub": "127.0.0.1:8900",
@@ -6028,7 +6062,6 @@ pub mod tests {
             "tpuQuic": "127.0.0.1:1240",
             "tpuForwards": null,
             "tpuForwardsQuic": "127.0.0.1:1245",
-            "tpuVote": "127.0.0.1:1241",
             "serveRepair": "127.0.0.1:1242",
             "rpc": "127.0.0.1:8899",
             "pubsub": "127.0.0.1:8900",
@@ -7633,6 +7666,79 @@ pub mod tests {
         let result: Response = serde_json::from_str(&res.expect("actual response"))
             .expect("actual response deserialization");
         assert_eq!(result, expected);
+
+        // `innerInstructionsEncoding` provided as `json`, should have compiled inner instructions
+        let req = format!(
+            r#"{{"jsonrpc":"2.0",
+                 "id":1,
+                 "method":"simulateTransaction",
+                 "params":[
+                   "{tx_serialized_encoded}",
+                   {{ "innerInstructions": true, "innerInstructionsEncoding": "json", "encoding": "base64" }}
+                 ]
+            }}"#,
+        );
+        let res = io.handle_request_sync(&req, meta.clone());
+        let account_index = |pubkey: &Pubkey| {
+            tx.message
+                .account_keys
+                .iter()
+                .position(|key| key == pubkey)
+                .unwrap()
+        };
+        let create_account_ix = system_instruction::create_account(
+            &from_pubkey,
+            &to_pubkey,
+            lamports,
+            space as u64,
+            &owner_pubkey,
+        );
+        let expected_inner_instructions = json!([
+            {
+            "index": 0,
+            "instructions": [
+                {
+                "programIdIndex": account_index(&system_program::id()),
+                "accounts": [account_index(&from_pubkey), account_index(&to_pubkey)],
+                "data": bs58::encode(&create_account_ix.data).into_string(),
+                "stackHeight": 2
+                }
+            ]
+            }
+        ]);
+        let result: Response = serde_json::from_str(&res.expect("actual response"))
+            .expect("actual response deserialization");
+        let Response::Single(Output::Success(success)) = result else {
+            panic!("expected success response, got {result:?}");
+        };
+        assert_eq!(
+            success.result["value"]["innerInstructions"],
+            expected_inner_instructions
+        );
+
+        // Unsupported `innerInstructionsEncoding` should return an error
+        let req = format!(
+            r#"{{"jsonrpc":"2.0",
+                 "id":1,
+                 "method":"simulateTransaction",
+                 "params":[
+                   "{tx_serialized_encoded}",
+                   {{ "innerInstructions": true, "innerInstructionsEncoding": "base64", "encoding": "base64" }}
+                 ]
+            }}"#,
+        );
+        let res = io.handle_request_sync(&req, meta.clone());
+        let result: Response = serde_json::from_str(&res.expect("actual response"))
+            .expect("actual response deserialization");
+        let Response::Single(Output::Failure(failure)) = result else {
+            panic!("expected failure response, got {result:?}");
+        };
+        assert_eq!(failure.error.code, ErrorCode::InvalidParams);
+        assert_eq!(
+            failure.error.message,
+            "unsupported inner instructions encoding: base64. Supported encodings: json, \
+             jsonParsed"
+        );
     }
 
     #[test]
@@ -7887,7 +7993,7 @@ pub mod tests {
         let (bank_forks, mint_keypair, ..) = new_bank_forks();
         let optimistically_confirmed_bank =
             OptimisticallyConfirmedBank::locked_from_bank_forks_root(&bank_forks);
-        let health = RpcHealth::stub(optimistically_confirmed_bank.clone(), blockstore.clone());
+        let health = RpcHealth::stub(optimistically_confirmed_bank.clone());
         // Mark the node as healthy to start
         health.stub_set_health_status(Some(RpcHealthStatus::Ok));
 
@@ -8264,7 +8370,7 @@ pub mod tests {
             block_commitment_cache,
             blockstore.clone(),
             validator_exit,
-            RpcHealth::stub(optimistically_confirmed_bank.clone(), blockstore),
+            RpcHealth::stub(optimistically_confirmed_bank.clone()),
             cluster_info,
             Hash::default(),
             None,
@@ -10123,7 +10229,7 @@ pub mod tests {
             block_commitment_cache,
             blockstore.clone(),
             validator_exit,
-            RpcHealth::stub(optimistically_confirmed_bank.clone(), blockstore.clone()),
+            RpcHealth::stub(optimistically_confirmed_bank.clone()),
             cluster_info,
             Hash::default(),
             None,
@@ -10483,10 +10589,7 @@ pub mod tests {
     #[test]
     fn test_rpc_get_stake_minimum_delegation() {
         let rpc = RpcHandler::start();
-        let bank = rpc.working_bank();
-        let expected_stake_minimum_delegation = stake_utils::get_minimum_delegation(
-            bank.feature_set.snapshot().upgrade_bpf_stake_program_to_v5,
-        );
+        let expected_stake_minimum_delegation = stake_utils::get_minimum_delegation();
 
         let request = create_test_request("getStakeMinimumDelegation", None);
         let response: RpcResponse<u64> = parse_success_result(rpc.handle_request_sync(request));

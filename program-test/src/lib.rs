@@ -35,8 +35,11 @@ use {
     solana_program_entrypoint::{SUCCESS, deserialize},
     solana_program_error::{ProgramError, ProgramResult},
     solana_program_runtime::{
-        invoke_context::BuiltinFunctionRegisterer, program_cache_entry::ProgramCacheEntry,
-        serialization::serialize_parameters, stable_log, sysvar_cache::SysvarCache,
+        invoke_context::BuiltinFunctionRegisterer,
+        program_cache_entry::ProgramCacheEntry,
+        serialization::{SerializationResult, serialize_parameters},
+        stable_log,
+        sysvar_cache::SysvarCache,
     },
     solana_pubkey::Pubkey,
     solana_rent::Rent,
@@ -121,7 +124,7 @@ pub fn invoke_builtin_function(
     let instruction_account_indices = 0..instruction_context.get_number_of_instruction_accounts();
 
     // mock builtin program must consume units
-    invoke_context.compute_meter.consume_checked(1)?;
+    invoke_context.consume_checked(1)?;
 
     let log_collector = invoke_context.get_log_collector();
     let program_id = instruction_context.get_program_key()?;
@@ -139,13 +142,15 @@ pub fn invoke_builtin_function(
         .direct_account_pointers_in_program_input;
 
     // Serialize entrypoint parameters with SBF ABI
-    let (mut parameter_bytes, _regions, _account_lengths, _instruction_data_offset) =
-        serialize_parameters(
-            &instruction_context,
-            false, // There is no VM so virtual_address_space_adjustments can not be implemented here
-            false, // There is no VM so account_data_direct_mapping can not be implemented here
-            direct_account_pointers_in_program_input,
-        )?;
+    let SerializationResult {
+        mut parameter_bytes,
+        ..
+    } = serialize_parameters(
+        &instruction_context,
+        false, // There is no VM so virtual_address_space_adjustments can not be implemented here
+        false, // There is no VM so account_data_direct_mapping can not be implemented here
+        direct_account_pointers_in_program_input,
+    )?;
 
     // Deserialize data back into instruction params
     let (program_id, account_infos, input) =
@@ -253,7 +258,6 @@ fn get_sysvar<T: Clone>(
 ) -> u64 {
     let invoke_context = get_invoke_context();
     if invoke_context
-        .compute_meter
         .consume_checked(invoke_context.get_execution_cost().sysvar_base_cost + sysvar_size as u64)
         .is_err()
     {
@@ -340,7 +344,6 @@ impl SyscallStubs {
         let sysvar_buf_cost = length.checked_div(cpi_bytes_per_unit).unwrap_or(0);
 
         if invoke_context
-            .compute_meter
             .consume_checked(
                 sysvar_base_cost
                     .saturating_add(sysvar_id_cost)
@@ -1407,7 +1410,12 @@ impl ProgramTestContext {
     /// that would be difficult to replicate on a new test cluster. Beware
     /// that it can be used to create states that would not be reachable
     /// under normal conditions!
-    pub fn set_sysvar<T: SysvarId + Serialize<Src = T>>(&self, sysvar: &T) {
+    pub fn set_sysvar<T>(&self, sysvar: &T)
+    where
+        T: wincode::SchemaWrite<solana_account::WincodeConfig, Src = T>
+            + for<'de> wincode::SchemaRead<'de, solana_account::WincodeConfig, Dst = T>
+            + SysvarId,
+    {
         let bank_forks = self.bank_forks.read().unwrap();
         let bank = bank_forks.working_bank();
         bank.set_sysvar_for_tests(sysvar);

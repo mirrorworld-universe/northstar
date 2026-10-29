@@ -38,7 +38,7 @@ pub struct StandardBroadcastRun {
     // Parent encoded in shred headers. This must remain stable for the slot
     // because it is used to derive PARENT_OFFSET.
     parent: Slot,
-    parent_block_id: Hash,
+    parent_block_id: BlockId,
     // Parent slot and block id committed into the double-merkle block id. This
     // can change after an UpdateParent marker.
     parent_for_double_merkle: Block,
@@ -85,7 +85,7 @@ impl StandardBroadcastRun {
         Self {
             slot: Slot::MAX,
             parent: Slot::MAX,
-            parent_block_id: Hash::default(),
+            parent_block_id: BlockId::default(),
             parent_for_double_merkle: Block {
                 slot: Slot::MAX,
                 block_id: BlockId::default(),
@@ -162,7 +162,9 @@ impl StandardBroadcastRun {
             ) {
                 Ok(chained_merkle_root) => chained_merkle_root,
                 // This is a snapshot slot that we don't have the shreds for. Use the block id from the snapshot
-                Err(Error::UnknownLastIndex(_)) | Err(Error::UnknownSlotMeta(_)) => parent_block_id,
+                Err(Error::UnknownLastIndex(_)) | Err(Error::UnknownSlotMeta(_)) => {
+                    parent_block_id.to_hash()
+                }
                 Err(e) => panic!(
                     "Unexpected error while producing leader block for {}: {e:?}",
                     bank.slot()
@@ -175,7 +177,7 @@ impl StandardBroadcastRun {
         self.parent_block_id = parent_block_id;
         self.parent_for_double_merkle = Block {
             slot: bank.parent_slot(),
-            block_id: BlockId::from(parent_block_id),
+            block_id: parent_block_id,
         };
         self.chained_merkle_root = chained_merkle_root;
         self.double_merkle_leaves.clear();
@@ -712,6 +714,7 @@ mod test {
         super::*,
         assert_matches::assert_matches,
         rand::Rng,
+        solana_clock::DEFAULT_NS_PER_TICK_400_MS,
         solana_entry::entry::create_ticks,
         solana_genesis_config::GenesisConfig,
         solana_gossip::{cluster_info::ClusterInfo, node::Node},
@@ -925,6 +928,8 @@ mod test {
             Blockstore::open(&ledger_path).expect("Expected to be able to open database ledger"),
         );
         let mut genesis_config = create_genesis_config(10_000).genesis_config;
+        genesis_config.poh_config.target_tick_duration =
+            Duration::from_nanos(DEFAULT_NS_PER_TICK_400_MS);
         let slot_time_features = slot_time_feature_ids().to_vec();
         deactivate_features(&mut genesis_config, &slot_time_features);
         for feature_id in feature_ids {
@@ -1037,12 +1042,12 @@ mod test {
         assert!(run.completed);
 
         // Set up the slot to be interrupted
-        let next_shred_index = 10;
+        let next_shred_index = 32;
         let slot = 1;
         let parent = 0;
         run.chained_merkle_root = Hash::new_from_array(rand::rng().random());
         run.next_shred_index = next_shred_index;
-        run.next_code_index = 17;
+        run.next_code_index = next_shred_index;
         run.slot = slot;
         run.parent = parent;
         run.completed = false;
@@ -1150,7 +1155,7 @@ mod test {
 
         // Step 2: Make a transmission for another bank that interrupts the transmission for
         // slot 1
-        bank1.set_block_id(Some(Hash::new_unique()));
+        bank1.set_block_id(Some(BlockId::new_unique()));
         let bank2 = new_child_bank(&bank1, 2);
         let interrupted_slot = standard_broadcast_run.slot;
         // Interrupting the slot should cause the unfinished_slot and stats to reset
@@ -1523,11 +1528,11 @@ mod test {
         );
         bs.slot = 12;
         bs.parent = 10;
-        let original_parent_block_id = Hash::new_unique();
+        let original_parent_block_id = BlockId::new_unique();
         bs.parent_block_id = original_parent_block_id;
         bs.parent_for_double_merkle = Block {
             slot: bs.parent,
-            block_id: BlockId::from(bs.parent_block_id),
+            block_id: bs.parent_block_id,
         };
 
         let new_parent_slot = 7;

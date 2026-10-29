@@ -47,58 +47,17 @@ default_cargo_audit_extra_args=(
   # Solution:  Upgrade to >=4.1.3
   --ignore RUSTSEC-2024-0344
 
-  # Crate:     tonic
-  # Version:   0.9.2
-  # Title:     Remotely exploitable Denial of Service in Tonic
-  # Date:      2024-10-01
-  # ID:        RUSTSEC-2024-0376
-  # URL:       https://rustsec.org/advisories/RUSTSEC-2024-0376
-  # Solution:  Upgrade to >=0.12.3
-  --ignore RUSTSEC-2024-0376
-
-  # Crate:     rustls-webpki
-  # Version:   0.101.7
-  # Title:     CRLs not considered authoritative by Distribution Point due to faulty matching logic
-  # Date:      2026-03-20
-  # ID:        RUSTSEC-2026-0049
-  # URL:       https://rustsec.org/advisories/RUSTSEC-2026-0049
-  # Solution:  Upgrade to >=0.103.10
-  #
-  # NOTE: we took the fix for 0.103.6 dependents. 0.101.7 is unaffected
-  --ignore RUSTSEC-2026-0049
-
-  # Crate:     rustls-webpki
-  # Version:   0.101.7
-  # Title:     Name constraints for URI names were incorrectly accepted
-  # Date:      2026-04-14
-  # ID:        RUSTSEC-2026-0098
-  # URL:       https://rustsec.org/advisories/RUSTSEC-2026-0098
-  # Solution:  Upgrade to >=0.103.12, <0.104.0-alpha.1 OR >=0.104.0-alpha.6
-  #
-  # AVAVE OK: we picked upstream fix atop our vendored branches
-  --ignore RUSTSEC-2026-0098
-
-  # Crate:     rustls-webpki
-  # Version:   0.101.7
-  # Title:     Name constraints were accepted for certificates asserting a wildcard name
-  # Date:      2026-04-14
-  # ID:        RUSTSEC-2026-0099
-  # URL:       https://rustsec.org/advisories/RUSTSEC-2026-0099
-  # Solution:  Upgrade to >=0.103.12, <0.104.0-alpha.1 OR >=0.104.0-alpha.6
-  #
-  # AVAVE OK: we picked upstream fix atop our vendored branches
-  --ignore RUSTSEC-2026-0099
-
-  # Crate:     rustls-webpki
-  # Version:   0.101.7
-  # Title:     Reachable panic in certificate revocation list parsing
-  # Date:      2026-04-22
-  # ID:        RUSTSEC-2026-0104
-  # URL:       https://rustsec.org/advisories/RUSTSEC-2026-0104
-  # Solution:  Upgrade to >=0.103.13, <0.104.0-alpha.1 OR >=0.104.0-alpha.7
-  #
-  # AGAVE OK: vendored the upstream fix again
-  --ignore RUSTSEC-2026-0104
+  # Crate:     crypto-bigint
+  # Version:   0.5.5
+  # Title:     Multiple timing variability issues in operations intended to be constant-time
+  # Date:      2026-10-23
+  # ID:        RUSTSEC-2026-0387
+  # URL:       https://rustsec.org/advisories/RUSTSEC-2026-0387
+  # Solution:  Upgrade to >=0.7.6
+  # Agave Ok:  only reached through k256 in solana-secp256k1-program and
+  # solana-secp256k1-recover, which verify and recover over public data.
+  # The fix needs those SDK crates to move to elliptic-curve 0.14.
+  --ignore RUSTSEC-2026-0387
 )
 
 xtask_cargo_audit_extra_args=(

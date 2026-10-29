@@ -4989,16 +4989,16 @@ mod tests {
             .bank()
             .parents_inclusive()
             .into_iter()
-            .map(|bank| bank.slot())
-            .filter(|slot| *slot >= (1u64 << 40))
+            .map(|bank| (bank.slot(), bank.bank_id()))
+            .filter(|(slot, _)| *slot >= (1u64 << 40))
             .collect();
         assert!(!old_er_slots.is_empty());
-        assert!(old_er_slots.iter().any(|slot| {
+        assert!(old_er_slots.iter().any(|(slot, bank_id)| {
             !parent_bank
                 .rc
                 .accounts
                 .accounts_db
-                .get_pubkey_account_for_slot(*slot)
+                .get_pubkey_account_for_slot(*slot, *bank_id)
                 .is_empty()
         }));
 
@@ -5016,13 +5016,13 @@ mod tests {
         }
         assert_eq!(runtime.retired_bank_forks_pending(), 0);
 
-        for slot in old_er_slots {
+        for (slot, bank_id) in old_er_slots {
             assert!(
                 parent_bank
                     .rc
                     .accounts
                     .accounts_db
-                    .get_pubkey_account_for_slot(slot)
+                    .get_pubkey_account_for_slot(slot, bank_id)
                     .is_empty(),
                 "old ER slot {slot} should be purged during async retirement"
             );

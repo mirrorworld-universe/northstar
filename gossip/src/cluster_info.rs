@@ -540,17 +540,26 @@ impl ClusterInfo {
     }
 
     /// Resolve `query` on ContactInfo for `peers`.
-    /// Yields one entry per pubkey in `peers`, or `None` when peer is absent.
+    /// Returns one entry per input pubkey in the same order, including duplicates,
+    /// or `None` when the peer is absent. `peers` is collected before locking, and
+    /// reads use bounded batches, which may observe different versions of the table.
+    /// `query` runs under the read lock and should only extract the fields needed
+    /// by the caller.
     pub fn query_contact_infos<'a, R>(
         &self,
-        peers: impl IntoIterator<Item = &'a Pubkey>,
+        peers: impl IntoIterator<Item = &'a Pubkey, IntoIter: ExactSizeIterator>,
         query: impl ContactInfoQuery<R>,
     ) -> Vec<(Pubkey, Option<R>)> {
-        let read_guard = self.gossip.crds.read();
-        peers
-            .into_iter()
-            .map(|id| (*id, read_guard.get(*id).map(|ci: &ContactInfo| query(ci))))
-            .collect()
+        let peers = peers.into_iter();
+        let mut values = Vec::with_capacity(peers.len());
+        values.extend(peers.map(|pubkey| (*pubkey, None)));
+        for chunk in values.chunks_mut(LOCK_CHUNK_SIZE) {
+            let gossip_crds = self.gossip.crds.read();
+            for (pubkey, value) in chunk {
+                *value = gossip_crds.get::<&ContactInfo>(*pubkey).map(&query);
+            }
+        }
+        values
     }
 
     pub fn lookup_contact_info_by_gossip_addr(
@@ -1109,16 +1118,10 @@ impl ClusterInfo {
 
     // Returns the values f returns for the nodes' contact-infos, taking the crds
     // read lock once per chunk of nodes.
-    fn collect_nodes<T>(
-        &self,
-        mut f: impl FnMut(&Crds, &VersionedCrdsValue) -> Option<T>,
-    ) -> Vec<T> {
-        let mut cursor = NodesCursor::new(self.gossip.crds.read());
-        while !cursor.is_done() {
-            let crds = self.gossip.crds.read();
-            cursor.read_chunk(&crds, LOCK_CHUNK_SIZE, |value| f(&crds, value));
-        }
-        cursor.into_unique().map(|(_, value)| value).collect()
+    fn collect_nodes<T>(&self, f: impl FnMut(&Crds, &VersionedCrdsValue) -> Option<T>) -> Vec<T> {
+        NodesCursor::collect(&self.gossip.crds, f)
+            .map(|(_, value)| value)
+            .collect()
     }
 
     /// all validators that have a valid rpc port.
@@ -1165,11 +1168,11 @@ impl ClusterInfo {
         })
     }
 
-    /// all tvu peers with valid gossip addrs that likely have the slot being requested
-    pub fn repair_peers(&self, slot: Slot) -> Vec<ContactInfo> {
+    /// all tvu peers with valid serve-repair addresses
+    pub fn repair_peers(&self) -> Vec<ContactInfo> {
         let _st = ScopedTimer::from(&self.stats.repair_peers);
         let self_pubkey = self.id();
-        self.collect_nodes(|crds, value| {
+        self.collect_nodes(|_, value| {
             value
                 .value
                 .contact_info()
@@ -1179,10 +1182,6 @@ impl ClusterInfo {
                         && self.check_socket_addr_space(
                             &node.serve_repair(contact_info::Protocol::UDP),
                         )
-                        && match crds.get::<&LowestSlot>(*node.pubkey()) {
-                            None => true, // fallback to legacy behavior
-                            Some(lowest_slot) => lowest_slot.lowest <= slot,
-                        }
                 })
                 .cloned()
         })
@@ -1772,10 +1771,9 @@ impl ClusterInfo {
             }
         };
         let mut num_crds_values = 0;
-        let (scores, mut pull_responses): (Vec<_>, Vec<_>) = requests
-            .iter()
-            .zip(pull_responses)
-            .flat_map(|(PullRequest { addr, .. }, values)| {
+        let (scores, mut pull_responses): (Vec<_>, Vec<_>) = pull_responses
+            .into_iter()
+            .flat_map(|(addr, values)| {
                 num_crds_values += values.len();
                 split_gossip_messages(PULL_RESPONSE_MAX_PAYLOAD_SIZE, values).map(move |values| {
                     let score = values.iter().map(get_score).max().unwrap_or_default();
@@ -3667,6 +3665,48 @@ mod tests {
     }
 
     #[test]
+    fn test_query_contact_infos() {
+        let keypair = Arc::new(Keypair::new());
+        let contact_info = ContactInfo::new_localhost(&keypair.pubkey(), timestamp());
+        let cluster_info = ClusterInfo::new(contact_info, keypair, SocketAddrSpace::Unspecified);
+        let present = Pubkey::new_unique();
+        cluster_info.insert_info(ContactInfo::new_localhost(&present, timestamp()));
+        let absent = Pubkey::new_unique();
+        let non_contact = Pubkey::new_unique();
+        cluster_info
+            .gossip
+            .crds
+            .write()
+            .insert(
+                CrdsValue::new_unsigned(CrdsData::EpochSlots(0, EpochSlots::new(non_contact, 0))),
+                0,
+                GossipRoute::LocalMessage,
+            )
+            .expect("the first EpochSlots value for this pubkey should be accepted");
+        let peers = [absent, present, cluster_info.id(), present, non_contact];
+        let results = cluster_info.query_contact_infos(&peers, |node| *node.pubkey());
+        assert_eq!(
+            results,
+            vec![
+                (absent, None),
+                (present, Some(present)),
+                (cluster_info.id(), Some(cluster_info.id())),
+                (present, Some(present)),
+                (non_contact, None),
+            ],
+            "results must preserve input order, duplicates, and missing ContactInfo"
+        );
+        assert!(
+            cluster_info
+                .query_contact_infos([], |_| {
+                    unreachable!("an empty peer list must not invoke the query")
+                })
+                .is_empty(),
+            "an empty peer list must yield no results"
+        );
+    }
+
+    #[test]
     fn test_collect_nodes() {
         let keypair = Arc::new(Keypair::new());
         let contact_info = ContactInfo::new_localhost(&keypair.pubkey(), timestamp());
@@ -3691,7 +3731,7 @@ mod tests {
         check(cluster_info.rpc_peers());
         check(cluster_info.gossip_peers());
         check(cluster_info.tvu_peers(ContactInfo::clone));
-        check(cluster_info.repair_peers(/*slot:*/ 0));
+        check(cluster_info.repair_peers());
         check(cluster_info.tpu_peers());
         let all_peers = cluster_info.all_peers();
         assert_eq!(
@@ -3716,21 +3756,12 @@ mod tests {
             node_keypair,
             SocketAddrSpace::Unspecified,
         );
-        for i in 0..10 {
-            // make these invalid for the upcoming repair request
-            let peer_lowest = if i >= 5 { 10 } else { 0 };
+        for _ in 0..10 {
             let other_node_pubkey = solana_pubkey::new_rand();
             let other_node = ContactInfo::new_localhost(&other_node_pubkey, timestamp());
-            cluster_info.insert_info(other_node.clone());
-            let value = CrdsValue::new_unsigned(CrdsData::LowestSlot(
-                0,
-                LowestSlot::new(other_node_pubkey, peer_lowest, timestamp()),
-            ));
-            let mut gossip_crds = cluster_info.gossip.crds.write();
-            let _ = gossip_crds.insert(value, timestamp(), GossipRoute::LocalMessage);
+            cluster_info.insert_info(other_node);
         }
-        // only half the visible peers should be eligible to serve this repair
-        assert_eq!(cluster_info.repair_peers(5).len(), 5);
+        assert_eq!(cluster_info.repair_peers().len(), 10);
     }
 
     #[test]
@@ -3812,7 +3843,7 @@ mod tests {
         let mut rng = rand::rng();
         let (slot, parent_slot, reference_tick, version) = (53084024, 53084023, 0, 0);
         let shredder = Shredder::new(slot, parent_slot, reference_tick, version).unwrap();
-        let next_shred_index = 353;
+        let next_shred_index = 352;
         let leader = Arc::new(Keypair::new());
         let shred1 = new_rand_shred(&mut rng, next_shred_index, &shredder, &leader);
         let shred2 = new_rand_shred(&mut rng, next_shred_index, &shredder, &leader);
@@ -3833,7 +3864,7 @@ mod tests {
 
         let slot = 53084025;
         let shredder = Shredder::new(slot, parent_slot, reference_tick, version).unwrap();
-        let next_shred_index = 354;
+        let next_shred_index = 384;
         let shred3 = new_rand_shred(&mut rng, next_shred_index, &shredder, &leader);
         let shred4 = new_rand_shred(&mut rng, next_shred_index, &shredder, &leader);
         assert!(

@@ -302,13 +302,13 @@ impl SlotAdvancer {
                     true
                 }
             });
-            removable_slots.retain(|(slot, _)| {
+            removable_slots.retain(|(_, bank_id)| {
                 frozen_bank
                     .rc
                     .accounts
                     .accounts_db
                     .accounts_cache
-                    .contains(*slot)
+                    .contains(*bank_id)
             });
             if !removable_slots.is_empty() {
                 // Sonic: AccountsDb cache entries outlive BankForks membership while RPC
@@ -818,7 +818,9 @@ mod tests {
         let bank_forks = BankForks::new_rw_arc_ephemeral(initial_bank);
         let initial_bank = Arc::clone(&bank_forks.read().unwrap().root_bank());
         let accounts_db = Arc::clone(&initial_bank.rc.accounts.accounts_db);
-        assert!(accounts_db.accounts_cache.contains(initial_slot));
+        let initial_bank_id = initial_bank.bank_id();
+        let l1_cache_slots = accounts_db.accounts_cache.num_slots().saturating_sub(1);
+        assert!(accounts_db.accounts_cache.contains(initial_bank_id));
         assert!(initial_bank
             .get_accounts_modified_in_slot()
             .into_iter()
@@ -854,13 +856,11 @@ mod tests {
 
         let working_bank = bank_forks.read().unwrap().working_bank();
         let working_slot = working_bank.slot();
-        let initial_cache_retained = accounts_db.accounts_cache.contains(initial_slot);
+        let initial_cache_retained = accounts_db.accounts_cache.contains(initial_bank_id);
         let retained_er_cache_slots = accounts_db
             .accounts_cache
-            .cached_frozen_slots()
-            .into_iter()
-            .filter(|slot| *slot >= initial_slot)
-            .collect::<Vec<_>>();
+            .num_slots()
+            .saturating_sub(l1_cache_slots);
         let loaded_account = working_bank.get_account(&retained_pubkey);
         let deleted_account = working_bank.get_account(&deleted_pubkey);
         let deletion_marker = working_bank
@@ -880,7 +880,7 @@ mod tests {
             "old ER slot {initial_slot} remained in AccountsCache at working slot {working_slot}"
         );
         assert!(
-            retained_er_cache_slots.len() <= 2,
+            retained_er_cache_slots <= 2,
             "ER AccountsCache grew with slot count: {retained_er_cache_slots:?}"
         );
         assert_eq!(loaded_account, Some(retained_account));

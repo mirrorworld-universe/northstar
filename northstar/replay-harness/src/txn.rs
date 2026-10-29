@@ -410,17 +410,21 @@ mod tests {
             assert_eq!(first_bytes, second_bytes);
             assert_eq!(hash(&first_bytes), hash(&second_bytes));
             assert_eq!(first_bytes.len(), 180_302);
+            // Agave 85b7b4e5f4 enables SIMD-0683 input metadata in the all-features trace.
             assert_eq!(
                 hash(&first_bytes).to_bytes(),
                 [
-                    206, 36, 189, 166, 16, 199, 162, 43, 196, 85, 71, 28, 114, 220, 183, 69, 133,
-                    151, 96, 153, 149, 8, 110, 164, 207, 133, 216, 138, 42, 13, 83, 44,
+                    137, 247, 172, 107, 95, 76, 47, 183, 55, 23, 28, 123, 197, 37, 178, 199, 41,
+                    23, 224, 179, 80, 59, 159, 169, 181, 121, 89, 110, 24, 26, 4, 120,
                 ]
             );
             assert!(first_trace.events.iter().any(|event| matches!(
                 event,
                 TraceEventV1::VmInvocation { rows, memory, .. }
-                    if !rows.is_empty() && memory.len() == 3
+                    if !rows.is_empty()
+                        && rows[0].registers[3] == 8
+                        && rows[0].registers[5] == 3
+                        && memory.len() == 3
             )));
             assert!(
                 first_trace

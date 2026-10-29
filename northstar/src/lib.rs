@@ -4949,21 +4949,33 @@ mod portal_e2e_tests {
         let instructions = plan.portal_instructions(program_id, session_pda, owner_pubkey);
         assert_eq!(instructions.len(), 5);
 
-        let first_tx = Transaction::new_signed_with_payer(
-            &instructions[..instructions.len() - 1],
-            Some(&owner_pubkey),
-            &[&owner_keypair],
-            settlement_bank.last_blockhash(),
-        );
-        settlement_bank.process_transaction(&first_tx).unwrap();
+        let mut initial_batches =
+            plan.portal_instruction_batches(program_id, session_pda, &owner_keypair, true);
+        assert!(initial_batches.len() > 1);
+        let finish = initial_batches.last_mut().unwrap().pop().unwrap();
+        assert_eq!(Some(&finish), instructions.last());
+        for batch in initial_batches.iter().filter(|batch| !batch.is_empty()) {
+            let transaction = Transaction::new_signed_with_payer(
+                batch,
+                Some(&owner_pubkey),
+                &[&owner_keypair],
+                settlement_bank.last_blockhash(),
+            );
+            settlement_bank.process_transaction(&transaction).unwrap();
+        }
 
-        let retry_tx = Transaction::new_signed_with_payer(
-            &instructions[1..],
-            Some(&owner_pubkey),
-            &[&owner_keypair],
+        // Fresh signatures make repeated chunk batches execute instead of hitting the status cache.
+        settlement_bank.register_unique_recent_blockhash_for_test();
+        let retry_transactions = plan.portal_retry_transactions_after_begin(
+            program_id,
+            session_pda,
+            &owner_keypair,
             settlement_bank.last_blockhash(),
         );
-        settlement_bank.process_transaction(&retry_tx).unwrap();
+        assert!(retry_transactions.len() > 1);
+        for transaction in retry_transactions {
+            settlement_bank.process_transaction(&transaction).unwrap();
+        }
 
         let delegated_after = settlement_bank.get_account(&delegated_account).unwrap();
         assert_eq!(delegated_after.data(), er_data.as_slice());
@@ -5325,7 +5337,7 @@ mod ephemeral_accounts_background_service_regression {
         );
         root_bank.fill_bank_with_ticks_for_tests();
         root_bank.freeze();
-        root_bank.set_block_id(Some(root_bank.hash()));
+        root_bank.set_block_id(Some(root_bank.hash().into()));
 
         // Wire ABS drop-callback plumbing against the L1 BankForks.
         root_bank
@@ -5444,7 +5456,7 @@ mod ephemeral_accounts_background_service_regression {
             let _ = child.process_transaction(&tx);
             child.fill_bank_with_ticks_for_tests();
             child.freeze();
-            child.set_block_id(Some(child.hash()));
+            child.set_block_id(Some(child.hash().into()));
 
             if slot % SET_ROOT_EVERY == 0 {
                 bank_forks

@@ -26,18 +26,19 @@ const ACCOUNT_BALANCE: u64 = u64::MAX / 4;
 
 fn create_sysvar_account<T>(value: &T) -> AccountSharedData
 where
-    T: wincode::Serialize<Src = T> + SysvarId,
+    T: wincode::SchemaWrite<solana_account::WincodeConfig, Src = T>
+        + for<'de> wincode::SchemaRead<'de, solana_account::WincodeConfig, Dst = T>
+        + SysvarId,
 {
-    let serialized_len = wincode::serialized_size(value).unwrap() as usize;
+    let serialized_len =
+        wincode::config::serialized_size(value, solana_account::WINCODE_CONFIG).unwrap() as usize;
     let canonical_data_len = match T::id() {
         sysvar::recent_blockhashes::ID => solana_sysvar::recent_blockhashes::SIZE,
         sysvar::rent::ID => solana_rent::SIZE,
         id => panic!("unsupported sysvar: {id}"),
     };
     let required_data_len = canonical_data_len.max(serialized_len);
-    let mut account = AccountSharedData::new(1, required_data_len, &sysvar::id());
-    wincode::serialize_into(account.data_as_mut_slice(), value).unwrap();
-    account
+    AccountSharedData::new_data_with_space(1, value, required_data_len, &sysvar::id()).unwrap()
 }
 
 #[derive(Default)]
@@ -99,7 +100,7 @@ impl TestSetup {
             },
         ];
 
-        self.instruction_data = bincode::serialize(&SystemInstruction::CreateAccount {
+        self.instruction_data = wincode::serialize(&SystemInstruction::CreateAccount {
             lamports: 1,
             space: 2,
             owner: self.owner_address,
@@ -122,7 +123,7 @@ impl TestSetup {
             },
         ];
 
-        self.instruction_data = bincode::serialize(&SystemInstruction::CreateAccountAllowPrefund {
+        self.instruction_data = wincode::serialize(&SystemInstruction::CreateAccountAllowPrefund {
             lamports: 1,
             space: 2,
             owner: self.owner_address,
@@ -149,7 +150,7 @@ impl TestSetup {
             },
         ];
 
-        self.instruction_data = bincode::serialize(&SystemInstruction::CreateAccountWithSeed {
+        self.instruction_data = wincode::serialize(&SystemInstruction::CreateAccountWithSeed {
             base: self.base_address,
             seed: SEED.to_string(),
             lamports: 1,
@@ -167,7 +168,7 @@ impl TestSetup {
         }];
 
         self.instruction_data =
-            bincode::serialize(&SystemInstruction::Allocate { space: 2 }).unwrap();
+            wincode::serialize(&SystemInstruction::Allocate { space: 2 }).unwrap();
     }
 
     fn prep_allocate_with_seed(&mut self) {
@@ -184,7 +185,7 @@ impl TestSetup {
             },
         ];
 
-        self.instruction_data = bincode::serialize(&SystemInstruction::AllocateWithSeed {
+        self.instruction_data = wincode::serialize(&SystemInstruction::AllocateWithSeed {
             base: self.base_address,
             seed: SEED.to_string(),
             space: 2,
@@ -200,7 +201,7 @@ impl TestSetup {
             is_writable: true,
         }];
 
-        self.instruction_data = bincode::serialize(&SystemInstruction::Assign {
+        self.instruction_data = wincode::serialize(&SystemInstruction::Assign {
             owner: self.owner_address,
         })
         .unwrap();
@@ -220,7 +221,7 @@ impl TestSetup {
             },
         ];
 
-        self.instruction_data = bincode::serialize(&SystemInstruction::AssignWithSeed {
+        self.instruction_data = wincode::serialize(&SystemInstruction::AssignWithSeed {
             base: self.base_address,
             seed: SEED.to_string(),
             owner: self.owner_address,
@@ -243,7 +244,7 @@ impl TestSetup {
         ];
 
         self.instruction_data =
-            bincode::serialize(&SystemInstruction::Transfer { lamports: 1 }).unwrap();
+            wincode::serialize(&SystemInstruction::Transfer { lamports: 1 }).unwrap();
     }
 
     fn prep_transfer_with_seed(&mut self) {
@@ -268,7 +269,7 @@ impl TestSetup {
             },
         ];
 
-        self.instruction_data = bincode::serialize(&SystemInstruction::TransferWithSeed {
+        self.instruction_data = wincode::serialize(&SystemInstruction::TransferWithSeed {
             lamports: 1,
             from_seed: SEED.to_string(),
             from_owner: self.owner_address,
@@ -324,7 +325,7 @@ impl TestSetup {
         ];
 
         self.instruction_data =
-            bincode::serialize(&SystemInstruction::InitializeNonceAccount(nonce_address)).unwrap();
+            wincode::serialize(&SystemInstruction::InitializeNonceAccount(nonce_address)).unwrap();
     }
 
     #[allow(deprecated)]
@@ -351,7 +352,7 @@ impl TestSetup {
         }];
 
         self.instruction_data =
-            bincode::serialize(&SystemInstruction::AuthorizeNonceAccount(nonce_address)).unwrap();
+            wincode::serialize(&SystemInstruction::AuthorizeNonceAccount(nonce_address)).unwrap();
     }
 
     #[allow(deprecated)]
@@ -399,7 +400,7 @@ impl TestSetup {
         ];
 
         self.instruction_data =
-            bincode::serialize(&SystemInstruction::AdvanceNonceAccount).unwrap();
+            wincode::serialize(&SystemInstruction::AdvanceNonceAccount).unwrap();
     }
 
     #[allow(deprecated)]
@@ -425,7 +426,7 @@ impl TestSetup {
         }];
 
         self.instruction_data =
-            bincode::serialize(&SystemInstruction::UpgradeNonceAccount).unwrap();
+            wincode::serialize(&SystemInstruction::UpgradeNonceAccount).unwrap();
     }
 
     #[allow(deprecated)]
@@ -489,7 +490,7 @@ impl TestSetup {
         ];
 
         self.instruction_data =
-            bincode::serialize(&SystemInstruction::WithdrawNonceAccount(1)).unwrap();
+            wincode::serialize(&SystemInstruction::WithdrawNonceAccount(1)).unwrap();
     }
 
     fn run(&self) {
