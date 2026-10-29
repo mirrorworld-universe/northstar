@@ -56,6 +56,11 @@ write_report() {
 }
 trap write_report EXIT
 
+set_phase() {
+  PHASE=$1
+  printf '[devnet SOL smoke] phase=%s\n' "$PHASE" >&2
+}
+
 rpc_result() {
   local url=$1 method=$2 params=$3
   curl -sSf --max-time 15 -X POST -H 'Content-Type: application/json' \
@@ -185,12 +190,15 @@ wait_for_account_owner() {
 }
 
 wait_for_session() {
-  local expected=$1
-  for _ in $(seq 1 360); do
-    local actual
+  local expected=$1 attempt actual
+  echo "Waiting for ER session $expected" >&2
+  for attempt in $(seq 1 360); do
     actual=$(get_session 2>/dev/null || true)
     if [ "$actual" = "$expected" ]; then
       return 0
+    fi
+    if [ $((attempt % 12)) -eq 1 ]; then
+      echo "ER session not ready ($attempt/360): expected $expected" >&2
     fi
     sleep 5
   done
@@ -198,18 +206,22 @@ wait_for_session() {
   return 1
 }
 
-wait_for_any_session() {
-  for _ in $(seq 1 360); do
-    local actual
-    actual=$(get_session 2>/dev/null || true)
-    if [ -n "$actual" ]; then
-      printf '%s\n' "$actual"
-      return 0
-    fi
-    sleep 5
-  done
-  echo "Timed out waiting for an active ER session" >&2
-  return 1
+require_l1_session() {
+  local address=$1 account owner
+  account=$(rpc_result "$DEVNET_RPC" getAccountInfo "$(jq -cn --arg address "$address" '[$address,{encoding:"base64",commitment:"confirmed"}]')")
+  if ! jq -e 'type == "object" and has("value") and (.value == null or (.value | type == "object"))' >/dev/null <<< "$account"; then
+    echo "Malformed L1 session response" >&2
+    return 1
+  fi
+  if jq -e '.value == null' >/dev/null <<< "$account"; then
+    echo "Missing L1 Portal session $address; complete Portal deployment/session bootstrap before the smoke test" >&2
+    return 1
+  fi
+  owner=$(jq -r '.value.owner // empty' <<< "$account")
+  if [ "$owner" != "$PORTAL_ADDRESS" ]; then
+    echo "L1 session owner mismatch for $address" >&2
+    return 1
+  fi
 }
 
 wait_for_balance() {
@@ -243,7 +255,7 @@ wait_for_deposit_credit() {
   return 1
 }
 
-PHASE=resolve_configuration
+set_phase resolve_configuration
 test -x "$SOLANA_CLI"
 test -f "$DEPLOYER_KEYPAIR"
 WALLET_ADDRESS=$(solana-keygen pubkey "$DEPLOYER_KEYPAIR")
@@ -253,17 +265,22 @@ if [ -z "$PORTAL_ADDRESS" ]; then
 fi
 test -n "$PORTAL_ADDRESS"
 VALIDATOR_IDENTITY=$(rpc_result "$L1_LOCAL_RPC" getIdentity '[]' | jq -r '.identity')
-SESSION_PDA=$(wait_for_any_session)
+SESSION_PDA=$("$SOLANA_CLI" --output json-compact find-program-derived-address "$PORTAL_ADDRESS" string:session | jq -er '.address')
+set_phase validate_l1_session
+require_l1_session "$SESSION_PDA"
+set_phase wait_for_initial_er_session
+wait_for_session "$SESSION_PDA"
+set_phase wait_for_l1_catchup
 wait_for_l1_catchup
 
-PHASE=capture_baseline
+set_phase capture_baseline
 BASELINE_ER_BALANCE=$(get_balance "$ER_RPC" "$WALLET_ADDRESS" processed)
 LOG_START_LINE=$(wc -l < "$VALIDATOR_LOG")
 rpc_result "$DEVNET_RPC" getSignaturesForAddress \
   "$(jq -cn --arg portal "$PORTAL_ADDRESS" '[$portal,{limit:40,commitment:"confirmed"}]')" \
   | jq -r '.[].signature' > /tmp/northstar-e2e-before-signatures.txt
 
-PHASE=deposit_l1
+set_phase deposit_l1
 DEPOSIT_OUTPUT=$(
   "$SOLANA_CLI" \
     --url "$DEVNET_RPC" \
@@ -277,29 +294,29 @@ DEPOSIT_OUTPUT=$(
 DEPOSIT_SIGNATURE=$(jq -er '.signature' <<< "$DEPOSIT_OUTPUT")
 POST_DEPOSIT_L1_BALANCE=$(get_balance "$DEVNET_RPC" "$WALLET_ADDRESS" confirmed)
 
-PHASE=wait_for_er_credit
+set_phase wait_for_er_credit
 CREDITED_BALANCE=$(wait_for_deposit_credit "$BASELINE_ER_BALANCE")
 
-PHASE=wait_for_l1_deposit_finalization
+set_phase wait_for_l1_deposit_finalization
 wait_for_signature_finalization "$L1_LOCAL_RPC" "$DEPOSIT_SIGNATURE" "local L1 deposit"
 DEPOSIT_RECEIPT_PDA=$(deposit_receipt_address "$DEPOSIT_SIGNATURE")
 
-PHASE=restart_with_unsettled_state
+set_phase restart_with_unsettled_state
 restart_validator
 wait_for_l1_rpc
 wait_for_l1_catchup
-PHASE=wait_for_restored_l1_deposit
+set_phase wait_for_restored_l1_deposit
 wait_for_account_owner "$L1_LOCAL_RPC" "$DEPOSIT_RECEIPT_PDA" "$PORTAL_ADDRESS" "restored L1 deposit receipt"
 wait_for_session "$SESSION_PDA"
 
-PHASE=verify_restored_state
+set_phase verify_restored_state
 RESTORED_BALANCE=$(get_balance "$ER_RPC" "$WALLET_ADDRESS" processed)
 if [ "$RESTORED_BALANCE" != "$CREDITED_BALANCE" ]; then
   echo "Restored ER balance mismatch: expected=$CREDITED_BALANCE actual=$RESTORED_BALANCE" >&2
   exit 1
 fi
 
-PHASE=withdraw_er
+set_phase withdraw_er
 WITHDRAWAL_OUTPUT=$(
   "$SOLANA_CLI" \
     --url "$ER_RPC" \
@@ -314,7 +331,7 @@ WITHDRAWAL_SIGNATURE=$(jq -er '.signature' <<< "$WITHDRAWAL_OUTPUT")
 EXPECTED_WITHDRAWN_BALANCE=$((CREDITED_BALANCE - AMOUNT_LAMPORTS))
 wait_for_balance "$ER_RPC" "$WALLET_ADDRESS" processed "$EXPECTED_WITHDRAWN_BALANCE" 'ER withdrawal'
 
-PHASE=wait_for_l1_settlement
+set_phase wait_for_l1_settlement
 EXPECTED_L1_BALANCE=$((POST_DEPOSIT_L1_BALANCE + AMOUNT_LAMPORTS))
 for _ in $(seq 1 180); do
   CURRENT_L1_BALANCE=$(get_balance "$DEVNET_RPC" "$WALLET_ADDRESS" confirmed 2>/dev/null || true)
@@ -329,7 +346,7 @@ if [ "$CURRENT_L1_BALANCE" -lt "$EXPECTED_L1_BALANCE" ]; then
   exit 1
 fi
 
-PHASE=collect_settlement_receipts
+set_phase collect_settlement_receipts
 CONFIRMED_SIGNATURES=$(
   tail -n "+$((LOG_START_LINE + 1))" "$VALIDATOR_LOG" \
     | sed -n 's/.*Portal settlement transaction confirmed.*signatures=\[\([^]]*\)\].*/\1/p' \
@@ -353,4 +370,4 @@ SETTLEMENT_SIGNATURES=$(
  )
 test -n "$SETTLEMENT_SIGNATURES"
 
-PHASE=complete
+set_phase complete

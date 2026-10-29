@@ -86,6 +86,10 @@ jobs:
           bash -n northstar/scripts/vrf-proof-cpu-conformance.sh
       - name: Test SOL smoke restart finalization guard
         run: bash .github/scripts/test-devnet-e2e-smoke.sh
+      - name: Test smoke readiness and RPC defaults
+        run: python3 -B .github/scripts/test-devnet-smoke-readiness.py
+      - name: Test deployment change detection
+        run: python3 -B .github/scripts/test-program-change-detection.py
       # Sonic: Deployment guards use no service, credentials or chain requests.
       - name: Test managed VRF redeploy guard
         run: python3 -B .github/scripts/test-stop-vrf-service.py
@@ -216,6 +220,9 @@ jobs:
     needs: [fmt, clippy, test]
     if: github.repository == 'mirrorworld-universe/northstar' && github.event_name == 'push' && github.ref == 'refs/heads/release'
     runs-on: [devnet]
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -224,29 +231,37 @@ jobs:
 
       - name: Check for program changes
         id: program_changes
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          BEFORE="${{ github.event.before }}"
-          # Compare against the previous state of this branch (the base branch
-          # before the push). Fall back to HEAD~1..HEAD for new/force-pushed
-          # branches where the before commit is unreachable.
-          if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] && git rev-parse --verify "$BEFORE^{commit}" >/dev/null 2>&1; then
-            echo "Comparing $BEFORE..HEAD" >&2
-            CHANGED_FILES=$(git diff --name-only "$BEFORE" HEAD)
-          else
-            echo "Before commit unavailable; comparing HEAD~1..HEAD" >&2
-            CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
+          RESPONSE=$(curl -fsS --max-time 30 --retry 2 \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=release&event=push&status=success&per_page=1")
+          BASELINE=$(jq -er 'if (.workflow_runs | type) != "array" then error("invalid workflow history") else (.workflow_runs[0].head_sha // "") end' <<< "$RESPONSE")
+          if [ -n "$BASELINE" ]; then
+            [[ "$BASELINE" =~ ^[a-f0-9]{40}$ ]]
           fi
+          # Sonic: Cancelled/failed pushes are not evidence that their programs reached devnet.
+          if [ -z "$BASELINE" ] || ! git rev-parse --verify "$BASELINE^{commit}" >/dev/null 2>&1 || ! git merge-base --is-ancestor "$BASELINE" HEAD; then
+            echo "No usable successful release baseline; both programs require deployment"
+            printf '%s\n' 'portal_changed=true' 'token_bridge_changed=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Comparing successful release $BASELINE..HEAD" >&2
+          CHANGED_FILES=$(git diff --name-only "$BASELINE" HEAD)
           echo "Changed files:"
           echo "$CHANGED_FILES"
-          if echo "$CHANGED_FILES" | grep -qE '^(Cargo\.(toml|lock)|northstar/programs/portal/)'; then
+          # Sonic: A grep -q pipeline can hide a match via SIGPIPE under pipefail on large diffs.
+          if grep -qE '^(Cargo\.(toml|lock)|northstar/programs/portal/)' <<< "$CHANGED_FILES"; then
             echo "portal_changed=true" >> "$GITHUB_OUTPUT"
             echo "Portal program inputs changed"
           else
             echo "portal_changed=false" >> "$GITHUB_OUTPUT"
             echo "No portal program input changes"
           fi
-          if echo "$CHANGED_FILES" | grep -qE '^(Cargo\.(toml|lock)|northstar/programs/(portal|token-bridge)/)'; then
+          if grep -qE '^(Cargo\.(toml|lock)|northstar/programs/(portal|token-bridge)/)' <<< "$CHANGED_FILES"; then
             echo "token_bridge_changed=true" >> "$GITHUB_OUTPUT"
             echo "Token bridge program inputs changed"
           else
