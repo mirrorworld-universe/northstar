@@ -215,7 +215,7 @@ jobs:
     name: Build and Deploy on Devnet
     needs: [fmt, clippy, test]
     if: github.repository == 'mirrorworld-universe/northstar' && github.event_name == 'push' && github.ref == 'refs/heads/release'
-    runs-on: [self-hosted, linux, devnet]
+    runs-on: [devnet]
     steps:
       - uses: actions/checkout@v4
         with:

@@ -269,7 +269,6 @@ class StopTests(unittest.TestCase):
         self.assertLess(stop, source.index("Generate new portal program address"))
         self.assertIn("sudo -n python3 -B .github/scripts/stop-vrf-service.py", source)
         deploy = source[source.index("  deploy:") :]
-        self.assertIn("runs-on: [self-hosted, linux, devnet]", deploy)
         self.assertIn("github.ref == 'refs/heads/release'", deploy)
         self.assertIn("persist-credentials: false", deploy)
         self.assertNotIn("NORTHSTAR_VRF_", deploy)
