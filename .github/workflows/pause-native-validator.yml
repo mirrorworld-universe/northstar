@@ -1,0 +1,25 @@
+name: Pause devnet validator
+
+on:
+  push:
+    branches: [pause-devnet]
+
+permissions:
+  contents: read
+
+jobs:
+  pause:
+    if: github.repository == 'mirrorworld-universe/northstar' && github.ref == 'refs/heads/pause-devnet'
+    runs-on: devnet
+    timeout-minutes: 15
+    steps:
+      - name: Stop validator and confirm inactivity
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = self-hosted
+          sudo -n systemctl stop northstar-validator
+          STATE=$(systemctl show northstar-validator --property=ActiveState --value)
+          SUBSTATE=$(systemctl show northstar-validator --property=SubState --value)
+          printf 'northstar-validator ActiveState=%s SubState=%s\n' "$STATE" "$SUBSTATE"
+          test "$STATE" = inactive
+          test "$SUBSTATE" = dead
