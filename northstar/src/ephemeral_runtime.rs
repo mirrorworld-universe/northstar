@@ -657,6 +657,7 @@ impl EphemeralRuntime {
                 er_history_store.clone(),
                 block_commitment_cache.clone(),
             )
+            .with_l1_delegation_bank(parent_bank.clone(), settings.grid_id)
             .with_transaction_max_age(transaction_max_age)
             .with_frozen_accounts(frozen_accounts.clone())
             .with_withdrawal_payout_events(
@@ -1159,6 +1160,8 @@ impl EphemeralRuntime {
 
             // 3. Keep new L1 anchor alive even if ER root later severs its
             // parent link to keep ER chains shallow.
+            self._tx_client
+                .set_l1_delegation_bank(parent_bank.clone(), self.settings.grid_id);
             self.l1_anchor_bank = parent_bank;
 
             // 4. Clear and rehydrate session state from existing L1
@@ -1520,6 +1523,8 @@ impl EphemeralRuntime {
             }
         }
 
+        self._tx_client
+            .set_l1_delegation_bank(parent_bank.clone(), self.settings.grid_id);
         self.l1_anchor_bank = parent_bank;
 
         let initial_bank = Self::freeze_and_rotate_bank_for_rpc(
@@ -4368,6 +4373,250 @@ mod tests {
         );
 
         runtime.shutdown();
+    }
+
+    #[test]
+    fn regression_valid_l1_delegation_remains_writable_after_restart() {
+        for skip_preflight in [true, false] {
+            for (recovery, should_admit) in [
+                ("startup", true),
+                ("reanchor", true),
+                ("reset", true),
+                ("reanchor", false),
+                ("reset", false),
+            ] {
+                let parent_bank = create_test_bank();
+                let portal_program_id = PORTAL_PROGRAM_ID;
+                let session_pda = Pubkey::new_unique();
+                let fee_payer = Keypair::new();
+                let destination = Pubkey::new_unique();
+                let initial_balance = 100_000_000;
+                let transfer_amount = 1_000_000;
+                parent_bank.store_account(
+                    &fee_payer.pubkey(),
+                    &AccountSharedData::new(initial_balance, 0, &portal_program_id),
+                );
+                store_delegation_record(
+                    &parent_bank,
+                    &portal_program_id,
+                    &fee_payer.pubkey(),
+                    &system_program::id(),
+                    u64::from(recovery != "startup" && should_admit),
+                );
+                parent_bank.freeze();
+                let settings = EphemeralRollupSettings {
+                    session_pda,
+                    grid_id: 0,
+                    ttl_slots: 100,
+                    fee_cap: 1_000,
+                    er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+                    delegated_accounts: vec![],
+                };
+                let mut runtime = EphemeralRuntime::new(
+                    Arc::new(parent_bank),
+                    create_test_cluster_info(),
+                    settings,
+                    find_free_addr(),
+                    find_free_addr(),
+                    find_free_addr(),
+                    portal_program_id,
+                    Arc::new(Keypair::new()),
+                )
+                .unwrap();
+                runtime.set_session_pda(session_pda);
+                runtime.activate();
+                if recovery != "startup" {
+                    let next_parent = Bank::new_from_parent(
+                        runtime.l1_anchor_bank.clone(),
+                        SlotLeader::default(),
+                        runtime.l1_anchor_bank.slot() + 1,
+                    );
+                    store_delegation_record(
+                        &next_parent,
+                        &portal_program_id,
+                        &fee_payer.pubkey(),
+                        &system_program::id(),
+                        u64::from(!should_admit),
+                    );
+                    next_parent.freeze();
+                    if recovery == "reanchor" {
+                        runtime.reanchor_to_l1_parent(Arc::new(next_parent));
+                    } else {
+                        runtime.reset_to_new_parent(Arc::new(next_parent));
+                    }
+                }
+                let rpc = rpc_client(&runtime);
+                wait_for_rpc_ready(&rpc);
+                let transaction = Transaction::new_signed_with_payer(
+                    &[transfer(&fee_payer.pubkey(), &destination, transfer_amount)],
+                    Some(&fee_payer.pubkey()),
+                    &[&fee_payer],
+                    runtime.bank().last_blockhash(),
+                );
+                let result = rpc.send_transaction_with_config(
+                    &transaction,
+                    RpcSendTransactionConfig {
+                        skip_preflight,
+                        ..Default::default()
+                    },
+                );
+                let bank = runtime.bank();
+                let destination_balance = bank.get_balance(&destination);
+                let er_owner = bank
+                    .get_account(&fee_payer.pubkey())
+                    .unwrap()
+                    .owner()
+                    .to_owned();
+                let l1_account = runtime
+                    .l1_anchor_bank
+                    .get_account(&fee_payer.pubkey())
+                    .unwrap();
+                runtime.shutdown();
+                if should_admit {
+                    assert!(
+                        result.is_ok(),
+                        "a valid existing L1 delegation must admit a fee-payer write after \
+                         {recovery}: {result:?}"
+                    );
+                    assert_eq!(destination_balance, transfer_amount);
+                    assert_eq!(er_owner, system_program::id());
+                } else {
+                    assert!(
+                        result.is_err(),
+                        "changed L1 binding must be rejected after {recovery}"
+                    );
+                    assert_eq!(destination_balance, 0);
+                    assert_eq!(er_owner, portal_program_id);
+                }
+                assert_eq!(l1_account.owner(), &portal_program_id);
+                assert_eq!(l1_account.lamports(), initial_balance);
+            }
+        }
+    }
+
+    #[test]
+    fn regression_recovery_hydrates_delegated_owner_programs() {
+        for upgradeable in [false, true] {
+            for restored in [false, true] {
+                let parent = create_test_bank();
+                let portal = PORTAL_PROGRAM_ID;
+                let session = Pubkey::new_unique();
+                let fee_payer = Keypair::new();
+                let delegated = Keypair::new();
+                let owner = if upgradeable {
+                    Pubkey::new_unique()
+                } else {
+                    spl_memo_interface::v3::id()
+                };
+                if upgradeable {
+                    let program = parent.get_account(&spl_memo_interface::v3::id()).unwrap();
+                    store_upgradeable_owner_program(
+                        &parent,
+                        &owner,
+                        &Pubkey::new_unique(),
+                        0,
+                        program.data(),
+                    );
+                }
+                parent.store_account(
+                    &delegated.pubkey(),
+                    &AccountSharedData::new(2_000_000, 4, &portal),
+                );
+                store_delegation_record(&parent, &portal, &delegated.pubkey(), &owner, 0);
+                parent.freeze();
+                let settings = EphemeralRollupSettings {
+                    session_pda: session,
+                    grid_id: 0,
+                    ttl_slots: 100,
+                    fee_cap: 1_000,
+                    er_fee_structure: EphemeralRollupSettings::zero_fee_structure(),
+                    delegated_accounts: vec![],
+                };
+                let mut runtime = EphemeralRuntime::new(
+                    Arc::new(parent),
+                    create_test_cluster_info(),
+                    settings,
+                    find_free_addr(),
+                    find_free_addr(),
+                    find_free_addr(),
+                    portal,
+                    Arc::new(Keypair::new()),
+                )
+                .unwrap();
+                runtime.set_session_pda(session);
+                runtime.activate();
+                runtime.credit_deposit(&fee_payer.pubkey(), 100_000_000);
+                if restored {
+                    let mut account = AccountSharedData::new(3_000_000, 4, &owner);
+                    account.set_data_from_slice(&[7; 4]);
+                    runtime.restore_unsettled_state(RecoveredUnsettledState {
+                        accounts: vec![(delegated.pubkey(), account)],
+                        touched_accounts: vec![delegated.pubkey()],
+                        payout_events: vec![],
+                        token_payout_events: vec![],
+                        processed_signatures: vec![],
+                    });
+                }
+                let rpc = rpc_client(&runtime);
+                wait_for_rpc_ready(&rpc);
+                let instruction = solana_instruction::Instruction {
+                    program_id: owner,
+                    accounts: vec![solana_instruction::AccountMeta::new(
+                        delegated.pubkey(),
+                        true,
+                    )],
+                    data: b"delegation recovery".to_vec(),
+                };
+                let transaction = Transaction::new_signed_with_payer(
+                    &[instruction],
+                    Some(&fee_payer.pubkey()),
+                    &[&fee_payer, &delegated],
+                    runtime.bank().last_blockhash(),
+                );
+                let result = rpc.send_transaction_with_config(
+                    &transaction,
+                    RpcSendTransactionConfig {
+                        skip_preflight: false,
+                        ..Default::default()
+                    },
+                );
+                let er_account = runtime.bank().get_account(&delegated.pubkey()).unwrap();
+                let l1_account = runtime
+                    .l1_anchor_bank
+                    .get_account(&delegated.pubkey())
+                    .unwrap();
+                let status = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|signature| runtime.er_history_store.get_signature_status(signature));
+                let binding_recovered = runtime
+                    .delegated_accounts
+                    .read()
+                    .unwrap()
+                    .contains(&delegated.pubkey());
+                runtime.shutdown();
+                assert!(
+                    result.is_ok(),
+                    "owner program must load during recovery, upgradeable={upgradeable}: \
+                     {result:?}"
+                );
+                assert!(
+                    status.is_some_and(|status| status.err.is_none()),
+                    "recovered owner program transaction must execute successfully"
+                );
+                assert_eq!(er_account.owner(), &owner);
+                assert!(
+                    binding_recovered,
+                    "restored ER data must retain its L1 delegation binding"
+                );
+                assert_eq!(er_account.data(), &if restored { [7; 4] } else { [0; 4] });
+                assert_eq!(
+                    er_account.lamports(),
+                    if restored { 3_000_000 } else { 2_000_000 }
+                );
+                assert_eq!(l1_account.owner(), &portal);
+            }
+        }
     }
 
     #[test]

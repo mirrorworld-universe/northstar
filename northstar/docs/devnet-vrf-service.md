@@ -48,6 +48,18 @@ enablement flag, approved-revision variable or CI-run identity input is needed.
 See the oracle [deployment runbook](https://github.com/mirrorworld-universe/vrf-oracle/blob/main/deploy/README.md)
 for exact inputs, permissions and recovery steps.
 
+## Delegation recovery after restart
+
+A signed write can recover an existing delegation without scanning historical L1
+accounts. Before admission (and before `sendTransaction` preflight), the runtime
+checks the canonical delegation record against its pinned L1 bank, Portal owner,
+active grid and pending undelegation state. Unrelated L1 accounts remain unwritable.
+Recovery preserves newer ER snapshot values rather than replacing them with L1
+balances or data. Failed persistence prevents publication and stops ER execution.
+
+Read-only account queries and standalone `simulateTransaction` do not trigger this
+recovery; the binding is recovered when a signed write references the account.
+
 ## Retained state and recovery
 
 Stable keys, control plans/intents and reports live under
