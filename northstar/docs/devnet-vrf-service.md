@@ -14,8 +14,14 @@ persistent oracle service. Northstar does not dispatch it automatically.
    state block deployment. On inspection failure, a previously active oracle is
    restarted against the old ER so it can reconcile. Missing units do not bypass
    shutdown confirmation, worker reservations or orphaned-state checks.
-3. Native CI deploys programs, restarts the validator, opens its session and completes
-   its existing SOL/SPL smoke tests. The managed oracle remains stopped/disabled.
+3. Native CI compares program inputs against the last successful release CI run,
+   not the preceding push. Failed/cancelled releases cannot hide undeployed changes;
+   without a usable successful baseline, both programs require deployment. CI then
+   deploys programs, restarts the validator, opens its session and completes its
+   SOL/SPL smoke tests. The managed oracle remains stopped/disabled.
+   SOL smoke checks the canonical L1 session before waiting for that same session on
+   ER, prints each phase and fails immediately when L1 bootstrap is missing. Both
+   smoke scripts default to the colocated ER RPC, with explicit overrides supported.
 4. After native CI succeeds, an operator runs **Deploy VRF on devnet** in the oracle
    repository on `main`, supplying the current Portal ID and other public inputs.
    That workflow rechecks devnet/session identity, provisions only dedicated programs,
