@@ -199,7 +199,7 @@ pub struct CheckpointArtifactV1 {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum TreeKind {
+pub(crate) enum TreeKind {
     State,
     Trace,
     TransactionEffect,
@@ -228,14 +228,17 @@ impl TreeKind {
     }
 }
 
-struct MerkleTree {
+pub(crate) struct MerkleTree {
     kind: TreeKind,
     leaf_count: u32,
     layers: Vec<Vec<CommitmentHash>>,
 }
 
 impl MerkleTree {
-    fn new(kind: TreeKind, leaves: Vec<CommitmentHash>) -> Result<Self, CheckpointArtifactError> {
+    pub(crate) fn new(
+        kind: TreeKind,
+        leaves: Vec<CommitmentHash>,
+    ) -> Result<Self, CheckpointArtifactError> {
         let leaf_count =
             u32::try_from(leaves.len()).map_err(|_| CheckpointArtifactError::Encoding)?;
         let width = leaves.len().max(1).next_power_of_two();
@@ -265,12 +268,12 @@ impl MerkleTree {
         })
     }
 
-    fn root(&self) -> CommitmentHash {
+    pub(crate) fn root(&self) -> CommitmentHash {
         let inner = self.layers.last().expect("tree has root layer")[0];
         root_hash(self.kind, self.leaf_count, &inner)
     }
 
-    fn path(
+    pub(crate) fn path(
         &self,
         leaf_index: usize,
     ) -> Result<MerkleAuthenticationPathV1, CheckpointArtifactError> {
@@ -780,7 +783,7 @@ struct SettlementEffectLeafV1<'a> {
     effect: &'a [u8],
 }
 
-fn trace_leaf_hash(
+pub(crate) fn trace_leaf_hash(
     index: u32,
     state_root: &CommitmentHash,
 ) -> Result<CommitmentHash, CheckpointArtifactError> {
@@ -794,7 +797,7 @@ fn trace_leaf_hash(
     ))
 }
 
-fn transaction_effect_leaf_hash(
+pub(crate) fn transaction_effect_leaf_hash(
     index: u32,
     transaction: &[u8],
     transaction_effect: &[u8],
@@ -812,7 +815,7 @@ fn transaction_effect_leaf_hash(
     Ok(commitment)
 }
 
-fn readonly_l1_leaf_hash(
+pub(crate) fn readonly_l1_leaf_hash(
     global_index: u32,
     step_index: u32,
     value_index: u32,
@@ -830,7 +833,7 @@ fn readonly_l1_leaf_hash(
     ))
 }
 
-fn settlement_effect_leaf_hash(
+pub(crate) fn settlement_effect_leaf_hash(
     global_index: u32,
     step_index: u32,
     effect_index: u32,

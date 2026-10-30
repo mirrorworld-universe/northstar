@@ -25,6 +25,7 @@ use {
 };
 
 pub mod checkpoint;
+pub mod checkpoint_v2;
 pub mod continuity_v2;
 pub mod ephemeral_runtime;
 pub mod ephemeral_tpu;
