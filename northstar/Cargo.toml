@@ -7,11 +7,11 @@ edition = "2021"
 vrf-candidate-capture = ["dep:serde", "dep:serde_json", "solana-runtime/vrf-candidate-capture", "solana-svm/vrf-candidate-capture"]
 proof-coordinator-test-hooks = ["proof-coordinator"]
 replay = ["dep:northstar-transaction-proof", "dep:northstar-replay-harness"]
-proof-coordinator = ["replay", "dep:sp1-verifier", "dep:serde_json", "dep:libc"]
+proof-coordinator = ["replay", "dep:sp1-verifier", "dep:serde_json"]
 
 [dependencies]
 serde = { workspace = true, optional = true }
-libc = { workspace = true, optional = true }
+libc.workspace = true
 sp1-verifier = { version = "=6.8.0", default-features = false, features = ["std"], optional = true }
 serde_json = { workspace = true, optional = true }
 northstar-replay-harness = { workspace = true, optional = true }

@@ -30,6 +30,7 @@ pub mod continuity_v2;
 pub mod ephemeral_runtime;
 pub mod ephemeral_tpu;
 pub mod ephemeral_tx_client;
+pub mod lineage_store_v2;
 pub mod portal_state;
 #[cfg(feature = "proof-coordinator")]
 pub mod proof_coordinator;
