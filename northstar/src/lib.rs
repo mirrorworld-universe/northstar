@@ -30,6 +30,7 @@ pub mod continuity_v2;
 pub mod ephemeral_runtime;
 pub mod ephemeral_tpu;
 pub mod ephemeral_tx_client;
+pub mod lineage_l1_v2;
 pub mod lineage_store_v2;
 pub mod portal_state;
 #[cfg(feature = "proof-coordinator")]
@@ -2303,6 +2304,9 @@ impl Manager {
 
 #[cfg(test)]
 mod portal_e2e_tests {
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    mod continuity_v2;
+
     use {
         super::*,
         agave_logger::setup,
@@ -2351,7 +2355,14 @@ mod portal_e2e_tests {
         genesis_config.rent = Rent::default();
 
         let program_id = Pubkey::new_unique();
-        let program_data = solana_runtime::loader_utils::load_program_from_file("northstar_portal");
+        let program_data = std::env::var_os("BPF_OUT_DIR")
+            .map(|directory| {
+                std::fs::read(std::path::PathBuf::from(directory).join("northstar_portal.so"))
+                    .expect("BPF_OUT_DIR must contain the built Northstar Portal artifact")
+            })
+            .unwrap_or_else(|| {
+                solana_runtime::loader_utils::load_program_from_file("northstar_portal")
+            });
         genesis_config.accounts.insert(
             program_id,
             solana_account::Account {

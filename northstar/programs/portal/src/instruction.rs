@@ -9,12 +9,8 @@ use {
 pub enum PortalInstruction {
     OpenSession(OpenSession),
     CloseSession,
-    DepositFee {
-        lamports: u64,
-    },
-    Delegate {
-        grid_id: u64,
-    },
+    DepositFee { lamports: u64 },
+    Delegate { grid_id: u64 },
     Undelegate,
     BeginSettlement(BeginSettlement),
     WriteSettlementChunk(WriteSettlementChunk),
@@ -24,9 +20,7 @@ pub enum PortalInstruction {
     UndelegateHandoff,
     SettleAccountOwner(SettleAccountOwner),
     SettleAccountLamports(SettleAccountLamports),
-    StartWithdrawal {
-        lamports: u64,
-    },
+    StartWithdrawal { lamports: u64 },
     ProposeCheckpoint(ProposeCheckpoint),
     CommitCheckpoint(CommitCheckpoint),
     CancelCheckpoint(CancelCheckpoint),
@@ -43,8 +37,12 @@ pub enum PortalInstruction {
     ConsumeTokenWithdrawal(ConsumeTokenWithdrawal),
     RequestUndelegation,
     ApproveUndelegation,
-    #[cfg(feature = "zk-verifier-prototype")]
     VerifyErStepProofV1(VerifyErStepProofV1),
+    OpenSessionV2(OpenSessionV2),
+    DelegateV2 { grid_id: u64 },
+    DepositFeeV2 { lamports: u64 },
+    ProposeCheckpointV2(ProposeCheckpointV2),
+    CommitCheckpointV2(CommitCheckpoint),
 }
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
 pub struct OpenSession {
@@ -53,6 +51,13 @@ pub struct OpenSession {
     pub fee_cap: u64,
     pub validator: Pubkey,
     pub settlement_interval_slots: u64,
+}
+
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+pub struct OpenSessionV2 {
+    pub session: OpenSession,
+    pub l1_genesis: Hash32,
+    pub profile: Hash32,
 }
 
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
@@ -123,6 +128,14 @@ pub struct ProposeCheckpoint {
     pub da_commitment: Hash32,
     pub effect_commitment: Hash32,
     pub challenge_window_slots: u64,
+}
+
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+pub struct ProposeCheckpointV2 {
+    pub proposal: ProposeCheckpoint,
+    pub pre: northstar_zk_types::continuity::StateRootOpeningV2,
+    pub post: northstar_zk_types::continuity::StateRootOpeningV2,
+    pub readonly_l1_root: Hash32,
 }
 
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
@@ -231,7 +244,6 @@ pub struct TimeoutChallenge {
     pub er_slot: u64,
 }
 
-#[cfg(feature = "zk-verifier-prototype")]
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
 pub struct VerifyErStepProofV1 {
     pub proof: [u8; 356],

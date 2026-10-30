@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
+checkpoint-continuity-v2 = ["northstar-portal/checkpoint-continuity-v2"]
 vrf-candidate-capture = ["dep:serde", "dep:serde_json", "solana-runtime/vrf-candidate-capture", "solana-svm/vrf-candidate-capture"]
 proof-coordinator-test-hooks = ["proof-coordinator"]
 replay = ["dep:northstar-transaction-proof", "dep:northstar-replay-harness"]

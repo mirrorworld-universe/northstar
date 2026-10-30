@@ -47,8 +47,7 @@ fn load_session(program_id: &Pubkey, session: &AccountInfo) -> Result<Session, P
     if !session.owned_by(program_id) {
         return Err(PortalError::SessionAccountOwnerMismatch.into());
     }
-    let session_state = Session::try_from_slice(&session.try_borrow()?)
-        .map_err(|_| PortalError::SessionDeserializeFailed)?;
+    let session_state = crate::continuity::parse_session(&session.try_borrow()?)?;
     if !session_state.is_valid() {
         return Err(PortalError::SessionStateInvalid.into());
     }
@@ -648,6 +647,14 @@ fn session_context_v1(
 pub fn process_propose_checkpoint(
     program_id: &Pubkey,
     accounts: &mut [AccountInfo],
+    args: ProposeCheckpoint,
+) -> ProgramResult {
+    process_propose_checkpoint_versioned(program_id, accounts, args, false)
+}
+
+pub(super) fn process_propose_checkpoint_versioned(
+    program_id: &Pubkey,
+    accounts: &mut [AccountInfo],
     ProposeCheckpoint {
         er_slot,
         step_count,
@@ -660,6 +667,7 @@ pub fn process_propose_checkpoint(
         effect_commitment,
         challenge_window_slots,
     }: ProposeCheckpoint,
+    version2: bool,
 ) -> ProgramResult {
     pinocchio_log::log!("Instruction: ProposeCheckpoint, er_slot={}", er_slot);
 
@@ -678,6 +686,13 @@ pub fn process_propose_checkpoint(
         return Err(PortalError::Unauthorized.into());
     }
 
+    if session
+        .try_borrow()?
+        .starts_with(&crate::SessionV2::DISCRIMINATOR)
+        != version2
+    {
+        return Err(ProgramError::InvalidInstructionData);
+    }
     let session_state = load_session(program_id, session)?;
     if proposer.address() != &session_state.validator {
         return Err(PortalError::Unauthorized.into());
@@ -800,7 +815,16 @@ pub fn process_propose_checkpoint(
 pub fn process_commit_checkpoint(
     program_id: &Pubkey,
     accounts: &mut [AccountInfo],
+    args: CommitCheckpoint,
+) -> ProgramResult {
+    process_commit_checkpoint_versioned(program_id, accounts, args, false)
+}
+
+pub(super) fn process_commit_checkpoint_versioned(
+    program_id: &Pubkey,
+    accounts: &mut [AccountInfo],
     CommitCheckpoint { er_slot }: CommitCheckpoint,
+    version2: bool,
 ) -> ProgramResult {
     pinocchio_log::log!("Instruction: CommitCheckpoint, er_slot={}", er_slot);
 
@@ -810,6 +834,13 @@ pub fn process_commit_checkpoint(
 
     if !committer.is_signer() {
         return Err(PortalError::Unauthorized.into());
+    }
+    if session
+        .try_borrow()?
+        .starts_with(&crate::SessionV2::DISCRIMINATOR)
+        != version2
+    {
+        return Err(ProgramError::InvalidInstructionData);
     }
 
     let session_state = load_session(program_id, session)?;
@@ -1343,6 +1374,12 @@ pub fn process_create_step_proof(
 
     if !authority.is_signer() {
         return Err(PortalError::Unauthorized.into());
+    }
+    if session
+        .try_borrow()?
+        .starts_with(&crate::SessionV2::DISCRIMINATOR)
+    {
+        return Err(PortalError::StepProofVerifierUnavailable.into());
     }
 
     let session_state = load_session(program_id, session)?;

@@ -52,6 +52,8 @@ jobs:
       - run: cargo clippy --locked --all --tests -- -D warnings
       # Sonic: Check opt-in paths without enabling them in deployment builds.
       - run: cargo clippy --locked --all --tests --features northstar/proof-coordinator-test-hooks,agave-validator/proof-coordinator-test-hooks,northstar-portal/zk-verifier-profile -- -D warnings
+      # Sonic: Continuity remains opt-in until its runtime and verifier are integrated.
+      - run: cargo clippy --locked -p northstar -p northstar-portal --tests --features checkpoint-continuity-v2 -- -D warnings
       # Sonic: Root workspace checks do not include the portable VRF probe.
       - run: cargo clippy --locked --manifest-path northstar/programs/vrf-runtime-probe/Cargo.toml --workspace --all-targets -- -D warnings
 
@@ -167,6 +169,13 @@ jobs:
         run: BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar-token-bridge --test validator_e2e -- --nocapture
       - name: Run Northstar crate tests
         run: BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar -p northstar-portal --no-fail-fast
+      # Sonic: Isolate the continuity fixture from the default deployment artifact.
+      - name: Test Portal continuity SBF lifecycle
+        run: |
+          ./cargo-build-sbf --manifest-path northstar/programs/portal/Cargo.toml \
+            --features checkpoint-continuity-v2 --sbf-out-dir "$PWD/target/continuity-v2-deploy" -- --locked
+          BPF_OUT_DIR="$PWD/target/continuity-v2-deploy" \
+            cargo test --locked -p northstar --features checkpoint-continuity-v2 v2
       # Sonic: Coordinator and mature-capture regressions need no GPU service.
       - name: Test opt-in proof coordination
         run: cargo test --locked -p northstar --features proof-coordinator-test-hooks proof_ --no-fail-fast

@@ -19,6 +19,47 @@ fn find_program_address(seeds: &[&[u8]], program_id: &Pubkey) -> (Pubkey, u8) {
     (Pubkey::from(pda.to_bytes()), bump)
 }
 
+pub fn find_session_epoch_v2_pda(program_id: &Pubkey) -> (Pubkey, u8) {
+    find_program_address(&[crate::SessionEpochV2::SEED_PREFIX], program_id)
+}
+
+pub fn find_ingress_record_v2_pda(
+    program_id: &Pubkey,
+    session_context: &[u8; 32],
+    sequence: u64,
+) -> (Pubkey, u8) {
+    find_program_address(
+        &[
+            northstar_zk_types::continuity::INGRESS_RECORD_SEED_V2,
+            session_context,
+            &sequence.to_le_bytes(),
+        ],
+        program_id,
+    )
+}
+
+pub fn find_deposit_receipt_v2_pda(
+    program_id: &Pubkey,
+    session_context: &[u8; 32],
+    recipient: &Pubkey,
+) -> (Pubkey, u8) {
+    find_program_address(
+        &[
+            crate::DepositReceiptV2::SEED_PREFIX,
+            session_context,
+            recipient.as_ref(),
+        ],
+        program_id,
+    )
+}
+
+pub fn find_checkpoint_binding_v2_pda(program_id: &Pubkey, checkpoint: &Pubkey) -> (Pubkey, u8) {
+    find_program_address(
+        &[crate::CheckpointBindingV2::SEED_PREFIX, checkpoint.as_ref()],
+        program_id,
+    )
+}
+
 pub fn find_session_pda(program_id: &Pubkey) -> (Pubkey, u8) {
     let seeds = &[Session::SEED_PREFIX];
     find_program_address(seeds, program_id)

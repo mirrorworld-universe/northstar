@@ -7,6 +7,8 @@ use {
 pub mod accumulate_token_withdrawal;
 pub mod checkpoint;
 pub mod close_session;
+#[cfg(feature = "checkpoint-continuity-v2")]
+pub mod continuity;
 pub mod delegate;
 pub mod deposit_fee;
 pub mod open_session;
@@ -56,6 +58,11 @@ fn initialize_pda_account(
     Ok(())
 }
 
+#[cfg(feature = "checkpoint-continuity-v2")]
+pub use continuity::{
+    process_commit_checkpoint_v2, process_delegate_v2, process_deposit_fee_v2,
+    process_open_session_v2, process_propose_checkpoint_v2,
+};
 #[cfg(feature = "zk-verifier-prototype")]
 pub use verifier::process_verify_er_step_proof_v1;
 pub use {

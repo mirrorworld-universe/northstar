@@ -122,7 +122,7 @@ fn validate_session(
     Ok(session_state)
 }
 
-fn process_delegate_account(
+pub(super) fn process_delegate_account(
     program_id: &Pubkey,
     payer: &AccountInfo,
     delegated_account: &mut AccountInfo,
