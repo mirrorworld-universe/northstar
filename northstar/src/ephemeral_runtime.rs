@@ -1036,6 +1036,10 @@ impl EphemeralRuntime {
         self.sync_status.update_latest_l1_slot(slot);
     }
 
+    pub(crate) fn set_checkpoint_error(&self, error: Option<&str>) {
+        self.sync_status.set_checkpoint_error(error);
+    }
+
     /// Sonic: Mark L1 events synced through `slot`.
     pub fn mark_synced_through(&self, slot: Slot) {
         self.sync_status.mark_synced_through(slot);

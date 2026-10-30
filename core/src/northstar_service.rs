@@ -1637,6 +1637,7 @@ mod tests {
                 is_syncing: false,
                 latest_synced_slot: bank_for_open.slot(),
                 latest_l1_slot: bank_for_open.slot(),
+                checkpoint_error: None,
             }
         );
 
