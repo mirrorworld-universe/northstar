@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+pub mod continuity;
 pub mod trace;
 
 use borsh::{

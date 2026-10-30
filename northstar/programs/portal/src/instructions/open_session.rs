@@ -33,6 +33,22 @@ use {
 pub fn process_open_session(
     program_id: &Pubkey,
     accounts: &mut [AccountInfo],
+    args: OpenSession,
+) -> ProgramResult {
+    process_open_session_initialized(program_id, accounts, args, None)
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct V2SessionInitialization {
+    pub nonce: u128,
+    pub l1_genesis: [u8; 32],
+    pub profile: [u8; 32],
+}
+
+#[inline(never)]
+pub(super) fn process_open_session_initialized(
+    program_id: &Pubkey,
+    accounts: &mut [AccountInfo],
     OpenSession {
         grid_id,
         ttl_slots,
@@ -40,6 +56,7 @@ pub fn process_open_session(
         validator,
         settlement_interval_slots,
     }: OpenSession,
+    version2: Option<V2SessionInitialization>,
 ) -> ProgramResult {
     pinocchio_log::log!(
         "Instruction: OpenSession, grid_id={}, ttl_slots={}, fee_cap={}, \
@@ -87,7 +104,7 @@ pub fn process_open_session(
         ttl_slots,
         fee_cap,
         created_at: current_slot,
-        nonce: 0,
+        nonce: version2.map_or(0, |initial| initial.nonce),
         authority: *payer_key,
         validator,
         settlement_interval_slots,
@@ -100,13 +117,25 @@ pub fn process_open_session(
         settlement_started_l1_slot: 0,
         bump: session_bump,
     };
+    let session_frame = version2.map(|initial| crate::SessionV2 {
+        discriminator: crate::SessionV2::DISCRIMINATOR,
+        base: session_state,
+        l1_genesis: initial.l1_genesis,
+        profile: initial.profile,
+        ingress_count: 0,
+        ingress_root: [0; 32],
+        consumed_ingress_count: 0,
+        consumed_ingress_root: [0; 32],
+    });
     let fee_vault_state = FeeVault {
         discriminator: FeeVault::DISCRIMINATOR,
         authority: payer_key.to_bytes(),
         bump: fee_vault_bump,
     };
     let rent = Rent::get()?;
-    let session_size = crate::account_size(&session_state);
+    let session_size = session_frame
+        .as_ref()
+        .map_or_else(|| crate::account_size(&session_state), crate::account_size);
     let fee_vault_size = crate::account_size(&fee_vault_state);
     let session_lamports = rent.try_minimum_balance(session_size)?;
     let fee_vault_lamports = rent.try_minimum_balance(fee_vault_size)?;
@@ -147,7 +176,11 @@ pub fn process_open_session(
 
     // Write Session state
     let mut session_data = session.try_borrow_mut()?;
-    BorshSerialize::serialize(&session_state, &mut &mut session_data[..]).unwrap();
+    if let Some(frame) = session_frame {
+        BorshSerialize::serialize(&frame, &mut &mut session_data[..]).unwrap();
+    } else {
+        BorshSerialize::serialize(&session_state, &mut &mut session_data[..]).unwrap();
+    }
 
     // Write FeeVault state
     let mut fee_vault_data = fee_vault.try_borrow_mut()?;

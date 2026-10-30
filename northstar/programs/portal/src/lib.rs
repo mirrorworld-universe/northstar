@@ -2,6 +2,7 @@
 #[cfg(not(target_os = "solana"))]
 extern crate alloc;
 
+pub mod continuity;
 mod error;
 mod events;
 mod instruction;
@@ -17,7 +18,12 @@ use {
     pinocchio::{error::ProgramError, AccountView as AccountInfo, ProgramResult},
 };
 pub use {
-    error::*, events::*, instruction::*, instructions::step_proof_public_input_hash, pda::*,
+    continuity::{CheckpointBindingV2, DepositReceiptV2, SessionEpochV2, SessionV2},
+    error::*,
+    events::*,
+    instruction::*,
+    instructions::step_proof_public_input_hash,
+    pda::*,
     state::*,
 };
 
@@ -167,6 +173,24 @@ fn process_instruction(
         #[cfg(feature = "zk-verifier-prototype")]
         Ok((30, payload)) => deserialize_args(payload)
             .and_then(|proof| instructions::process_verify_er_step_proof_v1(accounts, proof)),
+        #[cfg(feature = "checkpoint-continuity-v2")]
+        Ok((31, payload)) => deserialize_args(payload)
+            .and_then(|args| instructions::process_open_session_v2(program_id, accounts, args)),
+        #[cfg(feature = "checkpoint-continuity-v2")]
+        Ok((32, payload)) => deserialize_args::<u64>(payload)
+            .and_then(|grid| instructions::process_delegate_v2(program_id, accounts, grid)),
+        #[cfg(feature = "checkpoint-continuity-v2")]
+        Ok((33, payload)) => deserialize_args::<u64>(payload).and_then(|lamports| {
+            instructions::process_deposit_fee_v2(program_id, accounts, lamports)
+        }),
+        #[cfg(feature = "checkpoint-continuity-v2")]
+        Ok((34, payload)) => deserialize_args(payload).and_then(|args| {
+            instructions::process_propose_checkpoint_v2(program_id, accounts, args)
+        }),
+        #[cfg(feature = "checkpoint-continuity-v2")]
+        Ok((35, payload)) => deserialize_args(payload).and_then(|args| {
+            instructions::process_commit_checkpoint_v2(program_id, accounts, args)
+        }),
         Ok((_, _)) | Err(_) => Err(ProgramError::InvalidInstructionData),
     }
 }
