@@ -6,7 +6,10 @@ use {
     log::debug,
     serde::{Deserialize, Serialize},
     solana_clock::Slot,
-    std::sync::atomic::{AtomicU64, Ordering},
+    std::sync::{
+        RwLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 /// Sonic: Shared NorthStar L1 sync cursor exposed by `northstarSysGetSyncStatus`.
@@ -14,6 +17,7 @@ use {
 pub struct NorthStarSyncStatus {
     latest_synced_slot: AtomicU64,
     latest_l1_slot: AtomicU64,
+    checkpoint_error: RwLock<Option<String>>,
 }
 
 impl NorthStarSyncStatus {
@@ -25,6 +29,7 @@ impl NorthStarSyncStatus {
         Self {
             latest_synced_slot: AtomicU64::new(latest_synced_slot),
             latest_l1_slot: AtomicU64::new(latest_l1_slot),
+            checkpoint_error: RwLock::new(None),
         }
     }
 
@@ -40,6 +45,10 @@ impl NorthStarSyncStatus {
         self.latest_synced_slot.fetch_max(slot, Ordering::Relaxed);
     }
 
+    pub fn set_checkpoint_error(&self, error: Option<&str>) {
+        *self.checkpoint_error.write().unwrap() = error.map(str::to_owned);
+    }
+
     pub fn snapshot(&self) -> RpcNorthStarSyncStatus {
         self.snapshot_with_cluster_behind(false)
     }
@@ -47,10 +56,14 @@ impl NorthStarSyncStatus {
     pub fn snapshot_with_cluster_behind(&self, cluster_behind: bool) -> RpcNorthStarSyncStatus {
         let latest_synced_slot = self.latest_synced_slot.load(Ordering::Relaxed);
         let latest_l1_slot = self.latest_l1_slot.load(Ordering::Relaxed);
+        let checkpoint_error = self.checkpoint_error.read().unwrap().clone();
         RpcNorthStarSyncStatus {
-            is_syncing: cluster_behind || latest_synced_slot < latest_l1_slot,
+            is_syncing: cluster_behind
+                || latest_synced_slot < latest_l1_slot
+                || checkpoint_error.is_some(),
             latest_synced_slot,
             latest_l1_slot,
+            checkpoint_error,
         }
     }
 }
@@ -61,6 +74,8 @@ pub struct RpcNorthStarSyncStatus {
     pub is_syncing: bool,
     pub latest_synced_slot: Slot,
     pub latest_l1_slot: Slot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_error: Option<String>,
 }
 
 #[rpc]
@@ -129,6 +144,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn checkpoint_lineage_failure_is_visible_without_changing_sync_cursors() {
+        let status = NorthStarSyncStatus::new_with_slots(100, 100);
+        status.set_checkpoint_error(Some("checkpoint_lineage_mismatch"));
+        let snapshot = status.snapshot();
+        assert!(snapshot.is_syncing);
+        assert_eq!(snapshot.latest_synced_slot, 100);
+        assert_eq!(snapshot.latest_l1_slot, 100);
+        assert_eq!(
+            snapshot.checkpoint_error.as_deref(),
+            Some("checkpoint_lineage_mismatch")
+        );
+        status.set_checkpoint_error(None);
+        assert!(!status.snapshot().is_syncing);
+        assert!(
+            serde_json::to_value(status.snapshot())
+                .unwrap()
+                .get("checkpointError")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn sync_status_reports_syncing_when_cluster_is_behind_without_inventing_l1_slot() {
         let status = NorthStarSyncStatus::new_with_slots(100, 100);
 
@@ -138,6 +175,7 @@ mod tests {
                 is_syncing: true,
                 latest_synced_slot: 100,
                 latest_l1_slot: 100,
+                checkpoint_error: None,
             }
         );
     }
@@ -152,6 +190,7 @@ mod tests {
                 is_syncing: true,
                 latest_synced_slot: 100,
                 latest_l1_slot: 120,
+                checkpoint_error: None,
             }
         );
     }

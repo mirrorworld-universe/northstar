@@ -127,8 +127,7 @@ fn load_session(program_id: &Pubkey, session: &AccountInfo) -> Result<Session, P
     if !session.owned_by(program_id) {
         return Err(PortalError::SessionAccountOwnerMismatch.into());
     }
-    let session_state = Session::try_from_slice(&session.try_borrow()?)
-        .map_err(|_| PortalError::SessionDeserializeFailed)?;
+    let session_state = crate::continuity::parse_session(&session.try_borrow()?)?;
     if !session_state.is_valid() {
         return Err(PortalError::SessionStateInvalid.into());
     }
@@ -137,7 +136,7 @@ fn load_session(program_id: &Pubkey, session: &AccountInfo) -> Result<Session, P
 
 fn store_session(session: &mut AccountInfo, session_state: &Session) -> ProgramResult {
     let mut session_data = session.try_borrow_mut()?;
-    BorshSerialize::serialize(session_state, &mut &mut session_data[..]).unwrap();
+    crate::continuity::write_session(&mut session_data, session_state)?;
     Ok(())
 }
 

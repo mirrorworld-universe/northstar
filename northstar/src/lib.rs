@@ -25,9 +25,13 @@ use {
 };
 
 pub mod checkpoint;
+pub mod checkpoint_v2;
+pub mod continuity_v2;
 pub mod ephemeral_runtime;
 pub mod ephemeral_tpu;
 pub mod ephemeral_tx_client;
+pub mod lineage_l1_v2;
+pub mod lineage_store_v2;
 pub mod portal_state;
 #[cfg(feature = "proof-coordinator")]
 pub mod proof_coordinator;
@@ -399,6 +403,7 @@ pub struct Manager {
     slot_duration: Duration,
     er_history_max_retained_slots: usize,
     checkpoint_plans: std::sync::RwLock<HashMap<(Pubkey, u64), SettlementPlan>>,
+    lineage_blocked_checkpoint: std::sync::Mutex<Option<(Pubkey, u64)>>,
     /// Sonic: Always-on ephemeral runtime. Created once at startup via
     /// `init_runtime()`, stays alive for the validator's lifetime.
     /// The `active` flag inside gates transaction acceptance.
@@ -416,6 +421,7 @@ impl Manager {
             slot_duration: DEFAULT_ER_SLOT_DURATION,
             er_history_max_retained_slots: DEFAULT_MAX_RETAINED_SLOTS,
             checkpoint_plans: std::sync::RwLock::new(HashMap::new()),
+            lineage_blocked_checkpoint: std::sync::Mutex::new(None),
             runtime: None,
             #[cfg(feature = "proof-coordinator")]
             proof_coordinator: None,
@@ -1130,6 +1136,51 @@ impl Manager {
             );
             return None;
         }
+        let (cursor_pda, cursor_bump) =
+            find_checkpoint_cursor_pda(&self.config.portal_program_id, &session_pda);
+        let lineage_matches = l1_bank.get_account(&cursor_pda).is_none_or(|account| {
+            if account.owner() != &self.config.portal_program_id {
+                return false;
+            }
+            let Some(PortalAccount::CheckpointCursor(cursor)) =
+                try_parse_raw_portal_account(account.data())
+            else {
+                return false;
+            };
+            cursor.is_valid()
+                && cursor.session == session_pda
+                && cursor.bump == cursor_bump
+                && cursor.active_checkpoint == Pubkey::default()
+                && if cursor.latest_finalized_checkpoint == Pubkey::default() {
+                    cursor.latest_finalized_er_slot == 0
+                        && cursor.latest_finalized_state_root == [0; 32]
+                } else {
+                    artifact.checkpoint.er_slot > cursor.latest_finalized_er_slot
+                        && artifact.checkpoint.previous_state_root
+                            == cursor.latest_finalized_state_root
+                }
+        });
+        let mut blocked = self.lineage_blocked_checkpoint.lock().unwrap();
+        if !lineage_matches {
+            if let Some(runtime) = &self.runtime {
+                runtime.set_checkpoint_error(Some("checkpoint_lineage_mismatch"));
+            }
+            let identity = (session_pda, plan.er_slot);
+            if *blocked != Some(identity) {
+                warn!(
+                    "Checkpoint lineage quarantined before signing: session={} er_slot={}; \
+                     retained artifact and journal require reconciliation",
+                    session_pda, plan.er_slot,
+                );
+                *blocked = Some(identity);
+            }
+            return None;
+        }
+        *blocked = None;
+        drop(blocked);
+        if let Some(runtime) = &self.runtime {
+            runtime.set_checkpoint_error(None);
+        }
         #[cfg(feature = "proof-coordinator")]
         let ready_to_propose = || {
             let Some(coordinator) = &self.proof_coordinator else {
@@ -1222,9 +1273,12 @@ impl Manager {
     ) -> Option<(Pubkey, Checkpoint)> {
         // The cursor is the on-chain index for the one active checkpoint. Never rediscover it by
         // scanning every Portal-owned account on the settlement hot path.
-        let (cursor_pda, _) =
+        let (cursor_pda, cursor_bump) =
             find_checkpoint_cursor_pda(&self.config.portal_program_id, &session_pda);
         let cursor_account = l1_bank.get_account(&cursor_pda)?;
+        if cursor_account.owner() != &self.config.portal_program_id {
+            return None;
+        }
         let PortalAccount::CheckpointCursor(cursor) =
             try_parse_raw_portal_account(cursor_account.data())?
         else {
@@ -1232,6 +1286,7 @@ impl Manager {
         };
         if !cursor.is_valid()
             || cursor.session != session_pda
+            || cursor.bump != cursor_bump
             || cursor.active_checkpoint == Pubkey::default()
         {
             return None;
@@ -1249,6 +1304,7 @@ impl Manager {
         };
         (checkpoint.is_valid()
             && checkpoint.session == session_pda
+            && checkpoint.er_slot == cursor.active_er_slot
             && matches!(
                 checkpoint.status,
                 CheckpointStatus::Pending
@@ -2248,6 +2304,9 @@ impl Manager {
 
 #[cfg(test)]
 mod portal_e2e_tests {
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    mod continuity_v2;
+
     use {
         super::*,
         agave_logger::setup,
@@ -2296,7 +2355,14 @@ mod portal_e2e_tests {
         genesis_config.rent = Rent::default();
 
         let program_id = Pubkey::new_unique();
-        let program_data = solana_runtime::loader_utils::load_program_from_file("northstar_portal");
+        let program_data = std::env::var_os("BPF_OUT_DIR")
+            .map(|directory| {
+                std::fs::read(std::path::PathBuf::from(directory).join("northstar_portal.so"))
+                    .expect("BPF_OUT_DIR must contain the built Northstar Portal artifact")
+            })
+            .unwrap_or_else(|| {
+                solana_runtime::loader_utils::load_program_from_file("northstar_portal")
+            });
         genesis_config.accounts.insert(
             program_id,
             solana_account::Account {
@@ -4132,6 +4198,44 @@ mod portal_e2e_tests {
             checksum, [8; 32],
             "release must bind the checkpoint effect commitment, not the plan checksum"
         );
+    }
+
+    #[test]
+    fn regression_checkpoint_lineage_is_checked_before_signing() {
+        setup();
+        let (bank, manager, program_id, session_pda, ..) = setup_checkpoint_flow_fixture();
+        let runtime = manager.runtime.as_ref().unwrap();
+        let artifact = checkpoint_artifact_fixture(session_pda, runtime.bank().slot());
+        runtime.install_checkpoint_artifact_v1(artifact.clone());
+        let (cursor_pda, bump) = find_checkpoint_cursor_pda(&program_id, &session_pda);
+        let cursor = CheckpointCursor {
+            discriminator: CheckpointCursor::DISCRIMINATOR,
+            session: session_pda,
+            latest_finalized_checkpoint: Pubkey::new_unique(),
+            latest_finalized_er_slot: artifact.checkpoint.er_slot.saturating_sub(1),
+            latest_finalized_state_root: [7; 32],
+            active_checkpoint: Pubkey::default(),
+            active_er_slot: 0,
+            bump,
+        };
+        let data = borsh::to_vec(&cursor).unwrap();
+        let mut account = AccountSharedData::new(1_000_000, data.len(), &program_id);
+        account.data_as_mut_slice().copy_from_slice(&data);
+        let due_slot = bank.slot() + 10;
+        let due = Bank::new_from_parent(bank, SlotLeader::default(), due_slot);
+        due.store_account(&cursor_pda, &account);
+        for _ in 0..3 {
+            assert!(
+                manager
+                    .settlement_transactions_if_due(&due, due.last_blockhash())
+                    .is_none(),
+                "a mismatched accepted root must never produce another signed proposal"
+            );
+        }
+        assert_eq!(runtime.checkpoint_artifact_v1().unwrap(), artifact);
+        assert!(manager
+            .cached_checkpoint_plan(session_pda, artifact.checkpoint.er_slot)
+            .is_none());
     }
 
     #[test]

@@ -5,9 +5,9 @@ use {
         instruction::SettleDepositReceipt,
         instructions::settlement::accumulate_receipt_checksum,
         pda::{find_deposit_receipt_pda, find_session_pda},
-        state::{DepositReceipt, Session, SettlementStatus},
+        state::SettlementStatus,
     },
-    borsh::{BorshDeserialize, BorshSerialize},
+    borsh::BorshDeserialize,
     pinocchio::{
         error::ProgramError,
         sysvars::{clock::Clock, rent::Rent, Sysvar},
@@ -62,10 +62,7 @@ pub fn process_settle_deposit_receipt(
         return Err(PortalError::SessionAccountOwnerMismatch.into());
     }
 
-    let mut session_state = Session::try_from_slice(&session.try_borrow()?).map_err(|_| {
-        pinocchio_log::log!("ERROR: SettleDepositReceipt failed: session deserialize failed");
-        PortalError::SessionDeserializeFailed
-    })?;
+    let mut session_state = crate::continuity::parse_session(&session.try_borrow()?)?;
     if !session_state.is_valid() {
         pinocchio_log::log!("ERROR: SettleDepositReceipt failed: session state invalid");
         return Err(PortalError::SessionStateInvalid.into());
@@ -94,8 +91,24 @@ pub fn process_settle_deposit_receipt(
         pinocchio_log::log!("ERROR: SettleDepositReceipt failed: l1 recipient mismatch");
         return Err(PortalError::InvalidAccountData.into());
     }
-    let (expected_receipt_key, _) =
-        find_deposit_receipt_pda(program_id, &session_key, &er_source_key);
+    let context = if session
+        .try_borrow()?
+        .starts_with(&crate::SessionV2::DISCRIMINATOR)
+    {
+        Some(
+            crate::SessionV2::try_from_slice(&session.try_borrow()?)
+                .map_err(|_| PortalError::SessionDeserializeFailed)?
+                .identity(program_id, &session_key)
+                .commitment(|parts| solana_sha256_hasher::hashv(parts).to_bytes())
+                .map_err(|_| PortalError::InvalidAccountData)?,
+        )
+    } else {
+        None
+    };
+    let (expected_receipt_key, receipt_bump) = match context {
+        Some(context) => crate::find_deposit_receipt_v2_pda(program_id, &context, &er_source_key),
+        None => find_deposit_receipt_pda(program_id, &session_key, &er_source_key),
+    };
     if deposit_receipt.address() != &expected_receipt_key {
         pinocchio_log::log!("ERROR: SettleDepositReceipt failed: deposit receipt PDA mismatch");
         return Err(PortalError::InvalidPdaSeeds.into());
@@ -105,16 +118,30 @@ pub fn process_settle_deposit_receipt(
         return Err(PortalError::InvalidAccountData.into());
     }
 
-    let mut receipt_state = DepositReceipt::try_from_slice(&deposit_receipt.try_borrow()?)
-        .map_err(|_| {
-            pinocchio_log::log!("ERROR: SettleDepositReceipt failed: receipt deserialize failed");
-            PortalError::DepositReceiptDeserializeFailed
-        })?;
+    if context.is_some()
+        != deposit_receipt
+            .try_borrow()?
+            .starts_with(&crate::DepositReceiptV2::DISCRIMINATOR)
+    {
+        return Err(PortalError::DepositReceiptStateInvalid.into());
+    }
+    if let Some(context) = context {
+        let frame = crate::DepositReceiptV2::try_from_slice(&deposit_receipt.try_borrow()?)
+            .map_err(|_| PortalError::DepositReceiptDeserializeFailed)?;
+        if frame.session_context != context {
+            return Err(PortalError::InvalidAccountData.into());
+        }
+    }
+    let mut receipt_state =
+        crate::continuity::parse_deposit_receipt(&deposit_receipt.try_borrow()?)?;
     if !receipt_state.is_valid() {
         pinocchio_log::log!("ERROR: SettleDepositReceipt failed: receipt state invalid");
         return Err(PortalError::DepositReceiptStateInvalid.into());
     }
-    if receipt_state.session != session_key || receipt_state.recipient != er_source_key {
+    if receipt_state.session != session_key
+        || receipt_state.recipient != er_source_key
+        || receipt_state.bump != receipt_bump
+    {
         pinocchio_log::log!("ERROR: SettleDepositReceipt failed: receipt state seeds mismatch");
         return Err(PortalError::InvalidPdaSeeds.into());
     }
@@ -137,7 +164,7 @@ pub fn process_settle_deposit_receipt(
         return Err(PortalError::InvalidAccountData.into());
     }
 
-    let rent_exempt = Rent::get()?.try_minimum_balance(crate::account_size(&receipt_state))?;
+    let rent_exempt = Rent::get()?.try_minimum_balance(deposit_receipt.data_len())?;
     let escrow_lamports = deposit_receipt
         .lamports()
         .checked_sub(rent_exempt)
@@ -168,7 +195,7 @@ pub fn process_settle_deposit_receipt(
     receipt_state.balance = settle.balance;
     receipt_state.withdrawn = settle.withdrawn;
     let mut receipt_data = deposit_receipt.try_borrow_mut()?;
-    BorshSerialize::serialize(&receipt_state, &mut &mut receipt_data[..]).unwrap();
+    crate::continuity::write_deposit_receipt(&mut receipt_data, &receipt_state)?;
     drop(receipt_data);
 
     session_state.settlement_accumulator = accumulate_receipt_checksum(
@@ -180,7 +207,7 @@ pub fn process_settle_deposit_receipt(
         settle.payout_lamports,
     );
     let mut session_data = session.try_borrow_mut()?;
-    BorshSerialize::serialize(&session_state, &mut &mut session_data[..]).unwrap();
+    crate::continuity::write_session(&mut session_data, &session_state)?;
 
     if settle.payout_lamports > 0 {
         let clock = Clock::get()?;
