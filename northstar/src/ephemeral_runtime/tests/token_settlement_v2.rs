@@ -154,7 +154,34 @@ where
                 )
                 .map_err(|error| error.to_string())?;
             if !manager.resume_active_session_from_l1(root.clone()) {
-                return Err("partial token metadata settlement did not resume".into());
+                let session =
+                    northstar_portal::find_session_pda(&manager.config.portal_program_id).0;
+                let account = root.get_account(&session);
+                let physical = account.as_ref().map(|account| {
+                    (
+                        account.owner(),
+                        account.data().len(),
+                        account.data().get(..8),
+                    )
+                });
+                let frame = account.as_ref().and_then(|account| {
+                    borsh::from_slice::<northstar_portal::SessionV2>(account.data()).ok()
+                });
+                let binding = frame.map(|frame| {
+                    (
+                        frame.is_valid(),
+                        frame.base.created_at,
+                        frame.base.ttl_slots,
+                        frame.base.validator == manager.config.manager_account.pubkey(),
+                        frame.base.settlement_status,
+                    )
+                });
+                return Err(format!(
+                    "partial metadata settlement did not resume: phase={phase}, L1 slot={}, \
+                     active={}, physical={physical:?}, binding={binding:?}",
+                    root.slot(),
+                    manager.has_active_runtime()
+                ));
             }
         }
     }
@@ -461,7 +488,8 @@ fn regression_v2_spl_payout_chains_after_restart_and_later_topup() {
             return Err("authenticated initial token credit missing".into());
         }
         withdraw(&world, &manager, destination, 20)?;
-        let first = settle(&mut manager, &mut world.bank, &destination, 20)?;
+        let first = settle(&mut manager, &mut world.bank, &destination, 20)
+            .map_err(|error| format!("first SPL checkpoint: {error}"))?;
         if token_amount(&world.bank, &destination)? != 20 {
             return Err("first L1 payout missing".into());
         }
@@ -498,7 +526,8 @@ fn regression_v2_spl_payout_chains_after_restart_and_later_topup() {
             return Err("later topup did not execute after restart".into());
         }
         withdraw(&world, &manager, destination, 9)?;
-        let second = settle(&mut manager, &mut world.bank, &destination, 29)?;
+        let second = settle(&mut manager, &mut world.bank, &destination, 29)
+            .map_err(|error| format!("second SPL checkpoint: {error}"))?;
         if second.checkpoint.previous_state_root != first.checkpoint.new_state_root {
             return Err("second SPL checkpoint does not chain from accepted first root".into());
         }
