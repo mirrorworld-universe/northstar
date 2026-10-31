@@ -658,6 +658,7 @@ fn find_undelegation_request_pda(program_id: &Pubkey, delegated_account: &Pubkey
     .0
 }
 
+#[cfg(not(feature = "checkpoint-continuity-v2"))]
 fn find_deposit_receipt_pda(program_id: &Pubkey, session: &Pubkey, recipient: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(
         &[b"deposit_receipt", session.as_ref(), recipient.as_ref()],
@@ -838,7 +839,12 @@ pub async fn process_portal_subcommand(
     portal_subcommand: &PortalCliCommand,
 ) -> ProcessResult {
     #[cfg(feature = "checkpoint-continuity-v2")]
-    if !matches!(portal_subcommand, PortalCliCommand::OpenSession { .. }) {
+    if !matches!(
+        portal_subcommand,
+        PortalCliCommand::OpenSession { .. }
+            | PortalCliCommand::DepositFee { .. }
+            | PortalCliCommand::Delegate { .. }
+    ) {
         return Err(
             CliError::BadParameter("This command has no continuity binding yet".into()).into(),
         );
@@ -973,22 +979,37 @@ pub async fn process_portal_subcommand(
         } => {
             let portal_program_id = resolve_portal_program_id(config, *portal_program_id)?;
             let depositor = config.signers[*depositor];
-            let session_pda = find_session_pda(&portal_program_id);
-            let deposit_receipt_pda =
-                find_deposit_receipt_pda(&portal_program_id, &session_pda, recipient);
-            let instruction = Instruction {
-                program_id: portal_program_id,
-                accounts: vec![
-                    AccountMeta::new(depositor.pubkey(), true),
-                    AccountMeta::new_readonly(session_pda, false),
-                    AccountMeta::new(deposit_receipt_pda, false),
-                    AccountMeta::new_readonly(*recipient, false),
-                    AccountMeta::new_readonly(system_program::id(), false),
-                ],
-                data: borsh::to_vec(&PortalInstruction::DepositFee {
-                    lamports: *lamports,
-                })
-                .unwrap(),
+            #[cfg(not(feature = "checkpoint-continuity-v2"))]
+            let instruction = {
+                let session = find_session_pda(&portal_program_id);
+                Instruction {
+                    program_id: portal_program_id,
+                    accounts: vec![
+                        AccountMeta::new(depositor.pubkey(), true),
+                        AccountMeta::new_readonly(session, false),
+                        AccountMeta::new(
+                            find_deposit_receipt_pda(&portal_program_id, &session, recipient),
+                            false,
+                        ),
+                        AccountMeta::new_readonly(*recipient, false),
+                        AccountMeta::new_readonly(system_program::id(), false),
+                    ],
+                    data: borsh::to_vec(&PortalInstruction::DepositFee {
+                        lamports: *lamports,
+                    })
+                    .unwrap(),
+                }
+            };
+            #[cfg(feature = "checkpoint-continuity-v2")]
+            let instruction = {
+                let session =
+                    continuity::load_session(rpc_client, portal_program_id, *sign_only).await?;
+                continuity::deposit_instruction(
+                    &session,
+                    depositor.pubkey(),
+                    *recipient,
+                    *lamports,
+                )?
             };
             process_portal_instruction(
                 rpc_client,
@@ -1063,8 +1084,13 @@ pub async fn process_portal_subcommand(
             let portal_program_id = resolve_portal_program_id(config, *portal_program_id)?;
             let authority = config.signers[*authority];
             let delegated_account_pubkey = config.signers[*delegated_account].pubkey();
+            #[cfg(feature = "checkpoint-continuity-v2")]
+            let continuity_session =
+                continuity::load_session(rpc_client, portal_program_id, *sign_only).await?;
+            #[cfg(not(feature = "checkpoint-continuity-v2"))]
             let delegation_record_pda =
                 find_delegation_record_pda(&portal_program_id, &delegated_account_pubkey);
+            #[cfg(not(feature = "checkpoint-continuity-v2"))]
             let session_pda = find_session_pda(&portal_program_id);
 
             // Sonic: Stage keypair-wallet delegation in one transaction. Portal::Delegate
@@ -1105,6 +1131,7 @@ pub async fn process_portal_subcommand(
             );
             instructions.push(create_buffer_ix);
 
+            #[cfg(not(feature = "checkpoint-continuity-v2"))]
             let delegate_ix = Instruction {
                 program_id: portal_program_id,
                 accounts: vec![
@@ -1118,6 +1145,15 @@ pub async fn process_portal_subcommand(
                 ],
                 data: borsh::to_vec(&PortalInstruction::Delegate { grid_id: *grid_id }).unwrap(),
             };
+            #[cfg(feature = "checkpoint-continuity-v2")]
+            let delegate_ix = continuity::delegate_instruction(
+                &continuity_session,
+                authority.pubkey(),
+                delegated_account_pubkey,
+                owner_program,
+                buffer_keypair.pubkey(),
+                *grid_id,
+            )?;
             instructions.push(delegate_ix);
             process_portal_instructions(
                 rpc_client,

@@ -7,8 +7,10 @@ use the same feature selection.
 
 A CLI built with this feature opens sessions with explicit `--checkpoint-profile`
 and `--l1-genesis` identities and the versioned nonce account. Online opening
-checks the actual RPC genesis before signing. Other CLI bindings are currently
-refused rather than silently emitting legacy instructions.
+checks the actual RPC genesis before signing. Online deposit and keypair delegation
+validate the Portal-owned session and derive nonce-bound receipt/inbox accounts.
+Offline ingress and other unbound commands are refused rather than silently
+emitting legacy instructions.
 
 ## Committed state boundary
 
