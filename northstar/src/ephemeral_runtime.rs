@@ -957,6 +957,505 @@ impl EphemeralRuntime {
         self.settings.fee_cap = fee_cap;
     }
 
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    pub(crate) fn lineage_store_v2(
+        &self,
+    ) -> Option<crate::ephemeral_tx_client::SharedLineageStoreV2> {
+        self._tx_client.lineage_store_v2()
+    }
+
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    pub fn configure_checkpoint_v2(
+        &mut self,
+        directory: &std::path::Path,
+        identity: northstar_zk_types::continuity::SessionIdentityV2,
+        mode: crate::lineage_store_v2::StartupModeV2,
+    ) -> std::io::Result<()> {
+        use crate::{
+            continuity_v2::{AccountOriginV2, SettlementEffectV2, TransitionPayloadV2},
+            WITHDRAWAL_SINK,
+        };
+        if self.is_active()
+            || self._tx_client.lineage_store_v2().is_some()
+            || identity.portal != self.portal_program_id.to_bytes()
+            || identity.session != self.settings.session_pda.to_bytes()
+            || identity.grid_id != self.settings.grid_id
+            || identity.validator != self.manager_keypair.pubkey().to_bytes()
+            || self.settings.er_fee_structure.lamports_per_signature != 0
+            || self.settings.er_fee_structure.lamports_per_write_lock != 0
+            || self
+                .settings
+                .er_fee_structure
+                .compute_fee_bins
+                .iter()
+                .any(|bin| bin.fee != 0)
+        {
+            return Err(std::io::Error::other(
+                "v2 lineage requires an inactive, identity-bound zero-fee runtime",
+            ));
+        }
+        let session_account = self
+            .l1_anchor_bank
+            .get_account(&self.settings.session_pda)
+            .ok_or_else(|| std::io::Error::other("v2 L1 session is missing"))?;
+        let frame: northstar_portal::SessionV2 = borsh::from_slice(session_account.data())?;
+        if session_account.owner() != &self.portal_program_id
+            || !frame.is_valid()
+            || frame.identity(&self.portal_program_id, &self.settings.session_pda) != identity
+        {
+            return Err(std::io::Error::other("v2 L1 session identity differs"));
+        }
+        let onchain_head = crate::lineage_l1_v2::checkpoint_head_from_l1_v2(
+            &self.l1_anchor_bank,
+            &self.portal_program_id,
+            &self.settings.session_pda,
+            &frame,
+        )?
+        .map(|(head, _)| head);
+        let store = crate::lineage_store_v2::CheckpointLineageStoreV2::open(
+            directory,
+            identity,
+            onchain_head,
+            mode,
+        )?;
+        let state = store.working_state()?;
+        let slot_floor = store
+            .unsealed()
+            .iter()
+            .map(|transition| transition.er_slot)
+            .chain(store.sealed().map(|sealed| sealed.er_slot))
+            .chain(store.accepted_head().map(|head| head.er_slot))
+            .max()
+            .unwrap_or(0);
+        if self.bank().slot() <= slot_floor {
+            if self
+                .er_account_overlay
+                .read()
+                .unwrap()
+                .keys()
+                .any(|key| *key != self.manager_keypair.pubkey() && *key != WITHDRAWAL_SINK)
+            {
+                return Err(std::io::Error::other(
+                    "retained ER accounts require isolated lineage recovery",
+                ));
+            }
+            self.reset_to_new_parent_with_slot_floor(self.l1_anchor_bank.clone(), slot_floor);
+        }
+        let mut recovered_signatures = Vec::new();
+        for (slot, wire) in store.processed_transactions() {
+            let transaction: VersionedTransaction =
+                bincode::deserialize(wire).map_err(std::io::Error::other)?;
+            let signature =
+                transaction.signatures.first().copied().ok_or_else(|| {
+                    std::io::Error::other("retained transaction has no signature")
+                })?;
+            recovered_signatures.push((signature, slot));
+        }
+        let mut sol_payouts = Vec::new();
+        let mut token_payouts = Vec::new();
+        for transition in store.pending_transitions() {
+            let transaction = match &transition.payload {
+                TransitionPayloadV2::Execution { transaction, .. }
+                | TransitionPayloadV2::TokenIngress { transaction, .. } => transaction,
+                TransitionPayloadV2::Ingress { .. } => continue,
+            };
+            let transaction: VersionedTransaction =
+                bincode::deserialize(transaction).map_err(std::io::Error::other)?;
+            let signature =
+                transaction.signatures.first().copied().ok_or_else(|| {
+                    std::io::Error::other("retained transaction has no signature")
+                })?;
+            for encoded in &transition.settlement_effects {
+                match borsh::from_slice::<SettlementEffectV2>(encoded)? {
+                    SettlementEffectV2::SolWithdrawal {
+                        source,
+                        recipient,
+                        amount,
+                        cumulative_withdrawn,
+                    } => {
+                        sol_payouts.push(WithdrawalPayoutEvent {
+                            er_source: Pubkey::new_from_array(source),
+                            l1_recipient: Pubkey::new_from_array(recipient),
+                            lamports: amount,
+                            cumulative_withdrawn,
+                            signature,
+                            er_slot: transition.er_slot,
+                        });
+                    }
+                    SettlementEffectV2::TokenWithdrawal {
+                        bridge,
+                        session_bridge,
+                        account,
+                        destination,
+                        amount,
+                        decimals,
+                        ..
+                    } => {
+                        token_payouts.push(TokenWithdrawalPayoutEvent {
+                            bridge_program: Pubkey::new_from_array(bridge),
+                            session_bridge: Pubkey::new_from_array(session_bridge),
+                            er_token_account: Pubkey::new_from_array(account),
+                            l1_destination_token_account: Pubkey::new_from_array(destination),
+                            amount,
+                            decimals,
+                            signature,
+                            er_slot: transition.er_slot,
+                        });
+                    }
+                }
+            }
+        }
+        let lock = Arc::clone(&self.bank_operation_lock);
+        let _guard = lock.lock().unwrap();
+        let bank = self.bank();
+        let mut overlay = self.er_account_overlay.write().unwrap();
+        if overlay.keys().any(|key| {
+            *key != self.manager_keypair.pubkey()
+                && *key != WITHDRAWAL_SINK
+                && !state.accounts().contains_key(&key.to_bytes())
+        }) {
+            return Err(std::io::Error::other(
+                "retained ER accounts require isolated lineage recovery",
+            ));
+        }
+        self.unsettled_state_store.disable_writes();
+        overlay.clear();
+        for key in [self.manager_keypair.pubkey(), WITHDRAWAL_SINK] {
+            bank.store_account(&key, &AccountSharedData::default());
+            overlay.insert(key, AccountSharedData::default());
+        }
+        let mut delegated = self.delegated_accounts.write().unwrap();
+        let mut touched = self.touched_accounts.write().unwrap();
+        let mut frozen = self.frozen_accounts.write().unwrap();
+        delegated.clear();
+        touched.clear();
+        frozen.clear();
+        for (key, value) in state.accounts() {
+            let key = Pubkey::new_from_array(*key);
+            let account = value.to_account();
+            bank.store_account(&key, &account);
+            overlay.insert(key, account);
+            touched.insert(key);
+            if matches!(
+                state.origin(key.to_bytes()),
+                Some(AccountOriginV2::Delegated { .. })
+            ) {
+                delegated.insert(key);
+            }
+            if state.is_frozen(key.to_bytes()) {
+                frozen.insert(key);
+            }
+        }
+        drop(frozen);
+        drop(touched);
+        drop(delegated);
+        drop(overlay);
+        self._tx_client
+            .restore_processed_signatures(recovered_signatures);
+        *self.withdrawal_payout_events.write().unwrap() = sol_payouts;
+        *self.token_withdrawal_payout_events.write().unwrap() = token_payouts;
+        self._tx_client.install_lineage_store_v2(store);
+        self.publish_bank_for_rpc();
+        Ok(())
+    }
+
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    pub fn reconcile_checkpoint_v2(&self, l1_root: &Bank) -> std::io::Result<bool> {
+        use crate::continuity_v2::{AccountOriginV2, SettlementEffectV2};
+        let Some(store) = self._tx_client.lineage_store_v2() else {
+            return Ok(false);
+        };
+        let lock = Arc::clone(&self.bank_operation_lock);
+        let _guard = lock.lock().unwrap();
+        let mut store = store.lock().unwrap();
+        let (session, frame) =
+            crate::lineage_l1_v2::session_from_l1_v2(l1_root, &self.portal_program_id)?
+                .ok_or_else(|| std::io::Error::other("active continuity session is missing"))?;
+        if frame.identity(&self.portal_program_id, &session) != *store.accepted_state().identity() {
+            return Err(std::io::Error::other("active continuity session changed"));
+        }
+        let actual = crate::lineage_l1_v2::checkpoint_head_from_l1_v2(
+            l1_root,
+            &self.portal_program_id,
+            &session,
+            &frame,
+        )?;
+        let Some((head, checkpoint)) = actual else {
+            if store.accepted_head().is_some() {
+                return Err(std::io::Error::other("accepted L1 lineage disappeared"));
+            }
+            return Ok(false);
+        };
+        if store.accepted_head() != Some(&head) {
+            store.record_accepted(head.clone())?;
+        }
+        if !store.sealed().is_some_and(|sealed| sealed.accepted)
+            || checkpoint.status != northstar_portal::CheckpointStatus::Settled
+            || frame.base.settlement_status != northstar_portal::SettlementStatus::Idle
+            || frame.base.last_settled_er_slot != head.er_slot
+        {
+            return Ok(false);
+        }
+        let state = store.working_state()?;
+        let context = state
+            .identity()
+            .commitment(crate::continuity_v2::hash_parts)
+            .map_err(std::io::Error::other)?;
+        for transition in store.pending_transitions() {
+            for effect in &transition.settlement_effects {
+                match borsh::from_slice::<SettlementEffectV2>(effect)? {
+                    SettlementEffectV2::SolWithdrawal {
+                        source,
+                        cumulative_withdrawn,
+                        ..
+                    } => {
+                        let Some(AccountOriginV2::SolReceipt { receipt }) = state.origin(source)
+                        else {
+                            return Err(std::io::Error::other("settled SOL source has no receipt"));
+                        };
+                        let account = l1_root
+                            .get_account(&Pubkey::new_from_array(receipt))
+                            .ok_or_else(|| {
+                                std::io::Error::other("settled SOL receipt is missing")
+                            })?;
+                        let receipt: northstar_portal::DepositReceiptV2 =
+                            borsh::from_slice(account.data())?;
+                        if account.owner() != &self.portal_program_id
+                            || receipt.session_context != context
+                            || receipt.base.recipient.to_bytes() != source
+                            || receipt.base.session != session
+                            || receipt.discriminator
+                                != northstar_portal::DepositReceiptV2::DISCRIMINATOR
+                            || !receipt.base.is_valid()
+                            || receipt.base.withdrawn < cumulative_withdrawn
+                        {
+                            return Ok(false);
+                        }
+                    }
+                    SettlementEffectV2::TokenWithdrawal {
+                        bridge,
+                        session_bridge,
+                        account,
+                        cumulative_withdrawn,
+                        ..
+                    } => {
+                        let bridge_program = Pubkey::new_from_array(bridge);
+                        let (receipt, _) = northstar_token_bridge::find_token_deposit_receipt_pda(
+                            &bridge_program,
+                            &Pubkey::new_from_array(session_bridge),
+                            &Pubkey::new_from_array(account),
+                        );
+                        let receipt = l1_root.get_account(&receipt).ok_or_else(|| {
+                            std::io::Error::other("settled token receipt is missing")
+                        })?;
+                        let value: northstar_token_bridge::state::TokenDepositReceipt =
+                            borsh::from_slice(receipt.data())?;
+                        if receipt.owner() != &bridge_program
+                            || !value.is_valid()
+                            || value.session_bridge != session_bridge
+                            || value.er_token_account != account
+                            || value.withdrawn < cumulative_withdrawn
+                        {
+                            return Ok(false);
+                        }
+                    }
+                }
+            }
+        }
+        store.record_settled(&head)?;
+        self.withdrawal_payout_events.write().unwrap().clear();
+        self.token_withdrawal_payout_events.write().unwrap().clear();
+        Ok(true)
+    }
+
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    pub fn process_l1_ingress_v2(
+        &self,
+        l1_root: &Bank,
+    ) -> std::io::Result<Option<northstar_zk_types::continuity::IngressRecordV2>> {
+        use {
+            crate::continuity_v2::{AccountOriginV2, RecordedTransitionV2, TransitionPayloadV2},
+            northstar_zk_types::continuity::{IngressPayloadV2, IngressRecordV2},
+        };
+        let Some(store) = self._tx_client.lineage_store_v2() else {
+            return Ok(None);
+        };
+        let lock = Arc::clone(&self.bank_operation_lock);
+        let _guard = lock.lock().unwrap();
+        let mut store = store.lock().unwrap();
+        let mut candidate = store.working_state()?;
+        let session_key = Pubkey::new_from_array(candidate.identity().session);
+        let session = l1_root
+            .get_account(&session_key)
+            .ok_or_else(|| std::io::Error::other("finalized v2 session is missing"))?;
+        let frame: northstar_portal::SessionV2 = borsh::from_slice(session.data())?;
+        if session.owner() != &self.portal_program_id
+            || !frame.is_valid()
+            || frame.identity(&self.portal_program_id, &session_key) != *candidate.identity()
+        {
+            return Err(std::io::Error::other(
+                "finalized v2 session identity differs",
+            ));
+        }
+        let context = candidate
+            .identity()
+            .commitment(crate::continuity_v2::hash_parts)
+            .map_err(std::io::Error::other)?;
+        let pending = frame
+            .ingress_count
+            .checked_sub(candidate.ingress_count())
+            .ok_or_else(|| std::io::Error::other("finalized ingress head regressed"))?;
+        self._tx_client.set_pending_ingress_v2(pending);
+        if store.sealed().is_some() {
+            return Ok(None);
+        }
+        let capacity = crate::checkpoint_v2::MAX_CHECKPOINT_TRANSITIONS_V2
+            .saturating_sub(store.unsealed().len())
+            .min(8);
+        let bank = self.bank();
+        let mut transitions = Vec::new();
+        let mut changed = HashSet::new();
+        let mut token = None;
+        for _ in 0..capacity {
+            if candidate.ingress_count() == frame.ingress_count {
+                break;
+            }
+            let sequence = candidate
+                .ingress_count()
+                .checked_add(1)
+                .ok_or_else(|| std::io::Error::other("ingress sequence exhausted"))?;
+            let (record_key, bump) = northstar_portal::find_ingress_record_v2_pda(
+                &self.portal_program_id,
+                &context,
+                sequence,
+            );
+            let record_account = l1_root
+                .get_account(&record_key)
+                .ok_or_else(|| std::io::Error::other("finalized ingress record is missing"))?;
+            if record_account.owner() != &self.portal_program_id || record_account.executable() {
+                return Err(std::io::Error::other("ingress record owner differs"));
+            }
+            let record: IngressRecordV2 = borsh::from_slice(record_account.data())?;
+            record
+                .validate_next(
+                    context,
+                    candidate.ingress_count(),
+                    candidate.ingress_root(),
+                    crate::continuity_v2::hash_parts,
+                )
+                .map_err(std::io::Error::other)?;
+            if record.bump != bump
+                || record.l1_slot > l1_root.slot()
+                || (sequence == frame.ingress_count && record.root != frame.ingress_root)
+            {
+                return Err(std::io::Error::other("ingress prefix binding differs"));
+            }
+            if matches!(record.payload, IngressPayloadV2::TokenDeposit { .. }) {
+                token = Some(record);
+                break;
+            }
+            let data = if let IngressPayloadV2::Delegation {
+                account,
+                record: source,
+                owner,
+                ..
+            } = record.payload
+            {
+                let key = Pubkey::new_from_array(account);
+                let physical = l1_root
+                    .get_account(&key)
+                    .ok_or_else(|| std::io::Error::other("delegated input is missing"))?;
+                let (expected, expected_bump) =
+                    northstar_portal::find_delegation_record_pda(&self.portal_program_id, &key);
+                let binding = l1_root
+                    .get_account(&expected)
+                    .ok_or_else(|| std::io::Error::other("delegation binding is missing"))?;
+                let parsed: northstar_portal::DelegationRecord = borsh::from_slice(binding.data())?;
+                if source != expected.to_bytes()
+                    || binding.owner() != &self.portal_program_id
+                    || physical.owner() != &self.portal_program_id
+                    || physical.executable()
+                    || !parsed.is_valid()
+                    || parsed.bump != expected_bump
+                    || parsed.grid_id != candidate.identity().grid_id
+                    || parsed.owner_program.to_bytes() != owner
+                    || !l1_root
+                        .get_account(&Pubkey::new_from_array(owner))
+                        .is_some_and(|program| program.executable())
+                {
+                    return Err(std::io::Error::other("delegated input binding differs"));
+                }
+                physical.data().to_vec()
+            } else {
+                vec![]
+            };
+            let before = candidate.opening().map_err(std::io::Error::other)?;
+            candidate
+                .apply_ingress(&record, &data)
+                .map_err(std::io::Error::other)?;
+            changed.insert(Pubkey::new_from_array(record.payload.account()));
+            transitions.push(RecordedTransitionV2 {
+                er_slot: bank.slot(),
+                before,
+                after: candidate.opening().map_err(std::io::Error::other)?,
+                payload: TransitionPayloadV2::Ingress {
+                    record,
+                    account_data: data,
+                },
+                readonly_l1_values: vec![],
+                settlement_effects: vec![],
+            });
+        }
+        if !transitions.is_empty() {
+            store.append_batch(transitions)?;
+            let mut overlay = self.er_account_overlay.write().unwrap();
+            let mut delegated = self.delegated_accounts.write().unwrap();
+            let mut touched = self.touched_accounts.write().unwrap();
+            let mut frozen = self.frozen_accounts.write().unwrap();
+            for key in changed {
+                if let Some(value) = candidate.accounts().get(&key.to_bytes()) {
+                    let account = value.to_account();
+                    bank.store_account(&key, &account);
+                    overlay.insert(key, account);
+                    touched.insert(key);
+                    if matches!(
+                        candidate.origin(key.to_bytes()),
+                        Some(AccountOriginV2::Delegated { .. })
+                    ) {
+                        delegated.insert(key);
+                    }
+                    if candidate.is_frozen(key.to_bytes()) {
+                        frozen.insert(key);
+                    } else {
+                        frozen.remove(&key);
+                    }
+                } else {
+                    bank.store_account(&key, &l1_root.get_account(&key).unwrap_or_default());
+                    overlay.remove(&key);
+                    delegated.remove(&key);
+                    touched.remove(&key);
+                    frozen.remove(&key);
+                }
+            }
+            drop(frozen);
+            drop(touched);
+            drop(delegated);
+            drop(overlay);
+            self.hydrate_delegated_owner_programs_from_l1(l1_root, &bank, "v2 ingress");
+            self.publish_bank_for_rpc();
+        }
+        self._tx_client.set_pending_ingress_v2(
+            frame
+                .ingress_count
+                .saturating_sub(candidate.ingress_count()),
+        );
+        Ok(token)
+    }
+
+    pub fn checkpoint_artifact_v2(&self) -> Option<crate::checkpoint_v2::CheckpointArtifactV2> {
+        self._tx_client.checkpoint_artifact_v2()
+    }
+
     pub fn configure_unsettled_state(&self, dir: PathBuf) {
         self.unsettled_state_store.configure(dir);
     }
@@ -1038,6 +1537,12 @@ impl EphemeralRuntime {
 
     pub(crate) fn set_checkpoint_error(&self, error: Option<&str>) {
         self.sync_status.set_checkpoint_error(error);
+    }
+
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    pub(crate) fn quarantine_checkpoint(&self, error: &str) {
+        self.active.store(false, Ordering::Release);
+        self.sync_status.set_checkpoint_error(Some(error));
     }
 
     /// Sonic: Mark L1 events synced through `slot`.
@@ -1643,6 +2148,24 @@ impl EphemeralRuntime {
         self.delegated_accounts.read().unwrap().clone()
     }
 
+    fn settlement_receipt_key(&self, session: &Pubkey, source: &Pubkey) -> Pubkey {
+        if let Some(store) = self._tx_client.lineage_store_v2() {
+            let store = store.lock().unwrap();
+            let context = store
+                .accepted_state()
+                .identity()
+                .commitment(crate::continuity_v2::hash_parts)
+                .expect("configured checkpoint identity is valid");
+            return northstar_portal::find_deposit_receipt_v2_pda(
+                &self.portal_program_id,
+                &context,
+                source,
+            )
+            .0;
+        }
+        northstar_portal::find_deposit_receipt_pda(&self.portal_program_id, session, source).0
+    }
+
     /// Build validator-settled DepositReceipt balance updates from ER-local
     /// system account balances and successful Portal StartWithdrawal events.
     pub fn settlement_receipt_balances(
@@ -1662,17 +2185,17 @@ impl EphemeralRuntime {
                     && account.data().is_empty()
             })
             .filter_map(|(er_source, account)| {
-                let (receipt_pda, _) = northstar_portal::find_deposit_receipt_pda(
-                    &self.portal_program_id,
-                    &session_pda,
-                    er_source,
-                );
+                let receipt_pda = self.settlement_receipt_key(&session_pda, er_source);
                 let receipt_account = self.l1_anchor_bank.get_account(&receipt_pda)?;
-                let Some(crate::portal_state::PortalAccount::DepositReceipt(receipt)) =
-                    crate::portal_state::try_parse_raw_portal_account(receipt_account.data())
-                else {
+                if receipt_account.owner() != &self.portal_program_id {
                     return None;
-                };
+                }
+                let receipt =
+                    northstar_portal::continuity::parse_deposit_receipt(receipt_account.data())
+                        .ok()?;
+                if receipt.session != session_pda || receipt.recipient != *er_source {
+                    return None;
+                }
                 let escrow_balance = receipt_account.lamports().saturating_sub(
                     self.l1_anchor_bank
                         .get_minimum_balance_for_rent_exemption(receipt_account.data().len()),
@@ -1743,6 +2266,7 @@ impl EphemeralRuntime {
                 let payout_lamports = next_withdrawn.saturating_sub(current_withdrawn);
                 if payout_lamports > 0 {
                     receipt_balances.push(ReceiptBalanceSettlement {
+                        receipt: self.settlement_receipt_key(&session_pda, &er_source),
                         er_source,
                         l1_recipient: event.l1_recipient,
                         balance: er_balance,
@@ -2076,6 +2600,9 @@ impl EphemeralRuntime {
         l1_bank: Option<&Bank>,
     ) {
         let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
+        if self._tx_client.lineage_store_v2().is_some() {
+            return;
+        }
         if let Some(existing) = self
             .er_account_overlay
             .read()
@@ -2378,6 +2905,9 @@ impl EphemeralRuntime {
     /// when a FeeDeposited event is detected on L1.
     pub fn credit_deposit(&self, depositor: &Pubkey, lamports: u64) {
         let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
+        if self._tx_client.lineage_store_v2().is_some() {
+            return;
+        }
         let bank = self.bank();
         let was_delegated = self.delegated_accounts.read().unwrap().contains(depositor);
         let was_touched = self.touched_accounts.read().unwrap().contains(depositor);
@@ -2450,6 +2980,9 @@ impl Drop for EphemeralRuntime {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    mod continuity_v2;
+
     use {
         super::*,
         crate::ephemeral_tx_client::TransactionClient,
@@ -4377,6 +4910,12 @@ mod tests {
         );
 
         runtime.shutdown();
+    }
+
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    #[test]
+    fn regression_checkpoint_lineage_survives_l1_delegation_materialization() {
+        continuity_v2::assert_late_delegation_checkpoint_continuity();
     }
 
     #[test]

@@ -16,8 +16,9 @@ use {
     },
 };
 
-const FORMAT_VERSION: u16 = 2;
+const FORMAT_VERSION: u16 = 3;
 const MAX_CAPSULE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SETTLEMENT_PLAN_BYTES: usize = 1024 * 1024;
 const CAPSULE_FILE: &str = "lineage-v2.borsh";
 const MARKER_FILE: &str = "established-v2";
 const LOCK_FILE: &str = "lineage-v2.lock";
@@ -39,6 +40,7 @@ pub struct SealedCheckpointV2 {
     pub checkpoint_hash: [u8; 32],
     pub base: CommittedStateV2,
     pub transitions: Vec<RecordedTransitionV2>,
+    pub settlement_plan: Option<Vec<u8>>,
     pub accepted: bool,
 }
 
@@ -99,6 +101,9 @@ impl LineageCapsuleV2 {
             {
                 return Err(invalid("sealed artifact differs from retained transitions"));
             }
+            if let Some(plan) = &sealed.settlement_plan {
+                decode_settlement_plan(plan, sealed.er_slot)?;
+            }
             let mut result = sealed.base.clone();
             for transition in &sealed.transitions {
                 transition.apply(&mut result).map_err(invalid)?;
@@ -144,6 +149,21 @@ impl LineageCapsuleV2 {
         }
         Ok(state)
     }
+}
+
+fn decode_settlement_plan(
+    bytes: &[u8],
+    er_slot: u64,
+) -> io::Result<crate::settlement::SettlementPlan> {
+    if bytes.is_empty() || bytes.len() > MAX_SETTLEMENT_PLAN_BYTES {
+        return Err(invalid("settlement plan exceeds its encoding bound"));
+    }
+    let durable: crate::DurableSettlementPlan = borsh::from_slice(bytes)?;
+    let plan = crate::settlement::SettlementPlan::from(durable);
+    if plan.er_slot != er_slot || plan.recomputed_checksum() != plan.checksum {
+        return Err(invalid("settlement plan checksum or slot differs"));
+    }
+    Ok(plan)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -454,9 +474,54 @@ impl CheckpointLineageStoreV2 {
             artifact,
             base: next.accepted_state.clone(),
             transitions: std::mem::take(&mut next.unsealed),
+            settlement_plan: None,
             accepted: false,
         });
         self.commit(next)
+    }
+
+    pub fn bind_settlement_plan(
+        &mut self,
+        plan: &crate::settlement::SettlementPlan,
+    ) -> io::Result<()> {
+        let sealed = self
+            .capsule
+            .sealed
+            .as_ref()
+            .ok_or_else(|| invalid("settlement plan has no sealed checkpoint"))?;
+        if plan.has_unsupported_changes() || plan.er_slot != sealed.er_slot {
+            return Err(invalid(
+                "settlement plan differs from the sealed checkpoint",
+            ));
+        }
+        let bytes = borsh::to_vec(&crate::DurableSettlementPlan::from(plan))?;
+        decode_settlement_plan(&bytes, sealed.er_slot)?;
+        if let Some(existing) = &sealed.settlement_plan {
+            if existing != &bytes {
+                return Err(invalid("established settlement plan changed"));
+            }
+            return Ok(());
+        }
+        let mut next = self.capsule.clone();
+        next.sealed
+            .as_mut()
+            .ok_or_else(|| invalid("sealed checkpoint missing"))?
+            .settlement_plan = Some(bytes);
+        self.commit(next)
+    }
+
+    pub fn settlement_plan(&self) -> io::Result<Option<crate::settlement::SettlementPlan>> {
+        self.working_state()?;
+        self.capsule
+            .sealed
+            .as_ref()
+            .and_then(|sealed| {
+                sealed
+                    .settlement_plan
+                    .as_ref()
+                    .map(|bytes| decode_settlement_plan(bytes, sealed.er_slot))
+            })
+            .transpose()
     }
 
     pub fn record_accepted(&mut self, head: L1CheckpointHeadV2) -> io::Result<()> {

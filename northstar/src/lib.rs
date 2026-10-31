@@ -32,6 +32,8 @@ pub mod ephemeral_tpu;
 pub mod ephemeral_tx_client;
 pub mod lineage_l1_v2;
 pub mod lineage_store_v2;
+#[cfg(feature = "checkpoint-continuity-v2")]
+mod manager_continuity_v2;
 pub mod portal_state;
 #[cfg(feature = "proof-coordinator")]
 pub mod proof_coordinator;
@@ -246,6 +248,7 @@ struct DurableAccountLamportsSettlement {
 
 #[derive(borsh::BorshDeserialize, borsh::BorshSerialize)]
 struct DurableReceiptBalanceSettlement {
+    receipt: [u8; 32],
     er_source: [u8; 32],
     l1_recipient: [u8; 32],
     balance: u64,
@@ -302,6 +305,7 @@ impl From<&SettlementPlan> for DurableSettlementPlan {
                 .receipt_balances
                 .iter()
                 .map(|receipt| DurableReceiptBalanceSettlement {
+                    receipt: receipt.receipt.to_bytes(),
                     er_source: receipt.er_source.to_bytes(),
                     l1_recipient: receipt.l1_recipient.to_bytes(),
                     balance: receipt.balance,
@@ -366,6 +370,7 @@ impl From<DurableSettlementPlan> for SettlementPlan {
                 .receipt_balances
                 .into_iter()
                 .map(|receipt| settlement::ReceiptBalanceSettlement {
+                    receipt: Pubkey::new_from_array(receipt.receipt),
                     er_source: Pubkey::new_from_array(receipt.er_source),
                     l1_recipient: Pubkey::new_from_array(receipt.l1_recipient),
                     balance: receipt.balance,
@@ -500,6 +505,11 @@ impl Manager {
         self.runtime.as_ref().map(|r| r.session_pda())
     }
 
+    pub fn process_finalized_l1_inputs(&self, _bank: &Bank) {
+        #[cfg(feature = "checkpoint-continuity-v2")]
+        self.process_finalized_continuity_inputs(_bank);
+    }
+
     /// Compute current ER-vs-L1 state diff/hash, if runtime exists.
     pub fn state_diff_from_l1(&self) -> Option<ErStateDiff> {
         self.runtime
@@ -570,8 +580,14 @@ impl Manager {
         let session_pda = (*runtime.session_pda().read().unwrap())?;
         let diff = runtime.state_diff_from_l1();
         let checkpoint = runtime.checkpoint_artifact_v1();
-        let er_slot = checkpoint.as_ref().map_or_else(
-            || runtime.bank().slot(),
+        let continuity = runtime.checkpoint_artifact_v2();
+        let er_slot = continuity.as_ref().map_or_else(
+            || {
+                checkpoint.as_ref().map_or_else(
+                    || runtime.bank().slot(),
+                    |artifact| artifact.checkpoint.er_slot,
+                )
+            },
             |artifact| artifact.checkpoint.er_slot,
         );
         let receipt_balances = runtime.settlement_receipt_balances(session_pda);
@@ -583,16 +599,18 @@ impl Manager {
             receipt_balances,
         )
         .or_else(|| {
-            (!token_withdrawals.is_empty() || checkpoint.is_some()).then(|| SettlementPlan {
-                er_slot,
-                checksum: [0; 32],
-                chunks: vec![],
-                owner_changes: vec![],
-                lamport_changes: vec![],
-                receipt_balances: vec![],
-                token_withdrawals: vec![],
-                unsupported_changes: vec![],
-            })
+            (!token_withdrawals.is_empty() || checkpoint.is_some() || continuity.is_some()).then(
+                || SettlementPlan {
+                    er_slot,
+                    checksum: [0; 32],
+                    chunks: vec![],
+                    owner_changes: vec![],
+                    lamport_changes: vec![],
+                    receipt_balances: vec![],
+                    token_withdrawals: vec![],
+                    unsupported_changes: vec![],
+                },
+            )
         })?;
         plan.token_withdrawals = token_withdrawals;
         plan.checksum = plan.recomputed_checksum();
@@ -635,6 +653,10 @@ impl Manager {
         recent_blockhash: Hash,
     ) -> Option<(u64, [u8; 32], Vec<Transaction>)> {
         let runtime = self.runtime.as_ref()?;
+        #[cfg(feature = "checkpoint-continuity-v2")]
+        if runtime.lineage_store_v2().is_some() {
+            return self.continuity_settlement_transactions_if_due(l1_bank, recent_blockhash);
+        }
         runtime.process_token_deposits();
         let session_pda = (*runtime.session_pda().read().unwrap())?;
         let session_account = l1_bank.get_account(&session_pda)?;
@@ -1982,6 +2004,23 @@ impl Manager {
             warn!("Cannot activate session: event settings do not match Session account");
             return;
         }
+        #[cfg(feature = "checkpoint-continuity-v2")]
+        if account
+            .data()
+            .starts_with(&northstar_portal::SessionV2::DISCRIMINATOR)
+        {
+            if let Err(error) = self.prepare_continuity_session(
+                root_bank,
+                session_pda,
+                lineage_store_v2::StartupModeV2::InitializeNew,
+            ) {
+                if let Some(runtime) = &self.runtime {
+                    runtime.quarantine_checkpoint("checkpoint_lineage_recovery_failed");
+                }
+                warn!("Cannot activate continuity session: {error}");
+            }
+            return;
+        }
         let Some(recovered) = self.prepare_session(root_bank, session_pda, &session) else {
             return;
         };
@@ -2000,6 +2039,11 @@ impl Manager {
     pub fn deactivate_session(&mut self) {
         if let Some(runtime) = &mut self.runtime {
             runtime.deactivate();
+            #[cfg(feature = "checkpoint-continuity-v2")]
+            if runtime.lineage_store_v2().is_some() {
+                info!("Continuity session deactivated with durable lineage retained");
+                return;
+            }
             runtime.clear_unsettled_state();
             info!("Ephemeral session deactivated and persisted state cleared");
         } else {
@@ -2122,6 +2166,30 @@ impl Manager {
         let Some((session_pda, session)) = self.active_l1_session(&root_bank) else {
             return false;
         };
+        #[cfg(feature = "checkpoint-continuity-v2")]
+        if root_bank.get_account(&session_pda).is_some_and(|account| {
+            account
+                .data()
+                .starts_with(&northstar_portal::SessionV2::DISCRIMINATOR)
+        }) {
+            return match self.prepare_continuity_session(
+                root_bank.clone(),
+                session_pda,
+                lineage_store_v2::StartupModeV2::Resume,
+            ) {
+                Ok(()) => {
+                    self.mark_synced_through(root_bank.slot());
+                    true
+                }
+                Err(error) => {
+                    if let Some(runtime) = &self.runtime {
+                        runtime.set_checkpoint_error(Some("checkpoint_lineage_recovery_failed"));
+                    }
+                    warn!("Cannot resume continuity session: {error}");
+                    false
+                }
+            };
+        }
         let delegations = self.l1_delegations_for_grid(&root_bank, session.grid_id);
         if session.settlement_status == SettlementStatus::InProgress {
             warn!(
@@ -2347,6 +2415,12 @@ mod portal_e2e_tests {
     /// Set up a test bank with portal program in genesis.
     /// Returns (bank, bank_forks, program_id, mint_keypair).
     fn setup_bank_with_portal() -> (Arc<Bank>, Arc<RwLock<BankForks>>, Pubkey, Keypair) {
+        setup_bank_with_portal_id(Pubkey::new_unique())
+    }
+
+    pub(crate) fn setup_bank_with_portal_id(
+        program_id: Pubkey,
+    ) -> (Arc<Bank>, Arc<RwLock<BankForks>>, Pubkey, Keypair) {
         let GenesisConfigInfo {
             mut genesis_config,
             mint_keypair,
@@ -2354,7 +2428,6 @@ mod portal_e2e_tests {
         } = create_genesis_config(1_000_000_000_000);
         genesis_config.rent = Rent::default();
 
-        let program_id = Pubkey::new_unique();
         let program_data = std::env::var_os("BPF_OUT_DIR")
             .map(|directory| {
                 std::fs::read(std::path::PathBuf::from(directory).join("northstar_portal.so"))
@@ -3809,6 +3882,12 @@ mod portal_e2e_tests {
             &HashSet::new(),
             7,
             vec![crate::settlement::ReceiptBalanceSettlement {
+                receipt: northstar_portal::find_deposit_receipt_pda(
+                    &program_id,
+                    &session_pda,
+                    &owner_pubkey,
+                )
+                .0,
                 er_source: owner_pubkey,
                 l1_recipient: owner_pubkey,
                 balance: deposit_amount,
@@ -3851,6 +3930,12 @@ mod portal_e2e_tests {
             &HashSet::new(),
             8,
             vec![crate::settlement::ReceiptBalanceSettlement {
+                receipt: northstar_portal::find_deposit_receipt_pda(
+                    &program_id,
+                    &session_pda,
+                    &owner_pubkey,
+                )
+                .0,
                 er_source: owner_pubkey,
                 l1_recipient,
                 balance: deposit_amount - withdraw_amount,
@@ -5032,6 +5117,12 @@ mod portal_e2e_tests {
             &delegated_accounts,
             7,
             vec![crate::settlement::ReceiptBalanceSettlement {
+                receipt: northstar_portal::find_deposit_receipt_pda(
+                    &program_id,
+                    &session_pda,
+                    &owner_pubkey,
+                )
+                .0,
                 er_source: owner_pubkey,
                 l1_recipient: owner_pubkey,
                 balance: settled_receipt_balance,

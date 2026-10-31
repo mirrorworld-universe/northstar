@@ -22,6 +22,13 @@ pub enum PortalAccount {
 }
 
 pub fn try_parse_raw_portal_account(data: &[u8]) -> Option<PortalAccount> {
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    if data.starts_with(&northstar_portal::SessionV2::DISCRIMINATOR) {
+        let frame: northstar_portal::SessionV2 = borsh::from_slice(data).ok()?;
+        return frame
+            .is_valid()
+            .then_some(PortalAccount::Session(frame.base));
+    }
     if data.starts_with(&Session::DISCRIMINATOR) {
         borsh::from_slice::<Session>(data)
             .ok()
