@@ -53,6 +53,21 @@ pub fn find_deposit_receipt_v2_pda(
     )
 }
 
+pub fn find_session_bridge_v2_pda(
+    program_id: &Pubkey,
+    session_context: &[u8; 32],
+    mint: &Pubkey,
+) -> (Pubkey, u8) {
+    find_program_address(
+        &[
+            crate::SessionBridgeV2::SEED_PREFIX,
+            session_context,
+            mint.as_ref(),
+        ],
+        program_id,
+    )
+}
+
 pub fn find_checkpoint_binding_v2_pda(program_id: &Pubkey, checkpoint: &Pubkey) -> (Pubkey, u8) {
     find_program_address(
         &[crate::CheckpointBindingV2::SEED_PREFIX, checkpoint.as_ref()],

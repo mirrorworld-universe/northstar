@@ -61,7 +61,7 @@ fn initialize_pda_account(
 #[cfg(feature = "checkpoint-continuity-v2")]
 pub use continuity::{
     process_commit_checkpoint_v2, process_delegate_v2, process_deposit_fee_v2,
-    process_open_session_v2, process_propose_checkpoint_v2,
+    process_open_session_v2, process_propose_checkpoint_v2, process_register_session_bridge_v2,
 };
 #[cfg(feature = "zk-verifier-prototype")]
 pub use verifier::process_verify_er_step_proof_v1;

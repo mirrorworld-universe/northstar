@@ -2374,6 +2374,8 @@ impl Manager {
 mod portal_e2e_tests {
     #[cfg(feature = "checkpoint-continuity-v2")]
     mod continuity_v2;
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    mod token_ingress_v2;
 
     use {
         super::*,

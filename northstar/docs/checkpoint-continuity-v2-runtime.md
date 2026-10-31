@@ -21,6 +21,10 @@ transitions, and only then publishes the resulting ER accounts. Legacy event
 notifications are discovery hints; they cannot credit or hydrate the v2 mutable
 state directly.
 
+Bridge registrations are immutable, session-context-bound discovery metadata and
+require the session authority's signature. Registration does not itself authorize
+or apply a token credit.
+
 SVM execution records account pre/post values, execution results, readonly input
 observations, replay data, and supported withdrawal effects at the pre-commit
 boundary. A failed persistence operation cancels SVM commit and quarantines the

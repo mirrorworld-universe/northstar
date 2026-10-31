@@ -43,6 +43,7 @@ pub enum PortalInstruction {
     DepositFeeV2 { lamports: u64 },
     ProposeCheckpointV2(ProposeCheckpointV2),
     CommitCheckpointV2(CommitCheckpoint),
+    RegisterSessionBridgeV2(RegisterSessionBridge),
 }
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
 pub struct OpenSession {

@@ -18,7 +18,9 @@ use {
     pinocchio::{error::ProgramError, AccountView as AccountInfo, ProgramResult},
 };
 pub use {
-    continuity::{CheckpointBindingV2, DepositReceiptV2, SessionEpochV2, SessionV2},
+    continuity::{
+        CheckpointBindingV2, DepositReceiptV2, SessionBridgeV2, SessionEpochV2, SessionV2,
+    },
     error::*,
     events::*,
     instruction::*,
@@ -65,6 +67,18 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
 fn deserialize_args<T: BorshDeserialize>(data: &[u8]) -> Result<T, ProgramError> {
     let mut data = data;
     T::deserialize(&mut data).map_err(|_| ProgramError::InvalidInstructionData)
+}
+
+#[cfg(feature = "checkpoint-continuity-v2")]
+#[inline(never)]
+fn deserialize_args_exact<T: BorshDeserialize>(data: &[u8]) -> Result<T, ProgramError> {
+    let mut remaining = data;
+    let args = T::deserialize(&mut remaining).map_err(|_| ProgramError::InvalidInstructionData)?;
+    // Borsh's trailing-byte error allocates; this SBF program has no allocator.
+    if !remaining.is_empty() {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    Ok(args)
 }
 
 #[inline(always)]
@@ -174,22 +188,26 @@ fn process_instruction(
         Ok((30, payload)) => deserialize_args(payload)
             .and_then(|proof| instructions::process_verify_er_step_proof_v1(accounts, proof)),
         #[cfg(feature = "checkpoint-continuity-v2")]
-        Ok((31, payload)) => deserialize_args(payload)
+        Ok((31, payload)) => deserialize_args_exact(payload)
             .and_then(|args| instructions::process_open_session_v2(program_id, accounts, args)),
         #[cfg(feature = "checkpoint-continuity-v2")]
-        Ok((32, payload)) => deserialize_args::<u64>(payload)
+        Ok((32, payload)) => deserialize_args_exact::<u64>(payload)
             .and_then(|grid| instructions::process_delegate_v2(program_id, accounts, grid)),
         #[cfg(feature = "checkpoint-continuity-v2")]
-        Ok((33, payload)) => deserialize_args::<u64>(payload).and_then(|lamports| {
+        Ok((33, payload)) => deserialize_args_exact::<u64>(payload).and_then(|lamports| {
             instructions::process_deposit_fee_v2(program_id, accounts, lamports)
         }),
         #[cfg(feature = "checkpoint-continuity-v2")]
-        Ok((34, payload)) => deserialize_args(payload).and_then(|args| {
+        Ok((34, payload)) => deserialize_args_exact(payload).and_then(|args| {
             instructions::process_propose_checkpoint_v2(program_id, accounts, args)
         }),
         #[cfg(feature = "checkpoint-continuity-v2")]
-        Ok((35, payload)) => deserialize_args(payload).and_then(|args| {
+        Ok((35, payload)) => deserialize_args_exact(payload).and_then(|args| {
             instructions::process_commit_checkpoint_v2(program_id, accounts, args)
+        }),
+        #[cfg(feature = "checkpoint-continuity-v2")]
+        Ok((36, payload)) => deserialize_args_exact(payload).and_then(|args| {
+            instructions::process_register_session_bridge_v2(program_id, accounts, args)
         }),
         Ok((_, _)) | Err(_) => Err(ProgramError::InvalidInstructionData),
     }

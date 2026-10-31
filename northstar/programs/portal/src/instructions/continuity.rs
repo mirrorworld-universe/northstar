@@ -1,3 +1,5 @@
+mod bridge;
+pub use bridge::process_register_session_bridge_v2;
 use {
     super::{
         initialize_pda_account,
