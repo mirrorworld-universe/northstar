@@ -5435,6 +5435,7 @@ version = "0.1.0"
 dependencies = [
  "borsh",
  "northstar-portal",
+ "northstar-zk-types",
  "pinocchio 0.11.2",
  "pinocchio-system",
  "pinocchio-token",

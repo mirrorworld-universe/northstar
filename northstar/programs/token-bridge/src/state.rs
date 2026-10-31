@@ -1,4 +1,7 @@
 use borsh::{BorshDeserialize, BorshSerialize};
+pub use northstar_zk_types::token_bridge::{
+    ErTokenAccount, TokenDepositProgress, TokenDepositReceipt,
+};
 
 pub fn account_size<T: BorshSerialize + ?Sized>(account: &T) -> usize {
     borsh::object_length(account).expect("account serialization length overflow")
@@ -25,60 +28,8 @@ impl TokenVault {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub struct ErTokenAccount {
-    pub discriminator: u8,
-    pub session_bridge: [u8; 32],
-    pub owner: [u8; 32],
-    pub mint: [u8; 32],
-    pub amount: u64,
-    pub bump: u8,
-}
-
-impl ErTokenAccount {
-    pub const DISCRIMINATOR: u8 = 2;
-    pub const SEED_PREFIX: &'static [u8] = b"er_token";
-
-    pub fn is_valid(&self) -> bool {
-        self.discriminator == Self::DISCRIMINATOR
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub struct TokenDepositReceipt {
-    pub discriminator: u8,
-    pub session_bridge: [u8; 32],
-    pub er_token_account: [u8; 32],
-    pub balance: u64,
-    pub withdrawn: u64,
-    pub bump: u8,
-}
-
-impl TokenDepositReceipt {
-    pub const DISCRIMINATOR: u8 = 3;
-    pub const SEED_PREFIX: &'static [u8] = b"token_deposit";
-
-    pub fn is_valid(&self) -> bool {
-        self.discriminator == Self::DISCRIMINATOR
-    }
-}
-
 pub struct BridgeBuffer;
 
 impl BridgeBuffer {
     pub const SEED_PREFIX: &'static [u8] = b"northstar-token-buffer";
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub struct TokenDepositProgress {
-    pub discriminator: u8,
-    pub balance: u64,
-    pub bump: u8,
-}
-
-impl TokenDepositProgress {
-    pub const ORIGIN_DISCRIMINATOR: u8 = 4;
-    pub const CURSOR_DISCRIMINATOR: u8 = 5;
-    pub const ORIGIN_SEED: &'static [u8] = b"token_deposit_origin";
-    pub const CURSOR_SEED: &'static [u8] = b"token_deposit_cursor";
 }
