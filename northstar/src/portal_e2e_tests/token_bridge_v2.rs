@@ -6,20 +6,20 @@ use {
     solana_program_pack::Pack,
 };
 
-struct TokenWorldV2 {
-    bank: Arc<Bank>,
+pub(crate) struct TokenWorldV2 {
+    pub(crate) bank: Arc<Bank>,
     _forks: Arc<RwLock<BankForks>>,
-    payer: Keypair,
-    portal: Pubkey,
-    bridge: Pubkey,
-    session: Pubkey,
-    context: [u8; 32],
+    pub(crate) payer: Arc<Keypair>,
+    pub(crate) portal: Pubkey,
+    pub(crate) bridge: Pubkey,
+    pub(crate) session: Pubkey,
+    pub(crate) context: [u8; 32],
     mint: Pubkey,
     registry: Pubkey,
     vault: Pubkey,
     vault_token: Pubkey,
-    er: Pubkey,
-    receipt: Pubkey,
+    pub(crate) er: Pubkey,
+    pub(crate) receipt: Pubkey,
     origin: Pubkey,
     delegation: Pubkey,
     first_ingress: Pubkey,
@@ -27,8 +27,12 @@ struct TokenWorldV2 {
 }
 
 fn delegated_world() -> TokenWorldV2 {
+    delegated_token_world(Pubkey::new_unique(), false)
+}
+
+pub(crate) fn delegated_token_world(portal: Pubkey, bootstrap_fee_payer: bool) -> TokenWorldV2 {
     setup();
-    let (bank, _forks, portal, payer) = setup_bank_with_portal();
+    let (bank, _forks, portal, payer) = setup_bank_with_portal_id(portal);
     let payer_key = payer.pubkey();
     let bridge = northstar_token_bridge::id();
     let directory = std::env::var_os("TOKEN_BRIDGE_BPF_OUT_DIR")
@@ -92,6 +96,36 @@ fn delegated_world() -> TokenWorldV2 {
         .identity(&portal, &session)
         .commitment(hash_parts)
         .unwrap();
+    let delegation_sequence = if bootstrap_fee_payer {
+        let receipt =
+            northstar_portal::find_deposit_receipt_v2_pda(&portal, &context, &payer_key).0;
+        let ingress = northstar_portal::find_ingress_record_v2_pda(&portal, &context, 1).0;
+        let deposit = Instruction {
+            program_id: portal,
+            accounts: vec![
+                AccountMeta::new(payer_key, true),
+                AccountMeta::new(session, false),
+                AccountMeta::new(receipt, false),
+                AccountMeta::new_readonly(payer_key, false),
+                AccountMeta::new_readonly(system_program::id(), false),
+                AccountMeta::new(ingress, false),
+            ],
+            data: borsh::to_vec(&PortalInstruction::DepositFeeV2 {
+                lamports: 100_000_000,
+            })
+            .unwrap(),
+        };
+        bank.process_transaction(&Transaction::new_signed_with_payer(
+            &[deposit],
+            Some(&payer_key),
+            &[&payer],
+            bank.last_blockhash(),
+        ))
+        .unwrap();
+        2
+    } else {
+        1
+    };
     let mint = Keypair::new();
     let token = spl_token_interface::id();
     let create_mint = solana_system_interface::instruction::create_account(
@@ -222,7 +256,8 @@ fn delegated_world() -> TokenWorldV2 {
         &bridge,
     )
     .0;
-    let ingress = northstar_portal::find_ingress_record_v2_pda(&portal, &context, 1).0;
+    let ingress =
+        northstar_portal::find_ingress_record_v2_pda(&portal, &context, delegation_sequence).0;
     let delegate = Instruction {
         program_id: bridge,
         accounts: vec![
@@ -253,7 +288,7 @@ fn delegated_world() -> TokenWorldV2 {
     TokenWorldV2 {
         bank,
         _forks,
-        payer,
+        payer: Arc::new(payer),
         portal,
         bridge,
         session,
@@ -304,12 +339,12 @@ fn regression_v2_bridge_cpi_preserves_owner_authorized_delegation() {
 }
 
 impl TokenWorldV2 {
-    fn send(
+    pub(crate) fn send(
         &self,
         instructions: &[Instruction],
         extra: &[&Keypair],
     ) -> std::result::Result<(), solana_transaction::TransactionError> {
-        let mut signers = vec![&self.payer];
+        let mut signers = vec![self.payer.as_ref()];
         signers.extend_from_slice(extra);
         self.bank
             .process_transaction(&Transaction::new_signed_with_payer(
@@ -320,7 +355,7 @@ impl TokenWorldV2 {
             ))
     }
 
-    fn funded_tokens(&self, amount: u64) -> Pubkey {
+    pub(crate) fn funded_tokens(&self, amount: u64) -> Pubkey {
         let account = Keypair::new();
         let token = spl_token_interface::id();
         let create = solana_system_interface::instruction::create_account(
@@ -381,7 +416,7 @@ impl TokenWorldV2 {
         }
     }
 
-    fn deposit(&self, source: Pubkey, amount: u64, sequence: u64) -> Instruction {
+    pub(crate) fn deposit(&self, source: Pubkey, amount: u64, sequence: u64) -> Instruction {
         let request = northstar_portal::find_undelegation_request_pda(&self.portal, &self.er).0;
         let ingress =
             northstar_portal::find_ingress_record_v2_pda(&self.portal, &self.context, sequence).0;

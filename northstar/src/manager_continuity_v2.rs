@@ -391,15 +391,13 @@ impl Manager {
             return;
         }
         let result = runtime.reconcile_checkpoint_v2(bank).and_then(|_| {
-            runtime.process_l1_ingress_v2(bank).and_then(|token| {
-                if token.is_some() {
-                    Err(io::Error::other(
-                        "authenticated token ingress requires its execution adapter",
-                    ))
-                } else {
-                    Ok(())
-                }
-            })
+            for _ in 0..crate::checkpoint_v2::MAX_CHECKPOINT_TRANSITIONS_V2 {
+                let Some(record) = runtime.process_l1_ingress_v2(bank)? else {
+                    return Ok(());
+                };
+                runtime.execute_token_ingress_v2(bank, record)?;
+            }
+            Ok(())
         });
         if let Err(error) = result {
             runtime.quarantine_checkpoint("checkpoint_lineage_recovery_failed");

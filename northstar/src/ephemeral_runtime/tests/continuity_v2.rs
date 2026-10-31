@@ -148,6 +148,325 @@ impl Fixture {
 }
 
 #[test]
+fn regression_v2_manager_executes_cumulative_token_inputs_before_user_transactions() {
+    let mut world =
+        crate::portal_e2e_tests::token_bridge_v2::delegated_token_world(PORTAL_PROGRAM_ID, true);
+    let source = world.funded_tokens(1_000);
+    world.send(&[world.deposit(source, 42, 3)], &[]).unwrap();
+    world.send(&[world.deposit(source, 8, 4)], &[]).unwrap();
+    world.bank.freeze();
+    let directory = tempfile::tempdir().unwrap();
+    let config = crate::ManagerConfig {
+        portal_program_id: PORTAL_PROGRAM_ID,
+        manager_account: world.payer.clone(),
+        checkpoint_plan_dir: Some(directory.path().join("plans")),
+    };
+    let mut manager = crate::Manager::new(config.clone());
+    manager
+        .init_runtime(
+            world.bank.clone(),
+            create_test_cluster_info(),
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+        )
+        .unwrap();
+    manager.activate_session(world.bank.clone(), world.session, 0, 10_000, 0);
+    manager.process_finalized_l1_inputs(&world.bank);
+    let active = manager.has_active_runtime();
+    let runtime = manager.runtime.as_ref().unwrap();
+    let amount = runtime
+        .bank()
+        .get_account(&world.er)
+        .and_then(|value| {
+            borsh::from_slice::<northstar_token_bridge::state::ErTokenAccount>(value.data()).ok()
+        })
+        .map(|value| value.amount);
+    let store = runtime._tx_client.lineage_store_v2().unwrap();
+    let (prefix, token_executions) = {
+        let store = store.lock().unwrap();
+        (
+            store.working_state().unwrap().ingress_count(),
+            store
+                .unsealed()
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        entry.payload,
+                        crate::continuity_v2::TransitionPayloadV2::TokenIngress { .. }
+                    )
+                })
+                .count(),
+        )
+    };
+    drop(store);
+    manager.shutdown_runtime();
+    assert_eq!(
+        amount,
+        Some(50),
+        "authenticated token inputs must execute the real bridge program, not remain pending"
+    );
+    assert!(active);
+    assert_eq!(prefix, 4);
+    assert_eq!(token_executions, 2);
+    assert_eq!(
+        world.bank.get_account(&world.er).unwrap().owner(),
+        &PORTAL_PROGRAM_ID
+    );
+    let l1: northstar_token_bridge::state::ErTokenAccount =
+        borsh::from_slice(world.bank.get_account(&world.er).unwrap().data()).unwrap();
+    assert_eq!(l1.amount, 0);
+    let mut manager = crate::Manager::new(config);
+    manager
+        .init_runtime(
+            world.bank.clone(),
+            create_test_cluster_info(),
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+        )
+        .unwrap();
+    let resumed = manager.resume_active_session_from_l1(world.bank.clone());
+    manager.process_finalized_l1_inputs(&world.bank);
+    let restored = manager
+        .runtime
+        .as_ref()
+        .and_then(|runtime| runtime.bank().get_account(&world.er))
+        .and_then(|value| {
+            borsh::from_slice::<northstar_token_bridge::state::ErTokenAccount>(value.data()).ok()
+        })
+        .map(|value| value.amount);
+    let retained = manager
+        .runtime
+        .as_ref()
+        .and_then(|runtime| runtime._tx_client.lineage_store_v2())
+        .map(|store| {
+            let store = store.lock().unwrap();
+            (
+                store.working_state().unwrap().ingress_count(),
+                store.unsealed().len(),
+            )
+        });
+    world.bank = Arc::new(Bank::new_from_parent(
+        world.bank.clone(),
+        SlotLeader::default(),
+        world.bank.slot() + 1,
+    ));
+    world.send(&[world.deposit(source, 7, 5)], &[]).unwrap();
+    world.bank.freeze();
+    manager.reanchor_to_l1_parent(world.bank.clone());
+    manager.process_finalized_l1_inputs(&world.bank);
+    let topped_up = manager
+        .runtime
+        .as_ref()
+        .and_then(|runtime| runtime.bank().get_account(&world.er))
+        .and_then(|value| {
+            borsh::from_slice::<northstar_token_bridge::state::ErTokenAccount>(value.data()).ok()
+        })
+        .map(|value| value.amount);
+    let final_prefix = manager
+        .runtime
+        .as_ref()
+        .and_then(|runtime| runtime._tx_client.lineage_store_v2())
+        .map(|store| {
+            store
+                .lock()
+                .unwrap()
+                .working_state()
+                .unwrap()
+                .ingress_count()
+        });
+    manager.shutdown_runtime();
+    assert!(resumed);
+    assert_eq!(restored, Some(50));
+    assert_eq!(topped_up, Some(57));
+    assert_eq!(final_prefix, Some(5));
+    assert_eq!(
+        retained,
+        Some((4, 4)),
+        "restart must not execute retained input records twice"
+    );
+}
+
+#[test]
+fn regression_v2_token_input_persistence_failure_cancels_svm_credit() {
+    let world =
+        crate::portal_e2e_tests::token_bridge_v2::delegated_token_world(PORTAL_PROGRAM_ID, true);
+    let source = world.funded_tokens(1_000);
+    world.send(&[world.deposit(source, 42, 3)], &[]).unwrap();
+    world.bank.freeze();
+    let directory = tempfile::tempdir().unwrap();
+    let plans = directory.path().join("plans");
+    let mut manager = crate::Manager::new(crate::ManagerConfig {
+        portal_program_id: PORTAL_PROGRAM_ID,
+        manager_account: world.payer.clone(),
+        checkpoint_plan_dir: Some(plans.clone()),
+    });
+    manager
+        .init_runtime(
+            world.bank.clone(),
+            create_test_cluster_info(),
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+        )
+        .unwrap();
+    manager.activate_session(world.bank.clone(), world.session, 0, 10_000, 0);
+    let runtime = manager.runtime.as_ref().unwrap();
+    let record = runtime.process_l1_ingress_v2(&world.bank).unwrap().unwrap();
+    let before = runtime.bank().get_account(&world.er).unwrap();
+    let payer_before = runtime.bank().get_account(&world.payer.pubkey()).unwrap();
+    let cursor = Pubkey::find_program_address(
+        &[
+            northstar_token_bridge::state::TokenDepositProgress::CURSOR_SEED,
+            world.er.as_ref(),
+            &0u64.to_le_bytes(),
+        ],
+        &world.bridge,
+    )
+    .0;
+    let lineage = plans
+        .join("lineage-v2")
+        .join(solana_hash::Hash::new_from_array(world.context).to_string());
+    let saved = directory.path().join("retained-lineage");
+    std::fs::rename(&lineage, &saved).unwrap();
+    std::fs::write(&lineage, b"unavailable directory").unwrap();
+    let failed = runtime
+        .execute_token_ingress_v2(&world.bank, record)
+        .is_err();
+    let after = runtime.bank().get_account(&world.er).unwrap();
+    let payer_after = runtime.bank().get_account(&world.payer.pubkey()).unwrap();
+    let cursor_empty = runtime
+        .bank()
+        .get_account(&cursor)
+        .is_none_or(|value| value.lamports() == 0 && value.data().is_empty());
+    let active = runtime.is_active();
+    let store = runtime._tx_client.lineage_store_v2().unwrap();
+    let poisoned = store.lock().unwrap().is_poisoned();
+    drop(store);
+    manager.shutdown_runtime();
+    std::fs::remove_file(&lineage).unwrap();
+    std::fs::rename(&saved, &lineage).unwrap();
+    assert!(failed);
+    assert!(!active);
+    assert!(poisoned);
+    assert!(cursor_empty);
+    assert_eq!(payer_before, payer_after);
+    assert_eq!(
+        before, after,
+        "SVM credit must not commit ahead of durable input capture"
+    );
+}
+
+#[test]
+fn regression_v2_token_execution_requires_committed_payer_funding_before_admission() {
+    let world =
+        crate::portal_e2e_tests::token_bridge_v2::delegated_token_world(PORTAL_PROGRAM_ID, false);
+    let source = world.funded_tokens(1_000);
+    world.send(&[world.deposit(source, 42, 2)], &[]).unwrap();
+    world.bank.freeze();
+    let directory = tempfile::tempdir().unwrap();
+    let mut manager = crate::Manager::new(crate::ManagerConfig {
+        portal_program_id: PORTAL_PROGRAM_ID,
+        manager_account: world.payer.clone(),
+        checkpoint_plan_dir: Some(directory.path().join("plans")),
+    });
+    manager
+        .init_runtime(
+            world.bank.clone(),
+            create_test_cluster_info(),
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+        )
+        .unwrap();
+    manager.activate_session(world.bank.clone(), world.session, 0, 10_000, 0);
+    let runtime = manager.runtime.as_ref().unwrap();
+    let record = runtime.process_l1_ingress_v2(&world.bank).unwrap().unwrap();
+    let payer = world.payer.pubkey();
+    let admitted_before = runtime.touched_accounts.read().unwrap().contains(&payer);
+    let overlay_before = runtime
+        .er_account_overlay
+        .read()
+        .unwrap()
+        .get(&payer)
+        .cloned();
+    let rejected = runtime
+        .execute_token_ingress_v2(&world.bank, record)
+        .is_err();
+    let admitted_after = runtime.touched_accounts.read().unwrap().contains(&payer);
+    let overlay_after = runtime
+        .er_account_overlay
+        .read()
+        .unwrap()
+        .get(&payer)
+        .cloned();
+    let token: northstar_token_bridge::state::ErTokenAccount =
+        borsh::from_slice(runtime.bank().get_account(&world.er).unwrap().data()).unwrap();
+    manager.shutdown_runtime();
+    assert!(rejected);
+    assert_eq!(
+        admitted_before, admitted_after,
+        "rejected token input must not admit an unfunded L1 payer"
+    );
+    assert_eq!(overlay_before, overlay_after);
+    assert_eq!(token.amount, 0);
+}
+
+#[test]
+fn regression_v2_legacy_token_hints_cannot_skip_authenticated_inputs() {
+    let world =
+        crate::portal_e2e_tests::token_bridge_v2::delegated_token_world(PORTAL_PROGRAM_ID, true);
+    let source = world.funded_tokens(1_000);
+    world.send(&[world.deposit(source, 42, 3)], &[]).unwrap();
+    world.bank.freeze();
+    let directory = tempfile::tempdir().unwrap();
+    let mut manager = crate::Manager::new(crate::ManagerConfig {
+        portal_program_id: PORTAL_PROGRAM_ID,
+        manager_account: world.payer.clone(),
+        checkpoint_plan_dir: Some(directory.path().join("plans")),
+    });
+    manager
+        .init_runtime(
+            world.bank.clone(),
+            create_test_cluster_info(),
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+        )
+        .unwrap();
+    manager.activate_session(world.bank.clone(), world.session, 0, 10_000, 0);
+    let runtime = manager.runtime.as_ref().unwrap();
+    assert!(runtime
+        .process_l1_ingress_v2(&world.bank)
+        .unwrap()
+        .is_some());
+    let before = runtime.bank().get_account(&world.er).unwrap();
+    let state: northstar_token_bridge::state::ErTokenAccount =
+        borsh::from_slice(before.data()).unwrap();
+    let accepted = runtime.credit_token_deposit(
+        &world.bridge,
+        &Pubkey::new_from_array(state.session_bridge),
+        &world.er,
+        42,
+    );
+    runtime.process_token_deposits();
+    let after = runtime.bank().get_account(&world.er).unwrap();
+    let store = runtime._tx_client.lineage_store_v2().unwrap();
+    let prefix = store
+        .lock()
+        .unwrap()
+        .working_state()
+        .unwrap()
+        .ingress_count();
+    drop(store);
+    manager.shutdown_runtime();
+    assert!(!accepted);
+    assert_eq!(before, after);
+    assert_eq!(prefix, 2);
+}
+
+#[test]
 fn regression_v2_session_is_visible_to_l1_lifecycle_discovery() {
     let fixture = Fixture::new();
     let account = fixture.parent.get_account(&fixture.session).unwrap();

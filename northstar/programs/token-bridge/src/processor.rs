@@ -107,6 +107,7 @@ pub fn process_instruction(
                 | TokenBridgeInstruction::InitializeErTokenAccount { .. }
                 | TokenBridgeInstruction::DelegateErTokenAccount { .. }
                 | TokenBridgeInstruction::Deposit { .. }
+                | TokenBridgeInstruction::ApplyTokenDeposit { .. }
         ) {
             return Err(ProgramError::InvalidInstructionData);
         }

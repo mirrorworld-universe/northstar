@@ -2,8 +2,8 @@
 
 This is an opt-in development implementation, enabled with
 `checkpoint-continuity-v2`. It is not hosted deployment qualification or a new
-execution-proof acceptance claim. The validator and its Portal SBF artifact must
-use the same feature selection.
+execution-proof acceptance claim. The validator, Portal SBF artifact and bridge
+SBF artifact must use the same feature selection.
 
 A CLI built with this feature opens sessions with explicit `--checkpoint-profile`
 and `--l1-genesis` identities and the versioned nonce account. Online opening
@@ -26,8 +26,11 @@ require the session authority's signature. Registration does not itself authoriz
 or apply a token credit. The v2 bridge artifact validates the live session context
 and stages its own PDA delegation through the versioned Portal CPI. L1 token
 deposits atomically update custody/receipts and append vault-PDA-authorized input
-records; the delegated L1 account stays unchanged. ER token-credit execution and
-token withdrawals remain unavailable until their execution adapters are wired.
+records; the delegated L1 account stays unchanged. The manager executes each token
+input through the real bridge SBF instruction and durably records its input plus
+SVM result before commit. The payer needs committed ER SOL funding for cursor rent.
+Legacy hints and ordinary top-level/CPI credit calls cannot bypass input capture.
+Token withdrawals remain unavailable until their settlement adapters are wired.
 
 SVM execution records account pre/post values, execution results, readonly input
 observations, replay data, and supported withdrawal effects at the pre-commit
@@ -62,11 +65,13 @@ effects.
 The regression suite covers real Portal SBF session/deposit creation, ordered
 credit consumption, pre-commit persistence rejection, restart, missing-state
 rejection, immutable plan recovery, late delegation, and a later deposit followed
-by a second proposal with the first checkpoint's final root.
+by a second proposal with the first checkpoint's final root. Real SPL/bridge SBF
+coverage also checks custody, token-input execution, cumulative targets, restart
+without duplicate credits, and a later top-up after L1 reanchoring.
 
 ## Remaining deployment gates
 
-- Token ingress requires its authenticated execution adapter; it fails closed.
+- Token withdrawal/settlement adapters and a full SOL/SPL linked-checkpoint lifecycle remain incomplete.
 - CLI, consumer, and operator bindings must select the same protocol and session.
 - Configured proof coordination is rejected until the new relation is qualified.
   Historical guest keys and proofs are not accepted as continuity evidence.

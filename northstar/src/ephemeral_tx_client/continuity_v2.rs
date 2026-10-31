@@ -118,6 +118,17 @@ impl EphemeralTransactionClient {
                     .and_then(|details| details.return_data.as_ref())
                     .map(|data| (data.program_id.to_bytes(), data.data.clone())),
             };
+            if ingress.is_none()
+                && status.is_ok()
+                && Self::v2_token_credit_invoked(
+                    bank,
+                    &self.portal_program_id,
+                    transaction,
+                    &output.inner,
+                )?
+            {
+                return Err(solana_transaction::TransactionError::CommitCancelled);
+            }
             let execution_result = borsh::to_vec(&output)
                 .map_err(|_| solana_transaction::TransactionError::CommitCancelled)?;
             let wire = bincode::serialize(transaction)
@@ -232,6 +243,63 @@ impl EphemeralTransactionClient {
     ) -> solana_transaction::TransactionError {
         warn!("Versioned ER transition rejected before SVM commit: {error}");
         solana_transaction::TransactionError::CommitCancelled
+    }
+
+    fn v2_token_credit_invoked(
+        bank: &Bank,
+        portal_program_id: &Pubkey,
+        transaction: &VersionedTransaction,
+        inner: &[RecordedInnerInstructionV2],
+    ) -> Result<bool, solana_transaction::TransactionError> {
+        let addresses = Self::load_transaction_addresses(bank, transaction)
+            .ok_or(solana_transaction::TransactionError::CommitCancelled)?;
+        let keys = Self::full_account_keys(transaction, &addresses);
+        let outer = transaction
+            .message
+            .instructions()
+            .iter()
+            .map(|instruction| {
+                (
+                    instruction.program_id_index,
+                    instruction.accounts.as_slice(),
+                    instruction.data.as_slice(),
+                )
+            });
+        let inner = inner.iter().map(|instruction| {
+            (
+                instruction.program_id_index,
+                instruction.accounts.as_slice(),
+                instruction.data.as_slice(),
+            )
+        });
+        for (program_index, accounts, data) in outer.chain(inner) {
+            if !matches!(borsh::from_slice::<northstar_token_bridge::instruction::TokenBridgeInstruction>(data),
+                Ok(northstar_token_bridge::instruction::TokenBridgeInstruction::ApplyTokenDeposit {..})) {
+                continue;
+            }
+            let (Some(program), Some(registry)) = (
+                keys.get(usize::from(program_index)),
+                accounts
+                    .get(2)
+                    .and_then(|index| keys.get(usize::from(*index))),
+            ) else {
+                continue;
+            };
+            let Some(registry) = bank.get_account(registry) else {
+                continue;
+            };
+            if registry.owner() != portal_program_id {
+                continue;
+            }
+            let Ok(frame) = borsh::from_slice::<northstar_portal::SessionBridgeV2>(registry.data())
+            else {
+                continue;
+            };
+            if frame.is_valid() && frame.base.bridge_program == *program {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn v2_settlement_effects(
@@ -368,5 +436,93 @@ impl EphemeralTransactionClient {
             effects.push(encoded);
         }
         Ok(effects)
+    }
+}
+
+#[cfg(test)]
+mod token_input_guard_tests {
+    use {
+        super::*,
+        solana_instruction::{AccountMeta, Instruction},
+        solana_signer::Signer,
+    };
+
+    #[test]
+    fn invariant_v2_token_credit_guard_matches_registered_top_and_inner_calls_only() {
+        let world = crate::portal_e2e_tests::token_bridge_v2::delegated_token_world(
+            Pubkey::new_unique(),
+            false,
+        );
+        let account: northstar_token_bridge::state::ErTokenAccount =
+            borsh::from_slice(world.bank.get_account(&world.er).unwrap().data()).unwrap();
+        let registry = Pubkey::new_from_array(account.session_bridge);
+        let data = borsh::to_vec(
+            &northstar_token_bridge::instruction::TokenBridgeInstruction::ApplyTokenDeposit {
+                balance: 42,
+            },
+        )
+        .unwrap();
+        let instruction = Instruction {
+            program_id: world.bridge,
+            accounts: vec![
+                AccountMeta::new(world.payer.pubkey(), true),
+                AccountMeta::new(world.er, false),
+                AccountMeta::new_readonly(registry, false),
+                AccountMeta::new_readonly(world.bridge, false),
+            ],
+            data: data.clone(),
+        };
+        let transaction = solana_transaction::Transaction::new_signed_with_payer(
+            std::slice::from_ref(&instruction),
+            Some(&world.payer.pubkey()),
+            &[world.payer.as_ref()],
+            world.bank.last_blockhash(),
+        );
+        let transaction = VersionedTransaction::from(transaction);
+        assert!(EphemeralTransactionClient::v2_token_credit_invoked(
+            &world.bank,
+            &world.portal,
+            &transaction,
+            &[]
+        )
+        .unwrap());
+        let unrelated = Instruction {
+            program_id: Pubkey::new_unique(),
+            ..instruction
+        };
+        let transaction =
+            VersionedTransaction::from(solana_transaction::Transaction::new_signed_with_payer(
+                &[unrelated],
+                Some(&world.payer.pubkey()),
+                &[world.payer.as_ref()],
+                world.bank.last_blockhash(),
+            ));
+        assert!(!EphemeralTransactionClient::v2_token_credit_invoked(
+            &world.bank,
+            &world.portal,
+            &transaction,
+            &[]
+        )
+        .unwrap());
+        let index = transaction
+            .message
+            .static_account_keys()
+            .iter()
+            .position(|key| *key == world.bridge)
+            .unwrap();
+        let inner = RecordedInnerInstructionV2 {
+            outer_index: 0,
+            stack_height: 2,
+            program_id_index: u8::try_from(index).unwrap(),
+            accounts: transaction.message.instructions()[0].accounts.clone(),
+            data,
+        };
+        assert!(EphemeralTransactionClient::v2_token_credit_invoked(
+            &world.bank,
+            &world.portal,
+            &transaction,
+            &[inner]
+        )
+        .unwrap());
     }
 }
