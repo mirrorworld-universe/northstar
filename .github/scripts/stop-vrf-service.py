@@ -90,6 +90,20 @@ def inspect_journal(config_path=CONFIG, state_root=STATE):
         )
 
 
+def resolved_control(record, version):
+    if not isinstance(record, dict):
+        return False
+    receipt, absence = record.get("receipt"), record.get("absence")
+    if isinstance(receipt, dict) and absence is None:
+        return True
+    return (
+        version == 2 and receipt is None and isinstance(absence, dict)
+        and type(absence.get("version")) is int and absence["version"] == 1
+        and all(isinstance(absence.get(field), str) and absence[field]
+                for field in ("signature", "portal", "funding_anchor", "evidence", "evidence_sha256"))
+    )
+
+
 def audit_controls():
     index = DEPLOYMENT / "control-state.json"
     markers = [
@@ -124,7 +138,7 @@ def audit_controls():
     except (OSError, subprocess.SubprocessError, ValueError) as error:
         raise RuntimeError("VRF control history validation failed") from error
     if (
-        checked["version"] != 1
+        type(checked["version"]) is not int or checked["version"] not in (1, 2)
         or checked["pending_programs"] != []
         or not isinstance(checked["records"], dict)
     ):
@@ -144,7 +158,7 @@ def audit_controls():
         os.fsync(directory)
     finally:
         os.close(directory)
-    if any(record["receipt"] is None for record in checked["records"].values()):
+    if any(not resolved_control(record, checked["version"]) for record in checked["records"].values()):
         raise RuntimeError(
             "VRF has unresolved control intents; reconcile before restarting the ER"
         )

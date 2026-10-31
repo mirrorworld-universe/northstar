@@ -151,6 +151,33 @@ class StopTests(unittest.TestCase):
                 module.stop(run, unresolved)
             self.assertFalse(any(c[1] == "disable" for c in calls))
 
+    def test_verified_absence_remains_distinct_from_control_success(self):
+        module.DEPLOYMENT.mkdir()
+        path = module.DEPLOYMENT / "control-state.json"
+        checked = {"version": 2, "pending_programs": [], "records": {"deposit": {
+            "receipt": None, "absence": {"version": 1, "signature": "verified",
+                "portal": "verified", "funding_anchor": "fund-admin.intent.json",
+                "evidence": "control-recovery/evidence.json", "evidence_sha256": "a" * 64},
+        }}}
+        path.write_text(json.dumps(checked))
+        with patch.object(module.subprocess, "run", return_value=SimpleNamespace(stdout=json.dumps(checked))):
+            module.audit_controls()
+        self.assertIsNone(json.loads(path.read_text())["records"]["deposit"]["receipt"])
+
+    def test_control_disposition_versions_and_exclusivity_fail_closed(self):
+        module.DEPLOYMENT.mkdir()
+        path = module.DEPLOYMENT / "control-state.json"
+        for version, record in [(True, {"receipt": {}}),
+                                (1, {"receipt": None, "absence": {}}),
+                                (2, {"receipt": {}, "absence": {}}),
+                                (2, {"receipt": None, "absence": "unverified"})]:
+            with self.subTest(version=version, record=record):
+                checked = {"version": version, "pending_programs": [], "records": {"deposit": record}}
+                path.write_text(json.dumps(checked))
+                with patch.object(module.subprocess, "run", return_value=SimpleNamespace(stdout=json.dumps(checked))):
+                    with self.assertRaises(RuntimeError):
+                        module.audit_controls()
+
     def test_control_only_history_blocks_node_changes_without_worker_records(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
