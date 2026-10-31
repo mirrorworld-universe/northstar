@@ -1,3 +1,7 @@
+#[cfg(feature = "checkpoint-continuity-v2")]
+mod continuity;
+#[cfg(feature = "checkpoint-continuity-v2")]
+pub use continuity::ContinuitySessionArgs;
 use {
     crate::{
         cli::{CliCommand, CliCommandInfo, CliConfig, CliError, ProcessResult},
@@ -46,6 +50,8 @@ const DEFAULT_FEE_CAP_SOL: &str = "1000000";
 pub enum PortalCliCommand {
     OpenSession {
         portal_program_id: Option<Pubkey>,
+        #[cfg(feature = "checkpoint-continuity-v2")]
+        continuity: Option<ContinuitySessionArgs>,
         owner: SignerIndex,
         grid_id: u64,
         ttl_slots: u64,
@@ -136,17 +142,7 @@ impl PortalSubCommands for App<'_, '_> {
                 .alias("p")
                 .about("Northstar Portal interaction")
                 .setting(AppSettings::SubcommandRequiredElseHelp)
-                .subcommand(portal_tx_subcommand(
-                    SubCommand::with_name("open-session")
-                        .alias("os")
-                        .about("Open Portal session")
-                        .arg(portal_program_id_arg())
-                        .arg(grid_id_arg())
-                        .arg(ttl_slots_arg())
-                        .arg(fee_cap_arg())
-                        .arg(validator_arg())
-                        .arg(settlement_interval_slots_arg()),
-                ))
+                .subcommand(portal_tx_subcommand(open_session_subcommand()))
                 .subcommand(portal_tx_subcommand(
                     SubCommand::with_name("close-session")
                         .alias("cs")
@@ -196,6 +192,21 @@ impl PortalSubCommands for App<'_, '_> {
                 )),
         )
     }
+}
+
+fn open_session_subcommand<'a, 'b>() -> App<'a, 'b> {
+    let app = SubCommand::with_name("open-session")
+        .alias("os")
+        .about("Open Portal session")
+        .arg(portal_program_id_arg())
+        .arg(grid_id_arg())
+        .arg(ttl_slots_arg())
+        .arg(fee_cap_arg())
+        .arg(validator_arg())
+        .arg(settlement_interval_slots_arg());
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    let app = continuity::open_args(app);
+    app
 }
 
 fn portal_tx_subcommand<'a, 'b>(app: App<'a, 'b>) -> App<'a, 'b> {
@@ -354,6 +365,8 @@ fn parse_open_session(
     Ok(CliCommandInfo {
         command: CliCommand::Portal(PortalCliCommand::OpenSession {
             portal_program_id,
+            #[cfg(feature = "checkpoint-continuity-v2")]
+            continuity: continuity::parse_open_args(matches)?,
             owner: signer_info.index_of(Some(owner_pubkey)).unwrap(),
             grid_id: value_of(matches, "grid_id").unwrap(),
             ttl_slots: value_of(matches, "ttl_slots").unwrap(),
@@ -824,9 +837,17 @@ pub async fn process_portal_subcommand(
     config: &CliConfig<'_>,
     portal_subcommand: &PortalCliCommand,
 ) -> ProcessResult {
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    if !matches!(portal_subcommand, PortalCliCommand::OpenSession { .. }) {
+        return Err(
+            CliError::BadParameter("This command has no continuity binding yet".into()).into(),
+        );
+    }
     match portal_subcommand {
         PortalCliCommand::OpenSession {
             portal_program_id,
+            #[cfg(feature = "checkpoint-continuity-v2")]
+            continuity,
             owner,
             grid_id,
             ttl_slots,
@@ -843,24 +864,43 @@ pub async fn process_portal_subcommand(
         } => {
             let portal_program_id = resolve_portal_program_id(config, *portal_program_id)?;
             let owner = config.signers[*owner];
-            let session_pda = find_session_pda(&portal_program_id);
-            let fee_vault_pda = find_fee_vault_pda(&portal_program_id);
+            let parameters = OpenSession {
+                grid_id: *grid_id,
+                ttl_slots: *ttl_slots,
+                fee_cap: *fee_cap,
+                validator: *validator,
+                settlement_interval_slots: *settlement_interval_slots,
+            };
+            #[cfg(not(feature = "checkpoint-continuity-v2"))]
             let instruction = Instruction {
                 program_id: portal_program_id,
                 accounts: vec![
                     AccountMeta::new(owner.pubkey(), true),
-                    AccountMeta::new(session_pda, false),
-                    AccountMeta::new(fee_vault_pda, false),
+                    AccountMeta::new(find_session_pda(&portal_program_id), false),
+                    AccountMeta::new(find_fee_vault_pda(&portal_program_id), false),
                     AccountMeta::new_readonly(system_program::id(), false),
                 ],
-                data: borsh::to_vec(&PortalInstruction::OpenSession(OpenSession {
-                    grid_id: *grid_id,
-                    ttl_slots: *ttl_slots,
-                    fee_cap: *fee_cap,
-                    validator: *validator,
-                    settlement_interval_slots: *settlement_interval_slots,
-                }))
-                .unwrap(),
+                data: borsh::to_vec(&PortalInstruction::OpenSession(parameters)).unwrap(),
+            };
+            #[cfg(feature = "checkpoint-continuity-v2")]
+            let instruction = {
+                let identity = continuity.ok_or_else(|| {
+                    CliError::BadParameter(
+                        "Continuity sessions require --checkpoint-profile and --l1-genesis".into(),
+                    )
+                })?;
+                if !*sign_only {
+                    continuity::verify_genesis(
+                        identity.l1_genesis,
+                        rpc_client.get_genesis_hash().await?,
+                    )?;
+                }
+                continuity::open_instruction(
+                    portal_program_id,
+                    owner.pubkey(),
+                    parameters,
+                    identity,
+                )
             };
             process_portal_instruction(
                 rpc_client,
@@ -1204,6 +1244,103 @@ mod tests {
         write_keypair_file(&keypair, file.path()).unwrap();
         let path = file.path().to_str().unwrap().to_string();
         (DefaultSigner::new("keypair", path), keypair, file)
+    }
+
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    #[test]
+    fn test_parse_portal_open_session_continuity_v2() {
+        let profile = solana_hash::Hash::new_from_array([2; 32]).to_string();
+        let genesis = solana_hash::Hash::new_from_array([1; 32]).to_string();
+        let matches = get_clap_app("test", "desc", "version").get_matches_from_safe(vec![
+            "test",
+            "portal",
+            "open-session",
+            "--checkpoint-profile",
+            &profile,
+            "--l1-genesis",
+            &genesis,
+        ]);
+        assert!(
+            matches.is_ok(),
+            "continuity identity inputs must be accepted"
+        );
+        let (default_signer, _, _file) = make_default_signer();
+        let command = parse_command(&matches.unwrap(), &default_signer, &mut None)
+            .unwrap()
+            .command;
+        let CliCommand::Portal(PortalCliCommand::OpenSession {
+            continuity: Some(identity),
+            ..
+        }) = command
+        else {
+            panic!("versioned identity required")
+        };
+        assert_eq!(identity.l1_genesis.to_bytes(), [1; 32]);
+        assert_eq!(identity.profile.to_bytes(), [2; 32]);
+    }
+
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    #[tokio::test]
+    async fn regression_v2_open_missing_context_cannot_select_legacy_wire() {
+        let (default_signer, keypair, _file) = make_default_signer();
+        let portal = Pubkey::new_unique().to_string();
+        let matches = get_clap_app("test", "desc", "version").get_matches_from(vec![
+            "test",
+            "portal",
+            "open-session",
+            "--portal",
+            &portal,
+            "--sign-only",
+            "--blockhash",
+            "11111111111111111111111111111111",
+        ]);
+        let CliCommand::Portal(command) = parse_command(&matches, &default_signer, &mut None)
+            .unwrap()
+            .command
+        else {
+            panic!("Portal command required")
+        };
+        let config = CliConfig {
+            signers: vec![&keypair],
+            ..CliConfig::default()
+        };
+        let error =
+            process_portal_subcommand(&RpcClient::new_mock("succeeds".into()), &config, &command)
+                .await
+                .unwrap_err();
+        assert!(error.to_string().contains("--checkpoint-profile"));
+    }
+
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    #[tokio::test]
+    async fn regression_v2_unbound_commands_cannot_select_legacy_wire() {
+        let (default_signer, keypair, _file) = make_default_signer();
+        let portal = Pubkey::new_unique().to_string();
+        let matches = get_clap_app("test", "desc", "version").get_matches_from(vec![
+            "test",
+            "portal",
+            "close-session",
+            "--portal",
+            &portal,
+            "--sign-only",
+            "--blockhash",
+            "11111111111111111111111111111111",
+        ]);
+        let CliCommand::Portal(command) = parse_command(&matches, &default_signer, &mut None)
+            .unwrap()
+            .command
+        else {
+            panic!("Portal command required")
+        };
+        let config = CliConfig {
+            signers: vec![&keypair],
+            ..CliConfig::default()
+        };
+        let error =
+            process_portal_subcommand(&RpcClient::new_mock("succeeds".into()), &config, &command)
+                .await
+                .expect_err("an unbound command must not produce legacy wire");
+        assert!(error.to_string().contains("continuity binding"));
     }
 
     #[test]

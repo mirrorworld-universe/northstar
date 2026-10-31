@@ -5,6 +5,11 @@ This is an opt-in development implementation, enabled with
 execution-proof acceptance claim. The validator and its Portal SBF artifact must
 use the same feature selection.
 
+A CLI built with this feature opens sessions with explicit `--checkpoint-profile`
+and `--l1-genesis` identities and the versioned nonce account. Online opening
+checks the actual RPC genesis before signing. Other CLI bindings are currently
+refused rather than silently emitting legacy instructions.
+
 ## Committed state boundary
 
 A continuity session starts from the protocol-defined empty state. Portal-owned,

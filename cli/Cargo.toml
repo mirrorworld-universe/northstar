@@ -25,6 +25,8 @@ path = "src/main.rs"
 [features]
 default = ["remote-wallet-hidraw"]
 agave-unstable-api = []
+# Sonic: Versioned Portal client bindings.
+checkpoint-continuity-v2 = ["northstar-portal/checkpoint-continuity-v2"]
 dev-context-only-utils = [
     "solana-faucet/dev-context-only-utils",
     "solana-client/dev-context-only-utils",

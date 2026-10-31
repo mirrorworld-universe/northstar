@@ -53,7 +53,7 @@ jobs:
       # Sonic: Check opt-in paths without enabling them in deployment builds.
       - run: cargo clippy --locked --all --tests --features northstar/proof-coordinator-test-hooks,agave-validator/proof-coordinator-test-hooks,northstar-portal/zk-verifier-profile -- -D warnings
       # Sonic: Continuity remains opt-in until its runtime and verifier are integrated.
-      - run: cargo clippy --locked -p northstar -p northstar-portal --tests --features checkpoint-continuity-v2 -- -D warnings
+      - run: cargo clippy --locked -p northstar -p northstar-portal -p solana-cli --tests --features checkpoint-continuity-v2 -- -D warnings
       # Sonic: Root workspace checks do not include the portable VRF probe.
       - run: cargo clippy --locked --manifest-path northstar/programs/vrf-runtime-probe/Cargo.toml --workspace --all-targets -- -D warnings
 
@@ -179,6 +179,7 @@ jobs:
           BPF_OUT_DIR="$PWD/target/continuity-v2-deploy" \
             cargo test --locked -p northstar --features checkpoint-continuity-v2 \
               regression_checkpoint_lineage_survives_l1_delegation_materialization
+          cargo test --locked -p solana-cli --features checkpoint-continuity-v2 v2
       - name: Test oracle restart safeguards
         run: python3 -B .github/scripts/test-stop-vrf-service.py
       # Sonic: Coordinator and mature-capture regressions need no GPU service.
