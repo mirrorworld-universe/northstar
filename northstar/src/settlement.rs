@@ -33,6 +33,7 @@ pub struct SettlementChunk {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceiptBalanceSettlement {
+    pub receipt: Pubkey,
     pub er_source: Pubkey,
     pub l1_recipient: Pubkey,
     pub balance: u64,
@@ -595,15 +596,7 @@ impl SettlementPlan {
         }
 
         for receipt in &self.receipt_balances {
-            let deposit_receipt = Pubkey::find_program_address(
-                &[
-                    b"deposit_receipt",
-                    session_pda.as_ref(),
-                    receipt.er_source.as_ref(),
-                ],
-                &portal_program_id,
-            )
-            .0;
+            let deposit_receipt = receipt.receipt;
             instructions.push(Instruction {
                 program_id: portal_program_id,
                 accounts: vec![
@@ -1310,6 +1303,7 @@ mod tests {
             &HashSet::from([delegated]),
             5,
             vec![ReceiptBalanceSettlement {
+                receipt: Pubkey::new_unique(),
                 er_source: Pubkey::new_unique(),
                 l1_recipient: delegated,
                 balance: 95,
@@ -1342,6 +1336,7 @@ mod tests {
             &HashSet::from([delegated]),
             5,
             vec![ReceiptBalanceSettlement {
+                receipt: Pubkey::new_unique(),
                 er_source: Pubkey::new_unique(),
                 l1_recipient: Pubkey::new_unique(),
                 balance: 95,
@@ -1447,6 +1442,7 @@ mod tests {
         );
         let delegated_accounts = HashSet::from([delegated]);
         let receipt = ReceiptBalanceSettlement {
+            receipt: Pubkey::new_unique(),
             er_source,
             l1_recipient: delegated,
             balance: 95,
@@ -1480,6 +1476,7 @@ mod tests {
                 &delegated_accounts,
                 5,
                 vec![ReceiptBalanceSettlement {
+                    receipt: Pubkey::new_unique(),
                     er_source,
                     l1_recipient: delegated,
                     balance: 95,
@@ -1517,6 +1514,7 @@ mod tests {
         );
         let delegated_accounts = HashSet::from([dirty_delegated]);
         let receipt = ReceiptBalanceSettlement {
+            receipt: Pubkey::new_unique(),
             er_source,
             l1_recipient,
             balance: 999,
@@ -1870,6 +1868,7 @@ mod tests {
             owner_changes: vec![],
             lamport_changes: vec![],
             receipt_balances: vec![ReceiptBalanceSettlement {
+                receipt: Pubkey::new_unique(),
                 er_source: Pubkey::new_unique(),
                 l1_recipient: Pubkey::new_unique(),
                 balance: 9,

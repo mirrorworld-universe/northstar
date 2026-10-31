@@ -1,3 +1,5 @@
+#[cfg(feature = "checkpoint-continuity-v2")]
+mod continuity_v2;
 #[cfg(test)]
 mod live_cadence;
 #[cfg(test)]
@@ -74,6 +76,8 @@ pub(crate) trait TransactionClient {
 }
 
 type TransactionAccountSnapshot = Vec<(Pubkey, AccountSharedData, AccountSharedData, bool)>;
+pub(crate) type SharedLineageStoreV2 =
+    Arc<Mutex<crate::lineage_store_v2::CheckpointLineageStoreV2>>;
 
 #[derive(Default)]
 struct CheckpointCaptureV1 {
@@ -127,6 +131,8 @@ pub struct EphemeralTransactionClient {
     unsettled_state_store: Arc<UnsettledStateStore>,
     sync_status: Arc<NorthStarSyncStatus>,
     checkpoint_capture: Arc<RwLock<CheckpointCaptureV1>>,
+    lineage_v2: Arc<RwLock<Option<SharedLineageStoreV2>>>,
+    pending_ingress_v2: Arc<std::sync::atomic::AtomicU64>,
     #[cfg(feature = "vrf-candidate-capture")]
     candidate_capture: Arc<RwLock<Option<Arc<crate::vrf_candidate_capture::CandidateCaptureSink>>>>,
 }
@@ -154,6 +160,8 @@ impl Clone for EphemeralTransactionClient {
             unsettled_state_store: Arc::clone(&self.unsettled_state_store),
             sync_status: Arc::clone(&self.sync_status),
             checkpoint_capture: Arc::clone(&self.checkpoint_capture),
+            lineage_v2: Arc::clone(&self.lineage_v2),
+            pending_ingress_v2: Arc::clone(&self.pending_ingress_v2),
             #[cfg(feature = "vrf-candidate-capture")]
             candidate_capture: Arc::clone(&self.candidate_capture),
         }
@@ -395,6 +403,8 @@ impl EphemeralTransactionClient {
             unsettled_state_store: options.unsettled_state_store,
             sync_status: options.sync_status,
             checkpoint_capture: Arc::new(RwLock::new(CheckpointCaptureV1::default())),
+            lineage_v2: Arc::new(RwLock::new(None)),
+            pending_ingress_v2: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(feature = "vrf-candidate-capture")]
             candidate_capture: Arc::new(RwLock::new(None)),
         }
@@ -426,6 +436,9 @@ impl EphemeralTransactionClient {
         bank: &Bank,
         transaction: &VersionedTransaction,
     ) -> std::io::Result<usize> {
+        if self.lineage_store_v2().is_some() {
+            return Ok(0);
+        }
         let Some(context) = self.l1_delegation_context.read().unwrap().clone() else {
             return Ok(0);
         };
@@ -603,10 +616,9 @@ impl EphemeralTransactionClient {
         let mut signatures = self.processed_signatures.write().unwrap();
         signatures.retain(|_, slot| *slot >= min_slot);
         for (tx, commit_result) in txs.iter().zip(commit_results) {
-            if commit_result
-                .as_ref()
-                .is_ok_and(|committed_tx| committed_tx.status.is_ok())
-            {
+            if commit_result.as_ref().is_ok_and(|committed_tx| {
+                committed_tx.status.is_ok() || self.lineage_store_v2().is_some()
+            }) {
                 if let Some(signature) = tx.signatures.first() {
                     signatures.insert(*signature, bank.slot());
                 }
@@ -618,17 +630,85 @@ impl EphemeralTransactionClient {
         self.bank_forks.read().unwrap().working_bank()
     }
 
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    pub(crate) fn set_pending_ingress_v2(&self, count: u64) {
+        self.pending_ingress_v2.store(count, Ordering::Release);
+    }
+
+    pub(crate) fn lineage_store_v2(&self) -> Option<SharedLineageStoreV2> {
+        self.lineage_v2.read().unwrap().clone()
+    }
+
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    pub(crate) fn install_lineage_store_v2(
+        &self,
+        store: crate::lineage_store_v2::CheckpointLineageStoreV2,
+    ) {
+        *self.lineage_v2.write().unwrap() = Some(Arc::new(Mutex::new(store)));
+    }
+
+    pub(crate) fn checkpoint_artifact_v2(
+        &self,
+    ) -> Option<crate::checkpoint_v2::CheckpointArtifactV2> {
+        let store = self.lineage_store_v2()?;
+        let store = store.lock().unwrap();
+        borsh::from_slice(&store.sealed()?.artifact).ok()
+    }
+
     pub(crate) fn checkpoint_artifact_v1(&self) -> Option<CheckpointArtifactV1> {
         self.checkpoint_capture.read().unwrap().completed.clone()
     }
 
     fn checkpoint_awaits_settlement(&self) -> bool {
+        if self.pending_ingress_v2.load(Ordering::Acquire) != 0 {
+            return true;
+        }
+        if let Some(store) = self.lineage_store_v2() {
+            let store = store.lock().unwrap();
+            return store.sealed().is_some()
+                || store.unsealed().len() >= crate::checkpoint_v2::MAX_CHECKPOINT_TRANSITIONS_V2;
+        }
         let capture = self.checkpoint_capture.read().unwrap();
         capture.completed.is_some() || capture.steps.len() == CANONICAL_CHECKPOINT_STEPS_V1
     }
 
     pub(crate) fn seal_checkpoint_if_nonempty(&self) -> bool {
         let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
+        if let Some(store) = self.lineage_store_v2() {
+            let result = (|| -> std::io::Result<bool> {
+                let mut store = store.lock().unwrap();
+                if store.sealed().is_some() {
+                    return Ok(true);
+                }
+                if store.unsealed().is_empty() {
+                    return Ok(false);
+                }
+                let artifact = crate::checkpoint_v2::build_checkpoint_artifact_v2(
+                    store.accepted_state(),
+                    self.bank().slot(),
+                    store.unsealed(),
+                )
+                .map_err(std::io::Error::other)?;
+                let (checkpoint, _) = northstar_portal::find_checkpoint_pda(
+                    &self.portal_program_id,
+                    &artifact.checkpoint.session,
+                    artifact.checkpoint.er_slot,
+                );
+                let bytes = borsh::to_vec(&artifact)?;
+                store.seal(checkpoint.to_bytes(), artifact.checkpoint.er_slot, bytes)?;
+                Ok(true)
+            })();
+            return match result {
+                Ok(sealed) => sealed,
+                Err(error) => {
+                    self.active.store(false, Ordering::Relaxed);
+                    self.sync_status
+                        .set_checkpoint_error(Some("checkpoint_lineage_persistence_failed"));
+                    warn!("Versioned checkpoint sealing failed; ER deactivated: {error}");
+                    false
+                }
+            };
+        }
         let mut capture = self.checkpoint_capture.write().unwrap();
         if capture.completed.is_some() {
             return true;
@@ -692,6 +772,9 @@ impl EphemeralTransactionClient {
         account_snapshots: &[Option<TransactionAccountSnapshot>],
         replay_snapshots: &[Option<Vec<u8>>],
     ) {
+        if self.lineage_store_v2().is_some() {
+            return;
+        }
         let Some(session) = *self.session_pda.read().unwrap() else {
             return;
         };
@@ -1429,6 +1512,14 @@ impl EphemeralTransactionClient {
                             )
                         })
                         .collect();
+                    #[cfg(feature = "checkpoint-continuity-v2")]
+                    self.record_v2_before_commit(
+                        bank,
+                        &txs,
+                        processing_results,
+                        &replay_snapshots,
+                        None,
+                    )?;
                     Ok(())
                 },
             )?;
@@ -1447,6 +1538,8 @@ impl EphemeralTransactionClient {
         );
         self.record_withdrawal_payout_events_for_batch(bank, &txs, &commit_results);
         self.record_token_withdrawal_payout_events_for_batch(bank, &txs, &commit_results);
+        #[cfg(feature = "checkpoint-continuity-v2")]
+        self.refresh_v2_payout_cache()?;
         self.notify_transaction_subscribers(bank, &txs);
 
         for (tx_idx, result) in commit_results.iter().enumerate() {
@@ -1467,6 +1560,9 @@ impl EphemeralTransactionClient {
         txs: &[VersionedTransaction],
         commit_results: &[TransactionCommitResult],
     ) {
+        if self.lineage_store_v2().is_some() {
+            return;
+        }
         if self.session_pda.read().unwrap().is_none() {
             return;
         }
@@ -1625,6 +1721,9 @@ impl EphemeralTransactionClient {
         txs: &[VersionedTransaction],
         commit_results: &[TransactionCommitResult],
     ) {
+        if self.lineage_store_v2().is_some() {
+            return;
+        }
         if self.session_pda.read().unwrap().is_none() {
             return;
         }
