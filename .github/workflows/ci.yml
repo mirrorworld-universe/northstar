@@ -176,6 +176,9 @@ jobs:
             --features checkpoint-continuity-v2 --sbf-out-dir "$PWD/target/continuity-v2-deploy" -- --locked
           BPF_OUT_DIR="$PWD/target/continuity-v2-deploy" \
             cargo test --locked -p northstar --features checkpoint-continuity-v2 v2
+          BPF_OUT_DIR="$PWD/target/continuity-v2-deploy" \
+            cargo test --locked -p northstar --features checkpoint-continuity-v2 \
+              regression_checkpoint_lineage_survives_l1_delegation_materialization
       # Sonic: Coordinator and mature-capture regressions need no GPU service.
       - name: Test opt-in proof coordination
         run: cargo test --locked -p northstar --features proof-coordinator-test-hooks proof_ --no-fail-fast
