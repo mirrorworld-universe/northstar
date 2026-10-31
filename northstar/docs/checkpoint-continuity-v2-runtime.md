@@ -23,7 +23,9 @@ state directly.
 
 Bridge registrations are immutable, session-context-bound discovery metadata and
 require the session authority's signature. Registration does not itself authorize
-or apply a token credit.
+or apply a token credit. The v2 bridge artifact validates the live session context
+and stages its own PDA delegation through the versioned Portal CPI. Token value
+operations remain unavailable until their authenticated execution adapters are wired.
 
 SVM execution records account pre/post values, execution results, readonly input
 observations, replay data, and supported withdrawal effects at the pre-commit

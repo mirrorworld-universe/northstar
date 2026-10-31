@@ -88,8 +88,27 @@ pub fn process_instruction(
     accounts: &mut [AccountInfo],
     instruction_data: &[u8],
 ) -> ProgramResult {
+    #[cfg(not(feature = "checkpoint-continuity-v2"))]
     let instruction = TokenBridgeInstruction::try_from_slice(instruction_data)
         .map_err(|_| ProgramError::InvalidInstructionData)?;
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    let instruction = {
+        let mut remaining = instruction_data;
+        let instruction = TokenBridgeInstruction::deserialize(&mut remaining)
+            .map_err(|_| ProgramError::InvalidInstructionData)?;
+        if !remaining.is_empty() {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        if !matches!(
+            instruction,
+            TokenBridgeInstruction::InitializeVault
+                | TokenBridgeInstruction::InitializeErTokenAccount { .. }
+                | TokenBridgeInstruction::DelegateErTokenAccount { .. }
+        ) {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        instruction
+    };
     match instruction {
         TokenBridgeInstruction::InitializeVault => process_initialize_vault(program_id, accounts),
         TokenBridgeInstruction::InitializeErTokenAccount { owner } => {
@@ -727,6 +746,33 @@ fn process_delegate_er_token_account(
 
     let receipt = next_account_info(account_info_iter)?;
     let origin = next_account_info(account_info_iter)?;
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    let ingress = next_account_info(account_info_iter)?;
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    {
+        if !session.owned_by(portal_program.address()) || session.executable() {
+            return Err(ProgramError::InvalidAccountOwner);
+        }
+        let registration = crate::portal_abi::registration_v2(
+            program_id,
+            portal_program.address(),
+            session_bridge.address(),
+            &session_bridge.try_borrow()?,
+        )?;
+        let frame = crate::portal_abi::session_v2(
+            &registration,
+            portal_program.address(),
+            session.address(),
+            &session.try_borrow()?,
+        )?;
+        if frame.base.grid_id != grid_id
+            || frame
+                .base
+                .is_expired(pinocchio::sysvars::clock::Clock::get()?.slot)
+        {
+            return Err(ProgramError::InvalidAccountData);
+        }
+    }
     token_deposit::initialize_origin(
         program_id,
         payer,
@@ -757,6 +803,7 @@ fn process_delegate_er_token_account(
     let er_seeds = er_signer_seeds(&er_state);
     let er_signer = Signer::from(&er_seeds);
 
+    #[cfg(not(feature = "checkpoint-continuity-v2"))]
     let portal_accounts = [
         AccountMeta::writable_signer(payer.address()),
         AccountMeta::readonly(&pinocchio_system::ID),
@@ -766,25 +813,45 @@ fn process_delegate_er_token_account(
         AccountMeta::writable(delegation_record.address()),
         AccountMeta::readonly(buffer.address()),
     ];
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    let portal_accounts = [
+        AccountMeta::writable_signer(payer.address()),
+        AccountMeta::readonly(&pinocchio_system::ID),
+        AccountMeta::writable(session.address()),
+        AccountMeta::writable_signer(er_token_account.address()),
+        AccountMeta::readonly(program_id),
+        AccountMeta::writable(delegation_record.address()),
+        AccountMeta::readonly(buffer.address()),
+        AccountMeta::writable(ingress.address()),
+    ];
     let portal_data = encode_portal_delegate(grid_id);
     let portal_instruction = Instruction {
         program_id: portal_program.address(),
         accounts: &portal_accounts,
         data: &portal_data,
     };
-    invoke_signed(
-        &portal_instruction,
-        &[
-            &*payer,
-            &*system_program_info,
-            &*session,
-            &*er_token_account,
-            &*bridge_program,
-            &*delegation_record,
-            &*buffer,
-        ],
-        &[er_signer],
-    )?;
+    #[cfg(not(feature = "checkpoint-continuity-v2"))]
+    let portal_infos = [
+        &*payer,
+        &*system_program_info,
+        &*session,
+        &*er_token_account,
+        &*bridge_program,
+        &*delegation_record,
+        &*buffer,
+    ];
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    let portal_infos = [
+        &*payer,
+        &*system_program_info,
+        &*session,
+        &*er_token_account,
+        &*bridge_program,
+        &*delegation_record,
+        &*buffer,
+        &*ingress,
+    ];
+    invoke_signed(&portal_instruction, &portal_infos, &[er_signer])?;
 
     close_buffer(buffer, payer)
 }
@@ -930,8 +997,17 @@ fn load_session_bridge(
     if !session_bridge.owned_by(portal_program.address()) {
         return Err(ProgramError::InvalidAccountOwner);
     }
+    #[cfg(not(feature = "checkpoint-continuity-v2"))]
     let bridge = SessionBridge::try_from_slice(&session_bridge.try_borrow()?)
         .map_err(|_| ProgramError::InvalidAccountData)?;
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    let bridge = crate::portal_abi::registration_v2(
+        program_id,
+        portal_program.address(),
+        session_bridge.address(),
+        &session_bridge.try_borrow()?,
+    )?
+    .base;
     if !bridge.is_valid() || bridge.bridge_program != *program_id {
         return Err(ProgramError::InvalidAccountData);
     }
@@ -1198,7 +1274,11 @@ fn key_bytes(key: &Pubkey) -> [u8; 32] {
 
 fn encode_portal_delegate(grid_id: u64) -> [u8; 9] {
     let mut data = [0; 9];
-    data[0] = 3;
+    data[0] = if cfg!(feature = "checkpoint-continuity-v2") {
+        32
+    } else {
+        3
+    };
     data[1..].copy_from_slice(&grid_id.to_le_bytes());
     data
 }

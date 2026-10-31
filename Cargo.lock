@@ -5458,6 +5458,7 @@ dependencies = [
  "solana-rpc-client",
  "solana-rpc-client-api",
  "solana-sdk-ids",
+ "solana-sha256-hasher",
  "solana-signature",
  "solana-signer",
  "solana-system-interface",

@@ -9,6 +9,7 @@ crate-type = ["cdylib", "lib"]
 [features]
 default = []
 no-entrypoint = []
+checkpoint-continuity-v2 = ["northstar-portal/checkpoint-continuity-v2"]
 
 [dependencies]
 borsh = { version = "1", default-features = false, features = ["derive"] }
@@ -27,6 +28,7 @@ solana-program-pack = { workspace = true }
 solana-pubkey = { workspace = true }
 solana-rent = { workspace = true }
 solana-sdk-ids = { workspace = true }
+solana-sha256-hasher = { workspace = true }
 solana-system-interface = { workspace = true }
 spl-token-interface = { workspace = true }
 
