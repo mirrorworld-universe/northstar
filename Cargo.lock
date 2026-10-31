@@ -5343,6 +5343,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "northstar-continuity-fixture"
+version = "0.1.0"
+dependencies = [
+ "pinocchio 0.11.2",
+]
+
+[[package]]
 name = "northstar-portal"
 version = "0.1.0"
 dependencies = [

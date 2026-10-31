@@ -129,6 +129,7 @@ members = [
 
     # Sonic:
     "northstar",
+    "northstar/programs/continuity-fixture",
     "northstar/programs/portal",
     "northstar/programs/replay-owner",
     "northstar/programs/token-bridge",
