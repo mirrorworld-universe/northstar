@@ -167,6 +167,9 @@ jobs:
         run: BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar-token-bridge --test core
       - name: Run SPL token bridge validator E2E
         run: BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar-token-bridge --test validator_e2e -- --nocapture
+      # Sonic: Portal-enabled genesis must preserve explicitly pinned program artifacts.
+      - name: Test explicit genesis program selection
+        run: cargo test --locked -p solana-test-validator --lib portal_configuration_preserves_explicit -- --test-threads=1
       - name: Run Northstar crate tests
         run: BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar -p northstar-portal --no-fail-fast
       # Sonic: Isolate the continuity fixture from the default deployment artifact.
