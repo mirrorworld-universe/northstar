@@ -1,4 +1,6 @@
 mod token_deposit;
+#[cfg(feature = "checkpoint-continuity-v2")]
+mod token_settlement_v2;
 
 use {
     crate::{
@@ -1201,6 +1203,7 @@ impl EphemeralRuntime {
             .identity()
             .commitment(crate::continuity_v2::hash_parts)
             .map_err(std::io::Error::other)?;
+        let mut expected_tokens = std::collections::BTreeMap::new();
         for transition in store.pending_transitions() {
             for effect in &transition.settlement_effects {
                 match borsh::from_slice::<SettlementEffectV2>(effect)? {
@@ -1236,30 +1239,51 @@ impl EphemeralRuntime {
                         bridge,
                         session_bridge,
                         account,
-                        cumulative_withdrawn,
+                        destination,
+                        amount,
+                        decimals,
                         ..
                     } => {
-                        let bridge_program = Pubkey::new_from_array(bridge);
-                        let (receipt, _) = northstar_token_bridge::find_token_deposit_receipt_pda(
-                            &bridge_program,
-                            &Pubkey::new_from_array(session_bridge),
-                            &Pubkey::new_from_array(account),
-                        );
-                        let receipt = l1_root.get_account(&receipt).ok_or_else(|| {
-                            std::io::Error::other("settled token receipt is missing")
-                        })?;
-                        let value: northstar_token_bridge::state::TokenDepositReceipt =
-                            borsh::from_slice(receipt.data())?;
-                        if receipt.owner() != &bridge_program
-                            || !value.is_valid()
-                            || value.session_bridge != session_bridge
-                            || value.er_token_account != account
-                            || value.withdrawn < cumulative_withdrawn
-                        {
-                            return Ok(false);
-                        }
+                        let total = expected_tokens
+                            .entry((bridge, session_bridge, account, destination, decimals))
+                            .or_insert(0u64);
+                        *total = total
+                            .checked_add(amount)
+                            .ok_or_else(|| std::io::Error::other("token effect total overflow"))?;
                     }
                 }
+            }
+        }
+        let plan = store.settlement_plan()?;
+        let mut planned_tokens = std::collections::BTreeMap::new();
+        if let Some(plan) = &plan {
+            for withdrawal in &plan.token_withdrawals {
+                let total = planned_tokens
+                    .entry((
+                        withdrawal.bridge_program.to_bytes(),
+                        withdrawal.session_bridge.to_bytes(),
+                        withdrawal.er_token_account.to_bytes(),
+                        withdrawal.l1_destination_token_account.to_bytes(),
+                        withdrawal.decimals,
+                    ))
+                    .or_insert(0u64);
+                *total = total
+                    .checked_add(withdrawal.amount)
+                    .ok_or_else(|| std::io::Error::other("token payout total overflow"))?;
+            }
+        }
+        if expected_tokens != planned_tokens {
+            return Err(std::io::Error::other(
+                "sealed token payout plan differs from effects",
+            ));
+        }
+        if let Some(plan) = &plan {
+            if !self.token_payouts_complete_v2(
+                l1_root,
+                Pubkey::new_from_array(head.checkpoint),
+                &plan.token_withdrawals,
+            )? {
+                return Ok(false);
             }
         }
         store.record_settled(&head)?;
@@ -2982,6 +3006,8 @@ impl Drop for EphemeralRuntime {
 mod tests {
     #[cfg(feature = "checkpoint-continuity-v2")]
     mod continuity_v2;
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    mod token_settlement_v2;
 
     use {
         super::*,

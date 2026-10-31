@@ -2,6 +2,8 @@ mod token_deposit;
 #[cfg(feature = "checkpoint-continuity-v2")]
 mod token_ingress_v2;
 
+#[cfg(not(feature = "checkpoint-continuity-v2"))]
+use northstar_portal::Session;
 use {
     crate::{
         instruction::TokenBridgeInstruction,
@@ -9,7 +11,7 @@ use {
         state::{account_size, BridgeBuffer, ErTokenAccount, TokenDepositReceipt, TokenVault},
     },
     borsh::{BorshDeserialize, BorshSerialize},
-    northstar_portal::{Checkpoint, DelegationRecord, Session, SessionBridge},
+    northstar_portal::{Checkpoint, DelegationRecord, SessionBridge},
     pinocchio::{
         cpi::{invoke_signed, Seed, Signer},
         error::ProgramError,
@@ -108,6 +110,8 @@ pub fn process_instruction(
                 | TokenBridgeInstruction::DelegateErTokenAccount { .. }
                 | TokenBridgeInstruction::Deposit { .. }
                 | TokenBridgeInstruction::ApplyTokenDeposit { .. }
+                | TokenBridgeInstruction::StartWithdrawal { .. }
+                | TokenBridgeInstruction::SettleWithdrawal { .. }
         ) {
             return Err(ProgramError::InvalidInstructionData);
         }
@@ -563,7 +567,7 @@ fn process_start_withdrawal(
     program_id: &Pubkey,
     accounts: &mut [AccountInfo],
     amount: u64,
-    _decimals: u8,
+    decimals: u8,
 ) -> ProgramResult {
     let account_info_iter = &mut accounts.iter_mut();
     let owner = next_account_info(account_info_iter)?;
@@ -572,11 +576,30 @@ fn process_start_withdrawal(
     let portal_program = next_account_info(account_info_iter)?;
     let destination_token_account = next_account_info(account_info_iter)?;
     let token_program = next_account_info(account_info_iter)?;
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    let mint = next_account_info(account_info_iter)?;
+    #[cfg(not(feature = "checkpoint-continuity-v2"))]
+    let _ = decimals;
 
     require_signer(owner)?;
     let bridge = load_session_bridge(program_id, session_bridge, portal_program)?;
     if bridge.token_program != *token_program.address() {
         return Err(ProgramError::InvalidAccountData);
+    }
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    {
+        if amount == 0
+            || *mint.address() != bridge.mint
+            || !mint.owned_by(token_program.address())
+            || mint.executable()
+        {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        let state = spl_token_interface::state::Mint::unpack(&mint.try_borrow()?)
+            .map_err(|_| ProgramError::InvalidAccountData)?;
+        if !state.is_initialized || state.decimals != decimals {
+            return Err(ProgramError::InvalidInstructionData);
+        }
     }
     let destination = unpack_token_account(destination_token_account)?;
     if destination.mint.to_bytes() != bridge.mint.to_bytes() {
@@ -639,8 +662,24 @@ fn process_settle_withdrawal(
     if expected_checkpoint != *checkpoint.address() {
         return Err(ProgramError::InvalidSeeds);
     }
+    #[cfg(not(feature = "checkpoint-continuity-v2"))]
     let session_state = Session::try_from_slice(&session.try_borrow()?)
         .map_err(|_| ProgramError::InvalidAccountData)?;
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    let versioned_registration = crate::portal_abi::registration_v2(
+        program_id,
+        portal_program.address(),
+        session_bridge.address(),
+        &session_bridge.try_borrow()?,
+    )?;
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    let session_state = crate::portal_abi::session_v2(
+        &versioned_registration,
+        portal_program.address(),
+        session.address(),
+        &session.try_borrow()?,
+    )?
+    .base;
     let checkpoint_state = Checkpoint::try_from_slice(&checkpoint.try_borrow()?)
         .map_err(|_| ProgramError::InvalidAccountData)?;
     if !is_valid_settlement_session(&session_state, validator.address())
@@ -649,8 +688,19 @@ fn process_settle_withdrawal(
         return Err(ProgramError::InvalidAccountData);
     }
 
+    #[cfg(not(feature = "checkpoint-continuity-v2"))]
     let bridge = SessionBridge::try_from_slice(&session_bridge.try_borrow()?)
         .map_err(|_| ProgramError::InvalidAccountData)?;
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    let bridge = versioned_registration.base;
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    let expected_session_bridge = northstar_portal::find_session_bridge_v2_pda(
+        portal_program.address(),
+        &versioned_registration.session_context,
+        &bridge.mint,
+    )
+    .0;
+    #[cfg(not(feature = "checkpoint-continuity-v2"))]
     let expected_session_bridge = Pubkey::find_program_address(
         &[
             b"session_bridge",

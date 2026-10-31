@@ -30,7 +30,10 @@ records; the delegated L1 account stays unchanged. The manager executes each tok
 input through the real bridge SBF instruction and durably records its input plus
 SVM result before commit. The payer needs committed ER SOL funding for cursor rent.
 Legacy hints and ordinary top-level/CPI credit calls cannot bypass input capture.
-Token withdrawals remain unavailable until their settlement adapters are wired.
+Token withdrawals capture both top-level and CPI effects. The selected bridge ABI
+requires a readonly mint on withdrawal so decimals are checked before debit. Token
+plans retain cumulative vault counters, and reconciliation requires matching consumed
+Portal authorizations plus the vault's paid counter, not a deposit receipt counter.
 
 SVM execution records account pre/post values, execution results, readonly input
 observations, replay data, and supported withdrawal effects at the pre-commit
@@ -67,11 +70,13 @@ credit consumption, pre-commit persistence rejection, restart, missing-state
 rejection, immutable plan recovery, late delegation, and a later deposit followed
 by a second proposal with the first checkpoint's final root. Real SPL/bridge SBF
 coverage also checks custody, token-input execution, cumulative targets, restart
-without duplicate credits, and a later top-up after L1 reanchoring.
+without duplicate credits, and a later top-up after L1 reanchoring. SPL payout tests
+cover two linked checkpoints, actual CPI withdrawal, partial-metadata restart/retry,
+and malformed decimals, registry data and authorization tuples.
 
 ## Remaining deployment gates
 
-- Token withdrawal/settlement adapters and a full SOL/SPL linked-checkpoint lifecycle remain incomplete.
+- Full validator/RPC SOL/SPL lifecycle qualification is still required in addition to local bank/SBF evidence.
 - CLI, consumer, and operator bindings must select the same protocol and session.
 - Configured proof coordination is rejected until the new relation is qualified.
   Historical guest keys and proofs are not accepted as continuity evidence.

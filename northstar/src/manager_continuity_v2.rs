@@ -233,16 +233,28 @@ impl Manager {
                         } else {
                             None
                         };
-                    plan.portal_transactions_with_effect_commitment(
-                        self.config.portal_program_id,
+                    self.settlement_transactions_for_plan(
+                        &plan,
                         session,
-                        validator,
                         blockhash,
                         header.effect_commitment,
                         accumulator,
                     )
                 }
-                CheckpointStatus::Settled => return Ok(None),
+                CheckpointStatus::Settled => {
+                    if Self::token_withdrawals_complete(bank, &plan) {
+                        return Ok(None);
+                    }
+                    crate::settlement::token_withdrawal_transactions(
+                        &plan.token_withdrawals,
+                        self.config.portal_program_id,
+                        session,
+                        plan.er_slot,
+                        header.effect_commitment,
+                        validator,
+                        blockhash,
+                    )
+                }
                 _ => {
                     return Err(io::Error::other(
                         "continuity checkpoint requires dispute or cancellation recovery",

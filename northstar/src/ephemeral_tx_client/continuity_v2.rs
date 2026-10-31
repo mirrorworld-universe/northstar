@@ -313,7 +313,29 @@ impl EphemeralTransactionClient {
         let addresses = Self::load_transaction_addresses(bank, transaction).unwrap_or_default();
         let keys = Self::full_account_keys(transaction, &addresses);
         let mut effects = Vec::new();
+        let mut calls = Vec::new();
         for (outer, instruction) in transaction.message.instructions().iter().enumerate() {
+            let outer_index = u32::try_from(outer)
+                .map_err(|_| solana_transaction::TransactionError::CommitCancelled)?;
+            calls.push((
+                outer,
+                true,
+                RecordedInnerInstructionV2 {
+                    outer_index,
+                    stack_height: 1,
+                    program_id_index: instruction.program_id_index,
+                    accounts: instruction.accounts.clone(),
+                    data: instruction.data.clone(),
+                },
+            ));
+            calls.extend(
+                inner
+                    .iter()
+                    .filter(|instruction| instruction.outer_index == outer_index)
+                    .map(|instruction| (outer, false, instruction.clone())),
+            );
+        }
+        for (outer, top_level, instruction) in calls {
             let Some(program) = keys.get(instruction.program_id_index as usize) else {
                 continue;
             };
@@ -337,12 +359,13 @@ impl EphemeralTransactionClient {
                         .try_into()
                         .map_err(|_| solana_transaction::TransactionError::CommitCancelled)?,
                 );
-                if !transaction.message.is_signer(indices[0] as usize)
+                if (top_level && !transaction.message.is_signer(indices[0] as usize))
                     || *sink != crate::WITHDRAWAL_SINK
                     || !system_program::check_id(system)
                     || *clock != sysvar::clock::id()
                     || !inner.iter().any(|inner| {
                         inner.outer_index as usize == outer
+                            && inner.stack_height == instruction.stack_height.saturating_add(1)
                             && keys
                                 .get(inner.program_id_index as usize)
                                 .is_some_and(system_program::check_id)
@@ -373,8 +396,8 @@ impl EphemeralTransactionClient {
                 else {
                     continue;
                 };
-                if instruction.accounts.len() < 6 {
-                    return Err(solana_transaction::TransactionError::CommitCancelled);
+                if instruction.accounts.len() < 7 {
+                    continue;
                 }
                 let (Some(owner), Some(account), Some(bridge), Some(portal), Some(destination)) = (
                     keys.get(instruction.accounts[0] as usize),
@@ -385,12 +408,39 @@ impl EphemeralTransactionClient {
                 ) else {
                     return Err(solana_transaction::TransactionError::CommitCancelled);
                 };
-                let registration = bank
-                    .get_account(bridge)
-                    .ok_or(solana_transaction::TransactionError::CommitCancelled)?;
-                let registration_state: northstar_portal::SessionBridge =
-                    borsh::from_slice(registration.data())
-                        .map_err(|_| solana_transaction::TransactionError::CommitCancelled)?;
+                let Some(registration) = bank.get_account(bridge) else {
+                    continue;
+                };
+                if registration.owner() != &self.portal_program_id {
+                    continue;
+                }
+                let Ok(frame) =
+                    borsh::from_slice::<northstar_portal::SessionBridgeV2>(registration.data())
+                else {
+                    continue;
+                };
+                if frame.base.bridge_program != *program {
+                    continue;
+                }
+                let context = state
+                    .identity()
+                    .commitment(crate::continuity_v2::hash_parts)
+                    .map_err(|_| solana_transaction::TransactionError::CommitCancelled)?;
+                let (expected, bump) = northstar_portal::find_session_bridge_v2_pda(
+                    &self.portal_program_id,
+                    &context,
+                    &frame.base.mint,
+                );
+                if !frame.is_valid()
+                    || frame.session_context != context
+                    || *bridge != expected
+                    || frame.base.bump != bump
+                    || frame.base.session.to_bytes() != state.identity().session
+                    || registration.executable()
+                {
+                    return Err(solana_transaction::TransactionError::CommitCancelled);
+                }
+                let registration_state = frame.base;
                 let value = state
                     .accounts()
                     .get(&account.to_bytes())
@@ -407,9 +457,13 @@ impl EphemeralTransactionClient {
                     || token.owner != owner.to_bytes()
                     || token.session_bridge != bridge.to_bytes()
                     || token.mint != registration_state.mint.to_bytes()
-                    || !transaction
-                        .message
-                        .is_signer(instruction.accounts[0] as usize)
+                    || keys.get(instruction.accounts[5] as usize)
+                        != Some(&registration_state.token_program)
+                    || keys.get(instruction.accounts[6] as usize) != Some(&registration_state.mint)
+                    || (top_level
+                        && !transaction
+                            .message
+                            .is_signer(instruction.accounts[0] as usize))
                 {
                     return Err(solana_transaction::TransactionError::CommitCancelled);
                 }

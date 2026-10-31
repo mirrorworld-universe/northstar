@@ -416,6 +416,26 @@ impl TokenWorldV2 {
         }
     }
 
+    pub(crate) fn start_withdrawal(&self, destination: Pubkey, amount: u64) -> Instruction {
+        Instruction {
+            program_id: self.bridge,
+            accounts: vec![
+                AccountMeta::new_readonly(self.payer.pubkey(), true),
+                AccountMeta::new(self.er, false),
+                AccountMeta::new_readonly(self.registry, false),
+                AccountMeta::new_readonly(self.portal, false),
+                AccountMeta::new_readonly(destination, false),
+                AccountMeta::new_readonly(spl_token_interface::id(), false),
+                AccountMeta::new_readonly(self.mint, false),
+            ],
+            data: borsh::to_vec(&TokenBridgeInstruction::StartWithdrawal {
+                amount,
+                decimals: 6,
+            })
+            .unwrap(),
+        }
+    }
+
     pub(crate) fn deposit(&self, source: Pubkey, amount: u64, sequence: u64) -> Instruction {
         let request = northstar_portal::find_undelegation_request_pda(&self.portal, &self.er).0;
         let ingress =

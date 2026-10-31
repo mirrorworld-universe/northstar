@@ -591,7 +591,21 @@ impl Manager {
             |artifact| artifact.checkpoint.er_slot,
         );
         let receipt_balances = runtime.settlement_receipt_balances(session_pda);
+        #[cfg(not(feature = "checkpoint-continuity-v2"))]
         let token_withdrawals = runtime.settlement_token_withdrawals(er_slot);
+        #[cfg(feature = "checkpoint-continuity-v2")]
+        let token_withdrawals = if runtime.lineage_store_v2().is_some() {
+            match runtime.settlement_token_withdrawals_v2(er_slot) {
+                Ok(withdrawals) => withdrawals,
+                Err(error) => {
+                    runtime.quarantine_checkpoint("checkpoint_lineage_recovery_failed");
+                    warn!("Token settlement plan rejected before signing: {error}");
+                    return None;
+                }
+            }
+        } else {
+            runtime.settlement_token_withdrawals(er_slot)
+        };
         let mut plan = build_settlement_plan(
             &diff,
             &runtime.delegated_accounts(),

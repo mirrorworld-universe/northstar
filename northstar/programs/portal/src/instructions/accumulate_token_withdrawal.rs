@@ -1,7 +1,9 @@
+#[cfg(not(feature = "checkpoint-continuity-v2"))]
+use crate::find_session_bridge_pda;
 use {
     super::initialize_pda_account,
     crate::{
-        account_size, find_checkpoint_pda, find_session_bridge_pda, find_session_pda,
+        account_size, find_checkpoint_pda, find_session_pda,
         find_token_withdrawal_authorization_pda,
         instructions::settlement::{accumulate_token_withdrawal_checksum, TokenWithdrawalChecksum},
         AccumulateTokenWithdrawal, Checkpoint, CheckpointStatus, ConsumeTokenWithdrawal,
@@ -49,8 +51,7 @@ pub fn process_accumulate_token_withdrawal(
     if session.address() != &find_session_pda(program_id).0 {
         return Err(PortalError::InvalidPdaSeeds.into());
     }
-    let mut session_state = Session::try_from_slice(&session.try_borrow()?)
-        .map_err(|_| PortalError::SessionDeserializeFailed)?;
+    let mut session_state = load_settlement_session(program_id, session)?;
     if !session_state.is_valid() || !session.owned_by(program_id) {
         return Err(PortalError::SessionStateInvalid.into());
     }
@@ -144,6 +145,9 @@ pub fn process_accumulate_token_withdrawal(
     session_state.settlement_accumulator =
         accumulate_token_withdrawal_checksum(session_state.settlement_accumulator, &withdrawal);
     let mut session_data = session.try_borrow_mut()?;
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    crate::continuity::write_session(&mut session_data, &session_state)?;
+    #[cfg(not(feature = "checkpoint-continuity-v2"))]
     BorshSerialize::serialize(&session_state, &mut &mut session_data[..]).unwrap();
     Ok(())
 }
@@ -179,8 +183,7 @@ pub fn process_consume_token_withdrawal(
     if session.address() != &find_session_pda(program_id).0 || !session.owned_by(program_id) {
         return Err(PortalError::InvalidPdaSeeds.into());
     }
-    let session_state = Session::try_from_slice(&session.try_borrow()?)
-        .map_err(|_| PortalError::SessionDeserializeFailed)?;
+    let session_state = load_settlement_session(program_id, session)?;
     if !session_state.is_valid()
         || !validator.is_signer()
         || validator.address() != &session_state.validator
@@ -256,6 +259,22 @@ pub fn process_consume_token_withdrawal(
     Ok(())
 }
 
+fn load_settlement_session(
+    program_id: &Pubkey,
+    session: &AccountInfo,
+) -> Result<Session, ProgramError> {
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    {
+        super::continuity::load_session_v2(program_id, session).map(|frame| frame.base)
+    }
+    #[cfg(not(feature = "checkpoint-continuity-v2"))]
+    {
+        let _ = program_id;
+        Session::try_from_slice(&session.try_borrow()?)
+            .map_err(|_| PortalError::SessionDeserializeFailed.into())
+    }
+}
+
 fn load_bridge(
     program_id: &Pubkey,
     session: &AccountInfo,
@@ -267,9 +286,36 @@ fn load_bridge(
     if !session_bridge.owned_by(program_id) {
         return Err(PortalError::InvalidAccountData.into());
     }
+    #[cfg(not(feature = "checkpoint-continuity-v2"))]
     let bridge = SessionBridge::try_from_slice(&session_bridge.try_borrow()?)
         .map_err(|_| PortalError::InvalidAccountData)?;
+    #[cfg(not(feature = "checkpoint-continuity-v2"))]
     let expected_bridge = find_session_bridge_pda(program_id, session.address(), &bridge.mint).0;
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    let (bridge, expected_bridge) = {
+        let registry = crate::SessionBridgeV2::try_from_slice(&session_bridge.try_borrow()?)
+            .map_err(|_| PortalError::InvalidAccountData)?;
+        let frame = super::continuity::load_session_v2(program_id, session)?;
+        let context = frame
+            .identity(program_id, session.address())
+            .commitment(|parts| hashv(parts).to_bytes())
+            .map_err(|_| PortalError::InvalidAccountData)?;
+        let (expected, bump) =
+            crate::find_session_bridge_v2_pda(program_id, &context, &registry.base.mint);
+        let vault = Pubkey::find_program_address(
+            &[b"token_vault", session_bridge.address().as_ref()],
+            &registry.base.bridge_program,
+        )
+        .0;
+        if !registry.is_valid()
+            || registry.session_context != context
+            || registry.base.bump != bump
+            || registry.base.vault != vault
+        {
+            return Err(PortalError::InvalidAccountData.into());
+        }
+        (registry.base, expected)
+    };
     if !bridge.is_valid()
         || bridge.session != *session.address()
         || session_bridge.address() != &expected_bridge
