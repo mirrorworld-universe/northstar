@@ -148,6 +148,156 @@ impl Fixture {
 }
 
 #[test]
+fn regression_v2_sol_payout_chains_after_restart_and_later_topup() {
+    let fixture = Fixture::new();
+    let mut root = fixture.parent.clone();
+    let recipient = Pubkey::new_unique();
+    let directory = tempfile::tempdir().unwrap();
+    let config = crate::ManagerConfig {
+        portal_program_id: PORTAL_PROGRAM_ID,
+        manager_account: fixture.manager.clone(),
+        checkpoint_plan_dir: Some(directory.path().join("plans")),
+    };
+    let mut manager = crate::Manager::new(config.clone());
+    let result = (|| -> std::result::Result<(), String> {
+        manager
+            .init_runtime(
+                root.clone(),
+                create_test_cluster_info(),
+                find_free_addr(),
+                find_free_addr(),
+                find_free_addr(),
+            )
+            .map_err(|error| error.to_string())?;
+        manager.activate_session(root.clone(), fixture.session, 0, 10_000, 1_000);
+        manager.process_finalized_l1_inputs(&root);
+        let mut previous = None;
+        for (index, (amount, paid)) in [(10_000_000, 10_000_000), (3_000_000, 13_000_000)]
+            .into_iter()
+            .enumerate()
+        {
+            if index == 1 {
+                manager.shutdown_runtime();
+                manager = crate::Manager::new(config.clone());
+                manager
+                    .init_runtime(
+                        root.clone(),
+                        create_test_cluster_info(),
+                        find_free_addr(),
+                        find_free_addr(),
+                        find_free_addr(),
+                    )
+                    .map_err(|error| error.to_string())?;
+                if !manager.resume_active_session_from_l1(root.clone()) {
+                    return Err("SOL session did not resume".into());
+                }
+                let bank =
+                    Bank::new_from_parent(root.clone(), SlotLeader::default(), root.slot() + 1);
+                let context = fixture
+                    .identity
+                    .commitment(hash_parts)
+                    .map_err(|error| error.to_string())?;
+                let receipt = northstar_portal::find_deposit_receipt_v2_pda(
+                    &PORTAL_PROGRAM_ID,
+                    &context,
+                    &fixture.payer.pubkey(),
+                )
+                .0;
+                let record =
+                    northstar_portal::find_ingress_record_v2_pda(&PORTAL_PROGRAM_ID, &context, 2).0;
+                let instruction = Instruction {
+                    program_id: PORTAL_PROGRAM_ID,
+                    accounts: vec![
+                        solana_instruction::AccountMeta::new(fixture.manager.pubkey(), true),
+                        solana_instruction::AccountMeta::new(fixture.session, false),
+                        solana_instruction::AccountMeta::new(receipt, false),
+                        solana_instruction::AccountMeta::new_readonly(
+                            fixture.payer.pubkey(),
+                            false,
+                        ),
+                        solana_instruction::AccountMeta::new_readonly(system_program::id(), false),
+                        solana_instruction::AccountMeta::new(record, false),
+                    ],
+                    data: borsh::to_vec(&northstar_portal::PortalInstruction::DepositFeeV2 {
+                        lamports: 7_000_000,
+                    })
+                    .unwrap(),
+                };
+                let transaction = Transaction::new_signed_with_payer(
+                    &[instruction],
+                    Some(&fixture.manager.pubkey()),
+                    &[fixture.manager.as_ref()],
+                    bank.last_blockhash(),
+                );
+                bank.process_transaction(&transaction)
+                    .map_err(|error| format!("SOL topup: {error:?}"))?;
+                bank.freeze();
+                root = Arc::new(bank);
+                manager.reanchor_to_l1_parent(root.clone());
+                manager.process_finalized_l1_inputs(&root);
+            }
+            let runtime = manager.runtime.as_ref().ok_or("runtime missing")?;
+            let before = runtime.bank().get_balance(&fixture.payer.pubkey());
+            let instruction = Instruction {
+                program_id: PORTAL_PROGRAM_ID,
+                accounts: vec![
+                    solana_instruction::AccountMeta::new(fixture.payer.pubkey(), true),
+                    solana_instruction::AccountMeta::new_readonly(recipient, false),
+                    solana_instruction::AccountMeta::new(crate::WITHDRAWAL_SINK, false),
+                    solana_instruction::AccountMeta::new_readonly(system_program::id(), false),
+                    solana_instruction::AccountMeta::new_readonly(
+                        solana_sdk_ids::sysvar::clock::id(),
+                        false,
+                    ),
+                ],
+                data: borsh::to_vec(&northstar_portal::PortalInstruction::StartWithdrawal {
+                    lamports: amount,
+                })
+                .unwrap(),
+            };
+            let transaction = Transaction::new_signed_with_payer(
+                &[instruction],
+                Some(&fixture.payer.pubkey()),
+                &[&fixture.payer],
+                runtime.bank().last_blockhash(),
+            );
+            TransactionClient::send_transactions_in_batch(
+                &runtime._tx_client,
+                vec![bincode::serialize(&VersionedTransaction::from(transaction)).unwrap()],
+                &SendTransactionServiceStats::default(),
+            );
+            if before.checked_sub(amount)
+                != Some(runtime.bank().get_balance(&fixture.payer.pubkey()))
+            {
+                return Err("SOL withdrawal did not execute".into());
+            }
+            let artifact =
+                super::token_settlement_v2::settle_checkpoint(&mut manager, &mut root, |bank| {
+                    Ok(bank.get_balance(&recipient) == paid)
+                })?;
+            if previous.is_some_and(|expected| expected != artifact.checkpoint.previous_state_root)
+            {
+                return Err("SOL checkpoint root did not chain".into());
+            }
+            previous = Some(artifact.checkpoint.new_state_root);
+        }
+        if manager
+            .runtime
+            .as_ref()
+            .ok_or("runtime missing")?
+            .bank()
+            .get_balance(&fixture.payer.pubkey())
+            != 94_000_000
+        {
+            return Err("final ER SOL balance differs".into());
+        }
+        Ok(())
+    })();
+    manager.shutdown_runtime();
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[test]
 fn regression_v2_manager_executes_cumulative_token_inputs_before_user_transactions() {
     let mut world =
         crate::portal_e2e_tests::token_bridge_v2::delegated_token_world(PORTAL_PROGRAM_ID, true);

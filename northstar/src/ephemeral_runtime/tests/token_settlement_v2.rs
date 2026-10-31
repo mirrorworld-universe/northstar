@@ -7,7 +7,7 @@ use {
     solana_program_pack::Pack,
 };
 
-type TestResult<T> = std::result::Result<T, String>;
+pub(super) type TestResult<T> = std::result::Result<T, String>;
 
 fn token_amount(bank: &Bank, address: &Pubkey) -> TestResult<u64> {
     let value = bank
@@ -68,6 +68,19 @@ fn settle(
     destination: &Pubkey,
     expected: u64,
 ) -> TestResult<CheckpointArtifactV2> {
+    settle_checkpoint(manager, root, |bank| {
+        token_amount(bank, destination).map(|amount| amount == expected)
+    })
+}
+
+pub(super) fn settle_checkpoint<F>(
+    manager: &mut crate::Manager,
+    root: &mut Arc<Bank>,
+    asset_complete: F,
+) -> TestResult<CheckpointArtifactV2>
+where
+    F: Fn(&Bank) -> TestResult<bool>,
+{
     let runtime = manager.runtime.as_ref().ok_or("runtime missing")?;
     if !runtime.seal_checkpoint_if_nonempty() {
         return Err("checkpoint did not seal".into());
@@ -88,7 +101,7 @@ fn settle(
                     .is_some_and(|head| head.state_root == artifact.checkpoint.new_state_root)
         };
         drop(store);
-        if complete && token_amount(root, destination)? == expected {
+        if complete && asset_complete(root)? {
             return Ok(artifact);
         }
         let bank = Bank::new_from_parent(
@@ -101,8 +114,8 @@ fn settle(
             .ok_or_else(|| {
                 format!(
                     "settlement phase {phase} produced no transactions; complete={complete}, \
-                     recipient={:?}, active={}",
-                    token_amount(root, destination),
+                     asset_complete={:?}, active={}",
+                    asset_complete(root),
                     manager.has_active_runtime()
                 )
             })?;
