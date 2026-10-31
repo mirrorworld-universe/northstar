@@ -189,6 +189,171 @@ where
 }
 
 #[test]
+fn regression_v2_token_transfer_captures_both_delegated_balances() {
+    let world = delegated_token_world(PORTAL_PROGRAM_ID, true);
+    let owner = Keypair::new();
+    let destination = world.delegate_token_owner(&owner, 3);
+    let source = world.funded_tokens(100);
+    world.send(&[world.deposit(source, 42, 4)], &[]).unwrap();
+    world.bank.freeze();
+    let original_source = world.bank.get_account(&world.er).unwrap();
+    let original_destination = world.bank.get_account(&destination).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let config = crate::ManagerConfig {
+        portal_program_id: PORTAL_PROGRAM_ID,
+        manager_account: world.payer.clone(),
+        checkpoint_plan_dir: Some(directory.path().join("plans")),
+    };
+    let mut manager = crate::Manager::new(config.clone());
+    manager
+        .init_runtime(
+            world.bank.clone(),
+            create_test_cluster_info(),
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+        )
+        .unwrap();
+    manager.activate_session(world.bank.clone(), world.session, 0, 10_000, 0);
+    manager.process_finalized_l1_inputs(&world.bank);
+    let result: TestResult<()> =
+        (|| {
+            let before = (
+                er_amount(&manager, &world.er)?,
+                er_amount(&manager, &destination)?,
+            );
+            if before != (42, 0) {
+                return Err(format!("authenticated token credit differs: {before:?}"));
+            }
+            let runtime = manager.runtime.as_ref().ok_or("runtime missing")?;
+            let instruction = Instruction {
+                program_id: world.bridge,
+                accounts: vec![
+                    solana_instruction::AccountMeta::new_readonly(world.payer.pubkey(), true),
+                    solana_instruction::AccountMeta::new(world.er, false),
+                    solana_instruction::AccountMeta::new(destination, false),
+                ],
+                data: borsh::to_vec(
+                    &northstar_token_bridge::instruction::TokenBridgeInstruction::Transfer {
+                        amount: 20,
+                    },
+                )
+                .unwrap(),
+            };
+            let transaction = Transaction::new_signed_with_payer(
+                &[instruction],
+                Some(&world.payer.pubkey()),
+                &[world.payer.as_ref()],
+                runtime.bank().last_blockhash(),
+            );
+            TransactionClient::send_transactions_in_batch(
+                &runtime._tx_client,
+                vec![bincode::serialize(
+                    &solana_transaction::versioned::VersionedTransaction::from(transaction),
+                )
+                .unwrap()],
+                &SendTransactionServiceStats::default(),
+            );
+            let after = (
+                er_amount(&manager, &world.er)?,
+                er_amount(&manager, &destination)?,
+            );
+            if after != (22, 20) {
+                return Err(format!(
+                    "v2 token transfer did not execute: before={before:?}, after={after:?}"
+                ));
+            }
+            let store = runtime.lineage_store_v2().ok_or("lineage missing")?;
+            let executions = store
+                .lock()
+                .unwrap()
+                .unsealed()
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        entry.payload,
+                        crate::continuity_v2::TransitionPayloadV2::Execution { .. }
+                    )
+                })
+                .count();
+            if executions != 1 {
+                return Err(format!(
+                    "ordinary token transfer capture count differs: {executions}"
+                ));
+            }
+            for (authority, target) in [(&owner, destination), (world.payer.as_ref(), world.er)] {
+                let instruction = Instruction {
+                    program_id: world.bridge,
+                    accounts: vec![
+                        solana_instruction::AccountMeta::new_readonly(authority.pubkey(), true),
+                        solana_instruction::AccountMeta::new(world.er, false),
+                        solana_instruction::AccountMeta::new(target, false),
+                    ],
+                    data: borsh::to_vec(
+                        &northstar_token_bridge::instruction::TokenBridgeInstruction::Transfer {
+                            amount: 1,
+                        },
+                    )
+                    .unwrap(),
+                };
+                let mut signers = vec![world.payer.as_ref()];
+                if authority.pubkey() != world.payer.pubkey() {
+                    signers.push(authority);
+                }
+                let transaction = Transaction::new_signed_with_payer(
+                    &[instruction],
+                    Some(&world.payer.pubkey()),
+                    &signers,
+                    runtime.bank().last_blockhash(),
+                );
+                TransactionClient::send_transactions_in_batch(
+                    &runtime._tx_client,
+                    vec![bincode::serialize(
+                        &solana_transaction::versioned::VersionedTransaction::from(transaction),
+                    )
+                    .unwrap()],
+                    &SendTransactionServiceStats::default(),
+                );
+                let preserved = (
+                    er_amount(&manager, &world.er)?,
+                    er_amount(&manager, &destination)?,
+                );
+                if preserved != (22, 20) {
+                    return Err(format!(
+                        "invalid transfer changed token balances: {preserved:?}"
+                    ));
+                }
+            }
+            Ok(())
+        })();
+    manager.shutdown_runtime();
+    assert!(result.is_ok(), "{result:?}");
+    let mut manager = crate::Manager::new(config);
+    manager
+        .init_runtime(
+            world.bank.clone(),
+            create_test_cluster_info(),
+            find_free_addr(),
+            find_free_addr(),
+            find_free_addr(),
+        )
+        .unwrap();
+    let resumed = manager.resume_active_session_from_l1(world.bank.clone());
+    let restored = (
+        er_amount(&manager, &world.er),
+        er_amount(&manager, &destination),
+    );
+    manager.shutdown_runtime();
+    assert!(resumed);
+    assert_eq!(restored, (Ok(22), Ok(20)));
+    assert_eq!(world.bank.get_account(&world.er).unwrap(), original_source);
+    assert_eq!(
+        world.bank.get_account(&destination).unwrap(),
+        original_destination
+    );
+}
+
+#[test]
 fn invariant_v2_token_reconciliation_rejects_changed_authorization_tuple() {
     let mut world = delegated_token_world(PORTAL_PROGRAM_ID, true);
     let source = world.funded_tokens(100);

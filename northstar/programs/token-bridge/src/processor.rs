@@ -110,6 +110,7 @@ pub fn process_instruction(
                 | TokenBridgeInstruction::DelegateErTokenAccount { .. }
                 | TokenBridgeInstruction::Deposit { .. }
                 | TokenBridgeInstruction::ApplyTokenDeposit { .. }
+                | TokenBridgeInstruction::Transfer { .. }
                 | TokenBridgeInstruction::StartWithdrawal { .. }
                 | TokenBridgeInstruction::SettleWithdrawal { .. }
         ) {

@@ -355,6 +355,80 @@ impl TokenWorldV2 {
             ))
     }
 
+    pub(crate) fn delegate_token_owner(&self, owner: &Keypair, sequence: u64) -> Pubkey {
+        let er = northstar_token_bridge::find_er_token_account_pda(
+            &self.bridge,
+            &self.registry,
+            &owner.pubkey(),
+        )
+        .0;
+        let initialize = Instruction {
+            program_id: self.bridge,
+            accounts: vec![
+                AccountMeta::new(self.payer.pubkey(), true),
+                AccountMeta::new(er, false),
+                AccountMeta::new_readonly(self.registry, false),
+                AccountMeta::new_readonly(self.portal, false),
+                AccountMeta::new_readonly(system_program::id(), false),
+            ],
+            data: borsh::to_vec(&TokenBridgeInstruction::InitializeErTokenAccount {
+                owner: owner.pubkey().to_bytes(),
+            })
+            .unwrap(),
+        };
+        self.send(&[initialize], &[]).unwrap();
+        let receipt = northstar_token_bridge::find_token_deposit_receipt_pda(
+            &self.bridge,
+            &self.registry,
+            &er,
+        )
+        .0;
+        let origin = Pubkey::find_program_address(
+            &[
+                northstar_token_bridge::state::TokenDepositProgress::ORIGIN_SEED,
+                er.as_ref(),
+            ],
+            &self.bridge,
+        )
+        .0;
+        let delegate = Instruction {
+            program_id: self.bridge,
+            accounts: vec![
+                AccountMeta::new(self.payer.pubkey(), true),
+                AccountMeta::new_readonly(owner.pubkey(), true),
+                AccountMeta::new(er, false),
+                AccountMeta::new_readonly(self.bridge, false),
+                AccountMeta::new_readonly(self.registry, false),
+                AccountMeta::new_readonly(self.portal, false),
+                AccountMeta::new(self.session, false),
+                AccountMeta::new(
+                    northstar_portal::find_delegation_record_pda(&self.portal, &er).0,
+                    false,
+                ),
+                AccountMeta::new(
+                    northstar_token_bridge::find_buffer_pda(&self.bridge, &er).0,
+                    false,
+                ),
+                AccountMeta::new_readonly(system_program::id(), false),
+                AccountMeta::new_readonly(receipt, false),
+                AccountMeta::new(origin, false),
+                AccountMeta::new(
+                    northstar_portal::find_ingress_record_v2_pda(
+                        &self.portal,
+                        &self.context,
+                        sequence,
+                    )
+                    .0,
+                    false,
+                ),
+            ],
+            data: borsh::to_vec(&TokenBridgeInstruction::DelegateErTokenAccount { grid_id: 0 })
+                .unwrap(),
+        };
+        self.send(&[delegate], &[owner]).unwrap();
+        er
+    }
+
     pub(crate) fn funded_tokens(&self, amount: u64) -> Pubkey {
         let account = Keypair::new();
         let token = spl_token_interface::id();
