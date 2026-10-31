@@ -1,4 +1,6 @@
 mod token_deposit;
+#[cfg(feature = "checkpoint-continuity-v2")]
+mod token_ingress_v2;
 
 use {
     crate::{
@@ -30,7 +32,7 @@ no_allocator!();
 /// # Safety
 /// `input` must point to a valid serialized Solana program input buffer.
 pub unsafe extern "C" fn entrypoint(input: *mut u8) -> u64 {
-    pinocchio::entrypoint::process_entrypoint::<16>(input, process_instruction)
+    pinocchio::entrypoint::process_entrypoint::<17>(input, process_instruction)
 }
 
 fn next_account_info<'a>(
@@ -104,6 +106,7 @@ pub fn process_instruction(
             TokenBridgeInstruction::InitializeVault
                 | TokenBridgeInstruction::InitializeErTokenAccount { .. }
                 | TokenBridgeInstruction::DelegateErTokenAccount { .. }
+                | TokenBridgeInstruction::Deposit { .. }
         ) {
             return Err(ProgramError::InvalidInstructionData);
         }
@@ -282,6 +285,14 @@ fn process_deposit(
     let deposit_receipt = next_account_info(account_info_iter)?;
     let delegation_record = next_account_info(account_info_iter)?;
     let system_program_info = next_account_info(account_info_iter)?;
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    let request = next_account_info(account_info_iter)?;
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    let session = next_account_info(account_info_iter)?;
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    let origin = next_account_info(account_info_iter)?;
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    let ingress = next_account_info(account_info_iter)?;
 
     require_signer(payer)?;
     require_signer(owner)?;
@@ -303,6 +314,20 @@ fn process_deposit(
         owner.address(),
         &bridge.mint,
     )?;
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    {
+        if amount == 0 || source_token_account.address() == vault_token_account.address() {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        require_er_token_account_pda(program_id, er_token_account.address(), &er_state)?;
+        token_ingress_v2::validate_context(
+            program_id,
+            portal_program,
+            session,
+            session_bridge,
+            vault,
+        )?;
+    }
     let is_delegated = er_token_account.owned_by(portal_program.address());
     if !is_delegated && !er_token_account.owned_by(program_id) {
         return Err(ProgramError::InvalidAccountOwner);
@@ -314,6 +339,7 @@ fn process_deposit(
             delegation_record,
             portal_program,
         )?;
+        #[cfg(not(feature = "checkpoint-continuity-v2"))]
         let request = next_account_info(account_info_iter)?;
         let expected = Pubkey::find_program_address(
             &[b"undelegation_request", er_token_account.address().as_ref()],
@@ -408,6 +434,23 @@ fn process_deposit(
             .checked_add(amount)
             .ok_or(ProgramError::ArithmeticOverflow)?;
         store(er_token_account, &er_state)?;
+    }
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    if is_delegated {
+        let ingress_context = token_ingress_v2::DepositIngressV2 {
+            payer,
+            system: system_program_info,
+            session,
+            registry: session_bridge,
+            vault,
+            er: er_token_account,
+            delegation: delegation_record,
+            receipt: deposit_receipt,
+            origin,
+            ingress,
+            portal: portal_program,
+        };
+        ingress_context.append(vault_state.bump, amount)?;
     }
     Ok(())
 }
@@ -1026,6 +1069,13 @@ fn load_vault(
         .map_err(|_| ProgramError::InvalidAccountData)?;
     if !state.is_valid() || state.session_bridge != key_bytes(session_bridge) {
         return Err(ProgramError::InvalidAccountData);
+    }
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    {
+        let (expected, bump) = find_token_vault_pda(program_id, session_bridge);
+        if *vault.address() != expected || state.bump != bump {
+            return Err(ProgramError::InvalidSeeds);
+        }
     }
     Ok(state)
 }

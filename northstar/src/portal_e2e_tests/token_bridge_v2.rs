@@ -6,8 +6,27 @@ use {
     solana_program_pack::Pack,
 };
 
-#[test]
-fn regression_v2_bridge_cpi_preserves_owner_authorized_delegation() {
+struct TokenWorldV2 {
+    bank: Arc<Bank>,
+    _forks: Arc<RwLock<BankForks>>,
+    payer: Keypair,
+    portal: Pubkey,
+    bridge: Pubkey,
+    session: Pubkey,
+    context: [u8; 32],
+    mint: Pubkey,
+    registry: Pubkey,
+    vault: Pubkey,
+    vault_token: Pubkey,
+    er: Pubkey,
+    receipt: Pubkey,
+    origin: Pubkey,
+    delegation: Pubkey,
+    first_ingress: Pubkey,
+    original_data: Vec<u8>,
+}
+
+fn delegated_world() -> TokenWorldV2 {
     setup();
     let (bank, _forks, portal, payer) = setup_bank_with_portal();
     let payer_key = payer.pubkey();
@@ -231,20 +250,230 @@ fn regression_v2_bridge_cpi_preserves_owner_authorized_delegation() {
         bank.last_blockhash(),
     ))
     .unwrap();
-    let value = bank.get_account(&er).unwrap();
-    assert_eq!(value.owner(), &portal);
+    TokenWorldV2 {
+        bank,
+        _forks,
+        payer,
+        portal,
+        bridge,
+        session,
+        context,
+        mint: mint.pubkey(),
+        registry,
+        vault,
+        vault_token: vault_token.pubkey(),
+        er,
+        receipt,
+        origin,
+        delegation,
+        first_ingress: ingress,
+        original_data: original,
+    }
+}
+
+#[test]
+fn regression_v2_bridge_cpi_preserves_owner_authorized_delegation() {
+    let world = delegated_world();
+    let TokenWorldV2 {
+        bank,
+        portal,
+        bridge,
+        context,
+        er,
+        delegation,
+        first_ingress: ingress,
+        original_data: original,
+        ..
+    } = &world;
+    let value = bank.get_account(er).unwrap();
+    assert_eq!(value.owner(), portal);
     assert_eq!(value.data(), original);
     let record: IngressRecordV2 =
-        borsh::from_slice(bank.get_account(&ingress).unwrap().data()).unwrap();
+        borsh::from_slice(bank.get_account(ingress).unwrap().data()).unwrap();
     record
-        .validate_next(context, 0, [0; 32], hash_parts)
+        .validate_next(*context, 0, [0; 32], hash_parts)
         .unwrap();
     assert!(
         matches!(record.payload,IngressPayloadV2::Delegation {account,owner,..}
         if account==er.to_bytes() && owner==bridge.to_bytes())
     );
     let binding: northstar_portal::DelegationRecord =
-        borsh::from_slice(bank.get_account(&delegation).unwrap().data()).unwrap();
-    assert_eq!(binding.owner_program, bridge);
+        borsh::from_slice(bank.get_account(delegation).unwrap().data()).unwrap();
+    assert_eq!(binding.owner_program, *bridge);
     assert_eq!(binding.grid_id, 0);
+}
+
+impl TokenWorldV2 {
+    fn send(
+        &self,
+        instructions: &[Instruction],
+        extra: &[&Keypair],
+    ) -> std::result::Result<(), solana_transaction::TransactionError> {
+        let mut signers = vec![&self.payer];
+        signers.extend_from_slice(extra);
+        self.bank
+            .process_transaction(&Transaction::new_signed_with_payer(
+                instructions,
+                Some(&self.payer.pubkey()),
+                &signers,
+                self.bank.last_blockhash(),
+            ))
+    }
+
+    fn funded_tokens(&self, amount: u64) -> Pubkey {
+        let account = Keypair::new();
+        let token = spl_token_interface::id();
+        let create = solana_system_interface::instruction::create_account(
+            &self.payer.pubkey(),
+            &account.pubkey(),
+            Rent::default().minimum_balance(spl_token_interface::state::Account::LEN),
+            spl_token_interface::state::Account::LEN as u64,
+            &token,
+        );
+        let initialize = spl_token_interface::instruction::initialize_account3(
+            &token,
+            &account.pubkey(),
+            &self.mint,
+            &self.payer.pubkey(),
+        )
+        .unwrap();
+        let mint = spl_token_interface::instruction::mint_to_checked(
+            &token,
+            &self.mint,
+            &account.pubkey(),
+            &self.payer.pubkey(),
+            &[],
+            amount,
+            6,
+        )
+        .unwrap();
+        self.send(&[create, initialize, mint], &[&account]).unwrap();
+        account.pubkey()
+    }
+
+    fn token_amount(&self, address: &Pubkey) -> u64 {
+        spl_token_interface::state::Account::unpack(self.bank.get_account(address).unwrap().data())
+            .unwrap()
+            .amount
+    }
+
+    fn unsigned_record(&self, amount: u64, sequence: u64) -> Instruction {
+        let ingress =
+            northstar_portal::find_ingress_record_v2_pda(&self.portal, &self.context, sequence).0;
+        Instruction {
+            program_id: self.portal,
+            accounts: vec![
+                AccountMeta::new(self.payer.pubkey(), true),
+                AccountMeta::new_readonly(system_program::id(), false),
+                AccountMeta::new(self.session, false),
+                AccountMeta::new_readonly(self.registry, false),
+                AccountMeta::new_readonly(self.vault, false),
+                AccountMeta::new_readonly(self.er, false),
+                AccountMeta::new_readonly(self.delegation, false),
+                AccountMeta::new_readonly(self.receipt, false),
+                AccountMeta::new_readonly(self.origin, false),
+                AccountMeta::new(ingress, false),
+            ],
+            data: borsh::to_vec(&PortalInstruction::RecordTokenDepositV2(
+                northstar_portal::RecordTokenDepositV2 { amount },
+            ))
+            .unwrap(),
+        }
+    }
+
+    fn deposit(&self, source: Pubkey, amount: u64, sequence: u64) -> Instruction {
+        let request = northstar_portal::find_undelegation_request_pda(&self.portal, &self.er).0;
+        let ingress =
+            northstar_portal::find_ingress_record_v2_pda(&self.portal, &self.context, sequence).0;
+        Instruction {
+            program_id: self.bridge,
+            accounts: vec![
+                AccountMeta::new(self.payer.pubkey(), true),
+                AccountMeta::new_readonly(self.payer.pubkey(), true),
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new(self.er, false),
+                AccountMeta::new_readonly(self.registry, false),
+                AccountMeta::new_readonly(self.portal, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new(self.vault_token, false),
+                AccountMeta::new_readonly(self.mint, false),
+                AccountMeta::new_readonly(spl_token_interface::id(), false),
+                AccountMeta::new(self.receipt, false),
+                AccountMeta::new_readonly(self.delegation, false),
+                AccountMeta::new_readonly(system_program::id(), false),
+                AccountMeta::new_readonly(request, false),
+                AccountMeta::new(self.session, false),
+                AccountMeta::new_readonly(self.origin, false),
+                AccountMeta::new(ingress, false),
+            ],
+            data: borsh::to_vec(&TokenBridgeInstruction::Deposit {
+                amount,
+                decimals: 6,
+            })
+            .unwrap(),
+        }
+    }
+}
+
+#[test]
+fn regression_v2_bridge_deposit_records_only_authorized_cumulative_credit() {
+    let world = delegated_world();
+    let source = world.funded_tokens(1_000);
+    let mut expected = vec![37];
+    expected.extend_from_slice(&42u64.to_le_bytes());
+    assert_eq!(world.unsigned_record(42, 2).data, expected);
+    world.send(&[world.deposit(source, 42, 2)], &[]).unwrap();
+    assert_eq!(world.token_amount(&source), 958);
+    assert_eq!(world.token_amount(&world.vault_token), 42);
+    let receipt: northstar_token_bridge::state::TokenDepositReceipt =
+        borsh::from_slice(world.bank.get_account(&world.receipt).unwrap().data()).unwrap();
+    assert_eq!(receipt.balance, 42);
+    let key = northstar_portal::find_ingress_record_v2_pda(&world.portal, &world.context, 2).0;
+    let record: IngressRecordV2 =
+        borsh::from_slice(world.bank.get_account(&key).unwrap().data()).unwrap();
+    let previous: IngressRecordV2 =
+        borsh::from_slice(world.bank.get_account(&world.first_ingress).unwrap().data()).unwrap();
+    record
+        .validate_next(world.context, 1, previous.root, hash_parts)
+        .unwrap();
+    assert!(
+        matches!(record.payload,IngressPayloadV2::TokenDeposit {bridge,session_bridge,account,
+        receipt,mint,token_program,origin_deposited:0,amount:42,cumulative_deposited:42}
+        if bridge==world.bridge.to_bytes() && session_bridge==world.registry.to_bytes() && account==world.er.to_bytes()
+            && receipt==world.receipt.to_bytes() && mint==world.mint.to_bytes() && token_program==spl_token_interface::id().to_bytes())
+    );
+    assert_eq!(
+        world.bank.get_account(&world.er).unwrap().data(),
+        world.original_data
+    );
+    assert_eq!(
+        world.bank.get_account(&world.er).unwrap().owner(),
+        &world.portal
+    );
+    assert!(world.send(&[world.unsigned_record(42, 3)], &[]).is_err());
+    assert!(world.send(&[world.deposit(source, 7, 99)], &[]).is_err());
+    let mut trailing = world.deposit(source, 7, 3);
+    trailing.data.push(0);
+    assert!(world.send(&[trailing], &[]).is_err());
+    assert_eq!(world.token_amount(&source), 958);
+    assert_eq!(world.token_amount(&world.vault_token), 42);
+    let unchanged: northstar_token_bridge::state::TokenDepositReceipt =
+        borsh::from_slice(world.bank.get_account(&world.receipt).unwrap().data()).unwrap();
+    assert_eq!(unchanged, receipt);
+    world.send(&[world.deposit(source, 8, 3)], &[]).unwrap();
+    assert_eq!(world.token_amount(&world.vault_token), 50);
+    let key = northstar_portal::find_ingress_record_v2_pda(&world.portal, &world.context, 3).0;
+    let next: IngressRecordV2 =
+        borsh::from_slice(world.bank.get_account(&key).unwrap().data()).unwrap();
+    next.validate_next(world.context, 2, record.root, hash_parts)
+        .unwrap();
+    assert!(matches!(
+        next.payload,
+        IngressPayloadV2::TokenDeposit {
+            origin_deposited: 0,
+            amount: 8,
+            cumulative_deposited: 50,
+            ..
+        }
+    ));
 }

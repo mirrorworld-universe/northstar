@@ -209,6 +209,10 @@ fn process_instruction(
         Ok((36, payload)) => deserialize_args_exact(payload).and_then(|args| {
             instructions::process_register_session_bridge_v2(program_id, accounts, args)
         }),
+        #[cfg(feature = "checkpoint-continuity-v2")]
+        Ok((37, payload)) => deserialize_args_exact(payload).and_then(|args| {
+            instructions::process_record_token_deposit_v2(program_id, accounts, args)
+        }),
         Ok((_, _)) | Err(_) => Err(ProgramError::InvalidInstructionData),
     }
 }

@@ -11,6 +11,7 @@ pub struct ErTokenAccount {
 }
 
 impl ErTokenAccount {
+    pub const SERIALIZED_LEN: usize = 106;
     pub const DISCRIMINATOR: u8 = 2;
     pub const SEED_PREFIX: &'static [u8] = b"er_token";
 
@@ -30,6 +31,7 @@ pub struct TokenDepositReceipt {
 }
 
 impl TokenDepositReceipt {
+    pub const SERIALIZED_LEN: usize = 82;
     pub const DISCRIMINATOR: u8 = 3;
     pub const SEED_PREFIX: &'static [u8] = b"token_deposit";
 
@@ -46,6 +48,7 @@ pub struct TokenDepositProgress {
 }
 
 impl TokenDepositProgress {
+    pub const SERIALIZED_LEN: usize = 10;
     pub const ORIGIN_DISCRIMINATOR: u8 = 4;
     pub const CURSOR_DISCRIMINATOR: u8 = 5;
     pub const ORIGIN_SEED: &'static [u8] = b"token_deposit_origin";
@@ -68,6 +71,7 @@ mod tests {
         };
         let mut bytes = borsh::to_vec(&state).unwrap();
         assert_eq!(bytes.len(), 106);
+        assert_eq!(bytes.len(), ErTokenAccount::SERIALIZED_LEN);
         assert_eq!(&bytes[1..33], &state.session_bridge);
         assert_eq!(&bytes[33..65], &state.owner);
         assert_eq!(&bytes[65..97], &state.mint);
@@ -94,6 +98,7 @@ mod tests {
         };
         let mut bytes = borsh::to_vec(&state).unwrap();
         assert_eq!(bytes.len(), 82);
+        assert_eq!(bytes.len(), TokenDepositReceipt::SERIALIZED_LEN);
         assert_eq!(&bytes[65..73], &42u64.to_le_bytes());
         assert_eq!(&bytes[73..81], &7u64.to_le_bytes());
         assert_eq!(
@@ -114,6 +119,7 @@ mod tests {
         };
         let mut encoded = borsh::to_vec(&progress).unwrap();
         assert_eq!(encoded.len(), 10);
+        assert_eq!(encoded.len(), TokenDepositProgress::SERIALIZED_LEN);
         assert_eq!(&encoded[1..9], &42u64.to_le_bytes());
         assert_eq!(
             borsh::from_slice::<TokenDepositProgress>(&encoded).unwrap(),

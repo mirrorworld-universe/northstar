@@ -9,8 +9,12 @@ use {
 pub enum PortalInstruction {
     OpenSession(OpenSession),
     CloseSession,
-    DepositFee { lamports: u64 },
-    Delegate { grid_id: u64 },
+    DepositFee {
+        lamports: u64,
+    },
+    Delegate {
+        grid_id: u64,
+    },
     Undelegate,
     BeginSettlement(BeginSettlement),
     WriteSettlementChunk(WriteSettlementChunk),
@@ -20,7 +24,9 @@ pub enum PortalInstruction {
     UndelegateHandoff,
     SettleAccountOwner(SettleAccountOwner),
     SettleAccountLamports(SettleAccountLamports),
-    StartWithdrawal { lamports: u64 },
+    StartWithdrawal {
+        lamports: u64,
+    },
     ProposeCheckpoint(ProposeCheckpoint),
     CommitCheckpoint(CommitCheckpoint),
     CancelCheckpoint(CancelCheckpoint),
@@ -39,11 +45,17 @@ pub enum PortalInstruction {
     ApproveUndelegation,
     VerifyErStepProofV1(VerifyErStepProofV1),
     OpenSessionV2(OpenSessionV2),
-    DelegateV2 { grid_id: u64 },
-    DepositFeeV2 { lamports: u64 },
+    DelegateV2 {
+        grid_id: u64,
+    },
+    DepositFeeV2 {
+        lamports: u64,
+    },
     ProposeCheckpointV2(ProposeCheckpointV2),
     CommitCheckpointV2(CommitCheckpoint),
     RegisterSessionBridgeV2(RegisterSessionBridge),
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    RecordTokenDepositV2(RecordTokenDepositV2),
 }
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
 pub struct OpenSession {
@@ -203,6 +215,12 @@ pub struct RegisterSessionBridge {
     pub bridge_program: Pubkey,
     pub vault: Pubkey,
     pub token_program: Pubkey,
+}
+
+#[cfg(feature = "checkpoint-continuity-v2")]
+#[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]
+pub struct RecordTokenDepositV2 {
+    pub amount: u64,
 }
 
 #[derive(Debug, Clone, Copy, BorshDeserialize, BorshSerialize)]

@@ -1,5 +1,5 @@
 mod bridge;
-pub use bridge::process_register_session_bridge_v2;
+mod token_credit;
 use {
     super::{
         initialize_pda_account,
@@ -19,6 +19,9 @@ use {
     },
     pinocchio_idl_macros::p_instruction,
     solana_sha256_hasher::hashv,
+};
+pub use {
+    bridge::process_register_session_bridge_v2, token_credit::process_record_token_deposit_v2,
 };
 
 fn hash_parts(parts: &[&[u8]]) -> [u8; 32] {
