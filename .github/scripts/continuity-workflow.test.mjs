@@ -22,6 +22,10 @@ test('release-only deployment stages both inputs before isolated activation', ()
   expect(steps[activation].run).toContain('continuity_devnet.py run');
   expect(steps[activation].run).toContain('--revision "$GITHUB_SHA"');
   expect(steps[activation]['timeout-minutes']).toBe(120);
+  expect(steps.find(step => step.uses === 'actions/setup-node@v4').with['node-version']).toBe('24.21.0');
+  const testSteps = workflow.jobs.test.steps;
+  expect(testSteps.find(step => step.uses === 'actions/setup-node@v4').with['node-version']).toBe('24.21.0');
+  expect(testSteps.find(step => step.name === 'Test pinned public continuity SDK install').run).toContain('prepare-continuity-sdk.sh');
 });
 
 test('artifact upload selects only the verified public report', () => {
