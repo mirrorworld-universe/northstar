@@ -26,7 +26,7 @@ jobs:
           NATIVE_REVISION: ${{ inputs.revision }}
         run: |
           python3 -B - <<'PY'
-          import fcntl, hashlib, json, os, re, stat, subprocess, sys, textwrap
+          import fcntl, hashlib, json, os, re, stat, subprocess, sys, textwrap, time, urllib.request
           from pathlib import Path
           sys.path.insert(0, '.github/scripts')
           from continuity_devnet import Rpc, LOADER, SERVICE
@@ -156,5 +156,22 @@ jobs:
           summary = subprocess.run(['sudo', '-n', 'python3', '-B', '-c', textwrap.dedent(public_summary)],
                                    check=True, capture_output=True, text=True, timeout=20)
           print(summary.stdout.strip())
+          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+          from continuity_devnet import public_text
+          pending = {'encoding':'base64','commitment':'confirmed','withContext':True,'filters':[
+              {'memcmp':{'offset':0,'bytes':public_text(hashlib.sha256(b'account:RequestAccount').digest()[:8])}},
+              {'memcmp':{'offset':9,'bytes':'1'}}]}
+          for method, params in [('getBlockHeight',[{'commitment':'confirmed'}]), ('getProgramAccounts',[vrf_ids['coordinator'],pending])]:
+              started = time.monotonic()
+              try:
+                  request = urllib.request.Request('http://127.0.0.1:8910', data=json.dumps({'jsonrpc':'2.0','id':1,'method':method,'params':params}).encode(), headers={'Content-Type':'application/json'})
+                  with opener.open(request, timeout=90) as response:
+                      raw = response.read(8*1024*1024+1)
+                  require(len(raw) <= 8*1024*1024, 'timing response exceeds bound')
+                  observed = json.loads(raw)
+                  print(json.dumps({'rpc_timing_method':method,'elapsed_seconds':round(time.monotonic()-started,3),'rpc_error_code':observed.get('error',{}).get('code'),
+                                    'account_count':len(observed.get('result',{}).get('value',[])) if method == 'getProgramAccounts' else None}), flush=True)
+              except Exception as error:
+                  print(json.dumps({'rpc_timing_method':method,'elapsed_seconds':round(time.monotonic()-started,3),'error_kind':type(error).__name__}), flush=True)
           os.close(lock)
           PY
