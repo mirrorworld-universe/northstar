@@ -292,9 +292,11 @@ class StopTests(unittest.TestCase):
 
     def test_deploy_order_and_trust_boundary(self):
         source = Path(__file__).parents[1].joinpath("workflows/ci.yml").read_text()
-        stop = source.index("Stop managed VRF before deployment")
-        self.assertLess(stop, source.index("Generate new portal program address"))
-        self.assertIn("sudo -n python3 -B .github/scripts/stop-vrf-service.py", source)
+        self.assertIn("python3 -B .github/scripts/continuity_devnet.py run", source)
+        controller = Path(__file__).with_name("continuity_devnet.py").read_text()
+        stop = controller.index('ROOT / ".github/scripts/stop-vrf-service.py"')
+        self.assertLess(stop, controller.index('self.stage / ARTIFACTS["cli"], "--url"'))
+        self.assertIn('["sudo", "-n", "python3", "-B", ROOT / ".github/scripts/stop-vrf-service.py"]', controller)
         deploy = source[source.index("  deploy:") :]
         self.assertIn("github.ref == 'refs/heads/release'", deploy)
         self.assertIn("persist-credentials: false", deploy)

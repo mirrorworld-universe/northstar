@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "result": "passed",
+  "scope": "Isolated local test-validator RPC lifecycle with fresh Portal and bridge identities; not a hosted deployment",
+  "source_binding": "Caller-provided native binary and SBF artifacts, not an independent build attestation",
+  "native_revision": "34d642a070cba0fcb0ce531fe4be2b0cafaabe4c",
+  "sdk_revision": "24030ce9fc3b80aa21738db2bb9f5a5fbea030d8",
+  "scripts_sha256": {
+    "devnet-continuity-smoke.mjs": "aef819a95cb08dab7e1608e2d83472c2c21ea79a1bfd75d1d08ca15ae53a547a",
+    "continuity-control-journal.mjs": "828c6f53ad48f77ac76b06366f7e18134d72b3bf2152c0882a9cf3a3a9ce471a"
+  },
+  "artifacts_sha256": {
+    "validator": "afee7b815921a85ed5aa2cffe62c74cd7888f35a34cd05deae8fc94e3b5a7771",
+    "portal": "1e87255a3b7657460b91f37f082607b0b9d892c9b5c3797cdee3d169a55aba2f",
+    "token_bridge": "21c5196494c223b4e5850237b1ae177f9157a4466afc12751f4f291b72a57384"
+  },
+  "loaded_program_hashes_match": true,
+  "genesis_feature_deactivation": ["B8JJXCy5amZyWG9r7EnUYLwzXSXTxG7GZ1qZ1qggo83g"],
+  "binding": {
+    "genesis": "UfuzCFWGskTVkfFUdZCZBXes8eS73k9vpNRPD3BKrCG",
+    "er_genesis": "11111111111111111111111111111111",
+    "validator": "HmMK76vWeyUKWJeL5t3rYopvuF8yJWSb3QbsMbJXQxih",
+    "portal": "5uE9GPP88e2gjTqpRBwe9xUGt1qT1b45trrzUEnRGQUf",
+    "token_bridge": "GosgPPDNw77PiRf9HbYYTTcBtYuJtfcWiyR8BhtAPhvQ",
+    "profile": "9eeb38198dbe3511a59442fd81772eace362b96ef5d5bf51be3419e0d6741713",
+    "session": "34ut4xCjJNYsHTHBt4RLn9BQgjjp3BkHMoWRvZ46rHDo",
+    "nonce": "1",
+    "context": "13c620890b4733e7e5f75bab6a01a93b09be9735d4cddfd63da8d3eaada728e6"
+  },
+  "phases": [
+    "bootstrap",
+    "prepare-sol",
+    "restart-validator",
+    "resume-sol",
+    "prepare-spl",
+    "restart-validator",
+    "resume-spl"
+  ],
+  "assertions": {
+    "same_ledger_genesis_after_restart": true,
+    "restored_er_sol_lamports": 10000000,
+    "finalized_l1_sol_payout_lamports": 1000000,
+    "restored_er_alice_tokens": "350000000",
+    "restored_er_bob_tokens_before_withdrawal": "250000000",
+    "finalized_l1_bob_token_payout": "200000000",
+    "remaining_vault_tokens": "400000000",
+    "remaining_er_bob_tokens": "50000000",
+    "l1_er_token_card_still_portal_owned": true,
+    "validator_stopped": true
+  },
+  "qualification_limits": {
+    "hosted_devnet": false,
+    "production_systemd_activation": false,
+    "oracle_callback": false,
+    "controlled_partial_checkpoint_interruption": false,
+    "graceful_shutdown": false,
+    "sp1": false,
+    "proof_acceptance": false
+  }
+}

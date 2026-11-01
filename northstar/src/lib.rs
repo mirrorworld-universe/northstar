@@ -32,6 +32,8 @@ pub mod ephemeral_tpu;
 pub mod ephemeral_tx_client;
 pub mod lineage_l1_v2;
 pub mod lineage_store_v2;
+#[cfg(test)]
+mod manager_config_tests;
 #[cfg(feature = "checkpoint-continuity-v2")]
 mod manager_continuity_v2;
 pub mod portal_state;
@@ -210,6 +212,24 @@ pub struct ManagerConfig {
 
     /// Durable directory for checkpoint-bound settlement plan snapshots.
     pub checkpoint_plan_dir: Option<PathBuf>,
+}
+
+impl ManagerConfig {
+    pub fn for_validator(
+        portal_program_id: Pubkey,
+        manager_account: Arc<Keypair>,
+        ledger_path: &std::path::Path,
+    ) -> Self {
+        Self {
+            portal_program_id,
+            manager_account,
+            checkpoint_plan_dir: Some(
+                std::env::var_os("NORTHSTAR_CHECKPOINT_PLAN_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| ledger_path.join("northstar-checkpoint-plans")),
+            ),
+        }
+    }
 }
 
 /// Metadata about an ephemeral fork
