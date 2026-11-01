@@ -172,5 +172,29 @@ jobs:
               details.update(status=raw[9],request_slot=int.from_bytes(raw[115:123],'little'),deadline_slot=int.from_bytes(raw[228:236],'little'),
                              fee_payer=public_text(raw[244:276]),rent_payer=public_text(raw[276:308]))
           print(json.dumps({'request_lifecycle':details}), flush=True)
+          operations = os.open('/solana/northstar/vrf-service/operations.log', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+          try:
+              info = os.fstat(operations)
+              require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077, 'unsafe operation log')
+              os.lseek(operations, max(0, info.st_size-16384), os.SEEK_SET)
+              diagnostic = os.read(operations, 16384).decode('utf-8', errors='replace')
+          finally:
+              os.close(operations)
+          errors = [line for line in diagnostic.splitlines() if any(value in line for value in ('Error:', 'RPC sendTransaction', 'canonical checkpoint', 'Caused by:'))]
+          print(json.dumps({'current_control_errors':[line[:500] for line in errors[-6:]]}), flush=True)
+          case = Path('/solana/northstar/vrf-service/deployments/d1ccaf33fafeea07137247bc4f180f7c19409fbb4b4e03ffed6ec0fb08a8f023/invocations/watchlist-mvp-9d9d63e5222d2500ef360511c6ccf9f874d7a3dd')
+          pending = case / 'smoke-request.intent.json'
+          if pending.exists():
+              intent = private_json(pending)
+              attempt = intent['attempt']
+              plan = private_json(case / 'smoke-request.plan.json')['instructions'][0]
+              request_address, consumer_address = plan['accounts'][5]['address'], plan['accounts'][1]['address']
+              status = er.call('getSignatureStatuses', [[attempt['signature']], {'searchTransactionHistory':True}])['value'][0]
+              request_value = er.account(request_address)
+              consumer_value = er.account(consumer_address)
+              print(json.dumps({'watchlist_control':{'signature':attempt['signature'],'last_valid_height':attempt['last_valid_block_height'],
+                    'current_height':er.call('getBlockHeight',[{'commitment':'confirmed'}]),'status':status,'request':request_address,
+                    'request_exists':request_value is not None,'consumer':consumer_address,'consumer_deliveries':int.from_bytes(consumer_value['raw'][145:149],'little') if consumer_value else None,
+                    'consumer_request_pointer_set':any(consumer_value['raw'][149:181]) if consumer_value else None}}), flush=True)
           os.close(lock)
           PY
