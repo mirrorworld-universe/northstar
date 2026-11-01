@@ -26,7 +26,7 @@ jobs:
           NATIVE_REVISION: ${{ inputs.revision }}
         run: |
           python3 -B - <<'PY'
-          import fcntl, hashlib, json, os, re, stat, subprocess, sys, textwrap, time, urllib.request
+          import base64, fcntl, hashlib, json, os, re, stat, subprocess, sys, textwrap
           from pathlib import Path
           sys.path.insert(0, '.github/scripts')
           from continuity_devnet import Rpc, LOADER, SERVICE
@@ -156,22 +156,21 @@ jobs:
           summary = subprocess.run(['sudo', '-n', 'python3', '-B', '-c', textwrap.dedent(public_summary)],
                                    check=True, capture_output=True, text=True, timeout=20)
           print(summary.stdout.strip())
-          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
           from continuity_devnet import public_text
-          pending = {'encoding':'base64','commitment':'confirmed','withContext':True,'filters':[
-              {'memcmp':{'offset':0,'bytes':public_text(hashlib.sha256(b'account:RequestAccount').digest()[:8])}},
-              {'memcmp':{'offset':9,'bytes':'1'}}]}
-          for method, params in [('getBlockHeight',[{'commitment':'confirmed'}]), ('getProgramAccounts',[vrf_ids['coordinator'],pending])]:
-              started = time.monotonic()
-              try:
-                  request = urllib.request.Request('http://127.0.0.1:8910', data=json.dumps({'jsonrpc':'2.0','id':1,'method':method,'params':params}).encode(), headers={'Content-Type':'application/json'})
-                  with opener.open(request, timeout=90) as response:
-                      raw = response.read(8*1024*1024+1)
-                  require(len(raw) <= 8*1024*1024, 'timing response exceeds bound')
-                  observed = json.loads(raw)
-                  print(json.dumps({'rpc_timing_method':method,'elapsed_seconds':round(time.monotonic()-started,3),'rpc_error_code':observed.get('error',{}).get('code'),
-                                    'account_count':len(observed.get('result',{}).get('value',[])) if method == 'getProgramAccounts' else None}), flush=True)
-              except Exception as error:
-                  print(json.dumps({'rpc_timing_method':method,'elapsed_seconds':round(time.monotonic()-started,3),'error_kind':type(error).__name__}), flush=True)
+          request_plan = vrf_work / 'smoke-request.plan.json'
+          control_index = private_json(Path('/solana/northstar/vrf-service/control-state.json'))
+          identity = str((vrf_work / 'smoke-request.intent.json').relative_to('/solana/northstar/vrf-service'))
+          require(hashlib.sha256(request_plan.read_bytes()).hexdigest() == control_index['records'][identity]['plan_sha256'], 'request plan changed')
+          request_address = private_json(request_plan)['instructions'][0]['accounts'][5]['address']
+          er = Rpc('http://127.0.0.1:8910')
+          current = er.call('getSlot', [{'commitment':'confirmed'}])
+          observed = er.call('getAccountInfo', [request_address, {'encoding':'base64','commitment':'confirmed'}])
+          details = {'request':request_address,'current_er_slot':current,'context_slot':observed['context']['slot'],'exists':observed['value'] is not None}
+          if observed['value'] is not None:
+              raw = base64.b64decode(observed['value']['data'][0], validate=True)
+              require(observed['value']['owner'] == vrf_ids['coordinator'] and len(raw) >= 401 and raw[:8] == hashlib.sha256(b'account:RequestAccount').digest()[:8], 'unexpected request account')
+              details.update(status=raw[9],request_slot=int.from_bytes(raw[115:123],'little'),deadline_slot=int.from_bytes(raw[228:236],'little'),
+                             fee_payer=public_text(raw[244:276]),rent_payer=public_text(raw[276:308]))
+          print(json.dumps({'request_lifecycle':details}), flush=True)
           os.close(lock)
           PY
