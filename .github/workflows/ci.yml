@@ -113,8 +113,16 @@ jobs:
           python3 -B .github/scripts/test-continuity-rollout-state.py
           python3 -B .github/scripts/test-continuity-devnet.py
           python3 -B .github/scripts/test-continuity-devnet-model.py
+          python3 -B .github/scripts/test-prepare-continuity-sdk.py
           bun test ./.github/scripts/continuity-control-journal.test.mjs ./.github/scripts/devnet-continuity-smoke.test.mjs ./.github/scripts/continuity-workflow.test.mjs
           bash -n .github/scripts/prepare-continuity-sdk.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.21.0"
+      - name: Test pinned public continuity SDK install
+        run: |
+          SDK="$RUNNER_TEMP/native-sdk-bootstrap-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          bash .github/scripts/prepare-continuity-sdk.sh "$SDK"
       - name: Test bounded GPU runner without GPU
         run: |
           python3 -B northstar/scripts/test_gpu_prover.py
@@ -337,7 +345,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24.21.0"
 
       - name: Prepare pinned public continuity SDK
         id: continuity_sdk
