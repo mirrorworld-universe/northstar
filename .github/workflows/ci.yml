@@ -48,6 +48,13 @@ jobs:
           require(manifest['sha256'] == plan['artifacts'], 'artifacts differ')
           rpc = Rpc('https://api.devnet.solana.com')
           require(rpc.call('getGenesisHash') == DEVNET, 'not devnet')
+          local = Rpc('http://127.0.0.1:8899')
+          local_buffer = local.account(plan['programs']['portal-buffer'])
+          print(json.dumps({'l1_health': local.call('getHealth'), 'l1_genesis_matches': local.call('getGenesisHash') == DEVNET,
+                            'l1_confirmed': local.call('getSlot', [{'commitment': 'confirmed'}]),
+                            'l1_finalized': local.call('getSlot', [{'commitment': 'finalized'}]),
+                            'upstream_confirmed': rpc.call('getSlot', [{'commitment': 'confirmed'}]),
+                            'l1_buffer_sha256': hashlib.sha256(local_buffer['raw'][37:]).hexdigest() if local_buffer else None}), flush=True)
           from continuity_rollout_state import ARTIFACTS
           from continuity_devnet import public_bytes
           print(json.dumps({'revision': revision, 'funder': plan['funder'], 'programs': plan['programs'],
