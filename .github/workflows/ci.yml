@@ -136,5 +136,14 @@ jobs:
           result = subprocess.run(['systemctl', 'show', '--property=ActiveState', '--property=MainPID', SERVICE],
                                   check=True, capture_output=True, text=True, timeout=10)
           print(json.dumps({'native_service': result.stdout.splitlines()}))
+          worker = subprocess.run(['systemctl', 'show', '--property=ActiveState', '--property=Result', '--property=ExecMainStatus', 'northstar-vrf-oracle.service'],
+                                  check=True, capture_output=True, text=True, timeout=10)
+          print(json.dumps({'oracle_service': worker.stdout.splitlines()}))
+          journal = subprocess.run(['sudo', '-n', 'journalctl', '--unit=northstar-vrf-oracle.service', '--lines=40', '--no-pager', '--output=cat'],
+                                   check=True, capture_output=True, text=True, timeout=20)
+          for line in journal.stdout.splitlines()[-24:]:
+              if re.search(r'(?:\b\d{1,3},\s*){4}|mnemonic|seed phrase|secret_key', line, re.I):
+                  line = '[sensitive diagnostic omitted]'
+              print(json.dumps({'oracle_log': re.sub(r'/(?:[^\s/]+/)+[^\s,;]+', '<path>', line)[:350]}))
           os.close(lock)
           PY
