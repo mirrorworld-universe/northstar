@@ -84,12 +84,13 @@ jobs:
           text = os.read(descriptor, 65536).decode('utf8', errors='replace')
           os.close(descriptor)
           text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
-          lines = [line.strip() for line in text.splitlines() if line.strip().lower().startswith('error:')]
-          for line in lines[-5:]:
-              if re.search(r'seed|secret|private.?key|mnemonic|passphrase|\[(?:\s*\d+,){3}', line, re.I):
+          lines = [line.strip() for line in text.splitlines() if re.search(r'\b(?:[A-Za-z]*Error|ERROR)(?:\s*\[[A-Z0-9_]+\])?:', line)]
+          selected = lines[-5:] if lines else text.splitlines()[-16:]
+          for line in selected:
+              if re.search(r'seed|secret|private.?key|mnemonic|passphrase|(?:\b\d{1,3},\s*){4}', line, re.I):
                   print(json.dumps({'cli_error': '[sensitive diagnostic omitted]'}))
               else:
-                  print(json.dumps({'cli_error': re.sub(r'/(?:[^\s/]+/)+[^\s,;]+', '<path>', line)[:500]}))
+                  print(json.dumps({'cli_error': re.sub(r'/(?:[^\s/]+/)+[^\s,;]+', '<path>', line.strip())[:300]}))
           result = subprocess.run(['systemctl', 'show', '--property=ActiveState', '--property=MainPID', SERVICE],
                                   check=True, capture_output=True, text=True, timeout=10)
           print(json.dumps({'native_service': result.stdout.splitlines()}))
