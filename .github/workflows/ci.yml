@@ -192,9 +192,33 @@ jobs:
               status = er.call('getSignatureStatuses', [[attempt['signature']], {'searchTransactionHistory':True}])['value'][0]
               request_value = er.account(request_address)
               consumer_value = er.account(consumer_address)
+              wire = base64.b64decode(attempt['wire_base64'], validate=True)
+              cursor = 0
+              def compact():
+                  global cursor
+                  number = shift = 0
+                  for _ in range(3):
+                      byte = wire[cursor]; cursor += 1
+                      number |= (byte & 127) << shift
+                      if byte < 128: return number
+                      shift += 7
+                  raise ValueError('invalid compact wire length')
+              count = compact(); cursor += 64*count
+              require(wire[cursor] < 128, 'expected saved legacy control message')
+              cursor += 3
+              count = compact(); cursor += 32*count
+              blockhash = public_text(wire[cursor:cursor+32])
+              valid = er.call('isBlockhashValid',[blockhash,{'commitment':'confirmed'}])
               print(json.dumps({'watchlist_control':{'signature':attempt['signature'],'last_valid_height':attempt['last_valid_block_height'],
-                    'current_height':er.call('getBlockHeight',[{'commitment':'confirmed'}]),'status':status,'request':request_address,
+                    'current_height':er.call('getBlockHeight',[{'commitment':'confirmed'}]),'blockhash_valid':valid,'status':status,'request':request_address,
                     'request_exists':request_value is not None,'consumer':consumer_address,'consumer_deliveries':int.from_bytes(consumer_value['raw'][145:149],'little') if consumer_value else None,
                     'consumer_request_pointer_set':any(consumer_value['raw'][149:181]) if consumer_value else None}}), flush=True)
+              import urllib.request
+              opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+              probe = urllib.request.Request('http://127.0.0.1:8910',data=json.dumps({'jsonrpc':'2.0','id':1,'method':'simulateTransaction','params':[attempt['wire_base64'],{'encoding':'base64','sigVerify':False,'commitment':'confirmed'}]}).encode(),headers={'Content-Type':'application/json'})
+              with opener.open(probe, timeout=20) as response:
+                  simulation = json.loads(response.read(1024*1024))
+              error = simulation.get('error') or {}
+              print(json.dumps({'saved_control_simulation_error':{'code':error.get('code'),'message':str(error.get('message',''))[:500]},'saved_control_instruction_error':simulation.get('result',{}).get('value',{}).get('err')}), flush=True)
           os.close(lock)
           PY
