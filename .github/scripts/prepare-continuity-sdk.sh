@@ -7,6 +7,11 @@ if [[ $# != 1 || $1 != /* || -e "$1" || -L "$1" ]]; then
   exit 2
 fi
 for tool in git node npm sha256sum; do command -v "$tool" >/dev/null; done
+npm_version=$(npm --version)
+if [[ ! $npm_version =~ ^11\. ]]; then
+  echo "Pinned continuity SDK requires npm 11 (validated with Node 24.21.0); found $npm_version" >&2
+  exit 2
+fi
 revision=24030ce9fc3b80aa21738db2bb9f5a5fbea030d8
 lock=c9c3eab30574777558d737d043060eadfec8c156b41ee4b313bbab2d05910ded
 checkout=$1

@@ -23,7 +23,9 @@ Build-generated program keypairs are never deployment signing identities.
 `prepare-continuity-sdk.sh` checks out public NorthStarSDK revision
 `24030ce9fc3b80aa21738db2bb9f5a5fbea030d8`, checks its dependency-lock hash,
 installs frozen dependencies without lifecycle scripts and builds the bindings.
-No private-source credential is needed for this SDK checkout.
+No private-source credential is needed for this SDK checkout. Both CI validation
+and deployment pin Node 24.21.0/npm 11; the helper rejects npm 10 before checkout
+because that resolver rejects the unchanged pinned dependency lock.
 
 `continuity_devnet.py run` then:
 
