@@ -1,486 +1,90 @@
 name: CI
+run-name: Read-only retained native upload inspection
 
 on:
-  push:
-    branches: [master, main, release]
-  pull_request:
-    branches: [master, main]
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Full retained native deployment revision
+        required: true
+        type: string
 
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/release' }}
-
-env:
-  CARGO_TERM_COLOR: always
-  # Sonic: Full-debug dependency archives can exhaust hosted-runner disks during restore.
-  CARGO_PROFILE_DEV_DEBUG: "0"
-  CARGO_PROFILE_TEST_DEBUG: "0"
-  # PR caches are merge-ref scoped; only reusable default-branch caches should consume quota.
-  SAVE_CI_CACHE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+permissions:
+  contents: read
 
 jobs:
-  fmt:
-    name: Format
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/ensure-rust-toolchain
-      # Pin rustfmt so nightly style changes do not invalidate unchanged upstream files.
-      - run: rustup toolchain install nightly-2026-07-20 --component rustfmt
-      - run: cargo +nightly-2026-07-20 fmt --all -- --check
-      - run: cargo +nightly-2026-07-20 fmt --manifest-path northstar/zkvm-replay/Cargo.toml --all -- --check
-      # Sonic: The portable VRF probe is an isolated workspace.
-      - run: cargo +nightly-2026-07-20 fmt --manifest-path northstar/programs/vrf-runtime-probe/Cargo.toml --all -- --check
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/prepare-runner-disk
-      - uses: ./.github/actions/ensure-rust-toolchain
-      - name: Clean stale build artifacts
-        run: |
-          pkill -9 rustc || true
-          pkill -9 cargo || true
-          rm -rf target
-          rm -rf ~/.cargo/registry/src/**/.cargo-lock*
-      - run: rustup component add clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: native-no-debug-v1
-          save-if: ${{ env.SAVE_CI_CACHE }}
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler libprotobuf-dev libudev-dev libclang-dev
-      - run: cargo clippy --locked --all --tests -- -D warnings
-      # Sonic: Check opt-in paths without enabling them in deployment builds.
-      - run: cargo clippy --locked --all --tests --features northstar/proof-coordinator-test-hooks,agave-validator/proof-coordinator-test-hooks,northstar-portal/zk-verifier-profile -- -D warnings
-      # Sonic: Continuity remains opt-in until its runtime and verifier are integrated.
-      - run: cargo clippy --locked -p northstar -p northstar-portal -p solana-cli --tests --features checkpoint-continuity-v2 -- -D warnings
-      # Sonic: Root workspace checks do not include the portable VRF probe.
-      - run: cargo clippy --locked --manifest-path northstar/programs/vrf-runtime-probe/Cargo.toml --workspace --all-targets -- -D warnings
-
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/prepare-runner-disk
-      - uses: ./.github/actions/ensure-rust-toolchain
-      - name: Clean stale build artifacts
-        run: |
-          pkill -9 rustc || true
-          pkill -9 cargo || true
-          rm -rf target
-          rm -rf ~/.cargo/registry/src/**/.cargo-lock*
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: native-no-debug-v1
-          save-if: ${{ env.SAVE_CI_CACHE }}
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler libprotobuf-dev libudev-dev libclang-dev
-      # Sonic: CPU-only VRF clients require no hosted ER or proving service.
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.2
-      - name: Test CI cache disk budget
-        run: bun test ./.github/scripts/ci-cache-budget.test.mjs
-      - name: Test CPU VRF evidence and RPC clients
-        run: |
-          python3 -B -m unittest discover -s northstar/scripts -p 'test_vrf_evidence.py'
-          bun test northstar/scripts/vrf-runtime-rpc.test.mjs
-          bash -n northstar/scripts/vrf-runtime-build-sbf.sh
-          bash -n northstar/scripts/vrf-proof-cpu-conformance.sh
-      - name: Test SOL smoke restart finalization guard
-        run: bash .github/scripts/test-devnet-e2e-smoke.sh
-      - name: Test smoke readiness and RPC defaults
-        run: python3 -B .github/scripts/test-devnet-smoke-readiness.py
-      - name: Test deployment change detection
-        run: python3 -B .github/scripts/test-program-change-detection.py
-      # Sonic: Deployment guards use no service, credentials or chain requests.
-      - name: Test managed VRF redeploy guard
-        run: python3 -B .github/scripts/test-stop-vrf-service.py
-      - name: Test pinned SBF build arguments
-        run: bash .github/scripts/test-sbf-toolchain.sh
-      # Sonic: These deployment tests use no services, credentials or chain requests.
-      - name: Test continuity-v2 activation guards
-        run: |
-          python3 -B .github/scripts/test-build-continuity-v2.py
-          python3 -B .github/scripts/test-continuity-rollout-state.py
-          python3 -B .github/scripts/test-continuity-devnet.py
-          python3 -B .github/scripts/test-continuity-devnet-model.py
-          python3 -B .github/scripts/test-prepare-continuity-sdk.py
-          bun test ./.github/scripts/continuity-control-journal.test.mjs ./.github/scripts/devnet-continuity-smoke.test.mjs ./.github/scripts/continuity-workflow.test.mjs
-          bash -n .github/scripts/prepare-continuity-sdk.sh
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "24.21.0"
-      - name: Test pinned public continuity SDK install
-        run: |
-          SDK="$RUNNER_TEMP/native-sdk-bootstrap-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          bash .github/scripts/prepare-continuity-sdk.sh "$SDK"
-      - name: Test bounded GPU runner without GPU
-        run: |
-          python3 -B northstar/scripts/test_gpu_prover.py
-          python3 -B northstar/scripts/test_gpu_worker.py
-          bash -n northstar/scripts/gpu-prover-ssh.sh
-          bash -n northstar/scripts/live-cadence-recovery.sh
-          bash -n northstar/scripts/live-gpu-settlement.sh
-          bash -n northstar/scripts/live-proof-coordinator.sh
-          python3 -B northstar/scripts/gpu-worker-stress.py --help >/dev/null
-          bash -n northstar/scripts/provision-gpu-userspace.sh
-          bash -n northstar/scripts/provision-gpu-server.sh
-          bash northstar/scripts/test-gpu-provision.sh
-      - name: Install Solana tools
-        run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
-          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
-      - name: Read Solana builder version
-        run: cargo build-sbf --version
-      - name: Restore Solana platform tools
-        id: solana_platform_tools_cache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            ~/.cache/solana
-            ~/.local/share/solana/install/active_release/bin/platform-tools-sdk/sbf/dependencies/platform-tools
-          key: ${{ runner.os }}-solana-platform-tools-v4-${{ hashFiles('cargo-build-sbf') }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-solana-platform-tools-v4-${{ hashFiles('cargo-build-sbf') }}-
-      - name: Verify retained L40S proofs against prototype Portal SBF
-        run: |
-          ./cargo-build-sbf --manifest-path northstar/programs/portal/Cargo.toml --features zk-verifier-prototype -- --locked
-          BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar-portal --features zk-verifier-prototype --test zk_verifier
-          cargo test --locked -p northstar-portal --features zk-verifier-prototype --lib
-      - name: Verify fresh delegation fixture against the frozen replay relation
-        run: |
-          ./cargo-build-sbf --manifest-path northstar/programs/replay-owner/Cargo.toml -- --locked
-          NORTHSTAR_LIVE_OWNER_SBF="$PWD/target/deploy/northstar_replay_owner.so" \
-            cargo test --locked -p northstar fresh_delegation_owner_preserves_frozen_replay_relation -- --ignored
-      - name: Build Portal SBF program
-        run: ./cargo-build-sbf --manifest-path northstar/programs/portal/Cargo.toml -- --locked
-      - name: Build Token Bridge SBF program
-        run: ./cargo-build-sbf --manifest-path northstar/programs/token-bridge/Cargo.toml -- --locked
-      - name: Save Solana platform tools
-        if: env.SAVE_CI_CACHE == 'true' && steps.solana_platform_tools_cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ~/.cache/solana
-            ~/.local/share/solana/install/active_release/bin/platform-tools-sdk/sbf/dependencies/platform-tools
-          key: ${{ runner.os }}-solana-platform-tools-v4-${{ hashFiles('cargo-build-sbf') }}-${{ hashFiles('Cargo.lock') }}
-      # Sonic: Execute the portable fixtures locally without claiming hosted ER acceptance.
-      - name: Test VRF runtime SBF conformance
-        run: |
-          ./cargo-build-sbf --manifest-path northstar/programs/vrf-runtime-probe/Cargo.toml \
-            --sbf-out-dir "$PWD/northstar/programs/vrf-runtime-probe/target/deploy" -- --locked
-          BPF_OUT_DIR="$PWD/northstar/programs/vrf-runtime-probe/target/deploy" \
-            cargo test --locked --manifest-path northstar/programs/vrf-runtime-probe/Cargo.toml --workspace -- --include-ignored
-      - name: Test CPU VRF and witness foundations
-        run: |
-          cargo test --locked -p northstar-vrf-oracle -p northstar-transaction-proof -p northstar-replay-harness -p northstar-zk-types
-          cargo test --locked -p northstar-transaction-proof --no-default-features
-          CARGO_TARGET_DIR="$PWD/target" bash northstar/scripts/vrf-proof-cpu-conformance.sh "$RUNNER_TEMP/vrf-proof-cpu"
-      - name: Build test validator
-        run: cargo build --locked --bin solana-test-validator
-      - name: Test devnet SPL smoke state format
-        run: cargo test --locked -p northstar-token-bridge --example devnet_smoke
-      - name: Run SPL token bridge core tests
-        run: BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar-token-bridge --test core
-      - name: Run SPL token bridge validator E2E
-        run: BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar-token-bridge --test validator_e2e -- --nocapture
-      # Sonic: Portal-enabled genesis must preserve explicitly pinned program artifacts.
-      - name: Test explicit genesis program selection
-        run: cargo test --locked -p solana-test-validator --lib portal_configuration_preserves_explicit -- --test-threads=1
-      - name: Run Northstar crate tests
-        run: BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar -p northstar-portal --no-fail-fast
-      # Sonic: Isolate the continuity fixture from the default deployment artifact.
-      - name: Test Portal continuity SBF lifecycle
-        run: |
-          ./cargo-build-sbf --manifest-path northstar/programs/portal/Cargo.toml \
-            --features checkpoint-continuity-v2 --sbf-out-dir "$PWD/target/continuity-v2-deploy" -- --locked
-          ./cargo-build-sbf --manifest-path northstar/programs/token-bridge/Cargo.toml \
-            --features checkpoint-continuity-v2 --sbf-out-dir "$PWD/target/continuity-v2-deploy" -- --locked
-          ./cargo-build-sbf --manifest-path northstar/programs/continuity-fixture/Cargo.toml \
-            --sbf-out-dir "$PWD/target/continuity-v2-deploy" -- --locked
-          BPF_OUT_DIR="$PWD/target/continuity-v2-deploy" \
-            cargo test --locked -p northstar --features checkpoint-continuity-v2 v2
-          BPF_OUT_DIR="$PWD/target/continuity-v2-deploy" \
-            cargo test --locked -p northstar --features checkpoint-continuity-v2 \
-              regression_checkpoint_lineage_survives_l1_delegation_materialization
-          cargo test --locked -p solana-cli --features checkpoint-continuity-v2 v2
-      - name: Test oracle restart safeguards
-        run: python3 -B .github/scripts/test-stop-vrf-service.py
-      # Sonic: Coordinator and mature-capture regressions need no GPU service.
-      - name: Test opt-in proof coordination
-        run: cargo test --locked -p northstar --features proof-coordinator-test-hooks proof_ --no-fail-fast
-      - name: Test mature ER replay capture
-        run: cargo test --locked -p solana-runtime --lib bank::er_replay::tests --no-fail-fast
-      - name: Run Northstar SVM regression tests
-        run: cargo test --locked -p solana-svm northstar --no-fail-fast
-      - name: Run Northstar core service tests
-        run: cargo test --locked -p solana-core northstar_service --no-fail-fast
-
-  # Sonic: The network adapter is an isolated SP1 workspace; tests use no GPU or paid requests.
-  network-prover:
-    name: Network prover (CPU)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      SP1_SKIP_PROGRAM_BUILD: "true"
-      CARGO_BUILD_JOBS: 2
-      CARGO_PROFILE_DEV_DEBUG: 0
-      RAYON_NUM_THREADS: 2
-      TOKIO_WORKER_THREADS: 2
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/ensure-rust-toolchain
-      - run: rustup component add clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: northstar/zkvm-replay -> target
-          save-if: ${{ env.SAVE_CI_CACHE }}
-      - name: Install SDK build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config clang protobuf-compiler libprotobuf-dev
-      - name: Prepare the frozen guest
-        working-directory: northstar/zkvm-replay
-        run: |
-          mkdir -p target/elf-compilation/riscv64im-succinct-zkvm-elf/release
-          gzip -dc evidence/g5-a10g-sha-v1/candidate.elf.gz \
-            > target/elf-compilation/riscv64im-succinct-zkvm-elf/release/northstar-zkvm-replay-program
-      - name: Test network gateway guards without services
-        run: python3 -B northstar/scripts/test_network_gateway.py
-      - name: Test network adapter and retained proofs
-        working-directory: northstar/zkvm-replay
-        run: cargo test --locked -p northstar-zkvm-replay-script --features network --bin northstar-network-prover --test network_adapter
-      - name: Check network adapter
-        working-directory: northstar/zkvm-replay
-        run: cargo clippy --locked -p northstar-zkvm-replay-script --features network --bin northstar-network-prover --test network_adapter -- -D warnings
-
-  deploy:
-    name: Build and Deploy on Devnet
-    needs: [fmt, clippy, test]
-    if: github.repository == 'mirrorworld-universe/northstar' && github.event_name == 'push' && github.ref == 'refs/heads/release'
-    runs-on: [devnet]
-    permissions:
-      contents: read
-      actions: read
+  inspect:
+    if: github.repository == 'mirrorworld-universe/northstar' && github.ref == 'refs/heads/native-upload-inspection'
+    runs-on: devnet
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
-
-      - name: Check for program changes
-        id: program_changes
+      - name: Inspect retained upload without signing or changing service state
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          NATIVE_REVISION: ${{ inputs.revision }}
         run: |
-          set -euo pipefail
-          RESPONSE=$(curl -fsS --max-time 30 --retry 2 \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H 'Accept: application/vnd.github+json' \
-            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=release&event=push&status=success&per_page=1")
-          BASELINE=$(jq -er 'if (.workflow_runs | type) != "array" then error("invalid workflow history") else (.workflow_runs[0].head_sha // "") end' <<< "$RESPONSE")
-          if [ -n "$BASELINE" ]; then
-            [[ "$BASELINE" =~ ^[a-f0-9]{40}$ ]]
-          fi
-          # Sonic: Cancelled/failed pushes are not evidence that their programs reached devnet.
-          if [ -z "$BASELINE" ] || ! git rev-parse --verify "$BASELINE^{commit}" >/dev/null 2>&1 || ! git merge-base --is-ancestor "$BASELINE" HEAD; then
-            echo "No usable successful release baseline; both programs require deployment"
-            printf '%s\n' 'portal_changed=true' 'token_bridge_changed=true' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "Comparing successful release $BASELINE..HEAD" >&2
-          CHANGED_FILES=$(git diff --name-only "$BASELINE" HEAD)
-          echo "Changed files:"
-          echo "$CHANGED_FILES"
-          # Sonic: A grep -q pipeline can hide a match via SIGPIPE under pipefail on large diffs.
-          if grep -qE '^(Cargo\.(toml|lock)|northstar/programs/portal/)' <<< "$CHANGED_FILES"; then
-            echo "portal_changed=true" >> "$GITHUB_OUTPUT"
-            echo "Portal program inputs changed"
-          else
-            echo "portal_changed=false" >> "$GITHUB_OUTPUT"
-            echo "No portal program input changes"
-          fi
-          if grep -qE '^(Cargo\.(toml|lock)|northstar/programs/(portal|token-bridge)/)' <<< "$CHANGED_FILES"; then
-            echo "token_bridge_changed=true" >> "$GITHUB_OUTPUT"
-            echo "Token bridge program inputs changed"
-          else
-            echo "token_bridge_changed=false" >> "$GITHUB_OUTPUT"
-            echo "No token bridge program input changes"
-          fi
-
-      - uses: ./.github/actions/ensure-rust-toolchain
-
-      - name: Ensure Solana CLI is available
-        run: |
-          set -euo pipefail
-          SOLANA_BIN="$HOME/.local/share/solana/install/active_release/bin"
-          export PATH="$SOLANA_BIN:$PATH"
-          if ! command -v solana >/dev/null 2>&1; then
-            sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
-          fi
-          echo "$SOLANA_BIN" >> "$GITHUB_PATH"
-          solana --version
-
-      # Sonic: Build v2 artifacts without replacing binaries used by the retained v1 runtime.
-      - name: Stage continuity-v2 artifacts without activation
-        id: continuity_stage
-        env:
-          NORTHSTAR_CONTINUITY_BUILD_TARGET_DIR: /solana/northstar/continuity-v2-build-cache
-        run: |
-          set -euo pipefail
-          ROOT=/solana/northstar/continuity-v2-staging
-          mkdir -p "$ROOT"
-          STAGE="$ROOT/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA}"
-          bash .github/scripts/build-continuity-v2.sh "$STAGE"
-          echo "directory=$STAGE" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "24.21.0"
-
-      - name: Prepare pinned public continuity SDK
-        id: continuity_sdk
-        run: |
-          set -euo pipefail
-          SDK="$RUNNER_TEMP/northstar-continuity-sdk-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          bash .github/scripts/prepare-continuity-sdk.sh "$SDK"
-          echo "directory=$SDK" >> "$GITHUB_OUTPUT"
-
-      # Sonic: This controller preserves old state and refuses unknown/uncertain activation records.
-      - name: Activate isolated SessionV2 and qualify SOL/SPL recovery
-        id: continuity_activate
-        timeout-minutes: 120
-        env:
-          NATIVE_STAGE: ${{ steps.continuity_stage.outputs.directory }}
-          CONTINUITY_SDK: ${{ steps.continuity_sdk.outputs.directory }}
-        run: |
-          set -euo pipefail
-          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
-          python3 -B .github/scripts/continuity_devnet.py run \
-            --stage "$NATIVE_STAGE" --revision "$GITHUB_SHA" \
-            --sdk-checkout "$CONTINUITY_SDK"
-
-      - name: Retain public native qualification report
-        uses: actions/upload-artifact@v4
-        with:
-          name: native-continuity-v2-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ steps.continuity_activate.outputs.report_path }}
-          if-no-files-found: error
-
-      - name: Notify Slack
-        if: always()
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL_ID: ${{ vars.SLACK_CHANNEL_ID }}
-          STATUS: ${{ job.status }}
-          PORTAL_ADDRESS: ${{ steps.continuity_activate.outputs.portal }}
-          TOKEN_BRIDGE_ADDRESS: ${{ steps.continuity_activate.outputs.token_bridge }}
-          SESSION_CONTEXT: ${{ steps.continuity_activate.outputs.context }}
-          COMMIT_SHA: ${{ github.sha }}
-          COMMIT_MSG: ${{ github.event.head_commit.message }}
-          NATIVE_SMOKE_OUTCOME: ${{ steps.continuity_activate.outcome }}
-        run: |
-          set -euo pipefail
-          if [ "$STATUS" != "success" ]; then
-            exit 0
-          fi
-
-          if ! command -v jq >/dev/null 2>&1; then
-            sudo apt-get update && sudo apt-get install -y jq
-          fi
-
-          USERS_RESPONSE=$(curl -sS -G \
-            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-            --data-urlencode "limit=200" \
-            https://slack.com/api/users.list)
-          if ! jq -e '.ok == true' >/dev/null <<<"$USERS_RESPONSE"; then
-            echo "Failed to list Slack users: $USERS_RESPONSE" >&2
-            exit 1
-          fi
-
-          resolve_user_id() {
-            local name="$1"
-            jq -r --arg name "$name" '
-              .members[]
-              | select(.deleted != true)
-              | select(
-                  .name == $name
-                  or .real_name == $name
-                  or .profile.real_name == $name
-                  or .profile.display_name == $name
-                )
-              | .id
-            ' <<<"$USERS_RESPONSE" | head -n 1
-          }
-
-          MENTIONS=""
-          for USER_NAME in "Ivan Rybin" "Bilal Afzal" "Bai Xiong" "_bakebwa.sol"; do
-            USER_ID=$(resolve_user_id "$USER_NAME")
-            if [ -z "$USER_ID" ]; then
-              echo "Could not resolve Slack user: $USER_NAME" >&2
-              exit 1
-            fi
-            MENTIONS="$MENTIONS<@$USER_ID> "
-          done
-
-          LINES=(
-            ":white_check_mark: Northstar continuity-v2 native qualification succeeded."
-            ":link: Portal: https://explorer.solana.com/address/$PORTAL_ADDRESS?cluster=devnet"
-            ":link: Token bridge: https://explorer.solana.com/address/$TOKEN_BRIDGE_ADDRESS?cluster=devnet"
-            "Session context: \`$SESSION_CONTEXT\`"
-            ":memo: Commit: \`$COMMIT_SHA\`"
-            "$COMMIT_MSG"
-          )
-          TEXT=$(printf '%s\n' "${LINES[@]}")
-          TEXT="$MENTIONS"$'\n'"$TEXT"
-          PAYLOAD=$(jq -n --arg channel "$SLACK_CHANNEL_ID" --arg text "$TEXT" '{channel: $channel, text: $text}')
-          MESSAGE_RESPONSE=$(curl -sS -X POST \
-            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-            -H 'Content-type: application/json' \
-            --data "$PAYLOAD" \
-            https://slack.com/api/chat.postMessage)
-          if ! jq -e '.ok == true' >/dev/null <<<"$MESSAGE_RESPONSE"; then
-            echo "Failed to post Slack message: $MESSAGE_RESPONSE" >&2
-            exit 1
-          fi
-
-          MESSAGE_TS=$(jq -r '.ts' <<<"$MESSAGE_RESPONSE")
-          PIN_PAYLOAD=$(jq -n --arg channel "$SLACK_CHANNEL_ID" --arg timestamp "$MESSAGE_TS" '{channel: $channel, timestamp: $timestamp}')
-          PIN_RESPONSE=$(curl -sS -X POST \
-            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-            -H 'Content-type: application/json' \
-            --data "$PIN_PAYLOAD" \
-            https://slack.com/api/pins.add)
-          if ! jq -e '.ok == true' >/dev/null <<<"$PIN_RESPONSE"; then
-            echo "Failed to pin Slack message: $PIN_RESPONSE" >&2
-            exit 1
-          fi
-
-          test "$NATIVE_SMOKE_OUTCOME" = success
-          E2E_REPORT=$(printf '%s\n' \
-            'SessionV2 bootstrap, SOL/SPL credit, validator restarts and finalized L1 payouts passed.' \
-            'The managed VRF oracle remains stopped. Run its manual workflow against this context.' \
-            'This does not qualify an oracle callback, SP1 or proof acceptance.')
-          THREAD_PAYLOAD=$(jq -n \
-            --arg channel "$SLACK_CHANNEL_ID" \
-            --arg thread_ts "$MESSAGE_TS" \
-            --arg text "$E2E_REPORT" \
-            '{channel: $channel, thread_ts: $thread_ts, text: $text}')
-          THREAD_RESPONSE=$(curl -sS -X POST \
-            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-            -H 'Content-type: application/json' \
-            --data "$THREAD_PAYLOAD" \
-            https://slack.com/api/chat.postMessage)
-          if ! jq -e '.ok == true' >/dev/null <<<"$THREAD_RESPONSE"; then
-            echo "Failed to post E2E report thread: $THREAD_RESPONSE" >&2
-            exit 1
-          fi
+          python3 -B - <<'PY'
+          import fcntl, hashlib, json, os, re, stat, subprocess, sys
+          from pathlib import Path
+          sys.path.insert(0, '.github/scripts')
+          from continuity_devnet import Rpc, LOADER, SERVICE
+          from continuity_rollout_state import DEVNET, canonical, checked_directory, private_json, require, verify_artifacts
+          revision = os.environ['NATIVE_REVISION']
+          require(re.fullmatch('[0-9a-f]{40}', revision), 'full revision required')
+          control = Path('/solana/northstar/continuity-v2') / revision / 'control'
+          checked_directory(control, private=True)
+          lock = os.open('/solana/northstar/continuity-v2-deploy.lock', os.O_RDONLY | os.O_NOFOLLOW)
+          info = os.fstat(lock)
+          require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077, 'invalid deployment lock')
+          fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+          reservation = private_json(control / 'reservation.json')
+          plan = private_json(control / 'plan.json')
+          require(plan['source_revision'] == revision == reservation['source_revision'], 'revision differs')
+          require(hashlib.sha256(canonical(plan)).hexdigest() == reservation['plan_sha256'], 'plan binding differs')
+          stage = Path(reservation['stage'])
+          manifest = verify_artifacts(stage, revision)
+          require(manifest['sha256'] == plan['artifacts'], 'artifacts differ')
+          rpc = Rpc('https://api.devnet.solana.com')
+          require(rpc.call('getGenesisHash') == DEVNET, 'not devnet')
+          from continuity_rollout_state import ARTIFACTS
+          from continuity_devnet import public_bytes
+          print(json.dumps({'revision': revision, 'funder': plan['funder'], 'programs': plan['programs'],
+                            'uploads': private_json(control / 'programs.json'),
+                            'balance': rpc.call('getBalance', [plan['funder'], {'commitment': 'finalized'}])['value']}), flush=True)
+          for role in ('portal', 'token_bridge'):
+              image = (stage / ARTIFACTS[role]).read_bytes()
+              for kind in (role, role + '-buffer'):
+                  account = rpc.account(plan['programs'][kind])
+                  view = {'role': kind, 'exists': account is not None}
+                  if account:
+                      raw = account['raw']
+                      view.update(owner=account['owner'], executable=account['executable'], size=len(raw))
+                      if kind.endswith('-buffer'):
+                          bound = account['owner'] == LOADER and not account['executable'] and len(raw) >= 37 and raw[:4] == (1).to_bytes(4, 'little') and raw[4] == 1 and raw[5:37] == public_bytes(plan['funder'])
+                          view['authority_bound'] = bound
+                          if bound:
+                              view['uploaded_sha256'] = hashlib.sha256(raw[37:]).hexdigest()
+                              view['expected_sha256'] = hashlib.sha256(image).hexdigest()
+                              view['length_matches'] = len(raw) == len(image) + 37
+                              view['different_bytes'] = sum(left != right for left, right in zip(raw[37:], image))
+                  print(json.dumps(view), flush=True)
+          descriptor = os.open(control / 'operations.log', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+          info = os.fstat(descriptor)
+          require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077, 'invalid private diagnostic log')
+          os.lseek(descriptor, max(0, info.st_size - 65536), os.SEEK_SET)
+          text = os.read(descriptor, 65536).decode('utf8', errors='replace')
+          os.close(descriptor)
+          text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
+          lines = [line.strip() for line in text.splitlines() if line.strip().lower().startswith('error:')]
+          for line in lines[-5:]:
+              if re.search(r'seed|secret|private.?key|mnemonic|passphrase|\[(?:\s*\d+,){3}', line, re.I):
+                  print(json.dumps({'cli_error': '[sensitive diagnostic omitted]'}))
+              else:
+                  print(json.dumps({'cli_error': re.sub(r'/(?:[^\s/]+/)+[^\s,;]+', '<path>', line)[:500]}))
+          result = subprocess.run(['systemctl', 'show', '--property=ActiveState', '--property=MainPID', SERVICE],
+                                  check=True, capture_output=True, text=True, timeout=10)
+          print(json.dumps({'native_service': result.stdout.splitlines()}))
+          os.close(lock)
+          PY
