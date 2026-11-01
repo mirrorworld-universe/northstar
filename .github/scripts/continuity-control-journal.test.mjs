@@ -192,6 +192,43 @@ test('recovery floor comes only from bound complete receipts', async () => {
   } finally { value.close(); }
 });
 
+test('checkpoint holds retry only the original ER signed bytes while valid', async () => {
+  const value = fixture();
+  try {
+    let submissions = 0;
+    const rawRpc = { ...value.rpc,
+      sendRawTransaction: async data => {
+        value.calls.push(Buffer.from(data));
+        if (++submissions < 3) throw new Error('Simulation failed. canonical checkpoint awaits settlement; retry after settlement.');
+        return 'original-signature';
+      },
+      getSignatureStatuses: async () => ({ value: submissions >= 3 ? [{ slot: 10, err: null, confirmationStatus: 'confirmed' }] : [null] }),
+    };
+    const journal = new ControlJournal(path.join(value.temporary, 'checkpoint'), binding, decode, async () => {}, { timeoutMs: 200, pollMs: 1 });
+    journal.attach('er', rawRpc);
+    const result = await journal.run('withdrawal', 'er', {}, async () => { await rawRpc.getLatestBlockhash(); await rawRpc.sendRawTransaction(wire); });
+    expect(result.signature).toBe('original-signature');
+    expect(value.calls.length).toBe(3);
+    expect(value.calls.every(sent => sent.equals(wire))).toBe(true);
+  } finally { value.close(); }
+});
+
+test('checkpoint backpressure never permits submission after original expiry', async () => {
+  const value = fixture();
+  try {
+    const rawRpc = { ...value.rpc,
+      sendRawTransaction: async data => { value.calls.push(Buffer.from(data)); throw new Error('canonical checkpoint awaits settlement; retry after settlement.'); },
+      getSignatureStatuses: async () => ({ value: [null] }),
+      isBlockhashValid: async () => ({ value: value.calls.length < 3 }),
+    };
+    const journal = new ControlJournal(path.join(value.temporary, 'expired-checkpoint'), binding, decode, async () => {}, { timeoutMs: 200, pollMs: 1 });
+    journal.attach('er', rawRpc);
+    await expect(journal.run('withdrawal', 'er', {}, async () => { await rawRpc.getLatestBlockhash(); await rawRpc.sendRawTransaction(wire); })).rejects.toThrow('expired');
+    expect(value.calls.length).toBe(3);
+    expect(value.calls.every(sent => sent.equals(wire))).toBe(true);
+  } finally { value.close(); }
+});
+
 test('malformed RPC status is not absence', async () => {
   const value = fixture();
   try {
