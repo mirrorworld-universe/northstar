@@ -77,6 +77,24 @@ jobs:
                               view['length_matches'] = len(raw) == len(image) + 37
                               view['different_bytes'] = sum(left != right for left, right in zip(raw[37:], image))
                   print(json.dumps(view), flush=True)
+          vrf_work = Path('/solana/northstar/vrf-service/deployments/d1ccaf33fafeea07137247bc4f180f7c19409fbb4b4e03ffed6ec0fb08a8f023/invocations/devnet-a22bb1150b89eb2e9bce4faf789039b35c169140')
+          vrf_ids = private_json(vrf_work / 'identities.json')['program_ids']
+          vrf_manifest = private_json(vrf_work / 'programs/manifest.json')
+          for role, filename in {'coordinator': 'vrf_coordinator.so', 'verifier': 'vrf_verifier.so', 'consumer': 'test_consumer.so'}.items():
+              image = (vrf_work / 'programs' / filename).read_bytes()
+              require(hashlib.sha256(image).hexdigest() == vrf_manifest['programs'][filename], 'VRF artifact changed')
+              program = local.account(vrf_ids[role])
+              view = {'role': role, 'program': vrf_ids[role], 'required_bytes': len(image), 'elf_sha256': hashlib.sha256(image).hexdigest()}
+              if program:
+                  from continuity_devnet import public_text
+                  require(program['owner'] == LOADER and program['executable'] and len(program['raw']) == 36, 'unexpected VRF program')
+                  stored = local.account(public_text(program['raw'][4:]))
+                  require(stored['owner'] == LOADER and stored['raw'][:4] == (3).to_bytes(4, 'little') and stored['raw'][12] == 1, 'unexpected VRF programdata')
+                  capacity = len(stored['raw']) - 45
+                  rent = local.call('getMinimumBalanceForRentExemption', [45 + max(capacity, len(image))])
+                  view.update(capacity_bytes=capacity, extension_bytes=max(0, len(image) - capacity),
+                              extra_rent_lamports=max(0, rent - stored['lamports']), authority=public_text(stored['raw'][13:45]))
+              print(json.dumps({'vrf_capacity': view}), flush=True)
           er = Rpc('http://127.0.0.1:8910')
           print(json.dumps({'er_sync': er.call('northstarSysGetSyncStatus'), 'session': er.call('getSessionPda')}), flush=True)
           prepared = private_json(control / 'sdk-smoke/prepare-sol.json')
