@@ -24,6 +24,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24.21.0"
+      - name: Use existing Solana key utility
+        run: |
+          SOLANA_BIN="$HOME/.local/share/solana/install/active_release/bin"
+          test -x "$SOLANA_BIN/solana-keygen"
+          echo "$SOLANA_BIN" >> "$GITHUB_PATH"
+          "$SOLANA_BIN/solana-keygen" --version
       - name: Verify explicit recovery scope
         env:
           CONFIRMATION: ${{ inputs.confirmation }}
