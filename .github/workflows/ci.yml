@@ -22,4 +22,6 @@ jobs:
         with:
           bun-version: "1.4.2"
       - name: Check immutable control retries and original transaction expiry
-        run: bun test ./.github/scripts/continuity-control-journal.test.mjs
+        run: |
+          bun test ./.github/scripts/continuity-control-journal.test.mjs ./.github/scripts/native-smoke-absence.test.mjs ./.github/scripts/devnet-continuity-smoke.test.mjs
+          python3 -B .github/scripts/test-recheck-native-qualification.py
