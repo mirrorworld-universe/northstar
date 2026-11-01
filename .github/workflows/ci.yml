@@ -26,7 +26,7 @@ jobs:
           NATIVE_REVISION: ${{ inputs.revision }}
         run: |
           python3 -B - <<'PY'
-          import fcntl, hashlib, json, os, re, stat, subprocess, sys
+          import fcntl, hashlib, json, os, re, stat, subprocess, sys, textwrap
           from pathlib import Path
           sys.path.insert(0, '.github/scripts')
           from continuity_devnet import Rpc, LOADER, SERVICE
@@ -145,15 +145,16 @@ jobs:
               if re.search(r'(?:\b\d{1,3},\s*){4}|mnemonic|seed phrase|secret_key', line, re.I):
                   line = '[sensitive diagnostic omitted]'
               print(json.dumps({'oracle_log': re.sub(r'/(?:[^\s/]+/)+[^\s,;]+', '<path>', line)[:350]}))
-          probe_unit = 'northstar-vrf-credential-probe-' + os.environ['GITHUB_RUN_ID']
-          credential_root = '/run/credentials/' + probe_unit + '.service'
-          metadata = subprocess.run(['sudo', '-n', 'systemd-run', '--unit=' + probe_unit, '--wait', '--pipe', '--collect',
-                                     '--property=DynamicUser=yes',
-                                     '--property=LoadCredential=signer.json:/solana/northstar/vrf-service/keys/signer.json',
-                                     '--property=LoadCredential=vrf.json:/solana/northstar/vrf-service/keys/vrf.json',
-                                     '/usr/bin/stat', '--format=%a %F %u:%g', credential_root + '/signer.json',
-                                     credential_root + '/vrf.json', credential_root],
-                                    capture_output=True, text=True, timeout=30)
-          print(json.dumps({'credential_metadata_exit': metadata.returncode, 'credential_metadata': metadata.stdout.splitlines()}))
+          public_summary = '''
+          import json,sys
+          from pathlib import Path
+          p=Path('/var/lib/northstar-vrf-oracle/journals/927e514e7126d11f14fd8d17d546a79901ead60d57f675511d6eade1efeb9b40/public-state.json')
+          state=json.loads(p.read_bytes())
+          records=[{k:r[k] for k in ('address','status','attempts','confirmed_slot')}|{'signature':r['attempt']['signature'],'last_valid_height':r['attempt']['last_valid_block_height']} for r in state['records'].values()]
+          print(json.dumps({'worker_snapshot_binding':state['binding'],'worker_records':records}))
+          '''
+          summary = subprocess.run(['sudo', '-n', 'python3', '-B', '-c', textwrap.dedent(public_summary)],
+                                   check=True, capture_output=True, text=True, timeout=20)
+          print(summary.stdout.strip())
           os.close(lock)
           PY
