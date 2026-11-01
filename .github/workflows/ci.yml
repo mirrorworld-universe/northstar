@@ -145,5 +145,15 @@ jobs:
               if re.search(r'(?:\b\d{1,3},\s*){4}|mnemonic|seed phrase|secret_key', line, re.I):
                   line = '[sensitive diagnostic omitted]'
               print(json.dumps({'oracle_log': re.sub(r'/(?:[^\s/]+/)+[^\s,;]+', '<path>', line)[:350]}))
+          probe_unit = 'northstar-vrf-credential-probe-' + os.environ['GITHUB_RUN_ID']
+          credential_root = '/run/credentials/' + probe_unit + '.service'
+          metadata = subprocess.run(['sudo', '-n', 'systemd-run', '--unit=' + probe_unit, '--wait', '--pipe', '--collect',
+                                     '--property=DynamicUser=yes',
+                                     '--property=LoadCredential=signer.json:/solana/northstar/vrf-service/keys/signer.json',
+                                     '--property=LoadCredential=vrf.json:/solana/northstar/vrf-service/keys/vrf.json',
+                                     '/usr/bin/stat', '--format=%a %F %u:%g', credential_root + '/signer.json',
+                                     credential_root + '/vrf.json', credential_root],
+                                    capture_output=True, text=True, timeout=30)
+          print(json.dumps({'credential_metadata_exit': metadata.returncode, 'credential_metadata': metadata.stdout.splitlines()}))
           os.close(lock)
           PY
