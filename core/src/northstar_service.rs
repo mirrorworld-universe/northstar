@@ -780,6 +780,9 @@ impl NorthStarService {
                         manager.refresh_delegated_owner_programs(&bank);
                     }
 
+                    // Sonic: Authenticated ingress consumes finalized roots, not event-bank hints.
+                    manager.process_finalized_l1_inputs(&bank_forks.read().unwrap().root_bank());
+
                     warn_stuck_settlement_if_due(
                         &latest_bank,
                         &portal_program_id,

@@ -1,3 +1,5 @@
+#[cfg(feature = "checkpoint-continuity-v2")]
+mod continuity_v2;
 #[cfg(test)]
 mod live_cadence;
 #[cfg(test)]
@@ -74,6 +76,8 @@ pub(crate) trait TransactionClient {
 }
 
 type TransactionAccountSnapshot = Vec<(Pubkey, AccountSharedData, AccountSharedData, bool)>;
+pub(crate) type SharedLineageStoreV2 =
+    Arc<Mutex<crate::lineage_store_v2::CheckpointLineageStoreV2>>;
 
 #[derive(Default)]
 struct CheckpointCaptureV1 {
@@ -87,6 +91,14 @@ struct CheckpointCaptureV1 {
 struct L1DelegationContext {
     bank: Arc<Bank>,
     grid_id: u64,
+}
+
+#[derive(Clone, Copy)]
+struct TokenDepositContext {
+    account: Pubkey,
+    payer: Pubkey,
+    cursor: Pubkey,
+    ingress: Option<northstar_zk_types::continuity::IngressRecordV2>,
 }
 
 pub struct EphemeralTransactionClient {
@@ -127,6 +139,8 @@ pub struct EphemeralTransactionClient {
     unsettled_state_store: Arc<UnsettledStateStore>,
     sync_status: Arc<NorthStarSyncStatus>,
     checkpoint_capture: Arc<RwLock<CheckpointCaptureV1>>,
+    lineage_v2: Arc<RwLock<Option<SharedLineageStoreV2>>>,
+    pending_ingress_v2: Arc<std::sync::atomic::AtomicU64>,
     #[cfg(feature = "vrf-candidate-capture")]
     candidate_capture: Arc<RwLock<Option<Arc<crate::vrf_candidate_capture::CandidateCaptureSink>>>>,
 }
@@ -154,6 +168,8 @@ impl Clone for EphemeralTransactionClient {
             unsettled_state_store: Arc::clone(&self.unsettled_state_store),
             sync_status: Arc::clone(&self.sync_status),
             checkpoint_capture: Arc::clone(&self.checkpoint_capture),
+            lineage_v2: Arc::clone(&self.lineage_v2),
+            pending_ingress_v2: Arc::clone(&self.pending_ingress_v2),
             #[cfg(feature = "vrf-candidate-capture")]
             candidate_capture: Arc::clone(&self.candidate_capture),
         }
@@ -395,6 +411,8 @@ impl EphemeralTransactionClient {
             unsettled_state_store: options.unsettled_state_store,
             sync_status: options.sync_status,
             checkpoint_capture: Arc::new(RwLock::new(CheckpointCaptureV1::default())),
+            lineage_v2: Arc::new(RwLock::new(None)),
+            pending_ingress_v2: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(feature = "vrf-candidate-capture")]
             candidate_capture: Arc::new(RwLock::new(None)),
         }
@@ -426,6 +444,9 @@ impl EphemeralTransactionClient {
         bank: &Bank,
         transaction: &VersionedTransaction,
     ) -> std::io::Result<usize> {
+        if self.lineage_store_v2().is_some() {
+            return Ok(0);
+        }
         let Some(context) = self.l1_delegation_context.read().unwrap().clone() else {
             return Ok(0);
         };
@@ -603,10 +624,9 @@ impl EphemeralTransactionClient {
         let mut signatures = self.processed_signatures.write().unwrap();
         signatures.retain(|_, slot| *slot >= min_slot);
         for (tx, commit_result) in txs.iter().zip(commit_results) {
-            if commit_result
-                .as_ref()
-                .is_ok_and(|committed_tx| committed_tx.status.is_ok())
-            {
+            if commit_result.as_ref().is_ok_and(|committed_tx| {
+                committed_tx.status.is_ok() || self.lineage_store_v2().is_some()
+            }) {
                 if let Some(signature) = tx.signatures.first() {
                     signatures.insert(*signature, bank.slot());
                 }
@@ -618,17 +638,85 @@ impl EphemeralTransactionClient {
         self.bank_forks.read().unwrap().working_bank()
     }
 
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    pub(crate) fn set_pending_ingress_v2(&self, count: u64) {
+        self.pending_ingress_v2.store(count, Ordering::Release);
+    }
+
+    pub(crate) fn lineage_store_v2(&self) -> Option<SharedLineageStoreV2> {
+        self.lineage_v2.read().unwrap().clone()
+    }
+
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    pub(crate) fn install_lineage_store_v2(
+        &self,
+        store: crate::lineage_store_v2::CheckpointLineageStoreV2,
+    ) {
+        *self.lineage_v2.write().unwrap() = Some(Arc::new(Mutex::new(store)));
+    }
+
+    pub(crate) fn checkpoint_artifact_v2(
+        &self,
+    ) -> Option<crate::checkpoint_v2::CheckpointArtifactV2> {
+        let store = self.lineage_store_v2()?;
+        let store = store.lock().unwrap();
+        borsh::from_slice(&store.sealed()?.artifact).ok()
+    }
+
     pub(crate) fn checkpoint_artifact_v1(&self) -> Option<CheckpointArtifactV1> {
         self.checkpoint_capture.read().unwrap().completed.clone()
     }
 
     fn checkpoint_awaits_settlement(&self) -> bool {
+        if self.pending_ingress_v2.load(Ordering::Acquire) != 0 {
+            return true;
+        }
+        if let Some(store) = self.lineage_store_v2() {
+            let store = store.lock().unwrap();
+            return store.sealed().is_some()
+                || store.unsealed().len() >= crate::checkpoint_v2::MAX_CHECKPOINT_TRANSITIONS_V2;
+        }
         let capture = self.checkpoint_capture.read().unwrap();
         capture.completed.is_some() || capture.steps.len() == CANONICAL_CHECKPOINT_STEPS_V1
     }
 
     pub(crate) fn seal_checkpoint_if_nonempty(&self) -> bool {
         let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
+        if let Some(store) = self.lineage_store_v2() {
+            let result = (|| -> std::io::Result<bool> {
+                let mut store = store.lock().unwrap();
+                if store.sealed().is_some() {
+                    return Ok(true);
+                }
+                if store.unsealed().is_empty() {
+                    return Ok(false);
+                }
+                let artifact = crate::checkpoint_v2::build_checkpoint_artifact_v2(
+                    store.accepted_state(),
+                    self.bank().slot(),
+                    store.unsealed(),
+                )
+                .map_err(std::io::Error::other)?;
+                let (checkpoint, _) = northstar_portal::find_checkpoint_pda(
+                    &self.portal_program_id,
+                    &artifact.checkpoint.session,
+                    artifact.checkpoint.er_slot,
+                );
+                let bytes = borsh::to_vec(&artifact)?;
+                store.seal(checkpoint.to_bytes(), artifact.checkpoint.er_slot, bytes)?;
+                Ok(true)
+            })();
+            return match result {
+                Ok(sealed) => sealed,
+                Err(error) => {
+                    self.active.store(false, Ordering::Relaxed);
+                    self.sync_status
+                        .set_checkpoint_error(Some("checkpoint_lineage_persistence_failed"));
+                    warn!("Versioned checkpoint sealing failed; ER deactivated: {error}");
+                    false
+                }
+            };
+        }
         let mut capture = self.checkpoint_capture.write().unwrap();
         if capture.completed.is_some() {
             return true;
@@ -692,6 +780,9 @@ impl EphemeralTransactionClient {
         account_snapshots: &[Option<TransactionAccountSnapshot>],
         replay_snapshots: &[Option<Vec<u8>>],
     ) {
+        if self.lineage_store_v2().is_some() {
+            return;
+        }
         let Some(session) = *self.session_pda.read().unwrap() else {
             return;
         };
@@ -1002,13 +1093,49 @@ impl EphemeralTransactionClient {
         payer: Pubkey,
         cursor: Pubkey,
     ) {
-        self.send_transactions_with_deposit_context(vec![wire], Some((account, payer, cursor)));
+        self.send_transactions_with_deposit_context(
+            vec![wire],
+            Some(TokenDepositContext {
+                account,
+                payer,
+                cursor,
+                ingress: None,
+            }),
+        );
+    }
+
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    pub(super) fn send_token_ingress_transaction(
+        &self,
+        wire: Vec<u8>,
+        account: Pubkey,
+        payer: Pubkey,
+        cursor: Pubkey,
+        record: northstar_zk_types::continuity::IngressRecordV2,
+    ) -> bool {
+        if self.lineage_store_v2().is_none() {
+            return false;
+        }
+        self.send_transactions_with_deposit_context(
+            vec![wire],
+            Some(TokenDepositContext {
+                account,
+                payer,
+                cursor,
+                ingress: Some(record),
+            }),
+        );
+        self.lineage_store_v2().is_some_and(|store| {
+            store.lock().unwrap().working_state().is_ok_and(|state| {
+                state.ingress_count() == record.sequence && state.ingress_root() == record.root
+            })
+        })
     }
 
     fn send_transactions_with_deposit_context(
         &self,
         wire_transactions: Vec<Vec<u8>>,
-        deposit_context: Option<(Pubkey, Pubkey, Pubkey)>,
+        deposit_context: Option<TokenDepositContext>,
     ) {
         // Sonic: Reject all transactions when ephemeral rollup session is not active
         if !self.active.load(Ordering::Relaxed) {
@@ -1040,7 +1167,17 @@ impl EphemeralTransactionClient {
         }
 
         let _bank_operation_guard = self.bank_operation_lock.lock().unwrap();
-        if self.checkpoint_awaits_settlement() {
+        let ingress = deposit_context.and_then(|context| context.ingress);
+        if self.lineage_store_v2().is_some() && deposit_context.is_some() && ingress.is_none() {
+            warn!("Versioned token credit requires an authenticated input record");
+            return;
+        }
+        let capacity_blocked = self.lineage_store_v2().is_some_and(|store| {
+            let store = store.lock().unwrap();
+            store.sealed().is_some()
+                || store.unsealed().len() >= crate::checkpoint_v2::MAX_CHECKPOINT_TRANSITIONS_V2
+        });
+        if (ingress.is_none() && self.checkpoint_awaits_settlement()) || capacity_blocked {
             warn!("ER transaction rejected: canonical checkpoint awaits settlement");
             return;
         }
@@ -1062,14 +1199,15 @@ impl EphemeralTransactionClient {
         }
         let delegated_accounts = self.delegated_accounts.read().unwrap().clone();
         let mut frozen_accounts = self.frozen_accounts.read().unwrap().clone();
-        if let Some((account, payer, _)) = deposit_context {
-            // Only the internal receipt-credit builder uses this path. Frozen accounts must still receive L1 deposits before approval.
-            frozen_accounts.remove(&account);
-            self.touched_accounts.write().unwrap().insert(payer);
+        if let Some(context) = deposit_context {
+            if context.ingress.is_none() {
+                frozen_accounts.remove(&context.account);
+            }
+            self.touched_accounts.write().unwrap().insert(context.payer);
         }
         let mut touched_accounts = self.touched_accounts.read().unwrap().clone();
-        if let Some((_, _, cursor)) = deposit_context {
-            touched_accounts.insert(cursor);
+        if let Some(context) = deposit_context {
+            touched_accounts.insert(context.cursor);
         }
         let enforce_account_access = self.session_pda.read().unwrap().is_some();
         let txs: Vec<_> = txs
@@ -1127,7 +1265,12 @@ impl EphemeralTransactionClient {
             enforce_account_access,
         );
 
-        if let Err(e) = self.execute_transactions(&bank, txs.clone()) {
+        let executed = if ingress.is_some() {
+            self.execute_transactions_with_ingress(&bank, txs.clone(), ingress)
+        } else {
+            self.execute_transactions(&bank, txs.clone())
+        };
+        if let Err(e) = executed {
             warn!("ER tx batch execution failed: {e}");
         }
 
@@ -1292,6 +1435,17 @@ impl EphemeralTransactionClient {
         bank: &Bank,
         txs: Vec<VersionedTransaction>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.execute_transactions_with_ingress(bank, txs, None)
+    }
+
+    fn execute_transactions_with_ingress(
+        &self,
+        bank: &Bank,
+        txs: Vec<VersionedTransaction>,
+        ingress: Option<northstar_zk_types::continuity::IngressRecordV2>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        #[cfg(not(feature = "checkpoint-continuity-v2"))]
+        let _ = ingress;
         let tx_sigs = txs
             .iter()
             .map(|tx| {
@@ -1429,6 +1583,14 @@ impl EphemeralTransactionClient {
                             )
                         })
                         .collect();
+                    #[cfg(feature = "checkpoint-continuity-v2")]
+                    self.record_v2_before_commit(
+                        bank,
+                        &txs,
+                        processing_results,
+                        &replay_snapshots,
+                        ingress,
+                    )?;
                     Ok(())
                 },
             )?;
@@ -1447,6 +1609,8 @@ impl EphemeralTransactionClient {
         );
         self.record_withdrawal_payout_events_for_batch(bank, &txs, &commit_results);
         self.record_token_withdrawal_payout_events_for_batch(bank, &txs, &commit_results);
+        #[cfg(feature = "checkpoint-continuity-v2")]
+        self.refresh_v2_payout_cache()?;
         self.notify_transaction_subscribers(bank, &txs);
 
         for (tx_idx, result) in commit_results.iter().enumerate() {
@@ -1467,6 +1631,9 @@ impl EphemeralTransactionClient {
         txs: &[VersionedTransaction],
         commit_results: &[TransactionCommitResult],
     ) {
+        if self.lineage_store_v2().is_some() {
+            return;
+        }
         if self.session_pda.read().unwrap().is_none() {
             return;
         }
@@ -1625,6 +1792,9 @@ impl EphemeralTransactionClient {
         txs: &[VersionedTransaction],
         commit_results: &[TransactionCommitResult],
     ) {
+        if self.lineage_store_v2().is_some() {
+            return;
+        }
         if self.session_pda.read().unwrap().is_none() {
             return;
         }

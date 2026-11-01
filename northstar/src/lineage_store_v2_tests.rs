@@ -51,6 +51,95 @@ fn transition(state: &CommittedStateV2) -> RecordedTransitionV2 {
 }
 
 #[test]
+fn regression_lineage_store_v2_settlement_plan_is_durable_and_immutable() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("state");
+    let mut store =
+        CheckpointLineageStoreV2::open(&directory, identity(), None, StartupModeV2::InitializeNew)
+            .unwrap();
+    store
+        .append(transition(&store.working_state().unwrap()))
+        .unwrap();
+    let artifact = crate::checkpoint_v2::build_checkpoint_artifact_v2(
+        store.accepted_state(),
+        10,
+        store.unsealed(),
+    )
+    .unwrap();
+    store
+        .seal([70; 32], 10, borsh::to_vec(&artifact).unwrap())
+        .unwrap();
+    let mut plan = crate::settlement::SettlementPlan {
+        er_slot: 10,
+        checksum: [0; 32],
+        chunks: vec![],
+        owner_changes: vec![],
+        lamport_changes: vec![],
+        receipt_balances: vec![],
+        token_withdrawals: vec![],
+        unsupported_changes: vec![],
+    };
+    plan.checksum = plan.recomputed_checksum();
+    store.bind_settlement_plan(&plan).unwrap();
+    store.bind_settlement_plan(&plan).unwrap();
+    drop(store);
+    let mut store =
+        CheckpointLineageStoreV2::open(&directory, identity(), None, StartupModeV2::Resume)
+            .unwrap();
+    assert_eq!(store.settlement_plan().unwrap(), Some(plan.clone()));
+    let mut changed = plan.clone();
+    changed
+        .owner_changes
+        .push(crate::settlement::AccountOwnerSettlement {
+            account: solana_pubkey::Pubkey::new_unique(),
+            owner: solana_pubkey::Pubkey::new_unique(),
+        });
+    changed.checksum = changed.recomputed_checksum();
+    assert!(store.bind_settlement_plan(&changed).is_err());
+    changed.er_slot += 1;
+    assert!(store.bind_settlement_plan(&changed).is_err());
+    assert_eq!(store.settlement_plan().unwrap(), Some(plan));
+}
+
+#[test]
+fn regression_lineage_store_v2_plan_persistence_failure_prevents_publication() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("state");
+    let mut store =
+        CheckpointLineageStoreV2::open(&directory, identity(), None, StartupModeV2::InitializeNew)
+            .unwrap();
+    store
+        .append(transition(&store.working_state().unwrap()))
+        .unwrap();
+    let artifact = crate::checkpoint_v2::build_checkpoint_artifact_v2(
+        store.accepted_state(),
+        10,
+        store.unsealed(),
+    )
+    .unwrap();
+    store
+        .seal([70; 32], 10, borsh::to_vec(&artifact).unwrap())
+        .unwrap();
+    let mut plan = crate::settlement::SettlementPlan {
+        er_slot: 10,
+        checksum: [0; 32],
+        chunks: vec![],
+        owner_changes: vec![],
+        lamport_changes: vec![],
+        receipt_balances: vec![],
+        token_withdrawals: vec![],
+        unsupported_changes: vec![],
+    };
+    plan.checksum = plan.recomputed_checksum();
+    let snapshot = directory.join(CAPSULE_FILE);
+    std::fs::rename(&snapshot, directory.join("retained.borsh")).unwrap();
+    std::fs::create_dir(&snapshot).unwrap();
+    assert!(store.bind_settlement_plan(&plan).is_err());
+    assert!(store.is_poisoned());
+    assert!(store.sealed().unwrap().settlement_plan.is_none());
+}
+
+#[test]
 fn regression_lineage_store_v2_persistence_failure_requires_reopen() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("state");

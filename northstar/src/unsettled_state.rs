@@ -334,6 +334,10 @@ impl UnsettledStateStore {
         self.inner.lock().unwrap().writes_enabled = true;
     }
 
+    pub fn disable_writes(&self) {
+        self.inner.lock().unwrap().writes_enabled = false;
+    }
+
     pub fn begin_session(&self, identity: UnsettledSessionIdentity) -> io::Result<RecoveryOutcome> {
         let mut inner = self.inner.lock().unwrap();
         inner.writes_enabled = false;

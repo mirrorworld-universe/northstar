@@ -5343,6 +5343,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "northstar-continuity-fixture"
+version = "0.1.0"
+dependencies = [
+ "pinocchio 0.11.2",
+]
+
+[[package]]
 name = "northstar-portal"
 version = "0.1.0"
 dependencies = [
@@ -5435,6 +5442,7 @@ version = "0.1.0"
 dependencies = [
  "borsh",
  "northstar-portal",
+ "northstar-zk-types",
  "pinocchio 0.11.2",
  "pinocchio-system",
  "pinocchio-token",
@@ -5457,6 +5465,7 @@ dependencies = [
  "solana-rpc-client",
  "solana-rpc-client-api",
  "solana-sdk-ids",
+ "solana-sha256-hasher",
  "solana-signature",
  "solana-signer",
  "solana-system-interface",

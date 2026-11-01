@@ -12,6 +12,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Sonic: Full-debug dependency archives can exhaust hosted-runner disks during restore.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
   # PR caches are merge-ref scoped; only reusable default-branch caches should consume quota.
   SAVE_CI_CACHE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
@@ -34,6 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/prepare-runner-disk
       - uses: ./.github/actions/ensure-rust-toolchain
       - name: Clean stale build artifacts
         run: |
@@ -44,6 +48,7 @@ jobs:
       - run: rustup component add clippy
       - uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: native-no-debug-v1
           save-if: ${{ env.SAVE_CI_CACHE }}
       - name: Install dependencies
         run: |
@@ -53,7 +58,7 @@ jobs:
       # Sonic: Check opt-in paths without enabling them in deployment builds.
       - run: cargo clippy --locked --all --tests --features northstar/proof-coordinator-test-hooks,agave-validator/proof-coordinator-test-hooks,northstar-portal/zk-verifier-profile -- -D warnings
       # Sonic: Continuity remains opt-in until its runtime and verifier are integrated.
-      - run: cargo clippy --locked -p northstar -p northstar-portal --tests --features checkpoint-continuity-v2 -- -D warnings
+      - run: cargo clippy --locked -p northstar -p northstar-portal -p solana-cli --tests --features checkpoint-continuity-v2 -- -D warnings
       # Sonic: Root workspace checks do not include the portable VRF probe.
       - run: cargo clippy --locked --manifest-path northstar/programs/vrf-runtime-probe/Cargo.toml --workspace --all-targets -- -D warnings
 
@@ -62,6 +67,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/prepare-runner-disk
       - uses: ./.github/actions/ensure-rust-toolchain
       - name: Clean stale build artifacts
         run: |
@@ -71,6 +77,7 @@ jobs:
           rm -rf ~/.cargo/registry/src/**/.cargo-lock*
       - uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: native-no-debug-v1
           save-if: ${{ env.SAVE_CI_CACHE }}
       - name: Install dependencies
         run: |
@@ -80,6 +87,8 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
+      - name: Test CI cache disk budget
+        run: bun test ./.github/scripts/ci-cache-budget.test.mjs
       - name: Test CPU VRF evidence and RPC clients
         run: |
           python3 -B -m unittest discover -s northstar/scripts -p 'test_vrf_evidence.py'
@@ -167,6 +176,9 @@ jobs:
         run: BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar-token-bridge --test core
       - name: Run SPL token bridge validator E2E
         run: BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar-token-bridge --test validator_e2e -- --nocapture
+      # Sonic: Portal-enabled genesis must preserve explicitly pinned program artifacts.
+      - name: Test explicit genesis program selection
+        run: cargo test --locked -p solana-test-validator --lib portal_configuration_preserves_explicit -- --test-threads=1
       - name: Run Northstar crate tests
         run: BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar -p northstar-portal --no-fail-fast
       # Sonic: Isolate the continuity fixture from the default deployment artifact.
@@ -174,8 +186,18 @@ jobs:
         run: |
           ./cargo-build-sbf --manifest-path northstar/programs/portal/Cargo.toml \
             --features checkpoint-continuity-v2 --sbf-out-dir "$PWD/target/continuity-v2-deploy" -- --locked
+          ./cargo-build-sbf --manifest-path northstar/programs/token-bridge/Cargo.toml \
+            --features checkpoint-continuity-v2 --sbf-out-dir "$PWD/target/continuity-v2-deploy" -- --locked
+          ./cargo-build-sbf --manifest-path northstar/programs/continuity-fixture/Cargo.toml \
+            --sbf-out-dir "$PWD/target/continuity-v2-deploy" -- --locked
           BPF_OUT_DIR="$PWD/target/continuity-v2-deploy" \
             cargo test --locked -p northstar --features checkpoint-continuity-v2 v2
+          BPF_OUT_DIR="$PWD/target/continuity-v2-deploy" \
+            cargo test --locked -p northstar --features checkpoint-continuity-v2 \
+              regression_checkpoint_lineage_survives_l1_delegation_materialization
+          cargo test --locked -p solana-cli --features checkpoint-continuity-v2 v2
+      - name: Test oracle restart safeguards
+        run: python3 -B .github/scripts/test-stop-vrf-service.py
       # Sonic: Coordinator and mature-capture regressions need no GPU service.
       - name: Test opt-in proof coordination
         run: cargo test --locked -p northstar --features proof-coordinator-test-hooks proof_ --no-fail-fast

@@ -1,0 +1,13 @@
+# Sonic: Never apply ephemeral-image cleanup to the persistent devnet runner.
+name: Prepare hosted runner disk
+description: Reclaim unused SDKs before restoring large Rust dependency caches.
+runs:
+  using: composite
+  steps:
+    - name: Reclaim unused hosted-image SDKs
+      if: runner.environment == 'github-hosted'
+      shell: bash
+      run: |
+        df -h /
+        sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+        df -h /

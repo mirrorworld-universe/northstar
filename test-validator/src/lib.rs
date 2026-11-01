@@ -1088,7 +1088,7 @@ impl TestValidator {
 
         // Northstar: Load Portal and its SPL token bridge into genesis when configured.
         if let Some(portal_program_id) = config.portal {
-            // Sonic: Explicit Portal programs take precedence over the bundled default.
+            // Sonic: Explicit programs take precedence over bundled defaults.
             if !accounts.contains_key(&portal_program_id) {
                 insert_upgradeable_program_accounts(
                     &mut accounts,
@@ -1096,11 +1096,13 @@ impl TestValidator {
                     PORTAL_PROGRAM_BINARY,
                 );
             }
-            insert_upgradeable_program_accounts(
-                &mut accounts,
-                DEFAULT_TOKEN_BRIDGE_PROGRAM_ID,
-                TOKEN_BRIDGE_PROGRAM_BINARY,
-            );
+            if !accounts.contains_key(&DEFAULT_TOKEN_BRIDGE_PROGRAM_ID) {
+                insert_upgradeable_program_accounts(
+                    &mut accounts,
+                    DEFAULT_TOKEN_BRIDGE_PROGRAM_ID,
+                    TOKEN_BRIDGE_PROGRAM_BINARY,
+                );
+            }
         }
 
         // Northstar: Keep genesis features active for bundled SBF programs such as SPL Token.
@@ -1595,7 +1597,7 @@ mod test {
         assert!(TOKEN_BRIDGE_PROGRAM_BINARY.starts_with(b"\x7fELF"));
     }
 
-    // Sonic: --portal must not replace an explicitly configured SBF program.
+    // Sonic: --portal must not replace explicitly configured Northstar SBF programs.
     #[test]
     fn portal_configuration_preserves_explicit_program() {
         let portal = Pubkey::new_unique();
@@ -1614,6 +1616,29 @@ mod test {
             &account.data()[UpgradeableLoaderState::size_of_programdata_metadata()..]
                 == TOKEN_BRIDGE_PROGRAM_BINARY,
             "explicit Portal SBF was replaced by the bundled program",
+        );
+    }
+
+    #[test]
+    fn portal_configuration_preserves_explicit_token_bridge_program() {
+        let (validator, _) = TestValidatorGenesis::default_for_tests()
+            .portal(Pubkey::new_unique())
+            .add_program(
+                concat!(env!("OUT_DIR"), "/northstar_portal"),
+                DEFAULT_TOKEN_BRIDGE_PROGRAM_ID,
+            )
+            .start();
+        let programdata = Pubkey::find_program_address(
+            &[DEFAULT_TOKEN_BRIDGE_PROGRAM_ID.as_ref()],
+            &solana_sdk_ids::bpf_loader_upgradeable::id(),
+        )
+        .0;
+        let bank = validator.bank_forks().read().unwrap().root_bank();
+        let account = bank.get_account(&programdata).unwrap();
+        assert!(
+            &account.data()[UpgradeableLoaderState::size_of_programdata_metadata()..]
+                == PORTAL_PROGRAM_BINARY,
+            "explicit token bridge SBF was replaced by the bundled program",
         );
     }
 
