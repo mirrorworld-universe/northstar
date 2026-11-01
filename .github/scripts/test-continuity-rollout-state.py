@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""Sonic: Check isolation and retained-state guards without systemd or chain access."""
+import json
+import os
+from pathlib import Path
+import tempfile
+import unittest
+
+from continuity_rollout_state import (
+    ARTIFACTS, append_private, atomic_json, checked_directory, file_hash, flag_value, immutable_json,
+    inspect_paths, private_json, retained_fingerprint, service_arguments, service_dropin,
+    sync_paths, systemd_argument, verify_artifacts,
+)
+
+
+class StateTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def test_metadata_is_immutable_and_private(self):
+        filename = self.root / "plan.json"
+        immutable_json(filename, {"version": 2, "identity": "original"})
+        immutable_json(filename, {"identity": "original", "version": 2})
+        self.assertEqual(filename.stat().st_mode & 0o777, 0o600)
+        with self.assertRaisesRegex(ValueError, "changed"):
+            immutable_json(filename, {"version": 2, "identity": "different"})
+        self.assertEqual(private_json(filename)["identity"], "original")
+
+    def test_nonregular_and_public_control_inputs_are_rejected(self):
+        filename = self.root / "public.json"
+        filename.write_text("{}")
+        filename.chmod(0o644)
+        with self.assertRaises(ValueError):
+            private_json(filename)
+        pipe = self.root / "pipe"
+        os.mkfifo(pipe, 0o600)
+        with self.assertRaises(ValueError):
+            private_json(pipe)
+        with self.assertRaises(ValueError):
+            file_hash(pipe)
+
+    def test_control_symlinks_are_not_followed(self):
+        original = self.root / "original.json"
+        atomic_json(original, {"retained": True})
+        alias = self.root / "alias.json"
+        alias.symlink_to(original)
+        with self.assertRaises(OSError):
+            atomic_json(alias, {"retained": False})
+        self.assertTrue(private_json(original)["retained"])
+
+    def test_original_service_arguments_are_preserved_except_binary_and_portal(self):
+        original = ["/retained/agave-validator", "--ledger", "/retained/ledger", "--identity", "/retained/id.json", "--portal", "old"]
+        expected = original[:]
+        expected[0], expected[-1] = "/isolated/bin/agave-validator", "new"
+        self.assertEqual(service_arguments(original, expected[0], "new"), expected)
+        self.assertEqual(original[-1], "old")
+        self.assertEqual(flag_value(original, "--ledger"), "/retained/ledger")
+        with self.assertRaises(ValueError):
+            service_arguments(original + ["--portal=other"], expected[0], "new")
+
+    def test_dropin_overrides_only_native_state_environment(self):
+        arguments = ["/isolated/bin/agave-validator", "--portal", "new", "--ledger", "/retained/ledger"]
+        content = service_dropin(arguments, "/isolated/checkpoints", "/isolated/unsettled")
+        self.assertIn('ExecStart=\nExecStart="/usr/bin/env"', content)
+        self.assertIn('"NORTHSTAR_CHECKPOINT_PLAN_DIR=/isolated/checkpoints"', content)
+        self.assertIn('"NORTHSTAR_UNSETTLED_STATE_DIR=/isolated/unsettled"', content)
+        self.assertIn('"--ledger" "/retained/ledger"', content)
+        self.assertNotIn("WorkingDirectory", content)
+        with self.assertRaises(ValueError):
+            service_dropin(arguments, "relative", "/isolated/unsettled")
+
+    def test_systemd_argument_expansion_is_literal(self):
+        self.assertEqual(systemd_argument('a$b%c"d\\e'), '"a$$b%%c\\"d\\\\e"')
+        with self.assertRaises(ValueError):
+            systemd_argument("line\nbreak")
+
+    def test_retained_tree_fingerprint_never_changes_original_bytes(self):
+        retained = self.root / "retained"
+        retained.mkdir()
+        source = retained / "journal.bin"
+        source.write_bytes(b"original")
+        before = retained_fingerprint([str(retained)])
+        self.assertEqual(source.read_bytes(), b"original")
+        self.assertEqual(before, retained_fingerprint([str(retained)]))
+        source.write_bytes(b"changed")
+        self.assertNotEqual(before, retained_fingerprint([str(retained)]))
+        alias = retained / "alias"
+        alias.symlink_to(source)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            retained_fingerprint([str(retained)])
+
+    def test_private_diagnostic_append_rejects_aliases(self):
+        target = self.root / "diagnostics.log"
+        append_private(target, b"first\n")
+        append_private(target, b"second\n")
+        self.assertEqual(target.read_bytes(), b"first\nsecond\n")
+        alias = self.root / "alias.log"
+        alias.symlink_to(target)
+        with self.assertRaises(OSError):
+            append_private(alias, b"changed")
+        self.assertEqual(target.read_bytes(), b"first\nsecond\n")
+
+    def test_namespace_permissions_and_aliases_fail_closed(self):
+        directory = self.root / "private"
+        directory.mkdir(mode=0o700)
+        checked_directory(directory, private=True)
+        directory.chmod(0o755)
+        with self.assertRaises(ValueError):
+            checked_directory(directory, private=True)
+        alias = self.root / "alias"
+        alias.symlink_to(directory)
+        with self.assertRaises(ValueError):
+            checked_directory(alias)
+        with self.assertRaises(ValueError):
+            inspect_paths([str(alias)])
+
+    def test_durable_publication_flushes_only_regular_files_and_directories(self):
+        filename = self.root / "metadata.json"
+        atomic_json(filename, {"version": 2})
+        sync_paths([filename, self.root])
+        alias = self.root / "alias"
+        alias.symlink_to(filename)
+        with self.assertRaises(ValueError):
+            sync_paths([alias])
+
+    def test_complete_artifact_identity_and_hashes_are_required(self):
+        stage = self.root / "stage"
+        stage.mkdir()
+        checksums = {}
+        for role, filename in ARTIFACTS.items():
+            target = stage / filename
+            target.parent.mkdir(exist_ok=True)
+            target.write_bytes(b"\x7fELF" + role.encode())
+            checksums[role] = file_hash(target)
+        manifest = {"version": 2, "protocol": "continuity-v2", "source_revision": "a" * 40,
+                    "platform_tools": "v1.56", "arch": "v0", "activation_performed": False,
+                    "hosted_qualified": False, "proof_acceptance_qualified": False, "sha256": checksums}
+        atomic_json(stage / "manifest.json", manifest)
+        self.assertEqual(verify_artifacts(stage, "a" * 40), manifest)
+        (stage / ARTIFACTS["portal"]).write_bytes(b"changed")
+        with self.assertRaisesRegex(ValueError, "changed"):
+            verify_artifacts(stage, "a" * 40)
+
+
+if __name__ == "__main__":
+    unittest.main()

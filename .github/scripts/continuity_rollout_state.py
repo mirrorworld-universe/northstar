@@ -1,0 +1,220 @@
+"""Sonic: Durable native deployment metadata; no transaction or service mutations."""
+
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import tempfile
+
+DEVNET = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"
+SDK_REVISION = "24030ce9fc3b80aa21738db2bb9f5a5fbea030d8"
+ARTIFACTS = {
+    "validator": "bin/agave-validator",
+    "cli": "bin/solana",
+    "portal": "programs/northstar_portal.so",
+    "token_bridge": "programs/northstar_token_bridge.so",
+}
+
+
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+
+
+def private_json(filename):
+    descriptor = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(descriptor)
+        allowed = {os.getuid()}
+        if os.getuid() == 0 and os.environ.get("SUDO_UID", "").isdigit():
+            allowed.add(int(os.environ["SUDO_UID"]))
+        require(stat.S_ISREG(info.st_mode) and not info.st_mode & 0o077 and info.st_uid in allowed
+                and info.st_size <= 16 * 1024 * 1024, "control input is not a private regular file")
+        with os.fdopen(os.dup(descriptor), "rb") as stream:
+            return json.load(stream)
+    finally:
+        os.close(descriptor)
+
+
+def atomic_json(filename, value):
+    filename = Path(filename)
+    if os.path.lexists(filename):
+        private_json(filename)
+    descriptor, temporary = tempfile.mkstemp(prefix=filename.name + ".", suffix=".tmp", dir=filename.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(canonical(value) + b"\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, filename)
+        directory = os.open(filename.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except BaseException:
+        raise
+
+
+def sync_paths(paths):
+    for configured in paths:
+        filename = Path(configured)
+        info = filename.lstat()
+        require(stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode), "cannot flush a nonregular deployment path")
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        if stat.S_ISDIR(info.st_mode):
+            flags |= os.O_DIRECTORY
+        descriptor = os.open(filename, flags)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def append_private(filename, data):
+    descriptor = os.open(filename, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        info = os.fstat(descriptor)
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077,
+                "diagnostic log is not a private regular file")
+        with os.fdopen(os.dup(descriptor), "ab") as output:
+            output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+    finally:
+        os.close(descriptor)
+
+
+def immutable_json(filename, value):
+    if os.path.lexists(filename):
+        require(private_json(filename) == value, "established deployment metadata changed")
+    else:
+        atomic_json(filename, value)
+
+
+def file_hash(filename):
+    descriptor = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(descriptor)
+        require(stat.S_ISREG(info.st_mode) and info.st_size <= 2 * 1024**3, "retained input is not a bounded regular file")
+        result = hashlib.sha256()
+        while block := os.read(descriptor, 1024 * 1024):
+            result.update(block)
+        return result.hexdigest()
+    finally:
+        os.close(descriptor)
+
+
+def verify_artifacts(directory, revision):
+    directory = Path(directory)
+    manifest = private_json(directory / "manifest.json")
+    require(manifest.get("version") == 2 and manifest.get("protocol") == "continuity-v2"
+            and manifest.get("source_revision") == revision and re.fullmatch("[0-9a-f]{40}", revision)
+            and manifest.get("platform_tools") == "v1.56" and manifest.get("arch") == "v0"
+            and manifest.get("activation_performed") is False and manifest.get("hosted_qualified") is False
+            and manifest.get("proof_acceptance_qualified") is False,
+            "artifact manifest identity differs")
+    require(isinstance(manifest.get("sha256"), dict) and set(manifest["sha256"]) == set(ARTIFACTS), "incorrect native artifact roles")
+    for role, relative in ARTIFACTS.items():
+        require(file_hash(directory / relative) == manifest["sha256"][role], "native artifact bytes changed")
+        with (directory / relative).open("rb") as source:
+            require(source.read(4) == b"\x7fELF", "native artifact is not ELF")
+    return manifest
+
+
+def checked_directory(directory, private=False):
+    directory = Path(directory)
+    info = directory.lstat()
+    require(directory.is_absolute() and stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+            and info.st_uid == os.getuid() and not info.st_mode & (0o077 if private else 0o022),
+            "deployment directory ownership or permissions differ")
+
+
+def flag_value(arguments, name):
+    matches = []
+    for position, argument in enumerate(arguments):
+        if argument == name:
+            require(position + 1 < len(arguments), "service flag value is missing")
+            matches.append(arguments[position + 1])
+        elif argument.startswith(name + "="):
+            matches.append(argument[len(name) + 1:])
+    require(len(matches) == 1 and matches[0], "service flag is missing or duplicated: " + name)
+    return matches[0]
+
+
+def service_arguments(original, executable, portal):
+    require(isinstance(original, list) and original and all(isinstance(value, str) and value for value in original), "invalid service argument vector")
+    flag_value(original, "--portal")
+    result = list(original)
+    result[0] = str(executable)
+    for position, argument in enumerate(result):
+        if argument == "--portal":
+            result[position + 1] = portal
+        elif argument.startswith("--portal="):
+            result[position] = "--portal=" + portal
+    return result
+
+
+def systemd_argument(value):
+    require(isinstance(value, str) and value and not any(ord(character) < 32 for character in value), "service argument contains a control character")
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$") + '"'
+
+
+def service_dropin(arguments, checkpoint_directory, unsettled_directory):
+    for directory in (checkpoint_directory, unsettled_directory):
+        require(Path(directory).is_absolute() and not any(character.isspace() for character in str(directory)), "native state directory must be an absolute unambiguous path")
+    command = ["/usr/bin/env", "NORTHSTAR_CHECKPOINT_PLAN_DIR=" + str(checkpoint_directory),
+               "NORTHSTAR_UNSETTLED_STATE_DIR=" + str(unsettled_directory), *arguments]
+    return "[Service]\nExecStart=\nExecStart=" + " ".join(systemd_argument(value) for value in command) + "\n"
+
+
+def inspect_paths(paths):
+    result = {}
+    for configured in paths:
+        filename = Path(configured)
+        require(filename.is_absolute(), "inspection path must be absolute")
+        if not os.path.lexists(filename):
+            result[str(filename)] = {"absent": True}
+            continue
+        info = filename.lstat()
+        require(stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode), "inspection input is not a regular file/directory")
+        value = {"mode": stat.S_IMODE(info.st_mode), "uid": info.st_uid, "gid": info.st_gid}
+        if stat.S_ISREG(info.st_mode):
+            value["sha256"] = file_hash(filename)
+        else:
+            value["directory"] = True
+        result[str(filename)] = value
+    return result
+
+
+def retained_fingerprint(paths):
+    result = {}
+    count = 0
+    for configured in paths:
+        root = Path(configured)
+        require(root.is_absolute(), "retained path must be absolute")
+        if not os.path.lexists(root):
+            result[str(root)] = {"absent": True}
+            continue
+        pending = [root]
+        while pending:
+            current = pending.pop()
+            info = current.lstat()
+            require(not stat.S_ISLNK(info.st_mode), "retained state contains a symlink")
+            require(stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode), "retained state is not a regular file/directory")
+            count += 1
+            require(count <= 20_000, "retained state exceeds inventory bound")
+            metadata = {"mode": stat.S_IMODE(info.st_mode), "uid": info.st_uid, "gid": info.st_gid}
+            if stat.S_ISDIR(info.st_mode):
+                metadata["directory"] = True
+                pending.extend(sorted(current.iterdir()))
+            else:
+                metadata.update(size=info.st_size, sha256=file_hash(current))
+            result[str(current)] = metadata
+    return result

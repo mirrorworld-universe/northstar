@@ -106,9 +106,15 @@ jobs:
         run: python3 -B .github/scripts/test-stop-vrf-service.py
       - name: Test pinned SBF build arguments
         run: bash .github/scripts/test-sbf-toolchain.sh
-      # Sonic: Staging must not enter the retained runtime's activation path.
-      - name: Test continuity-v2 staging boundary
-        run: python3 -B .github/scripts/test-build-continuity-v2.py
+      # Sonic: These deployment tests use no services, credentials or chain requests.
+      - name: Test continuity-v2 activation guards
+        run: |
+          python3 -B .github/scripts/test-build-continuity-v2.py
+          python3 -B .github/scripts/test-continuity-rollout-state.py
+          python3 -B .github/scripts/test-continuity-devnet.py
+          python3 -B .github/scripts/test-continuity-devnet-model.py
+          bun test ./.github/scripts/continuity-control-journal.test.mjs ./.github/scripts/devnet-continuity-smoke.test.mjs ./.github/scripts/continuity-workflow.test.mjs
+          bash -n .github/scripts/prepare-continuity-sdk.sh
       - name: Test bounded GPU runner without GPU
         run: |
           python3 -B northstar/scripts/test_gpu_prover.py
@@ -318,6 +324,7 @@ jobs:
 
       # Sonic: Build v2 artifacts without replacing binaries used by the retained v1 runtime.
       - name: Stage continuity-v2 artifacts without activation
+        id: continuity_stage
         env:
           NORTHSTAR_CONTINUITY_BUILD_TARGET_DIR: /solana/northstar/continuity-v2-build-cache
         run: |
@@ -326,176 +333,40 @@ jobs:
           mkdir -p "$ROOT"
           STAGE="$ROOT/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA}"
           bash .github/scripts/build-continuity-v2.sh "$STAGE"
+          echo "directory=$STAGE" >> "$GITHUB_OUTPUT"
 
-      # Sonic: Existing state must stay untouched until the isolated activation path is qualified.
-      - name: Hold before native activation
-        run: |
-          echo "::error::Fresh namespace/session activation and v2 SOL/SPL qualification remain incomplete; no service or chain state was changed"
-          exit 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
 
-      # Sonic: Oracle startup is manual; preserve unresolved work before replacing its ER.
-      - name: Stop managed VRF before deployment
-        run: sudo -n python3 -B .github/scripts/stop-vrf-service.py
-
-      - name: Generate new portal program address
-        id: portal_address
-        if: steps.program_changes.outputs.portal_changed == 'true'
+      - name: Prepare pinned public continuity SDK
+        id: continuity_sdk
         run: |
           set -euo pipefail
-          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
-          KEYPAIR="/solana/northstar/portal-keypair.json"
-          rm -f "$KEYPAIR"
-          solana-keygen new --outfile "$KEYPAIR" --force --no-passphrase
-          PUBKEY=$(solana-keygen pubkey "$KEYPAIR")
-          echo "portal_address=$PUBKEY" >> "$GITHUB_OUTPUT"
-          echo "New portal program address: $PUBKEY"
+          SDK="$RUNNER_TEMP/northstar-continuity-sdk-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          bash .github/scripts/prepare-continuity-sdk.sh "$SDK"
+          echo "directory=$SDK" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy portal program to devnet
-        id: portal_deploy
-        if: steps.program_changes.outputs.portal_changed == 'true'
-        run: |
-          set -euo pipefail
-          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
-          PUBKEY="${{ steps.portal_address.outputs.portal_address }}"
-          echo "Deploying portal program to devnet at $PUBKEY"
-          solana program deploy \
-            /solana/northstar/deploy/northstar_portal.so \
-            --program-id /solana/northstar/portal-keypair.json \
-            --url https://api.devnet.solana.com \
-            --keypair /home/ubuntu/.config/solana/id.json
-          echo "Portal program deployed to devnet at $PUBKEY"
-          echo "portal_address=$PUBKEY" >> "$GITHUB_OUTPUT"
-
-      - name: Generate new token bridge program address
-        id: token_bridge_address
-        if: steps.program_changes.outputs.token_bridge_changed == 'true'
-        run: |
-          set -euo pipefail
-          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
-          KEYPAIR="/solana/northstar/token-bridge-keypair.json"
-          rm -f "$KEYPAIR"
-          solana-keygen new --outfile "$KEYPAIR" --force --no-passphrase
-          PUBKEY=$(solana-keygen pubkey "$KEYPAIR")
-          echo "token_bridge_address=$PUBKEY" >> "$GITHUB_OUTPUT"
-          echo "New token bridge program address: $PUBKEY"
-
-      - name: Deploy token bridge program to devnet
-        id: token_bridge_deploy
-        if: steps.program_changes.outputs.token_bridge_changed == 'true'
-        run: |
-          set -euo pipefail
-          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
-          PUBKEY="${{ steps.token_bridge_address.outputs.token_bridge_address }}"
-          echo "Deploying token bridge program to devnet at $PUBKEY"
-          solana program deploy \
-            /solana/northstar/deploy/northstar_token_bridge.so \
-            --program-id /solana/northstar/token-bridge-keypair.json \
-            --url https://api.devnet.solana.com \
-            --keypair /home/ubuntu/.config/solana/id.json
-          echo "Token bridge program deployed to devnet at $PUBKEY"
-          echo "token_bridge_address=$PUBKEY" >> "$GITHUB_OUTPUT"
-
-      - name: Update validator service with new portal address
-        if: steps.program_changes.outputs.portal_changed == 'true'
-        run: |
-          set -euo pipefail
-          SERVICE_FILE="/etc/systemd/system/northstar-validator.service"
-          PUBKEY="${{ steps.portal_address.outputs.portal_address }}"
-          sudo sed -i "s/--portal [^ ]*/--portal $PUBKEY/" "$SERVICE_FILE"
-          echo "Updated $SERVICE_FILE with portal address $PUBKEY"
-          grep -- "--portal" "$SERVICE_FILE"
-
-      - name: Reload systemd
-        if: steps.program_changes.outputs.portal_changed == 'true'
-        run: sudo systemctl daemon-reload
-
-      - name: Restart validator
-        run: sudo systemctl restart northstar-validator
-
-      - name: Wait for validator to be fully up
-        run: |
-          sudo mkdir -p /solana/northstar/logs
-          sudo touch /solana/northstar/logs/validator.log
-          sudo chmod a+rw /solana/northstar/logs/validator.log
-
-          # Stream validator logs to CI output while we wait
-          tail -f /solana/northstar/logs/validator.log &
-          TAIL_PID=$!
-
-          # shellcheck disable=SC2329
-          cleanup() {
-            kill "$TAIL_PID" 2>/dev/null || true
-            wait "$TAIL_PID" 2>/dev/null || true
-          }
-          trap cleanup EXIT
-
-          sleep 2
-
-          echo "Waiting for validator to be fully up..."
-          for _ in $(seq 1 1080); do
-            if sudo systemctl is-failed --quiet northstar-validator; then
-              echo ""
-              echo "Validator service failed during startup!"
-              exit 1
-            fi
-
-            if sudo systemctl is-active --quiet northstar-validator; then
-              if curl -sf -X POST -H "Content-Type: application/json" \
-                 -d '{"jsonrpc":"2.0","id":1,"method":"getVersion"}' \
-                 http://localhost:8899 >/dev/null 2>&1; then
-                echo ""
-                echo "Validator is up and RPC is responding!"
-                exit 0
-              fi
-            fi
-            sleep 5
-          done
-
-          echo ""
-          echo "Timed out waiting for validator to be fully up"
-          exit 1
-        timeout-minutes: 90
-
-      - name: Open Portal session on devnet
-        if: steps.program_changes.outputs.portal_changed == 'true'
-        run: |
-          set -euo pipefail
-          SOLANA_CLI="/solana/northstar/release/solana"
-          PORTAL_ADDRESS="${{ steps.portal_address.outputs.portal_address }}"
-          DEPLOYER_KEYPAIR="/home/ubuntu/.config/solana/id.json"
-          DEVNET_RPC="https://api.devnet.solana.com"
-
-          test -x "$SOLANA_CLI"
-          VALIDATOR_IDENTITY=$(curl -sf -X POST -H "Content-Type: application/json" \
-            -d '{"jsonrpc":"2.0","id":1,"method":"getIdentity"}' \
-            http://localhost:8899 | sed -n 's/.*"identity":"\([^"]*\)".*/\1/p')
-          test -n "$VALIDATOR_IDENTITY"
-
-          echo "Opening session for portal $PORTAL_ADDRESS with validator $VALIDATOR_IDENTITY"
-          "$SOLANA_CLI" \
-            --url "$DEVNET_RPC" \
-            --keypair "$DEPLOYER_KEYPAIR" \
-            --commitment confirmed \
-            portal open-session \
-            --portal "$PORTAL_ADDRESS" \
-            --validator "$VALIDATOR_IDENTITY"
-
-      - name: Run SOL deposit, resume, withdrawal, and settlement smoke test
-        id: sol_e2e_smoke
-        timeout-minutes: 45
+      # Sonic: This controller preserves old state and refuses unknown/uncertain activation records.
+      - name: Activate isolated SessionV2 and qualify SOL/SPL recovery
+        id: continuity_activate
+        timeout-minutes: 120
         env:
-          PORTAL_ADDRESS: ${{ steps.portal_deploy.outputs.portal_address }}
-          REPORT_PATH: /tmp/northstar-sol-e2e-report.txt
-        run: ./.github/scripts/devnet-e2e-smoke.sh
+          NATIVE_STAGE: ${{ steps.continuity_stage.outputs.directory }}
+          CONTINUITY_SDK: ${{ steps.continuity_sdk.outputs.directory }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+          python3 -B .github/scripts/continuity_devnet.py run \
+            --stage "$NATIVE_STAGE" --revision "$GITHUB_SHA" \
+            --sdk-checkout "$CONTINUITY_SDK"
 
-      - name: Run SPL deposit, resume, withdrawal, and settlement smoke test
-        id: spl_e2e_smoke
-        timeout-minutes: 45
-        env:
-          PORTAL_ADDRESS: ${{ steps.portal_deploy.outputs.portal_address }}
-          TOKEN_BRIDGE_ADDRESS: ${{ steps.token_bridge_deploy.outputs.token_bridge_address }}
-          REPORT_PATH: /tmp/northstar-spl-e2e-report.txt
-        run: ./.github/scripts/devnet-spl-e2e-smoke.sh
+      - name: Retain public native qualification report
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-continuity-v2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.continuity_activate.outputs.report_path }}
+          if-no-files-found: error
 
       - name: Notify Slack
         if: always()
@@ -503,14 +374,12 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ vars.SLACK_CHANNEL_ID }}
           STATUS: ${{ job.status }}
-          PORTAL_CHANGED: ${{ steps.program_changes.outputs.portal_changed }}
-          PORTAL_ADDRESS: ${{ steps.portal_deploy.outputs.portal_address }}
-          TOKEN_BRIDGE_CHANGED: ${{ steps.program_changes.outputs.token_bridge_changed }}
-          TOKEN_BRIDGE_ADDRESS: ${{ steps.token_bridge_deploy.outputs.token_bridge_address }}
+          PORTAL_ADDRESS: ${{ steps.continuity_activate.outputs.portal }}
+          TOKEN_BRIDGE_ADDRESS: ${{ steps.continuity_activate.outputs.token_bridge }}
+          SESSION_CONTEXT: ${{ steps.continuity_activate.outputs.context }}
           COMMIT_SHA: ${{ github.sha }}
           COMMIT_MSG: ${{ github.event.head_commit.message }}
-          SOL_SMOKE_OUTCOME: ${{ steps.sol_e2e_smoke.outcome }}
-          SPL_SMOKE_OUTCOME: ${{ steps.spl_e2e_smoke.outcome }}
+          NATIVE_SMOKE_OUTCOME: ${{ steps.continuity_activate.outcome }}
         run: |
           set -euo pipefail
           if [ "$STATUS" != "success" ]; then
@@ -555,29 +424,11 @@ jobs:
             MENTIONS="$MENTIONS<@$USER_ID> "
           done
 
-          LINES=(":white_check_mark: NorthStar validator deployment succeeded.")
-          if [ "$PORTAL_CHANGED" = "true" ] && [ -n "$PORTAL_ADDRESS" ]; then
-            LINES+=(
-              ":rocket: Portal program changed and deployed at: \`$PORTAL_ADDRESS\`"
-              ":link: Portal explorer: https://explorer.solana.com/address/$PORTAL_ADDRESS?cluster=devnet"
-            )
-          elif [ "$PORTAL_CHANGED" = "true" ]; then
-            LINES+=(":warning: Portal program changed but deployment failed or was skipped.")
-          fi
-
-          if [ "$TOKEN_BRIDGE_CHANGED" = "true" ] && [ -n "$TOKEN_BRIDGE_ADDRESS" ]; then
-            LINES+=(
-              ":rocket: Token bridge program changed and deployed at: \`$TOKEN_BRIDGE_ADDRESS\`"
-              ":link: Token bridge explorer: https://explorer.solana.com/address/$TOKEN_BRIDGE_ADDRESS?cluster=devnet"
-            )
-          elif [ "$TOKEN_BRIDGE_CHANGED" = "true" ]; then
-            LINES+=(":warning: Token bridge program changed but deployment failed or was skipped.")
-          fi
-
-          if [ "$PORTAL_CHANGED" != "true" ] && [ "$TOKEN_BRIDGE_CHANGED" != "true" ]; then
-            LINES+=(":information_source: No Portal or token bridge program changes.")
-          fi
-          LINES+=(
+          LINES=(
+            ":white_check_mark: Northstar continuity-v2 native qualification succeeded."
+            ":link: Portal: https://explorer.solana.com/address/$PORTAL_ADDRESS?cluster=devnet"
+            ":link: Token bridge: https://explorer.solana.com/address/$TOKEN_BRIDGE_ADDRESS?cluster=devnet"
+            "Session context: \`$SESSION_CONTEXT\`"
             ":memo: Commit: \`$COMMIT_SHA\`"
             "$COMMIT_MSG"
           )
@@ -606,21 +457,11 @@ jobs:
             exit 1
           fi
 
-          if [ "$SOL_SMOKE_OUTCOME" != "skipped" ] && [ -f /tmp/northstar-sol-e2e-report.txt ]; then
-            SOL_REPORT=$(cat /tmp/northstar-sol-e2e-report.txt)
-          else
-            SOL_REPORT=$(printf '%s\n%s' \
-              ':test_tube: Devnet SOL smoke status: *skipped*' \
-              ':information_source: The SOL smoke step did not run because an earlier deployment step failed.')
-          fi
-          if [ "$SPL_SMOKE_OUTCOME" != "skipped" ] && [ -f /tmp/northstar-spl-e2e-report.txt ]; then
-            SPL_REPORT=$(cat /tmp/northstar-spl-e2e-report.txt)
-          else
-            SPL_REPORT=$(printf '%s\n%s' \
-              ':test_tube: Devnet SPL smoke status: *skipped*' \
-              ':information_source: The SPL smoke step did not run because an earlier deployment step failed.')
-          fi
-          E2E_REPORT=$(printf '%s\n\n%s' "$SOL_REPORT" "$SPL_REPORT")
+          test "$NATIVE_SMOKE_OUTCOME" = success
+          E2E_REPORT=$(printf '%s\n' \
+            'SessionV2 bootstrap, SOL/SPL credit, validator restarts and finalized L1 payouts passed.' \
+            'The managed VRF oracle remains stopped. Run its manual workflow against this context.' \
+            'This does not qualify an oracle callback, SP1 or proof acceptance.')
           THREAD_PAYLOAD=$(jq -n \
             --arg channel "$SLACK_CHANNEL_ID" \
             --arg thread_ts "$MESSAGE_TS" \

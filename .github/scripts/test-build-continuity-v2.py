@@ -126,15 +126,21 @@ class BuildTests(unittest.TestCase):
         self.assertFalse(self.stage.exists())
         self.assertEqual(len(self.calls.read_text().splitlines()), 1)
 
-    def test_workflow_holds_before_legacy_activation(self):
+    def test_workflow_uses_only_the_isolated_versioned_activation_controller(self):
         deployment = WORKFLOW.read_text().split("  deploy:\n", 1)[1]
-        self.assertIn("bash .github/scripts/build-continuity-v2.sh", deployment)
-        hold = deployment.index("- name: Hold before native activation")
-        for name in ("Stop managed VRF", "Generate new portal", "Deploy portal", "Generate new token bridge", "Restart validator"):
-            self.assertLess(hold, deployment.index("- name: " + name))
-        boundary = deployment[hold:deployment.index("- name: Stop managed VRF")]
-        self.assertIn("exit 1", boundary)
-        self.assertIn("no service or chain state was changed", boundary)
+        stage = deployment.index("bash .github/scripts/build-continuity-v2.sh")
+        sdk = deployment.index("bash .github/scripts/prepare-continuity-sdk.sh")
+        activation = deployment.index("python3 -B .github/scripts/continuity_devnet.py run")
+        self.assertLess(stage, activation)
+        self.assertLess(sdk, activation)
+        self.assertIn('--stage "$NATIVE_STAGE" --revision "$GITHUB_SHA"', deployment)
+        self.assertIn("steps.continuity_activate.outputs.report_path", deployment)
+        self.assertEqual(deployment.count("continuity_devnet.py run"), 1)
+        for legacy in ("Hold before native activation", 'rm -f "$KEYPAIR"', "--force --no-passphrase",
+                       "sudo sed -i", "sudo systemctl restart", "portal open-session", "devnet-e2e-smoke.sh", "devnet-spl-e2e-smoke.sh"):
+            self.assertNotIn(legacy, deployment)
+        for command in ("test-continuity-devnet-model.py", "continuity-control-journal.test.mjs", "devnet-continuity-smoke.test.mjs"):
+            self.assertIn(command, WORKFLOW.read_text())
 
 
 if __name__ == "__main__":
