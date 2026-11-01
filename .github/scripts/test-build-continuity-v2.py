@@ -10,7 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / ".github/scripts/build-continuity-v2.sh"
-PATCH = ROOT / ".github/patches/continuity-v2-devnet.patch"
+WORKFLOW = ROOT / ".github/workflows/ci.yml"
 FAKE_CARGO = r'''#!/usr/bin/env python3
 import json
 import os
@@ -126,16 +126,15 @@ class BuildTests(unittest.TestCase):
         self.assertFalse(self.stage.exists())
         self.assertEqual(len(self.calls.read_text().splitlines()), 1)
 
-    def test_publication_patch_applies_and_holds_before_legacy_activation(self):
-        checked = subprocess.run(["git", "apply", "--check", str(PATCH)], cwd=ROOT,
-                                 capture_output=True, text=True, timeout=15)
-        self.assertEqual(checked.returncode, 0, checked.stderr)
-        patch = PATCH.read_text()
-        self.assertIn("build-continuity-v2.sh", patch)
-        self.assertLess(patch.index("+      - name: Hold before native activation"),
-                        patch.index("       - name: Stop managed VRF before deployment"))
-        self.assertIn("exit 1", patch)
-        self.assertIn("no service or chain state was changed", patch)
+    def test_workflow_holds_before_legacy_activation(self):
+        deployment = WORKFLOW.read_text().split("  deploy:\n", 1)[1]
+        self.assertIn("bash .github/scripts/build-continuity-v2.sh", deployment)
+        hold = deployment.index("- name: Hold before native activation")
+        for name in ("Stop managed VRF", "Generate new portal", "Deploy portal", "Generate new token bridge", "Restart validator"):
+            self.assertLess(hold, deployment.index("- name: " + name))
+        boundary = deployment[hold:deployment.index("- name: Stop managed VRF")]
+        self.assertIn("exit 1", boundary)
+        self.assertIn("no service or chain state was changed", boundary)
 
 
 if __name__ == "__main__":

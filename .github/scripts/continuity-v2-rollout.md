@@ -1,8 +1,8 @@
 # Continuity-v2 devnet rollout preparation
 
 This is a **staging-only draft**, not a native deployment or checkpoint-recovery
-remediation. Merging these files does not change the active workflow, enable v2 by
-default, change a Portal cursor or replace retained runtime state.
+remediation. The release workflow stages artifacts, then stops at an explicit hold.
+It does not activate v2, change a Portal cursor or replace retained runtime state.
 
 The runtime foundation is merged in [PR #226](https://github.com/mirrorworld-universe/northstar/pull/226).
 The oracle worker/controller/consumer bindings are merged in
@@ -42,26 +42,14 @@ The helper:
 runtime directory. Failed builds retain partial diagnostics/artifacts without a
 completion manifest. Use a new staging directory after inspecting the failure.
 
-## Workflow publication
+## Guarded release workflow
 
-The agent's existing GitHub token can publish normal branches and PRs, but lacks
-workflow-write scope. The proposed edit is retained as
-[`continuity-v2-devnet.patch`](continuity-v2-devnet.patch), not applied to
-`.github/workflows/ci.yml`. Publishing this patch needs an authorized GitHub
-session; it does not require changing the agent's credentials.
+**CD intentionally holds after artifact staging and before the existing VRF stop,
+deployment-key generation, chain deployment or validator restart steps.** A release
+job fails at that explicit hold while leaving active state untouched. This is not
+a working deployment workflow. Do not remove the hold merely to make CI green.
 
-```sh
-git apply --check .github/patches/continuity-v2-devnet.patch
-git apply .github/patches/continuity-v2-devnet.patch
-```
-
-**The patch intentionally holds CD after artifact staging and before the existing
-VRF stop, key generation, deployment or validator restart steps.** A release job
-with this patch fails at that explicit hold while leaving active state untouched.
-This is not a working deployment workflow. Do not remove the hold merely to make
-CI green.
-
-Validate the staging contract and unapplied patch with:
+Validate the staging contract and hold ordering with:
 
 ```sh
 bash -n .github/scripts/build-continuity-v2.sh
@@ -69,9 +57,8 @@ python3 -B .github/scripts/test-build-continuity-v2.py
 ```
 
 The tests use fake compiler outputs. They validate arguments, artifact hashing,
-retained-file protection and failure behavior, not a fresh native compilation.
-After publishing the workflow edit, the unapplied-patch test must be updated or
-removed because its base workflow has deliberately changed.
+retained-file protection, failure behavior and the activation boundary, not a fresh
+native compilation.
 
 ## Required before activation
 

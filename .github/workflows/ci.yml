@@ -106,6 +106,9 @@ jobs:
         run: python3 -B .github/scripts/test-stop-vrf-service.py
       - name: Test pinned SBF build arguments
         run: bash .github/scripts/test-sbf-toolchain.sh
+      # Sonic: Staging must not enter the retained runtime's activation path.
+      - name: Test continuity-v2 staging boundary
+        run: python3 -B .github/scripts/test-build-continuity-v2.py
       - name: Test bounded GPU runner without GPU
         run: |
           python3 -B northstar/scripts/test_gpu_prover.py
@@ -313,34 +316,22 @@ jobs:
           echo "$SOLANA_BIN" >> "$GITHUB_PATH"
           solana --version
 
-      - name: Build SBF programs
+      # Sonic: Build v2 artifacts without replacing binaries used by the retained v1 runtime.
+      - name: Stage continuity-v2 artifacts without activation
+        env:
+          NORTHSTAR_CONTINUITY_BUILD_TARGET_DIR: /solana/northstar/continuity-v2-build-cache
         run: |
           set -euo pipefail
-          DEPLOY_DIR=/solana/northstar/deploy
-          mkdir -p "$DEPLOY_DIR"
-          rm -f "$DEPLOY_DIR/northstar_portal.so" "$DEPLOY_DIR/northstar_token_bridge.so"
-          ./cargo-build-sbf \
-            --manifest-path northstar/programs/portal/Cargo.toml \
-            --sbf-out-dir "$DEPLOY_DIR" \
-            -- --locked
-          ./cargo-build-sbf \
-            --manifest-path northstar/programs/token-bridge/Cargo.toml \
-            --sbf-out-dir "$DEPLOY_DIR" \
-            -- --locked
-          test -s "$DEPLOY_DIR/northstar_portal.so"
-          test -s "$DEPLOY_DIR/northstar_token_bridge.so"
+          ROOT=/solana/northstar/continuity-v2-staging
+          mkdir -p "$ROOT"
+          STAGE="$ROOT/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA}"
+          bash .github/scripts/build-continuity-v2.sh "$STAGE"
 
-      - name: Build validator binary
-        run: cargo build --locked --release --target-dir /solana/northstar/ --bin agave-validator
-
-      - name: Build Northstar Solana CLI
-        run: cargo build --locked --release --target-dir /solana/northstar/ --package solana-cli --bin solana --no-default-features
-
-      - name: Confirm binary exists
+      # Sonic: Existing state must stay untouched until the isolated activation path is qualified.
+      - name: Hold before native activation
         run: |
-          set -euo pipefail
-          BIN="/solana/northstar/release/agave-validator"
-          test -f "$BIN" && test -x "$BIN" && "$BIN" --version
+          echo "::error::Fresh namespace/session activation and v2 SOL/SPL qualification remain incomplete; no service or chain state was changed"
+          exit 1
 
       # Sonic: Oracle startup is manual; preserve unresolved work before replacing its ER.
       - name: Stop managed VRF before deployment
