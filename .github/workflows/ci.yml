@@ -3,6 +3,11 @@ run-name: Verify checkpoint backpressure invariants in CI VM
 
 on:
   workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type run-independent-case to preserve prior intent and qualify a distinct test case
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -25,3 +30,34 @@ jobs:
         run: |
           bun test ./.github/scripts/continuity-control-journal.test.mjs ./.github/scripts/native-smoke-absence.test.mjs ./.github/scripts/devnet-continuity-smoke.test.mjs
           python3 -B .github/scripts/test-recheck-native-qualification.py
+
+  qualification:
+    needs: guards
+    if: github.repository == 'mirrorworld-universe/northstar' && github.ref == 'refs/heads/native-qualification-recheck' && inputs.confirmation == 'run-independent-case'
+    runs-on: devnet
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.21.0"
+      - name: Use existing Solana key utility
+        run: |
+          SOLANA_BIN="$HOME/.local/share/solana/install/active_release/bin"
+          test -x "$SOLANA_BIN/solana-keygen"
+          echo "$SOLANA_BIN" >> "$GITHUB_PATH"
+      - name: Qualify independent SOL/SPL case without changing native identity
+        id: qualification
+        run: |
+          SDK="$RUNNER_TEMP/native-independent-sdk-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          bash .github/scripts/prepare-continuity-sdk.sh "$SDK"
+          python3 -B .github/scripts/recheck-native-qualification.py --sdk-checkout "$SDK" --confirmation run-independent-case
+      - name: Retain public independent qualification evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-independent-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.qualification.outputs.report_path }}
+          if-no-files-found: error
+          retention-days: 30
