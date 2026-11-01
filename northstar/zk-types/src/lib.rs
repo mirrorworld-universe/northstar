@@ -3,6 +3,7 @@
 extern crate alloc;
 
 pub mod continuity;
+pub mod token_bridge;
 pub mod trace;
 
 use borsh::{

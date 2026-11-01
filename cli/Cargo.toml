@@ -25,6 +25,8 @@ path = "src/main.rs"
 [features]
 default = ["remote-wallet-hidraw"]
 agave-unstable-api = []
+# Sonic: Versioned Portal client bindings.
+checkpoint-continuity-v2 = ["northstar-portal/checkpoint-continuity-v2"]
 dev-context-only-utils = [
     "solana-faucet/dev-context-only-utils",
     "solana-client/dev-context-only-utils",
@@ -89,6 +91,8 @@ solana-rpc-client-api = { workspace = true }
 solana-rpc-client-nonce-utils = { workspace = true, features = ["clap"] }
 solana-sbpf = { workspace = true, features = ["jit"] }
 solana-sdk-ids = { workspace = true }
+# Sonic: Continuity session-context commitments.
+solana-sha256-hasher = { workspace = true }
 solana-signature = { workspace = true }
 solana-signer = { workspace = true }
 solana-signer-store = { workspace = true }
@@ -123,7 +127,6 @@ solana-nonce = { workspace = true, features = ["wincode"] }
 solana-nonce-account = { workspace = true, features = ["wincode"] }
 solana-presigner = { workspace = true }
 solana-rpc = { path = "../rpc", features = ["agave-unstable-api"] }
-solana-sha256-hasher = { workspace = true }
 solana-test-validator = { path = "../test-validator", features = ["agave-unstable-api", "dev-context-only-utils"] }
 tempfile = { workspace = true }
 test-case = { workspace = true }

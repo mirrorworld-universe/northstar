@@ -71,6 +71,24 @@ impl DepositReceiptV2 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct SessionBridgeV2 {
+    pub discriminator: [u8; 8],
+    pub base: crate::SessionBridge,
+    pub session_context: [u8; 32],
+}
+
+impl SessionBridgeV2 {
+    pub const DISCRIMINATOR: [u8; 8] = *b"NSBRDG02";
+    pub const SEED_PREFIX: &[u8] = b"session_bridge_v2";
+
+    pub fn is_valid(&self) -> bool {
+        self.discriminator == Self::DISCRIMINATOR
+            && self.base.is_valid()
+            && self.session_context != [0; 32]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct CheckpointBindingV2 {
     pub discriminator: [u8; 8],
     pub checkpoint: [u8; 32],

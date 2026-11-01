@@ -1462,11 +1462,11 @@ impl Validator {
                     bank_forks.clone(),
                     bank_notifications_for_northstar_recv
                         .expect("northstar receiver must exist when portal is set"),
-                    northstar::ManagerConfig {
+                    northstar::ManagerConfig::for_validator(
                         portal_program_id,
-                        manager_account: identity_keypair.clone(),
-                        checkpoint_plan_dir: Some(ledger_path.join("northstar-checkpoint-plans")),
-                    },
+                        identity_keypair.clone(),
+                        ledger_path,
+                    ),
                     cluster_info.clone(),
                     crate::northstar_service::NorthStarServiceConfig {
                         listen_addr: format!("0.0.0.0:{}", config.ephemeral_rpc_port)

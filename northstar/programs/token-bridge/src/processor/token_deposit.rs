@@ -99,11 +99,13 @@ pub(super) fn initialize_origin(
 }
 
 pub(super) fn apply(program: &Pubkey, accounts: &mut [AccountInfo], balance: u64) -> ProgramResult {
-    let [payer, account, bridge, portal, session, delegation, receipt, origin, cursor, system, ..] =
+    let [payer, account, bridge, portal, session, delegation, receipt, origin, cursor, system, rest @ ..] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
+    #[cfg(not(feature = "checkpoint-continuity-v2"))]
+    let _ = rest;
     require_signer(payer)?;
     require_system_program(system)?;
     let bridge_state = load_session_bridge(program, bridge, portal)?;
@@ -113,8 +115,24 @@ pub(super) fn apply(program: &Pubkey, accounts: &mut [AccountInfo], balance: u64
     {
         return Err(ProgramError::InvalidAccountData);
     }
+    #[cfg(not(feature = "checkpoint-continuity-v2"))]
     let session_state = northstar_portal::Session::try_from_slice(&session.try_borrow()?)
         .map_err(|_| ProgramError::InvalidAccountData)?;
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    let versioned_registration = crate::portal_abi::registration_v2(
+        program,
+        portal.address(),
+        bridge.address(),
+        &bridge.try_borrow()?,
+    )?;
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    let session_state = crate::portal_abi::session_v2(
+        &versioned_registration,
+        portal.address(),
+        session.address(),
+        &session.try_borrow()?,
+    )?
+    .base;
     if !session_state.is_valid() || session_state.validator != *payer.address() {
         return Err(ProgramError::MissingRequiredSignature);
     }
@@ -180,6 +198,46 @@ pub(super) fn apply(program: &Pubkey, accounts: &mut [AccountInfo], balance: u64
     };
     if balance > available || balance <= progress.balance {
         return Err(ProgramError::InvalidArgument);
+    }
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    {
+        let input_account = rest.first().ok_or(ProgramError::NotEnoughAccountKeys)?;
+        if !input_account.owned_by(portal.address()) || input_account.executable() {
+            return Err(ProgramError::InvalidAccountOwner);
+        }
+        let input = northstar_zk_types::continuity::IngressRecordV2::try_from_slice(
+            &input_account.try_borrow()?,
+        )
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+        let context = versioned_registration.session_context;
+        let (expected, bump) = northstar_portal::find_ingress_record_v2_pda(
+            portal.address(),
+            &context,
+            input.sequence,
+        );
+        if *input_account.address() != expected || input.bump != bump {
+            return Err(ProgramError::InvalidSeeds);
+        }
+        input
+            .validate_next(
+                context,
+                input
+                    .sequence
+                    .checked_sub(1)
+                    .ok_or(ProgramError::InvalidAccountData)?,
+                input.previous_root,
+                |parts| solana_sha256_hasher::hashv(parts).to_bytes(),
+            )
+            .map_err(|_| ProgramError::InvalidAccountData)?;
+        if !matches!(input.payload,northstar_zk_types::continuity::IngressPayloadV2::TokenDeposit {
+            bridge:source,session_bridge,account:target,receipt:source_receipt,mint,token_program,
+            origin_deposited,amount,cumulative_deposited}
+            if source==program.to_bytes() && session_bridge==bridge.address().to_bytes() && target==account.address().to_bytes()
+                && source_receipt==receipt.address().to_bytes() && mint==state.mint && token_program==bridge_state.token_program.to_bytes()
+                && origin_deposited==baseline.balance && cumulative_deposited==balance && balance.checked_sub(progress.balance)==Some(amount))
+        {
+            return Err(ProgramError::InvalidAccountData);
+        }
     }
     state.amount = state
         .amount
