@@ -231,5 +231,12 @@ jobs:
               print(json.dumps({'er_history_witness':{'program':vrf_ids['consumer'],'count':len(history),'anchor':anchor,
                                 'anchor_found':any(row['signature'] == anchor for row in history),'candidate_found':any(row['signature'] == attempt['signature'] for row in history),
                                 'newest_slot':history[0]['slot'] if history else None,'oldest_slot':history[-1]['slot'] if history else None}}), flush=True)
+              birth = subprocess.run(['stat','--format=%W',str(pending)],check=True,capture_output=True,text=True,timeout=5)
+              anchor_tx = er.call('getTransaction',[anchor,{'encoding':'base64','commitment':'confirmed','maxSupportedTransactionVersion':0}])
+              print(json.dumps({'er_creation_fence':{'intent_birth_unix':int(birth.stdout.strip()),'anchor_block_time':anchor_tx.get('blockTime') if anchor_tx else None,
+                                'anchor_slot':anchor_tx.get('slot') if anchor_tx else None,'first_available_er_block':er.call('getFirstAvailableBlock')}}), flush=True)
+              funding = [{'id':name,'signature':item['receipt']['signature'],'slot':item['receipt']['slot']} for name,item in control_index['records'].items()
+                         if name.endswith('/deposit-admin.intent.json') and item.get('session') is None and item.get('receipt') is not None]
+              print(json.dumps({'er_funding_anchors':funding}), flush=True)
           os.close(lock)
           PY
