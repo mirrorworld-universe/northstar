@@ -1582,6 +1582,13 @@ impl EphemeralRuntime {
         self._tx_client.checkpoint_artifact_v1()
     }
 
+    pub fn set_history_observer(
+        &self,
+        observer: Arc<dyn solana_rpc::er_history::ErHistoryObserver>,
+    ) {
+        self.er_history_store.set_observer(observer);
+    }
+
     #[cfg(feature = "proof-coordinator")]
     pub(crate) fn replay_history(&self) -> Arc<ErHistoryStore> {
         self.er_history_store.clone()
@@ -5604,6 +5611,92 @@ mod tests {
                 transaction_errors.is_empty(),
                 "round {round}: concurrent System Program execution failed: {transaction_errors:?}"
             );
+        }
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_history_observer_receives_executed_transaction_before_slot_freeze() {
+        struct Capture {
+            transactions: std::sync::mpsc::Sender<(
+                u64,
+                u32,
+                solana_signature::Signature,
+                TransactionStatusMeta,
+            )>,
+            slots: std::sync::mpsc::Sender<(u64, u64)>,
+        }
+        impl solana_rpc::er_history::ErHistoryObserver for Capture {
+            fn transaction_recorded(
+                &self,
+                bank: &Bank,
+                record: &VersionedTransactionWithStatusMeta,
+                index: u32,
+            ) {
+                self.transactions
+                    .send((
+                        bank.slot(),
+                        index,
+                        record.transaction.signatures[0],
+                        record.meta.clone(),
+                    ))
+                    .unwrap();
+            }
+            fn slot_finalized(&self, bank: &Bank, count: u64) {
+                self.slots.send((bank.slot(), count)).unwrap();
+            }
+        }
+        let (_, mut runtime) = create_runtime();
+        let (transactions, received) = std::sync::mpsc::channel();
+        let (slots, frozen) = std::sync::mpsc::channel();
+        runtime.set_history_observer(Arc::new(Capture {
+            transactions,
+            slots,
+        }));
+        runtime.activate();
+        let payer = Keypair::new();
+        runtime.credit_deposit(&payer.pubkey(), 100_000_000);
+        let (_, _, _, deposit_meta) = received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(deposit_meta
+            .log_messages
+            .unwrap()
+            .iter()
+            .any(|line| line.contains("NorthstarDeposit")));
+        let rpc = rpc_client(&runtime);
+        wait_for_rpc_ready(&rpc);
+        let transaction = Transaction::new_signed_with_payer(
+            &[transfer(&payer.pubkey(), &Pubkey::new_unique(), 1_000_000)],
+            Some(&payer.pubkey()),
+            &[&payer],
+            runtime.bank().last_blockhash(),
+        );
+        let signature = rpc
+            .send_transaction_with_config(
+                &transaction,
+                RpcSendTransactionConfig {
+                    skip_preflight: true,
+                    ..RpcSendTransactionConfig::default()
+                },
+            )
+            .unwrap();
+        let (slot, index, observed_signature, meta) =
+            received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(observed_signature, signature);
+        assert!(meta.status.is_ok());
+        assert!(meta
+            .log_messages
+            .unwrap()
+            .iter()
+            .any(|line| line.ends_with("success")));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let (frozen_slot, count) = frozen
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap();
+            if frozen_slot == slot {
+                assert_eq!(count, u64::from(index) + 1);
+                break;
+            }
         }
         runtime.shutdown();
     }

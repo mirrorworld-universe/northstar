@@ -12,7 +12,7 @@ use {
     },
     std::{
         collections::{BTreeMap, HashMap, VecDeque},
-        sync::RwLock,
+        sync::{Arc, RwLock},
     },
 };
 
@@ -79,7 +79,19 @@ struct ErHistoryInner {
     replay_capture_order: VecDeque<Signature>,
 }
 
+/// Observes committed ER history without manufacturing native Blockstore entries.
+pub trait ErHistoryObserver: Send + Sync {
+    fn transaction_recorded(
+        &self,
+        bank: &Bank,
+        transaction: &VersionedTransactionWithStatusMeta,
+        index: u32,
+    );
+    fn slot_finalized(&self, bank: &Bank, transaction_count: u64);
+}
+
 pub struct ErHistoryStore {
+    observer: RwLock<Option<Arc<dyn ErHistoryObserver>>>,
     inner: RwLock<ErHistoryInner>,
     max_retained_slots: usize,
     max_replay_captures: usize,
@@ -98,10 +110,16 @@ impl ErHistoryStore {
 
     pub fn new_with_replay_limit(max_retained_slots: usize, max_replay_captures: usize) -> Self {
         Self {
+            observer: RwLock::new(None),
             inner: RwLock::new(ErHistoryInner::default()),
             max_retained_slots,
             max_replay_captures,
         }
+    }
+
+    /// Attach before accepting transactions so observers see a complete slot.
+    pub fn set_observer(&self, observer: Arc<dyn ErHistoryObserver>) {
+        *self.observer.write().unwrap() = Some(observer);
     }
 
     fn populate_slot_from_bank(slot_history: &mut ErSlotHistory, bank: &Bank) {
@@ -126,6 +144,8 @@ impl ErHistoryStore {
             return Some(existing.index);
         }
 
+        let observer = self.observer.read().unwrap().clone();
+        let observed_transaction = observer.as_ref().map(|_| transaction.clone());
         let slot = bank.slot();
         let slot_history = inner.slots.entry(slot).or_default();
         Self::populate_slot_from_bank(slot_history, bank);
@@ -143,6 +163,10 @@ impl ErHistoryStore {
             },
         );
         self.prune_excess_slots(&mut inner);
+        drop(inner);
+        if let Some((observer, transaction)) = observer.zip(observed_transaction) {
+            observer.transaction_recorded(bank, &transaction, index);
+        }
 
         Some(index)
     }
@@ -217,7 +241,9 @@ impl ErHistoryStore {
             return;
         };
         Self::populate_slot_from_bank(slot_history, bank);
+        let notify = !slot_history.finalized;
         slot_history.finalized = true;
+        let transaction_count = slot_history.signatures.len() as u64;
 
         let block_time = slot_history.block_time;
         let signatures = slot_history.signatures.clone();
@@ -227,6 +253,10 @@ impl ErHistoryStore {
             }
         }
         self.prune_excess_slots(&mut inner);
+        drop(inner);
+        if notify && let Some(observer) = self.observer.read().unwrap().clone() {
+            observer.slot_finalized(bank, transaction_count);
+        }
     }
 
     pub fn get_transaction(
@@ -517,6 +547,60 @@ mod tests {
                 cost_units: None,
             },
         }
+    }
+
+    #[test]
+    fn test_er_history_observer_preserves_indices_metadata_and_freeze_boundary() {
+        #[derive(Default)]
+        struct Capture {
+            transactions: std::sync::Mutex<Vec<(u32, TransactionStatusMeta)>>,
+            finalized: std::sync::Mutex<Vec<(Slot, u64)>>,
+        }
+        impl ErHistoryObserver for Capture {
+            fn transaction_recorded(
+                &self,
+                _bank: &Bank,
+                transaction: &VersionedTransactionWithStatusMeta,
+                index: u32,
+            ) {
+                self.transactions
+                    .lock()
+                    .unwrap()
+                    .push((index, transaction.meta.clone()));
+            }
+            fn slot_finalized(&self, bank: &Bank, count: u64) {
+                self.finalized.lock().unwrap().push((bank.slot(), count));
+            }
+        }
+        let store = ErHistoryStore::default();
+        let capture = Arc::new(Capture::default());
+        store.set_observer(capture.clone());
+        let bank = create_test_bank();
+        let payer = Keypair::new();
+        let mut transaction = create_test_tx(&bank, &payer, &Pubkey::new_unique());
+        transaction.meta.log_messages = Some(vec!["Program data: AAAAAAAAAAA=".into()]);
+        transaction.meta.inner_instructions = Some(vec![]);
+        assert_eq!(
+            store.record_transaction(&bank, transaction.clone()),
+            Some(0)
+        );
+        assert_eq!(
+            store.record_transaction(&bank, transaction.clone()),
+            Some(0)
+        );
+        let mut failed = create_test_tx(&bank, &payer, &Pubkey::new_unique());
+        failed.meta.status = Err(solana_transaction::TransactionError::AccountNotFound);
+        assert_eq!(store.record_transaction(&bank, failed), Some(1));
+        assert!(capture.finalized.lock().unwrap().is_empty());
+        bank.freeze();
+        store.finalize_slot(&bank);
+        store.finalize_slot(&bank);
+        let recorded = capture.transactions.lock().unwrap();
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded[0], (0, transaction.meta));
+        assert_eq!(recorded[1].0, 1);
+        assert!(recorded[1].1.status.is_err());
+        assert_eq!(*capture.finalized.lock().unwrap(), vec![(bank.slot(), 2)]);
     }
 
     #[test]

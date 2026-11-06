@@ -15,10 +15,13 @@ or dispatches the oracle.
 
 `build-continuity-v2.sh` builds Portal and token bridge with
 `checkpoint-continuity-v2`, platform-tools v1.56 and SBPFv0 explicitly. It also
-freezes a feature-enabled validator and CLI in a fresh private staging directory.
-Its four-ELF manifest binds hashes and the caller-provided checkout revision;
-it is not an independent build attestation. Staging itself performs no activation.
-Build-generated program keypairs are never deployment signing identities.
+freezes a feature-enabled validator, CLI, and `northstar-geyser-events` shared
+library from the same checkout and pinned Rust toolchain in a fresh private
+staging directory. Its five-ELF manifest binds hashes and the caller-provided
+checkout revision; it is not an independent build attestation. Older four-artifact
+stages are rejected; rebuild into a new stage instead of editing retained manifests.
+Staging itself performs no activation. Build-generated program keypairs are never
+deployment signing identities.
 
 `prepare-continuity-sdk.sh` checks out public NorthStarSDK revision
 `24030ce9fc3b80aa21738db2bb9f5a5fbea030d8`, checks its dependency-lock hash,
@@ -38,11 +41,15 @@ because that resolver rejects the unchanged pinned dependency lock.
 4. Stops the old validator, fingerprints its retained state and records the new
    activation specification. It does not overwrite the old executable, base unit,
    program keys, checkpoint directory, unsettled state or L1 ledger.
-5. Installs an isolated binary and systemd drop-in, preserving the old arguments
-   except executable and Portal. Checkpoint and unsettled directories point to the
-   new namespace. Directory entries and key/configuration files are flushed before
-   activation. Startup must reach the finalized program deployment slots and catch
-   up to the current devnet head.
+5. Installs an isolated validator and event plugin, a read-only plugin config, and
+   the systemd drop-in. It replaces executable and Portal arguments and adds
+   `--er-geyser-plugin-config`, preserving other service arguments. Existing ER
+   plugin flags require explicit review before uploads or service changes.
+   Checkpoint and unsettled directories point to the new namespace. Plugin and
+   configuration hashes are checked on retries; changed files are not overwritten.
+   Directory entries and key/configuration files are flushed before activation.
+   Startup must reach the finalized program deployment slots, catch up to the
+   current devnet head, and pass the ER event listener health check on every restart.
 6. Opens and pins canonical nonce-1 SessionV2 with the full L1 genesis, explicit
    profile and actual validator identity. ER genesis is pinned separately; it must
    not be assumed equal to L1 genesis.
@@ -76,6 +83,12 @@ There is no legacy migration, cursor rewriting or automatic v2 rollover.
   by the oracle wallet's balance.
 - Control RPC endpoints are colocated loopback roots. The upstream default is
   `https://api.devnet.solana.com`; the exact complete genesis must match.
+- The ER event plugin binds **`0.0.0.0:9101`** with confirmed delivery. Allow TCP
+  9101 in the host firewall/security group for external consumers; CD does not
+  modify those rules. The stream has **no authentication or TLS**: anyone with
+  access can subscribe and consume validator resources, subject to plugin limits.
+  The native JSON-RPC binding is unchanged. The local `/health` probe does not
+  prove external reachability.
 
 The default `--max-estimated-cost-lamports` is 10,000,000,000. The conservative
 estimate includes program rent, the largest upload buffer and a 500,000,000-lamport

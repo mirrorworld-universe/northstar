@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import continuity_devnet as rollout
-from continuity_rollout_state import ARTIFACTS, atomic_json, private_json
+from continuity_rollout_state import ARTIFACTS, DEVNET, atomic_json, private_json
 
 
 class MutationBoundary(Exception):
@@ -105,6 +105,41 @@ class DeploymentTests(unittest.TestCase):
         with patch.object(rollout, "command", return_value=SimpleNamespace(returncode=0, stdout=b"", stderr=b"")) as run:
             value.execute(["unprivileged-operation"])
         self.assertEqual(run.call_args.args[2], (42,))
+
+    def test_event_listener_probe_requires_the_health_response(self):
+        value = self.deployment
+        response = Mock(status=200)
+        response.read.return_value = b"ok"
+        opener = Mock()
+        opener.open.return_value.__enter__ = Mock(return_value=response)
+        opener.open.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(rollout.urllib.request, "build_opener", return_value=opener):
+            self.assertTrue(value.event_listener_ready())
+            opener.open.assert_called_with("http://127.0.0.1:9101/health", timeout=5)
+            response.read.assert_called_with(16)
+            response.read.return_value = b"not ready"
+            self.assertFalse(value.event_listener_ready())
+            response.status = 503
+            response.read.return_value = b"ok"
+            self.assertFalse(value.event_listener_ready())
+
+    def test_rpc_health_alone_does_not_satisfy_event_listener_readiness(self):
+        value = self.deployment
+        atomic_json(value.control / "programs.json", {"version": 2, "roles": {
+            role: {"complete": {"deployment_slot": 100}} for role in ("portal", "token_bridge")}})
+        responses = {"getSlot": 100, "getHealth": "ok", "getGenesisHash": DEVNET,
+                     "getIdentity": {"identity": value.plan["validator"]}}
+        value.l1 = SimpleNamespace(call=lambda method, *_: responses[method])
+        value.upstream = SimpleNamespace(call=lambda *_: 100)
+        value.er = Mock()
+        for failure in (False, OSError("listener unavailable")):
+            with self.subTest(failure=failure):
+                value.event_listener_ready = Mock(side_effect=failure if isinstance(failure, Exception) else None, return_value=False)
+                value.execute = Mock(side_effect=["", "active"])
+                with patch.object(rollout.time, "monotonic", side_effect=[0, 0, 1201]), patch.object(rollout.time, "sleep"):
+                    with self.assertRaisesRegex(RuntimeError, "startup/catchup timed out"):
+                        value.start()
+                value.event_listener_ready.assert_called_once()
 
     def test_changed_retained_binary_cannot_be_started(self):
         value = self.deployment
