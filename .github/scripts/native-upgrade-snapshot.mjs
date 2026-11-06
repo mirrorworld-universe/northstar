@@ -32,8 +32,9 @@ export async function snapshotIdentity(config, readers, mode) {
   if (mode === 'online') {
     requireValue(await readers.validator() === config.validator, 'Running validator identity differs');
     const status = await readers.syncStatus();
+    // The pinned SDK normalizes RPC slots to bigint, even when the wire uses numbers.
     requireValue(status.checkpointError == null && status.isSyncing === false &&
-      [status.latestSyncedSlot, status.latestL1Slot].every(value => Number.isSafeInteger(value) && value >= 0) &&
+      [status.latestSyncedSlot, status.latestL1Slot].every(value => typeof value === 'bigint' && value >= 0n && value <= 0xffff_ffff_ffff_ffffn) &&
       status.latestSyncedSlot >= status.latestL1Slot, 'Native checkpoint quarantine or synchronization blocks qualification');
     const execution = await readers.executionSession();
     requireValue(key(execution.address) === session && Buffer.from(execution.context).toString('hex') === context,
