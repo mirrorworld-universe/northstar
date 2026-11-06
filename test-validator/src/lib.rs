@@ -178,6 +178,8 @@ pub struct TestValidatorGenesis {
     pub blockstore_cleanup_strategy: BlockstoreCleanupStrategy,
     pub max_genesis_archive_unpacked_size: Option<u64>,
     pub geyser_plugin_config_files: Option<Vec<PathBuf>>,
+    // Sonic: Independent ER plugin configuration.
+    pub er_geyser_plugin_config_files: Vec<PathBuf>,
     pub enable_scheduler_bindings: bool,
     deactivate_feature_set: HashSet<Pubkey>,
     compute_unit_limit: Option<u64>,
@@ -221,6 +223,8 @@ impl Default for TestValidatorGenesis {
             blockstore_cleanup_strategy: BlockstoreCleanupStrategy::None,
             max_genesis_archive_unpacked_size: Option::<u64>::default(),
             geyser_plugin_config_files: Option::<Vec<PathBuf>>::default(),
+            // Sonic: ER plugin opt-in.
+            er_geyser_plugin_config_files: Vec::new(),
             enable_scheduler_bindings: false,
             deactivate_feature_set: HashSet::default(),
             compute_unit_limit: Option::<u64>::default(),
@@ -1284,6 +1288,8 @@ impl TestValidator {
 
         let mut validator_config = ValidatorConfig {
             on_start_geyser_plugin_config_files: config.geyser_plugin_config_files.clone(),
+            // Sonic: Forward ER plugins independently from the L1 plugin manager.
+            er_geyser_plugin_config_files: config.er_geyser_plugin_config_files.clone(),
             rpc_addrs: Some((
                 SocketAddr::new(
                     IpAddr::V4(Ipv4Addr::UNSPECIFIED),

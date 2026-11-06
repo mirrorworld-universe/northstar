@@ -425,6 +425,8 @@ pub struct ValidatorConfig {
     pub ephemeral_tpu_port: u16,
     // Sonic: Maximum number of non-empty ER slots retained in in-memory transaction history
     pub er_history_max_retained_slots: usize,
+    // Sonic: Plugins loaded against ER history rather than the L1 pipeline.
+    pub er_geyser_plugin_config_files: Vec<PathBuf>,
 }
 
 impl ValidatorConfig {
@@ -519,6 +521,7 @@ impl ValidatorConfig {
             ephemeral_tpu_port: 8912,
             // Sonic: Default ER history retention
             er_history_max_retained_slots: solana_rpc::er_history::DEFAULT_MAX_RETAINED_SLOTS,
+            er_geyser_plugin_config_files: Vec::new(),
         }
     }
 
@@ -1458,7 +1461,8 @@ impl Validator {
 
             // Sonic: Create NorthStar service if portal is provided
             let northstar_service_opt = config.portal.map(|portal_program_id| {
-                crate::northstar_service::NorthStarService::new(
+                // Sonic: ER has an independent Geyser service and slot namespace.
+                crate::northstar_service::NorthStarService::new_with_geyser(
                     bank_forks.clone(),
                     bank_notifications_for_northstar_recv
                         .expect("northstar receiver must exist when portal is set"),
@@ -1484,6 +1488,7 @@ impl Validator {
                         settlement_forward_sender: Some(settlement_forward_sender.clone()),
                     },
                     exit.clone(),
+                    &config.er_geyser_plugin_config_files,
                 )
             });
 

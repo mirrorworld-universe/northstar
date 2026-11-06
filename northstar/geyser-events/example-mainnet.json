@@ -1,0 +1,8 @@
+{
+  "libpath": "../../target/release/libnorthstar_geyser_events.so",
+  "name": "mainnet-events",
+  "listen_addr": "127.0.0.1:9100",
+  "commitment": "confirmed",
+  "replay_seconds": 600,
+  "unsubscribe_grace_seconds": 30
+}

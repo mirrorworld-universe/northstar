@@ -664,6 +664,14 @@ fn main() {
         );
     }
 
+    // Sonic: ER uses a separate Geyser plugin service.
+    genesis.er_geyser_plugin_config_files = matches
+        .values_of("er_geyser_plugin_config")
+        .into_iter()
+        .flatten()
+        .map(PathBuf::from)
+        .collect();
+
     if let Some(compute_unit_limit) = compute_unit_limit {
         genesis.compute_unit_limit(compute_unit_limit);
     }

@@ -486,6 +486,16 @@ impl Manager {
         self.er_history_max_retained_slots = max_retained_slots;
     }
 
+    pub fn set_er_history_observer(
+        &self,
+        observer: Arc<dyn solana_rpc::er_history::ErHistoryObserver>,
+    ) {
+        self.runtime
+            .as_ref()
+            .expect("ER runtime must be initialized before attaching history observer")
+            .set_history_observer(observer);
+    }
+
     /// Sonic: Check if an ephemeral session is currently active (accepting transactions)
     pub fn has_active_runtime(&self) -> bool {
         self.runtime.as_ref().is_some_and(|r| r.is_active())

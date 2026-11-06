@@ -47,6 +47,15 @@ class FakeHost(rollout.Deployment):
         self.world = world
         self.upstream, self.l1, self.er = (FakeRpc(world, layer) for layer in ("upstream", "l1", "er"))
 
+    def event_listener_ready(self):
+        self.world.event_probes += 1
+        arguments = self.world.current["arguments"]
+        config_path = Path(arguments[arguments.index("--er-geyser-plugin-config") + 1])
+        configuration = json.loads(config_path.read_text())
+        assert configuration["listen_addr"] == "0.0.0.0:9101"
+        assert file_hash(configuration["libpath"]) == self.manifest["sha256"]["geyser_events"]
+        return True
+
     def execute(self, arguments, timeout=120, allowed=False):
         arguments = list(map(str, arguments))
         if arguments[0] == "git":
@@ -167,7 +176,7 @@ class ModelTests(unittest.TestCase):
                                funder_keypair=funder, l1_rpc="http://localhost:8899", er_rpc="http://localhost:8910",
                                devnet_rpc="https://api.devnet.solana.com", max_estimated_cost_lamports=10_000_000_000)
         self.world = SimpleNamespace(args=args, original=original, current=copy.deepcopy(original), active=True, starts=0,
-                                     worker_stops=0, uploads=[], accounts={}, upload_failure=None, key_generations=0, retention_error=False,
+                                     worker_stops=0, event_probes=0, uploads=[], accounts={}, upload_failure=None, key_generations=0, retention_error=False,
                                      validator=rollout.public_text(bytes([2]) * 32))
         lock = sdk / "package-lock.json"
         self.addCleanup(patch.stopall)
@@ -187,6 +196,42 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(self.world.key_generations, 4)
         self.assertEqual(retained_fingerprint(self.world.original["retained_paths"]), before)
 
+    def test_activation_starts_with_the_public_er_event_plugin(self):
+        FakeHost(self.world).run()
+        arguments = self.world.current["arguments"]
+        self.assertIn("--er-geyser-plugin-config", arguments)
+        config_path = Path(arguments[arguments.index("--er-geyser-plugin-config") + 1])
+        config = json.loads(config_path.read_text())
+        self.assertEqual(config["listen_addr"], "0.0.0.0:9101")
+        self.assertEqual(config["commitment"], "confirmed")
+        plugin = Path(config["libpath"])
+        self.assertTrue(plugin.is_absolute())
+        self.assertEqual(plugin, self.world.args.state_root / self.world.args.revision / "runtime/lib/libnorthstar_geyser_events.so")
+        self.assertEqual(file_hash(plugin), file_hash(self.world.args.stage / "lib/libnorthstar_geyser_events.so"))
+        self.assertEqual(config_path.stat().st_mode & 0o777, 0o400)
+        self.assertEqual(plugin.stat().st_mode & 0o777, 0o500)
+        self.assertEqual(self.world.event_probes, self.world.starts)
+
+    def test_changed_installed_event_artifacts_are_not_replaced_or_started(self):
+        for relative in ("lib/libnorthstar_geyser_events.so", "geyser-events.json"):
+            with self.subTest(relative=relative):
+                if self.world.starts == 0:
+                    FakeHost(self.world).run()
+                target = self.world.args.state_root / self.world.args.revision / "runtime" / relative
+                original = target.read_bytes()
+                mode = target.stat().st_mode & 0o777
+                target.chmod(0o600)
+                target.write_bytes(b"changed")
+                target.chmod(mode)
+                starts = self.world.starts
+                with self.assertRaisesRegex(ValueError, "event plugin.*differ"):
+                    FakeHost(self.world).run()
+                self.assertEqual(self.world.starts, starts)
+                self.assertEqual(target.read_bytes(), b"changed")
+                target.chmod(0o600)
+                target.write_bytes(original)
+                target.chmod(mode)
+
     def test_retention_failure_restores_unchanged_original_service_before_activation(self):
         self.world.retention_error = True
         with self.assertRaisesRegex(ValueError, "retention snapshot"):
@@ -202,6 +247,16 @@ class ModelTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "running.*changed"):
             FakeHost(self.world).run()
         self.assertEqual(self.world.starts, starts)
+        self.assertTrue(self.world.active)
+
+    def test_existing_er_plugin_requires_review_before_uploads_or_service_changes(self):
+        self.world.original["arguments"].extend(["--er-geyser-plugin-config", "/retained/er-events.json"])
+        self.world.current = copy.deepcopy(self.world.original)
+        with self.assertRaisesRegex(ValueError, "explicit deployment review"):
+            FakeHost(self.world).run()
+        self.assertEqual(self.world.uploads, [])
+        self.assertEqual(self.world.starts, 0)
+        self.assertEqual(self.world.key_generations, 0)
         self.assertTrue(self.world.active)
 
     def test_established_plan_loss_does_not_generate_keys_or_restart(self):
