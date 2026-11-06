@@ -83,5 +83,49 @@
         { "name": "TestOnly" }
       ]
     }
+  },
+  {
+    "name": "OpenSession",
+    "type": {
+      "kind": "struct",
+      "fields": [
+        { "name": "grid_id", "type": "u64" },
+        { "name": "ttl_slots", "type": "u64" },
+        { "name": "fee_cap", "type": "u64" },
+        { "name": "validator", "type": "pubkey" },
+        { "name": "settlement_interval_slots", "type": "u64" }
+      ]
+    }
+  },
+  {
+    "name": "ProposeCheckpoint",
+    "type": {
+      "kind": "struct",
+      "fields": [
+        { "name": "er_slot", "type": "u64" },
+        { "name": "step_count", "type": "u64" },
+        { "name": "previous_state_root", "type": "Hash32" },
+        { "name": "new_state_root", "type": "Hash32" },
+        { "name": "trace_root", "type": "Hash32" },
+        { "name": "tx_effect_root", "type": "Hash32" },
+        { "name": "readonly_l1_root", "type": "Hash32" },
+        { "name": "da_commitment", "type": "Hash32" },
+        { "name": "effect_commitment", "type": "Hash32" },
+        { "name": "challenge_window_slots", "type": "u64" }
+      ]
+    }
+  },
+  {
+    "name": "StateRootOpeningV2",
+    "type": {
+      "kind": "struct",
+      "fields": [
+        { "name": "session_context", "type": "Hash32" },
+        { "name": "account_root", "type": "Hash32" },
+        { "name": "origin_root", "type": "Hash32" },
+        { "name": "ingress_count", "type": "u64" },
+        { "name": "ingress_root", "type": "Hash32" }
+      ]
+    }
   }
 ]
