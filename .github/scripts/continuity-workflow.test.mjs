@@ -21,6 +21,7 @@ test('release-only deployment stages both inputs before isolated activation', ()
   });
   expect(steps[activation].run).toContain('continuity_devnet.py run');
   expect(steps[activation].run).toContain('--revision "$GITHUB_SHA"');
+  expect(steps[activation].run).toContain('--upgrade-existing');
   expect(steps[activation]['timeout-minutes']).toBe(120);
   expect(steps.find(step => step.uses === 'actions/setup-node@v4').with['node-version']).toBe('24.21.0');
   const testSteps = workflow.jobs.test.steps;
@@ -41,6 +42,18 @@ test('inline deployment commands do not replace retained keys or invoke legacy c
     expect(scripts).not.toContain(old);
   }
   expect(scripts).toContain('oracle remains stopped');
+});
+
+test('upgrade scope is separate from fresh protocol qualification in Slack', () => {
+  const notification = steps.find(step => step.name === 'Notify Slack');
+  expect(notification.env.QUALIFICATION_KIND).toBe('${{ steps.continuity_activate.outputs.qualification_kind }}');
+  expect(notification.run).toContain('case "$QUALIFICATION_KIND"');
+  expect(notification.run).toContain('native-upgrade)');
+  expect(notification.run).toContain('This is not a fresh SOL/SPL payout');
+  expect(notification.run).toContain('No programs were deployed.');
+  const guards = workflow.jobs.test.steps.find(step => step.name === 'Test continuity-v2 activation guards').run;
+  expect(guards).toContain('test-native-upgrade.py');
+  expect(guards).toContain('native-upgrade-snapshot.test.mjs');
 });
 
 test('all workflow shell blocks parse without executing them', () => {

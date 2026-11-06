@@ -112,7 +112,7 @@ def file_hash(filename):
         os.close(descriptor)
 
 
-def verify_artifacts(directory, revision):
+def verify_artifacts(directory, revision, *, retained=False):
     directory = Path(directory)
     manifest = private_json(directory / "manifest.json")
     require(manifest.get("version") == 2 and manifest.get("protocol") == "continuity-v2"
@@ -121,8 +121,12 @@ def verify_artifacts(directory, revision):
             and manifest.get("activation_performed") is False and manifest.get("hosted_qualified") is False
             and manifest.get("proof_acceptance_qualified") is False,
             "artifact manifest identity differs")
-    require(isinstance(manifest.get("sha256"), dict) and set(manifest["sha256"]) == set(ARTIFACTS), "incorrect native artifact roles")
-    for role, relative in ARTIFACTS.items():
+    roles = dict(ARTIFACTS)
+    require(isinstance(manifest.get("sha256"), dict), "incorrect native artifact roles")
+    if retained and set(manifest["sha256"]) == set(roles) - {"geyser_events"}:
+        del roles["geyser_events"]
+    require(set(manifest["sha256"]) == set(roles), "incorrect native artifact roles")
+    for role, relative in roles.items():
         require(file_hash(directory / relative) == manifest["sha256"][role], "native artifact bytes changed")
         with (directory / relative).open("rb") as source:
             require(source.read(4) == b"\x7fELF", "native artifact is not ELF")
@@ -170,6 +174,29 @@ def service_arguments(original, executable, portal, geyser_config=None):
                         for argument in original), "existing ER Geyser configuration requires explicit deployment review")
         result.extend(["--er-geyser-plugin-config", str(geyser_config)])
     return result
+
+
+def upgrade_arguments(original, executable, geyser_config, previous_config=None):
+    require(isinstance(original, list) and original and all(isinstance(value, str) and value for value in original), "invalid upgrade argument vector")
+    flag_value(original, "--portal")
+    result = [str(executable)]
+    found = []
+    position = 1
+    while position < len(original):
+        argument = original[position]
+        if argument == "--er-geyser-plugin-config":
+            require(position + 1 < len(original), "event plugin flag value is missing")
+            found.append(original[position + 1])
+            position += 2
+        elif argument.startswith("--er-geyser-plugin-config="):
+            found.append(argument.split("=", 1)[1])
+            position += 1
+        else:
+            result.append(argument)
+            position += 1
+    require(found == ([str(previous_config)] if previous_config else []), "unknown or duplicated retained ER plugin configuration")
+    require(Path(executable).is_absolute() and Path(geyser_config).is_absolute(), "upgrade native paths must be absolute")
+    return [*result, "--er-geyser-plugin-config", str(geyser_config)]
 
 
 def systemd_argument(value):
