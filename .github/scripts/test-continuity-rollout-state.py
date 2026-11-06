@@ -9,7 +9,7 @@ import unittest
 from continuity_rollout_state import (
     ARTIFACTS, append_private, atomic_json, checked_directory, file_hash, flag_value, geyser_events_config, immutable_json,
     inspect_paths, private_json, retained_fingerprint, service_arguments, service_dropin,
-    sync_paths, systemd_argument, verify_artifacts,
+    sync_paths, systemd_argument, upgrade_arguments, verify_artifacts,
 )
 
 
@@ -76,6 +76,24 @@ class StateTests(unittest.TestCase):
             "libpath": "/isolated/lib/events.so", "name": "er-events", "listen_addr": "0.0.0.0:9101", "commitment": "confirmed"})
         with self.assertRaisesRegex(ValueError, "plugin path.*absolute"):
             geyser_events_config("relative.so")
+
+    def test_native_upgrade_preserves_portal_and_replaces_only_its_owned_plugin(self):
+        original = ["/retained/agave-validator", "--portal=existing", "--ledger", "/retained/ledger",
+                    "--geyser-plugin-config", "/retained/l1.json"]
+        expected = ["/upgrade/bin/agave-validator", *original[1:], "--er-geyser-plugin-config", "/upgrade/events.json"]
+        self.assertEqual(upgrade_arguments(original, expected[0], expected[-1]), expected)
+        for suffix in (["--er-geyser-plugin-config", "/retained/events.json"], ["--er-geyser-plugin-config=/retained/events.json"]):
+            self.assertEqual(upgrade_arguments(original + suffix, expected[0], expected[-1], "/retained/events.json"), expected)
+        self.assertEqual(original[1], "--portal=existing")
+
+    def test_native_upgrade_rejects_unknown_or_duplicate_plugin_flags(self):
+        original = ["/retained/agave-validator", "--portal", "existing"]
+        for suffix, previous in ((["--er-geyser-plugin-config", "/unknown.json"], None),
+                                 (["--er-geyser-plugin-config", "/unknown.json"], "/retained/events.json"),
+                                 (["--er-geyser-plugin-config=/retained/events.json"] * 2, "/retained/events.json"),
+                                 (["--er-geyser-plugin-config"], None)):
+            with self.subTest(suffix=suffix), self.assertRaises(ValueError):
+                upgrade_arguments(original + suffix, "/upgrade/bin/agave-validator", "/upgrade/events.json", previous)
 
     def test_dropin_overrides_only_native_state_environment(self):
         arguments = ["/isolated/bin/agave-validator", "--portal", "new", "--ledger", "/retained/ledger"]
@@ -160,6 +178,7 @@ class StateTests(unittest.TestCase):
         atomic_json(stage / "manifest.json", without_plugin)
         with self.assertRaisesRegex(ValueError, "artifact roles"):
             verify_artifacts(stage, "a" * 40)
+        self.assertEqual(verify_artifacts(stage, "a" * 40, retained=True), without_plugin)
         atomic_json(stage / "manifest.json", manifest)
         (stage / ARTIFACTS["geyser_events"]).write_bytes(b"changed")
         with self.assertRaisesRegex(ValueError, "changed"):

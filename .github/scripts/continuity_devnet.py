@@ -168,12 +168,15 @@ class Deployment:
         public_bytes(value)
         return value
 
-    def prepare(self):
-        require(self.upstream.call("getGenesisHash") == DEVNET, "native rollout is devnet-only")
-        require(re.fullmatch("[0-9a-f]{40}", self.args.revision), "full source revision required")
+    def verify_sdk(self):
         require(self.execute(["git", "-C", self.args.sdk_checkout, "rev-parse", "HEAD"]).strip() == SDK_REVISION, "SDK revision differs")
         self.execute(["git", "-C", self.args.sdk_checkout, "diff", "--quiet", "HEAD"])
         require(file_hash(self.args.sdk_checkout / "package-lock.json") == "c9c3eab30574777558d737d043060eadfec8c156b41ee4b313bbab2d05910ded", "SDK dependency lock differs")
+
+    def prepare(self):
+        require(self.upstream.call("getGenesisHash") == DEVNET, "native rollout is devnet-only")
+        require(re.fullmatch("[0-9a-f]{40}", self.args.revision), "full source revision required")
+        self.verify_sdk()
         verify_artifacts(self.args.stage, self.args.revision)
         require(private_json(self.args.funder_keypair) is not None, "native funder is missing")
         funder = self.execute(["solana-keygen", "pubkey", self.args.funder_keypair]).strip()
@@ -250,8 +253,10 @@ class Deployment:
         sync_paths([self.control / "keys", self.control, self.namespace, self.args.state_root, self.args.state_root.parent])
         print(json.dumps({"phase": "prepared", "portal": ids["portal"], "token_bridge": ids["token_bridge"], "validator": self.plan["validator"]}), flush=True)
 
-    def program_view(self, role):
-        ids = self.plan["programs"]
+    def program_view(self, role, *, stage=None, plan=None):
+        plan = self.plan if plan is None else plan
+        stage = self.stage if stage is None else stage
+        ids = plan["programs"]
         program = self.upstream.account(ids[role])
         if program is None:
             return None
@@ -261,8 +266,8 @@ class Deployment:
         stored = self.upstream.account(address)
         require(stored is not None and stored["owner"] == LOADER and not stored["executable"] and len(stored["raw"]) >= 45
                 and stored["raw"][:4] == (3).to_bytes(4, "little") and stored["raw"][12] == 1
-                and stored["raw"][13:45] == public_bytes(self.plan["funder"]), "native upgrade authority differs")
-        elf = (self.stage / ARTIFACTS[role]).read_bytes()
+                and stored["raw"][13:45] == public_bytes(plan["funder"]), "native upgrade authority differs")
+        elf = (stage / ARTIFACTS[role]).read_bytes()
         require(stored["raw"][45:45 + len(elf)] == elf and not any(stored["raw"][45 + len(elf):]), "deployed native bytes differ")
         require(self.upstream.account(ids[role + "-buffer"]) is None, "native upload buffer remains; reconcile it before activation")
         return {"programdata": address, "deployment_slot": int.from_bytes(stored["raw"][4:12], "little"),
@@ -480,7 +485,8 @@ class Deployment:
             raw = self.execute(["node", ROOT / ".github/scripts/devnet-continuity-smoke.mjs", config_path, phase], timeout=1200)
             phases.append(json.loads(raw.splitlines()[-1]))
         require(private_json(self.control / "retained.json") == self.retention(), "legacy state changed during native qualification")
-        report = {"version": 2, "result": "passed", "scope": "devnet native SOL/SPL payout and restart; not oracle or SP1 qualification",
+        report = {"version": 2, "result": "passed", "qualification_kind": "first-activation",
+                  "scope": "devnet native SOL/SPL payout and restart; not oracle or SP1 qualification",
                   "source_revision": self.args.revision, "sdk_revision": SDK_REVISION, "genesis": DEVNET,
                   "portal": config["portal"], "token_bridge": config["token_bridge"], "validator": self.plan["validator"],
                   "profile": self.plan["profile"], "context": phases[0]["context"], "phases": phases,
@@ -490,11 +496,16 @@ class Deployment:
         output = os.environ.get("GITHUB_OUTPUT")
         if output:
             with open(output, "a") as stream:
-                for name in ("portal", "token_bridge", "context", "profile"):
+                for name in ("portal", "token_bridge", "context", "profile", "qualification_kind"):
                     stream.write(name + "=" + report[name] + "\n")
                 stream.write("report_path=" + str(self.control / "report.json") + "\n")
 
     def run(self):
+        pending_upgrade = self.args.state_root / "upgrades" / self.args.revision
+        same_activation = os.path.lexists(self.control / "activation.json")
+        if getattr(self.args, "upgrade_existing", False) and (os.path.lexists(pending_upgrade) or os.path.lexists(DROPIN) and not same_activation):
+            from native_upgrade import NativeUpgrade
+            return NativeUpgrade(self, SERVICE, DROPIN).run()
         self.prepare()
         self.deploy_programs()
         self.activate()
@@ -518,6 +529,7 @@ def main():
     run.add_argument("--l1-rpc", default="http://127.0.0.1:8899")
     run.add_argument("--er-rpc", default="http://127.0.0.1:8910")
     run.add_argument("--max-estimated-cost-lamports", type=int, default=10_000_000_000)
+    run.add_argument("--upgrade-existing", action="store_true", help="Permit a guarded native-only upgrade of a known managed v2 activation.")
     args = parser.parse_args()
     if args.operation == "inventory":
         print(json.dumps(inventory_service()))

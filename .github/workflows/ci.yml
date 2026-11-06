@@ -113,8 +113,9 @@ jobs:
           python3 -B .github/scripts/test-continuity-rollout-state.py
           python3 -B .github/scripts/test-continuity-devnet.py
           python3 -B .github/scripts/test-continuity-devnet-model.py
+          python3 -B .github/scripts/test-native-upgrade.py
           python3 -B .github/scripts/test-prepare-continuity-sdk.py
-          bun test ./.github/scripts/continuity-control-journal.test.mjs ./.github/scripts/devnet-continuity-smoke.test.mjs ./.github/scripts/continuity-workflow.test.mjs
+          bun test ./.github/scripts/continuity-control-journal.test.mjs ./.github/scripts/devnet-continuity-smoke.test.mjs ./.github/scripts/continuity-workflow.test.mjs ./.github/scripts/native-upgrade-snapshot.test.mjs
           bash -n .github/scripts/prepare-continuity-sdk.sh
       - uses: actions/setup-node@v4
         with:
@@ -366,7 +367,7 @@ jobs:
           echo "directory=$SDK" >> "$GITHUB_OUTPUT"
 
       # Sonic: This controller preserves old state and refuses unknown/uncertain activation records.
-      - name: Activate isolated SessionV2 and qualify SOL/SPL recovery
+      - name: Activate isolated SessionV2 or upgrade its retained native runtime
         id: continuity_activate
         timeout-minutes: 120
         env:
@@ -377,7 +378,7 @@ jobs:
           export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
           python3 -B .github/scripts/continuity_devnet.py run \
             --stage "$NATIVE_STAGE" --revision "$GITHUB_SHA" \
-            --sdk-checkout "$CONTINUITY_SDK"
+            --sdk-checkout "$CONTINUITY_SDK" --upgrade-existing
 
       - name: Retain public native qualification report
         uses: actions/upload-artifact@v4
@@ -398,6 +399,7 @@ jobs:
           COMMIT_SHA: ${{ github.sha }}
           COMMIT_MSG: ${{ github.event.head_commit.message }}
           NATIVE_SMOKE_OUTCOME: ${{ steps.continuity_activate.outcome }}
+          QUALIFICATION_KIND: ${{ steps.continuity_activate.outputs.qualification_kind }}
         run: |
           set -euo pipefail
           if [ "$STATUS" != "success" ]; then
@@ -442,8 +444,25 @@ jobs:
             MENTIONS="$MENTIONS<@$USER_ID> "
           done
 
+          case "$QUALIFICATION_KIND" in
+            first-activation)
+              SUMMARY='Northstar continuity-v2 native qualification succeeded.'
+              E2E_REPORT=$(printf '%s\n' \
+                'SessionV2 bootstrap, SOL/SPL credit, validator restarts and finalized L1 payouts passed.' \
+                'The managed VRF oracle remains stopped. Run its manual workflow against this context.' \
+                'This does not qualify an oracle callback, SP1 or proof acceptance.')
+              ;;
+            native-upgrade)
+              SUMMARY='Northstar native validator/plugin upgrade succeeded.'
+              E2E_REPORT=$(printf '%s\n' \
+                'Existing Portal/bridge programs, SessionV2 and journal paths were retained.' \
+                'Read-only session/RPC readiness and ER SSE health checks passed. No programs were deployed.' \
+                'This is not a fresh SOL/SPL payout, oracle, SP1 or proof-acceptance qualification.')
+              ;;
+            *) echo 'Unknown native qualification scope' >&2; exit 1 ;;
+          esac
           LINES=(
-            ":white_check_mark: Northstar continuity-v2 native qualification succeeded."
+            ":white_check_mark: $SUMMARY"
             ":link: Portal: https://explorer.solana.com/address/$PORTAL_ADDRESS?cluster=devnet"
             ":link: Token bridge: https://explorer.solana.com/address/$TOKEN_BRIDGE_ADDRESS?cluster=devnet"
             "Session context: \`$SESSION_CONTEXT\`"
@@ -476,10 +495,6 @@ jobs:
           fi
 
           test "$NATIVE_SMOKE_OUTCOME" = success
-          E2E_REPORT=$(printf '%s\n' \
-            'SessionV2 bootstrap, SOL/SPL credit, validator restarts and finalized L1 payouts passed.' \
-            'The managed VRF oracle remains stopped. Run its manual workflow against this context.' \
-            'This does not qualify an oracle callback, SP1 or proof acceptance.')
           THREAD_PAYLOAD=$(jq -n \
             --arg channel "$SLACK_CHANNEL_ID" \
             --arg thread_ts "$MESSAGE_TS" \
