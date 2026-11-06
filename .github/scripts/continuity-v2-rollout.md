@@ -19,7 +19,9 @@ freezes a feature-enabled validator, CLI, and `northstar-geyser-events` shared
 library from the same checkout and pinned Rust toolchain in a fresh private
 staging directory. Its five-ELF manifest binds hashes and the caller-provided
 checkout revision; it is not an independent build attestation. Older four-artifact
-stages are rejected; rebuild into a new stage instead of editing retained manifests.
+stages are rejected as new targets; rebuild into a new stage instead of editing
+retained manifests. Native-only upgrades may verify an unchanged, manifest-bound
+four-artifact stage as the original deployment, never as the new target.
 Staging itself performs no activation. Build-generated program keypairs are never
 deployment signing identities.
 
@@ -62,11 +64,62 @@ keys belong to the runner; runtime data belongs to the validator service user.
 The default checkpoint directory follows the retained ledger unless explicitly
 overridden. The production validator now honors that override.
 
-**This controller supports first activation and retries of that same recorded
-activation. It refuses an unrelated existing v2 context or managed drop-in.**
-A later protocol/runtime upgrade needs explicit review rather than silently
-replacing an active v2 session or reusing its lineage under different semantics.
-There is no legacy migration, cursor rewriting or automatic v2 rollover.
+Without `--upgrade-existing`, this controller supports only first activation and
+retries of that same recorded activation. An existing managed drop-in still fails
+closed. Release CD explicitly enables the native-only path below; it never falls
+back to a fresh activation when retained upgrade metadata is incomplete.
+There is no protocol migration, cursor rewriting or automatic v2 rollover.
+
+## Guarded native-only upgrades
+
+`--upgrade-existing` permits a reviewed **non-protocol** validator/plugin update.
+It is not authorization to reuse an old profile under changed execution semantics.
+The guard requires the existing managed v2 plan, original activation, upload
+receipts, private controls, live arguments, native hashes and journal bindings.
+Unknown/manual installations or an unqualified previous native upgrade require
+operator review. Both on-chain program ELF hashes must be byte-identical in the
+original and target stages, and their finalized accounts must still match the
+original deployment receipts. A changed program requires a separate upgrade plan.
+
+The upgrade:
+
+1. Uses the pinned SDK without a signer to verify the current SessionV2 identity,
+   nonce, authority, profile, validator, genesis and synchronized ER binding.
+   Checkpoint quarantine blocks admission; no quarantine or pending control is cleared.
+2. Records an immutable upgrade plan under
+   `/solana/northstar/continuity-v2/upgrades/<source-revision>` before stopping the
+   service. Existing program IDs, session context/profile and both journal paths
+   remain unchanged. No program key, upload or on-chain transaction is created by
+   the upgrade controller, and it does not read the deployer keypair.
+3. Stops the original service and fingerprints retained journals and original
+   private controls. It installs only new validator/plugin copies and their config
+   in the upgrade namespace. Only the executable and this controller's ER plugin
+   argument change; Portal, L1 plugins and other service arguments are preserved.
+4. Checks frozen hashes, ownership, effective systemd arguments and the unchanged
+   L1 session through a read-only upstream query before recording a durable start
+   barrier. Its L1 recovery floor includes the old local processed/confirmed/finalized
+   slots and the upstream processed head immediately before startup. A separate
+   durable progress record makes missing established barriers fail closed.
+   No retained activation record or program manifest is rewritten.
+5. Verifies confirmed/finalized L1 and ER synchronization have reached that floor,
+   local RPC/catchup, the same execution session and ER genesis, unchanged
+   protocol controls and SSE `/health`. A qualified same-plan retry does not restart
+   the runtime; a later upgrade must bind to the previous qualified upgrade record.
+
+A pre-start interruption resumes only with the same plan/artifacts and unchanged
+frozen state. A failed initial fingerprint can restart the unchanged original
+service before configuration changes. Once native startup was attempted, there
+is **no automatic rollback, journal restore or blind restart**. Qualification
+failure stops only the known new runtime. An inactive/uncertain attempted start
+requires operator reconciliation before retrying; never delete its barriers.
+
+The original profile remains the protocol identity, **not an attestation of the
+new native build**. The new source/artifact hashes are bound separately in the
+upgrade plan. These checks cannot prove arbitrary native-code compatibility;
+review execution and persistence compatibility before enabling this path.
+The public report/Slack scope is `native-upgrade`: read-only readiness and retained
+identity, **not fresh SOL/SPL payout, oracle, SP1 or proof-acceptance qualification**.
+It does not start, stop or reconfigure an existing oracle.
 
 ## Required host configuration
 
@@ -77,7 +130,7 @@ There is no legacy migration, cursor rewriting or automatic v2 rollover.
 - The runner can use noninteractive sudo for the existing service guard and the
   controller's inventory, file installation and systemd operations. Privileged
   Python calls use `-B` and never write bytecode into the checkout.
-- The established native deployer is the private regular key file
+- For first activation, the established native deployer is the private regular key file
   `/home/ubuntu/.config/solana/id.json`. It is not the separately configured oracle
   funder. Neither its balance nor any additional funding requirement is implied
   by the oracle wallet's balance.
@@ -162,12 +215,16 @@ python3 -B .github/scripts/test-build-continuity-v2.py
 python3 -B .github/scripts/test-continuity-rollout-state.py
 python3 -B .github/scripts/test-continuity-devnet.py
 python3 -B .github/scripts/test-continuity-devnet-model.py
-bun test ./.github/scripts/continuity-control-journal.test.mjs ./.github/scripts/devnet-continuity-smoke.test.mjs
+python3 -B .github/scripts/test-native-upgrade.py
+bun test ./.github/scripts/continuity-control-journal.test.mjs ./.github/scripts/devnet-continuity-smoke.test.mjs ./.github/scripts/native-upgrade-snapshot.test.mjs
 bash -n .github/scripts/prepare-continuity-sdk.sh
 ```
 
 The host model checks complete activation, same-plan retries, included/unobserved
 upload recovery, changed running services, missing plans and pre-activation cleanup.
-It does not execute systemd or deploy programs. A real pinned SDK checkout/install/
+Native upgrade models additionally cover pre-plugin retained stages, unchanged
+program/session/journal bindings, no-funder operation, interrupted retries,
+quarantine, uncertain starts, qualified retries and subsequent native upgrades.
+They do not execute systemd or deploy programs. A real pinned SDK checkout/install/
 build and the local RPC adapter lifecycle have also passed separately. Hosted
 execution is still required before claiming this rollout or oracle deployment.
