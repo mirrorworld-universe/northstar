@@ -124,6 +124,7 @@ jobs:
         run: |
           SDK="$RUNNER_TEMP/native-sdk-bootstrap-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           bash .github/scripts/prepare-continuity-sdk.sh "$SDK"
+          NORTHSTAR_TEST_SDK_CHECKOUT="$SDK" node --test .github/scripts/native-upgrade-snapshot.test.mjs
       - name: Test bounded GPU runner without GPU
         run: |
           python3 -B northstar/scripts/test_gpu_prover.py

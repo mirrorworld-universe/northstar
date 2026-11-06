@@ -26,7 +26,9 @@ test('release-only deployment stages both inputs before isolated activation', ()
   expect(steps.find(step => step.uses === 'actions/setup-node@v4').with['node-version']).toBe('24.21.0');
   const testSteps = workflow.jobs.test.steps;
   expect(testSteps.find(step => step.uses === 'actions/setup-node@v4').with['node-version']).toBe('24.21.0');
-  expect(testSteps.find(step => step.name === 'Test pinned public continuity SDK install').run).toContain('prepare-continuity-sdk.sh');
+  const sdkCheck = testSteps.find(step => step.name === 'Test pinned public continuity SDK install').run;
+  expect(sdkCheck).toContain('prepare-continuity-sdk.sh');
+  expect(sdkCheck).toContain('NORTHSTAR_TEST_SDK_CHECKOUT="$SDK" node --test .github/scripts/native-upgrade-snapshot.test.mjs');
 });
 
 test('artifact upload selects only the verified public report', () => {

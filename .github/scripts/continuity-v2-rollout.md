@@ -30,7 +30,9 @@ deployment signing identities.
 installs frozen dependencies without lifecycle scripts and builds the bindings.
 No private-source credential is needed for this SDK checkout. Both CI validation
 and deployment pin Node 24.21.0/npm 11; the helper rejects npm 10 before checkout
-because that resolver rejects the unchanged pinned dependency lock.
+because that resolver rejects the unchanged pinned dependency lock. CI also tests
+the native snapshot reader against this actual SDK over a loopback RPC fixture,
+including numeric/string wire cursors that the SDK normalizes to `bigint`.
 
 `continuity_devnet.py run` then:
 
