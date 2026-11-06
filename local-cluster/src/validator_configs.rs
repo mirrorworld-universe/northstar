@@ -91,6 +91,7 @@ pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
         ephemeral_ws_port: config.ephemeral_ws_port,
         ephemeral_tpu_port: config.ephemeral_tpu_port,
         er_history_max_retained_slots: config.er_history_max_retained_slots,
+        er_geyser_plugin_config_files: Vec::new(),
     }
 }
 

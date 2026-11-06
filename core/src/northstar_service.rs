@@ -1,3 +1,6 @@
+// Sonic: Independent Geyser plugins for the ER slot namespace.
+mod geyser;
+
 use {
     crate::banking_trace::BankingPacketSender,
     agave_banking_stage_ingress_types::BankingPacketBatch,
@@ -571,6 +574,21 @@ impl NorthStarService {
         config: NorthStarServiceConfig,
         exit: Arc<AtomicBool>,
     ) -> Self {
+        Self::new_with_geyser(bank_forks, receiver, cfg, cluster_info, config, exit, &[])
+    }
+
+    // Sonic: Keep ER plugin state separate from the L1 Geyser service.
+    pub fn new_with_geyser(
+        bank_forks: Arc<std::sync::RwLock<BankForks>>,
+        receiver: BankNotificationReceiver,
+        cfg: northstar::ManagerConfig,
+        cluster_info: Arc<ClusterInfo>,
+        config: NorthStarServiceConfig,
+        exit: Arc<AtomicBool>,
+        er_geyser_config_files: &[std::path::PathBuf],
+    ) -> Self {
+        let er_observer = geyser::ErGeyserObserver::load(er_geyser_config_files)
+            .expect("failed to load ER Geyser plugins");
         // Sonic: Initialize NorthStar manager with always-on ephemeral RPC
         let portal_program_id = cfg.portal_program_id;
         let mut manager = northstar::Manager::new(cfg);
@@ -603,10 +621,16 @@ impl NorthStarService {
                 config.tpu_addr,
             ) {
                 error!("Failed to initialize ephemeral runtime: {e}");
-            } else if manager.resume_active_session_from_l1(root_bank) {
-                info!("NorthStar resumed active Portal session from L1 on startup");
             } else {
-                info!("NorthStar found no active Portal session to resume on startup");
+                // Sonic: Attach before session recovery can execute ER transactions.
+                if let Some(observer) = er_observer {
+                    manager.set_er_history_observer(observer);
+                }
+                if manager.resume_active_session_from_l1(root_bank) {
+                    info!("NorthStar resumed active Portal session from L1 on startup");
+                } else {
+                    info!("NorthStar found no active Portal session to resume on startup");
+                }
             }
         }
 

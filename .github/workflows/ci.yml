@@ -224,6 +224,16 @@ jobs:
         run: cargo test --locked -p solana-svm northstar --no-fail-fast
       - name: Run Northstar core service tests
         run: cargo test --locked -p solana-core northstar_service --no-fail-fast
+      # Sonic: Exercise extraction, replay, and the real ER Geyser shared library.
+      - name: Test Geyser program events and ER history
+        run: |
+          cargo test --locked -p northstar-geyser-events
+          cargo test --locked -p solana-rpc --lib er_history
+      - name: Test ER Geyser SSE roundtrip
+        run: |
+          cargo build --locked -p northstar-geyser-events
+          NORTHSTAR_EVENTS_PLUGIN_LIB="$PWD/target/debug/libnorthstar_geyser_events.so" \
+            cargo test --locked -p solana-core --lib test_er_history_dynamic_geyser_sse_roundtrip -- --ignored
 
   # Sonic: The network adapter is an isolated SP1 workspace; tests use no GPU or paid requests.
   network-prover:

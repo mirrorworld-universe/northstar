@@ -963,6 +963,16 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .multiple(true)
             .help("Specify the configuration file for the Geyser plugin."),
     )
+    // Sonic: Separate ER event streams preserve slot-based ordering and cursors.
+    .arg(
+        Arg::with_name("er_geyser_plugin_config")
+            .long("er-geyser-plugin-config")
+            .value_name("FILE")
+            .takes_value(true)
+            .multiple(true)
+            .requires("portal")
+            .help("Load a Geyser plugin for ER transactions and locally finalized ER slots."),
+    )
     .arg(
         Arg::with_name("geyser_plugin_always_enabled")
             .long("geyser-plugin-always-enabled")

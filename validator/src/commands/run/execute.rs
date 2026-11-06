@@ -762,6 +762,13 @@ pub fn execute(
         },
         rpc_config: run_args.json_rpc_config,
         on_start_geyser_plugin_config_files,
+        // Sonic: ER plugins must not consume L1 callbacks.
+        er_geyser_plugin_config_files: matches
+            .values_of("er_geyser_plugin_config")
+            .into_iter()
+            .flatten()
+            .map(PathBuf::from)
+            .collect(),
         geyser_plugin_always_enabled: matches.is_present("geyser_plugin_always_enabled"),
         rpc_addrs: value_t!(matches, "rpc_port", u16).ok().map(|rpc_port| {
             (

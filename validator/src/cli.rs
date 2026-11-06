@@ -862,6 +862,16 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
                 .multiple(true)
                 .help("Specify the configuration file for the Geyser plugin."),
         )
+        // Sonic: Separate ER plugins from the L1 Geyser callbacks.
+        .arg(
+            Arg::with_name("er_geyser_plugin_config")
+                .long("er-geyser-plugin-config")
+                .value_name("FILE")
+                .takes_value(true)
+                .multiple(true)
+                .requires("portal")
+                .help("Load a Geyser plugin for locally finalized ER transactions."),
+        )
         .arg(
             Arg::with_name("enable_scheduler_bindings")
                 .long("enable-scheduler-bindings")
