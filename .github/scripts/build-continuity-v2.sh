@@ -19,7 +19,7 @@ cd "$root"
 sbf_version=$(cargo build-sbf --version)
 revision=$(git rev-parse --verify HEAD)
 mkdir -- "$stage"
-mkdir -- "$stage/bin" "$stage/programs"
+mkdir -- "$stage/bin" "$stage/lib" "$stage/programs"
 
 cargo build-sbf --tools-version v1.56 --arch v0 \
   --manifest-path northstar/programs/portal/Cargo.toml \
@@ -31,8 +31,10 @@ cargo build --locked --release --target-dir "$target" --bin agave-validator \
   --features northstar/checkpoint-continuity-v2
 cargo build --locked --release --target-dir "$target" --package solana-cli --bin solana \
   --no-default-features --features checkpoint-continuity-v2
+cargo build --locked --release --target-dir "$target" --package northstar-geyser-events --lib
 install -m 755 -- "$target/release/agave-validator" "$stage/bin/agave-validator"
 install -m 755 -- "$target/release/solana" "$stage/bin/solana"
+install -m 500 -- "$target/release/libnorthstar_geyser_events.so" "$stage/lib/libnorthstar_geyser_events.so"
 
 python3 - "$stage" "$revision" "$sbf_version" <<'PY'
 import hashlib
@@ -45,6 +47,7 @@ stage, revision, builder = Path(sys.argv[1]), sys.argv[2], sys.argv[3].splitline
 files = {
     "validator": stage / "bin/agave-validator",
     "cli": stage / "bin/solana",
+    "geyser_events": stage / "lib/libnorthstar_geyser_events.so",
     "portal": stage / "programs/northstar_portal.so",
     "token_bridge": stage / "programs/northstar_token_bridge.so",
 }

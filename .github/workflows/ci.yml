@@ -341,7 +341,7 @@ jobs:
           solana --version
 
       # Sonic: Build v2 artifacts without replacing binaries used by the retained v1 runtime.
-      - name: Stage continuity-v2 artifacts without activation
+      - name: Stage continuity-v2 artifacts and ER event plugin without activation
         id: continuity_stage
         env:
           NORTHSTAR_CONTINUITY_BUILD_TARGET_DIR: /solana/northstar/continuity-v2-build-cache

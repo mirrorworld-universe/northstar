@@ -13,6 +13,7 @@ SDK_REVISION = "24030ce9fc3b80aa21738db2bb9f5a5fbea030d8"
 ARTIFACTS = {
     "validator": "bin/agave-validator",
     "cli": "bin/solana",
+    "geyser_events": "lib/libnorthstar_geyser_events.so",
     "portal": "programs/northstar_portal.so",
     "token_bridge": "programs/northstar_token_bridge.so",
 }
@@ -148,7 +149,12 @@ def flag_value(arguments, name):
     return matches[0]
 
 
-def service_arguments(original, executable, portal):
+def geyser_events_config(library):
+    require(Path(library).is_absolute(), "event plugin path must be absolute")
+    return {"libpath": str(library), "name": "er-events", "listen_addr": "0.0.0.0:9101", "commitment": "confirmed"}
+
+
+def service_arguments(original, executable, portal, geyser_config=None):
     require(isinstance(original, list) and original and all(isinstance(value, str) and value for value in original), "invalid service argument vector")
     flag_value(original, "--portal")
     result = list(original)
@@ -158,6 +164,11 @@ def service_arguments(original, executable, portal):
             result[position + 1] = portal
         elif argument.startswith("--portal="):
             result[position] = "--portal=" + portal
+    if geyser_config is not None:
+        require(Path(geyser_config).is_absolute(), "event plugin config path must be absolute")
+        require(not any(argument == "--er-geyser-plugin-config" or argument.startswith("--er-geyser-plugin-config=")
+                        for argument in original), "existing ER Geyser configuration requires explicit deployment review")
+        result.extend(["--er-geyser-plugin-config", str(geyser_config)])
     return result
 
 

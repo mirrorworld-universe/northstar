@@ -31,7 +31,7 @@ elif args[0] == "build-sbf":
     if os.environ.get("FAKE_FAIL") != "missing-elf":
         (Path(args[args.index("--sbf-out-dir") + 1]) / name).write_bytes(b"\x7fELF" + name.encode())
 elif args[0] == "build":
-    name = args[args.index("--bin") + 1]
+    name = args[args.index("--bin") + 1] if "--bin" in args else "libnorthstar_geyser_events.so"
     if os.environ.get("FAKE_FAIL") == name:
         sys.exit(1)
     directory = Path(args[args.index("--target-dir") + 1]) / "release"
@@ -75,17 +75,21 @@ class BuildTests(unittest.TestCase):
         self.assertFalse(manifest["hosted_qualified"])
         self.assertFalse(manifest["proof_acceptance_qualified"])
         for role, filename in {
-            "validator": "bin/agave-validator", "cli": "bin/solana",
+            "validator": "bin/agave-validator", "cli": "bin/solana", "geyser_events": "lib/libnorthstar_geyser_events.so",
             "portal": "programs/northstar_portal.so", "token_bridge": "programs/northstar_token_bridge.so",
         }.items():
             self.assertEqual(manifest["sha256"][role], hashlib.sha256((self.stage / filename).read_bytes()).hexdigest())
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(calls), 6)
         for call in calls:
             self.assertEqual(call["auto_install"], "0")
         for call in calls[1:]:
             arguments = call["args"]
             self.assertIn("--locked", arguments)
+            if "northstar-geyser-events" in arguments:
+                self.assertIn("--lib", arguments)
+                self.assertNotIn("--features", arguments)
+                continue
             feature = arguments[arguments.index("--features") + 1]
             self.assertTrue(feature.endswith("checkpoint-continuity-v2"))
             if arguments[0] == "build-sbf":
@@ -93,6 +97,14 @@ class BuildTests(unittest.TestCase):
                 self.assertEqual(arguments[arguments.index("--tools-version") + 1], "v1.56")
             elif arguments[arguments.index("--bin") + 1] == "solana":
                 self.assertIn("--no-default-features", arguments)
+
+    def test_event_plugin_is_built_and_bound_to_the_staged_manifest(self):
+        result = self.run_build()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = json.loads((self.stage / "manifest.json").read_text())
+        self.assertIn("geyser_events", manifest["sha256"])
+        plugin = self.stage / "lib/libnorthstar_geyser_events.so"
+        self.assertEqual(manifest["sha256"]["geyser_events"], hashlib.sha256(plugin.read_bytes()).hexdigest())
 
     def test_existing_directory_and_artifacts_are_not_replaced(self):
         self.stage.mkdir()
@@ -115,7 +127,7 @@ class BuildTests(unittest.TestCase):
         self.assertFalse(self.calls.exists())
 
     def test_failed_build_never_publishes_completion(self):
-        for failure in ("northstar_portal.so", "northstar_token_bridge.so", "agave-validator", "solana", "missing-elf"):
+        for failure in ("northstar_portal.so", "northstar_token_bridge.so", "agave-validator", "solana", "libnorthstar_geyser_events.so", "missing-elf"):
             with self.subTest(failure=failure):
                 path = self.root / failure
                 self.assertNotEqual(self.run_build(path, failure).returncode, 0)

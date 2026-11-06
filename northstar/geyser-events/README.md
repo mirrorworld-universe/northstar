@@ -1,6 +1,6 @@
 # Northstar Geyser events
 
-A Geyser shared library that extracts raw program events and serves private SSE
+A Geyser shared library that extracts raw program events and serves SSE
 streams. It works with the validator's L1 Geyser service and the independent ER
 Geyser service. Public authentication, IDL decoding, persistence, RPC proxying,
 and downstream fan-out belong to HyperFuse, not this plugin.
@@ -61,8 +61,20 @@ including Northstar deposit records, rather than batch-local indices or L1
 Blockstore.
 
 The service binds loopback by default and has no authentication or TLS. For a
-remote HyperFuse deployment, bind a private interface and restrict access with
-network policy. Do not expose either listener or native RPC publicly.
+private HyperFuse deployment, bind a private interface and restrict access with
+network policy. Keep native JSON-RPC private.
+
+Release CD explicitly exposes the ER stream on **`0.0.0.0:9101`**, with confirmed
+delivery and the default connection/resource limits. Anyone with network access
+can subscribe; traffic is plaintext. The host firewall/security group must allow
+TCP 9101 for external access. CD does not change firewall rules or expose L1 RPC.
+
+The [release controller](../../.github/scripts/continuity-v2-rollout.md) stages
+and hashes the plugin from the same checkout as the validator, installs a
+service-owned read-only copy, and adds `--er-geyser-plugin-config` pointing to
+`runtime/geyser-events.json`. Activation and smoke-test restarts also wait for
+`http://127.0.0.1:9101/health`. This checks local listener readiness, not external
+reachability or durable event coverage.
 
 ## HTTP and SSE
 

@@ -18,7 +18,7 @@ import urllib.request
 from urllib.parse import urlsplit
 
 from continuity_rollout_state import (
-    ARTIFACTS, DEVNET, SDK_REVISION, append_private, atomic_json, canonical, checked_directory, file_hash, flag_value,
+    ARTIFACTS, DEVNET, SDK_REVISION, append_private, atomic_json, canonical, checked_directory, file_hash, flag_value, geyser_events_config,
     immutable_json, inspect_paths, private_json, require, retained_fingerprint, service_arguments,
     service_dropin, sync_paths, verify_artifacts,
 )
@@ -222,6 +222,8 @@ class Deployment:
                            "stage": str(self.stage), "original": self.original, "validator": validator, "old_portal": old_portal,
                            "l1_rpc": self.args.l1_rpc, "er_rpc": self.args.er_rpc, "devnet_rpc": self.args.devnet_rpc}
             immutable_json(self.control / "reservation.json", reservation)
+        service_arguments(self.original["arguments"], self.runtime / ARTIFACTS["validator"],
+                          flag_value(self.original["arguments"], "--portal"), self.runtime / "geyser-events.json")
         self.log = self.control / "operations.log"
         if not self.log.exists():
             descriptor = os.open(self.log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -326,6 +328,11 @@ class Deployment:
         pid = self.execute(["systemctl", "show", "--property=MainPID", "--value", SERVICE]).strip()
         require(state in ("inactive", "failed") and pid == "0", "validator inactivity was not confirmed")
 
+    def event_listener_ready(self):
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open("http://127.0.0.1:9101/health", timeout=5) as response:
+            return response.status == 200 and response.read(16) == b"ok"
+
     def start(self):
         uploads = private_json(self.control / "programs.json")
         floor = max(uploads["roles"][role]["complete"]["deployment_slot"] for role in ("portal", "token_bridge"))
@@ -343,18 +350,24 @@ class Deployment:
                     self.l1.call("getIdentity")["identity"] == self.plan["validator"] and
                     min(local, finalized) >= floor and abs(local - upstream) <= 50):
                     self.er.call("getGenesisHash")
-                    return
+                    if self.event_listener_ready():
+                        return
             except (OSError, ValueError):
                 pass
             time.sleep(1)
         raise RuntimeError("native startup/catchup timed out")
 
     def activate(self):
-        binary = self.runtime / "bin/agave-validator"
-        arguments = service_arguments(self.original["arguments"], binary, self.plan["programs"]["portal"])
+        binary = self.runtime / ARTIFACTS["validator"]
+        plugin = self.runtime / ARTIFACTS["geyser_events"]
+        plugin_config = self.runtime / "geyser-events.json"
+        configuration = geyser_events_config(plugin)
+        config_digest = hashlib.sha256(canonical(configuration) + b"\n").hexdigest()
+        arguments = service_arguments(self.original["arguments"], binary, self.plan["programs"]["portal"], plugin_config)
         expected = {"NORTHSTAR_CHECKPOINT_PLAN_DIR": str(self.runtime / "checkpoints"),
                     "NORTHSTAR_UNSETTLED_STATE_DIR": str(self.runtime / "unsettled")}
-        spec = {"version": 2, "arguments": arguments, "state_environment": expected, "artifacts": self.plan["artifacts"]}
+        spec = {"version": 2, "arguments": arguments, "state_environment": expected, "artifacts": self.plan["artifacts"],
+                "geyser_config_sha256": config_digest}
         record = self.control / "activation.json"
         if not record.exists():
             actual = self.inventory()
@@ -390,8 +403,8 @@ class Deployment:
             self.stop()
             require(retained == self.retention(), "retained legacy state changed")
         uid, gid = str(self.original["uid"]), str(self.original["gid"])
-        directories = (self.runtime, self.runtime / "bin", self.runtime / "checkpoints", self.runtime / "unsettled")
-        inspected = self.inspect([*directories, binary])
+        directories = (self.runtime, self.runtime / "bin", self.runtime / "lib", self.runtime / "checkpoints", self.runtime / "unsettled")
+        inspected = self.inspect([*directories, binary, plugin, plugin_config])
         for directory in directories:
             observed = inspected[str(directory)]
             if observed.get("absent"):
@@ -399,12 +412,23 @@ class Deployment:
             else:
                 require(observed.get("directory") is True and observed.get("uid") == int(uid) and observed.get("mode") == 0o700,
                         "established runtime directory identity differs")
-        installed = inspected[str(binary)]
+        for role, label in (("validator", "binary"), ("geyser_events", "event plugin")):
+            target = self.runtime / ARTIFACTS[role]
+            installed = inspected[str(target)]
+            if installed.get("absent"):
+                self.execute(["sudo", "-n", "install", "-m", "500", "-o", uid, "-g", gid, self.stage / ARTIFACTS[role], target])
+            else:
+                require(installed.get("sha256") == self.manifest["sha256"][role]
+                        and installed.get("uid") == int(uid) and installed.get("mode") == 0o500,
+                        "retained native " + label + " bytes or ownership differ")
+        config_source = self.control / "geyser-events.json"
+        immutable_json(config_source, configuration)
+        installed = inspected[str(plugin_config)]
         if installed.get("absent"):
-            self.execute(["sudo", "-n", "install", "-m", "500", "-o", uid, "-g", gid, self.stage / ARTIFACTS["validator"], binary])
+            self.execute(["sudo", "-n", "install", "-m", "400", "-o", uid, "-g", gid, config_source, plugin_config])
         else:
-            require(installed.get("sha256") == self.manifest["sha256"]["validator"]
-                    and installed.get("uid") == int(uid) and installed.get("mode") == 0o500, "retained native binary bytes or ownership differ")
+            require(installed.get("sha256") == config_digest and installed.get("uid") == int(uid)
+                    and installed.get("mode") == 0o400, "retained event plugin configuration differs")
         dropin = self.control / "validator.conf"
         text = service_dropin(arguments, self.runtime / "checkpoints", self.runtime / "unsettled")
         if dropin.exists():
@@ -428,9 +452,10 @@ class Deployment:
         effective = self.execute(["systemctl", "show", "--property=ExecStart", "--value", SERVICE])
         effective_paths = re.findall(r"(?:^|[ {])path=([^;]+);", effective)
         require(len(effective_paths) == 1 and effective_paths[0].strip() == "/usr/bin/env" and str(binary) in effective
-                and self.plan["programs"]["portal"] in effective, "effective service start differs from isolated activation")
+                and self.plan["programs"]["portal"] in effective and "--er-geyser-plugin-config" in effective
+                and str(plugin_config) in effective, "effective service start differs from isolated activation")
         immutable_json(installed_marker, {"sha256": digest})
-        self.flush([binary, *reversed(directories), self.namespace, DROPIN, DROPIN.parent])
+        self.flush([binary, plugin, plugin_config, *reversed(directories), self.namespace, DROPIN, DROPIN.parent])
         self.start()
         observed = self.inventory()
         require(observed["arguments"] == arguments and observed["state_environment"] == expected
