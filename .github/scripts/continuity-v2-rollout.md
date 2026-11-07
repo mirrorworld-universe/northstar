@@ -136,6 +136,9 @@ Bounded systemd journal and configured validator-log scans emit only fixed error
 counts, never raw messages, file paths, command lines, keys or private control contents.
 Operational file tails are capped at 64 KiB and accepted only from validated managed
 records; one rotated sibling alias is allowed, not arbitrary alias traversal.
+For an inactive service with no current marker, inspect at most two matching rotations
+from a 128-entry directory scan. Gzip scans stop at 64 MiB compressed, 1 GiB decoded
+or five seconds; limits are reported rather than treated as complete coverage.
 Filesystem availability is reported for the state root and recorded ledger. Transaction
 journals and account databases are not read. Marker counts are not a root-cause
 diagnosis. The public JSON is the only uploaded artifact.
