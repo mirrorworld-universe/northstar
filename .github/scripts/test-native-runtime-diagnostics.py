@@ -387,6 +387,22 @@ class DiagnosticTests(unittest.TestCase):
         self.assertNotIn(alias, found)
         self.assertTrue(all(path.suffix != ".json" for path in found))
 
+    def test_panic_evidence_includes_only_committed_source_and_fixed_reason(self):
+        previous = self.root / (self.logfile.name + ".1.gz")
+        text = ("thread 'solReplayStage' panicked at /" + SECRET + "/core/src/replay_stage.rs:2167:25:\n"
+                + "We have tried to repair duplicate slot: 42 more than 10 times " + SECRET)
+        previous.write_bytes(gzip.compress(text.encode()))
+        result = diagnostics.gzip_log_summary(previous)
+        self.assertEqual(result["panic_sites"], [{"file": "core/src/replay_stage.rs", "line": 2167}])
+        self.assertEqual(result["marker_counts"]["duplicate_slot_repair_exhausted"], 1)
+        self.assertNotIn(SECRET, json.dumps(result))
+        self.assertNotIn("solReplayStage", json.dumps(result))
+
+    def test_panic_sites_reject_program_logs_and_non_repository_paths(self):
+        messages = ["Program log: panicked at core/src/replay_stage.rs:2167:1",
+                    "panicked at /private/keys/secret.rs:1:1", "panicked at core/src/not_a_committed_file.rs:1:1"]
+        self.assertEqual(diagnostics.panic_sites(messages), [])
+
     def test_journal_output_is_bounded(self):
         result = diagnostics.journal_summary(lambda _args: SimpleNamespace(returncode=0, stdout=b"a" * (2 * 1024 * 1024 + 1)))
         self.assertEqual(result, {"status": "unavailable"})
