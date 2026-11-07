@@ -27,6 +27,12 @@ MARKERS = {
     "permission denied": "permission_denied",
     "address already in use": "listener_in_use",
     "no space left on device": "disk_full",
+    "insufficient disk space": "disk_full",
+    "os error 28": "disk_full",
+    "too many open files": "file_descriptor_limit",
+    "failed to open ledger": "ledger_open_failure",
+    "bank hash mismatch": "bank_hash_mismatch",
+    "snapshot hash mismatch": "snapshot_hash_mismatch",
     "out of memory": "memory_limit",
     "oom-kill": "memory_limit",
     "failed to load er geyser plugins": "event_plugin_load_failure",
@@ -42,6 +48,108 @@ def execute(arguments):
     return subprocess.run(arguments, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False)
 
 
+def marker_counts(messages):
+    counts = {}
+    for message in messages:
+        if not isinstance(message, str) or "program log:" in message.lower():
+            continue
+        for marker in {value for text, value in MARKERS.items() if text in message.lower()}:
+            counts[marker] = counts.get(marker, 0) + 1
+    return counts
+
+
+def disk_summary(directory):
+    try:
+        info = os.statvfs(directory)
+        return {"status": "observed", "total_bytes": info.f_blocks * info.f_frsize,
+                "available_bytes": info.f_bavail * info.f_frsize, "free_bytes": info.f_bfree * info.f_frsize,
+                "available_inodes": info.f_favail}
+    except OSError:
+        return {"status": "unavailable"}
+
+
+def file_log_summary(path):
+    if (not path.is_absolute() or any(part in ("..", "control", "keys", ".ssh", ".config", "checkpoints", "unsettled", "rocksdb", "accounts", "accounts_index", "snapshots") for part in path.parts)
+            or not any(suffix in path.name for suffix in (".log", ".out", ".err"))
+            or not any(name in path.name.lower() for name in ("validator", "agave", "solana", "northstar", "native", "stderr", "stdout"))):
+        return {"status": "not_an_approved_log_sink"}
+    descriptor = None
+    try:
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_NOATIME", 0)
+        rotated = False
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as error:
+            if error.errno != errno.ELOOP:
+                raise
+            target = Path(os.readlink(path))
+            target = target if target.is_absolute() else path.parent / target
+            if (target.parent != path.parent or not target.name.startswith(path.stem)
+                    or not any(suffix in target.name for suffix in (".log", ".out", ".err"))):
+                return {"status": "unapproved_log_alias"}
+            descriptor = os.open(target, flags)
+            rotated = True
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            return {"status": "not_a_regular_log"}
+        os.lseek(descriptor, max(0, info.st_size - 64 * 1024), os.SEEK_SET)
+        tail = os.read(descriptor, 64 * 1024)
+        return {"status": "classified", "bytes_examined": len(tail), "modified_at_unix": int(info.st_mtime), "rotated_sibling": rotated,
+                "marker_counts": marker_counts(tail.decode(errors="replace").splitlines()),
+                "raw_messages_included": False, "markers_are_not_a_root_cause_diagnosis": True}
+    except OSError:
+        return {"status": "unavailable"}
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def operational_details(values, root, records):
+    report = {"filesystems": {"state_root": disk_summary(root)}, "file_logs": []}
+    if not (records.get("recorded_plan_identity_matches") and records.get("managed_dropin_matches_original")
+            and records.get("original_binary_matches") and len(records.get("original_revisions", [])) == 1):
+        return report
+    try:
+        activation = private_json(root / records["original_revisions"][0] / "control/activation.json")
+        arguments = activation["arguments"]
+        working = Path(values.get("WorkingDirectory", ""))
+        try:
+            ledger = Path(flag_value(arguments, "--ledger"))
+            if not ledger.is_absolute() and working.is_absolute():
+                ledger = working / ledger
+            if ledger.is_absolute():
+                report["filesystems"]["ledger"] = disk_summary(ledger)
+        except ValueError:
+            pass
+        candidates = []
+        try:
+            configured = flag_value(arguments, "--log")
+            if configured != "-":
+                configured = Path(configured)
+                if not configured.is_absolute() and working.is_absolute():
+                    configured = working / configured
+                candidates.append(("validator_flag", configured))
+        except ValueError:
+            if working.is_absolute():
+                candidates.append(("validator_default", working / ("agave-validator-" + records["validator"] + ".log")))
+        for name in ("StandardOutput", "StandardError"):
+            if not records.get("effective_start_mentions_original_binary"):
+                continue
+            value = values.get(name, "")
+            if ":" in value and value.split(":", 1)[0] in ("append", "file", "truncate"):
+                candidates.append((name, Path(value.split(":", 1)[1])))
+            elif value in ("append", "file", "truncate") and values.get(name + "File"):
+                candidates.append((name, Path(values[name + "File"])))
+        seen = set()
+        for source, path in candidates:
+            if path not in seen:
+                seen.add(path)
+                report["file_logs"].append({"source": source, **file_log_summary(path)})
+    except (OSError, ValueError, TypeError, KeyError):
+        report["log_lookup_status"] = "unavailable"
+    return report
+
+
 def journal_summary(run):
     try:
         result = run(["journalctl", "--unit", SERVICE, "--no-pager", "--lines=120", "--output=json",
@@ -50,7 +158,7 @@ def journal_summary(run):
         return {"status": "unavailable"}
     if result.returncode or len(result.stdout) > 2 * 1024 * 1024:
         return {"status": "unavailable"}
-    counts, entries = {}, 0
+    messages, entries = [], 0
     for line in result.stdout.splitlines():
         try:
             entry = json.loads(line)
@@ -58,11 +166,8 @@ def journal_summary(run):
             continue
         entries += 1
         message = entry.get("MESSAGE") if isinstance(entry, dict) else None
-        if not isinstance(message, str) or "program log:" in message.lower():
-            continue
-        for marker in {value for text, value in MARKERS.items() if text in message.lower()}:
-            counts[marker] = counts.get(marker, 0) + 1
-    return {"status": "classified", "entries_examined": entries, "marker_counts": counts,
+        messages.append(message)
+    return {"status": "classified", "entries_examined": entries, "marker_counts": marker_counts(messages),
             "raw_messages_included": False, "markers_are_not_a_root_cause_diagnosis": True}
 
 
@@ -159,7 +264,8 @@ def managed_records(start, root, dropin, retained_start=""):
 def collect_report(run=execute, root=STATE_ROOT, dropin=DROPIN, lock=LOCK):
     report = {"version": 1, "read_only": True, "service": SERVICE,
               "scope": "systemd and retained metadata only; no RPC qualification or recovery"}
-    result = run(["systemctl", "show", SERVICE, *["--property=" + name for name in (*PUBLIC_PROPERTIES, "ExecStart")]])
+    private_properties = ("ExecStart", "StandardOutput", "StandardOutputFile", "StandardError", "StandardErrorFile", "WorkingDirectory")
+    result = run(["systemctl", "show", SERVICE, *["--property=" + name for name in (*PUBLIC_PROPERTIES, *private_properties)]])
     if len(result.stdout) > 64 * 1024:
         return {**report, "status": "service_query_unavailable"}
     values = dict(line.split("=", 1) for line in result.stdout.decode(errors="replace").splitlines() if "=" in line)
@@ -182,6 +288,7 @@ def collect_report(run=execute, root=STATE_ROOT, dropin=DROPIN, lock=LOCK):
             retained_start = ""
             report["managed_dropin_readable"] = False
         report["managed_records"] = managed_records(values.get("ExecStart", ""), root, dropin, retained_start)
+        report["operational"] = operational_details(values, root, report["managed_records"])
         report["status"] = "snapshot_collected"
     except FileNotFoundError:
         report["status"] = "deployment_lock_missing"

@@ -11,7 +11,7 @@ import unittest
 
 import native_runtime_diagnostics as diagnostics
 from continuity_devnet import public_text
-from continuity_rollout_state import atomic_json, file_hash, retained_fingerprint, service_dropin
+from continuity_rollout_state import atomic_json, file_hash, private_json, retained_fingerprint, service_dropin
 
 SECRET = "PRIVATE_DIAGNOSTIC_SENTINEL"
 
@@ -34,7 +34,12 @@ class DiagnosticTests(unittest.TestCase):
         binary.write_bytes(b"\x7fELFretained-validator")
         binary.chmod(0o500)
         programs = {role: public_text(bytes([index]) * 32) for index, role in enumerate(("portal", "token_bridge"), 1)}
-        arguments = [str(binary), "--portal", programs["portal"], "--private-option", SECRET]
+        self.ledger = self.root / "ledger"
+        self.ledger.mkdir()
+        self.logfile = self.root / "validator.log"
+        self.logfile.write_text("ordinary private log data " + SECRET)
+        arguments = [str(binary), "--portal", programs["portal"], "--ledger", str(self.ledger),
+                     "--log", str(self.logfile), "--private-option", SECRET]
         original = {"uid": os.getuid(), "gid": os.getgid(), "arguments": arguments}
         artifacts = {"validator": file_hash(binary), "cli": "b" * 64, "portal": "c" * 64, "token_bridge": "d" * 64}
         profile = diagnostics.digest({"version": 2, "source": self.base.name, "artifacts": artifacts,
@@ -187,6 +192,82 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(result["systemd"]["ActiveState"], "inactive")
         self.assertEqual(result["journal"]["status"], "unavailable")
         self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_configured_file_log_is_bounded_and_never_exposes_content_or_paths(self):
+        self.logfile.write_bytes(b"x" * 80_000 + b"\nERROR No space left on device " + SECRET.encode()
+                                 + b"\nProgram log: permission denied " + SECRET.encode())
+        before = retained_fingerprint([self.root])
+        result = self.collect()
+        log = result["operational"]["file_logs"][0]
+        self.assertEqual(log["source"], "validator_flag")
+        self.assertEqual(log["status"], "classified")
+        self.assertLessEqual(log["bytes_examined"], 64 * 1024)
+        self.assertEqual(log["marker_counts"], {"disk_full": 1})
+        self.assertEqual(result["operational"]["filesystems"]["ledger"]["status"], "observed")
+        self.assertNotIn(SECRET, json.dumps(result))
+        self.assertNotIn(str(self.logfile), json.dumps(result))
+        self.assertEqual(before, retained_fingerprint([self.root]))
+
+    def test_private_directories_are_not_accepted_as_log_sinks(self):
+        log = self.control / "private.log"
+        log.write_text(SECRET)
+        result = diagnostics.file_log_summary(log)
+        self.assertEqual(result["status"], "not_an_approved_log_sink")
+        self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_rotated_sibling_log_is_read_but_cross_directory_alias_is_rejected(self):
+        self.logfile.unlink()
+        rotated = self.root / "validator.log.1"
+        rotated.write_text("No space left on device " + SECRET)
+        self.logfile.symlink_to(rotated.name)
+        result = diagnostics.file_log_summary(self.logfile)
+        self.assertTrue(result["rotated_sibling"])
+        self.assertEqual(result["marker_counts"], {"disk_full": 1})
+        self.logfile.unlink()
+        self.logfile.symlink_to(self.control / "plan.json")
+        result = diagnostics.file_log_summary(self.logfile)
+        self.assertEqual(result["status"], "unapproved_log_alias")
+        self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_validator_default_log_uses_the_validated_identity_and_working_directory(self):
+        activation_path = self.control / "activation.json"
+        activation = private_json(activation_path)
+        position = activation["arguments"].index("--log")
+        del activation["arguments"][position:position + 2]
+        atomic_json(activation_path, activation)
+        default = self.root / ("agave-validator-" + self.plan["validator"] + ".log")
+        default.write_text("bank hash mismatch " + SECRET)
+        records = {"recorded_plan_identity_matches": True, "managed_dropin_matches_original": True,
+                   "original_binary_matches": True, "original_revisions": [self.base.name], "validator": self.plan["validator"]}
+        result = diagnostics.operational_details({"WorkingDirectory": str(self.root)}, self.state_root, records)
+        self.assertEqual(result["file_logs"][0]["source"], "validator_default")
+        self.assertEqual(result["file_logs"][0]["marker_counts"], {"bank_hash_mismatch": 1})
+        self.assertNotIn(SECRET, json.dumps(result))
+        self.assertNotIn(str(default), json.dumps(result))
+
+    def test_unknown_managed_binding_cannot_read_file_logs(self):
+        atomic_json(self.control / "plan.json", dict(self.plan, profile="0" * 64))
+        result = self.collect()
+        self.assertEqual(result["operational"]["file_logs"], [])
+
+    def test_nonregular_log_never_blocks_or_reads_a_stream(self):
+        self.logfile.unlink()
+        os.mkfifo(self.logfile, 0o600)
+        result = diagnostics.file_log_summary(self.logfile)
+        self.assertEqual(result["status"], "not_a_regular_log")
+
+    def test_systemd_file_sink_is_not_copied_into_public_properties(self):
+        secondary = self.root / "stderr.err"
+        secondary.write_text("too many open files " + SECRET)
+        def with_sink(arguments):
+            result = self.run_command(arguments)
+            if arguments[0] == "systemctl":
+                result.stdout += ("StandardError=append\nStandardErrorFile=" + str(secondary) + "\n").encode()
+            return result
+        result = diagnostics.collect_report(with_sink, self.state_root, self.dropin, self.lock)
+        self.assertEqual(result["operational"]["file_logs"][-1]["marker_counts"], {"file_descriptor_limit": 1})
+        for private in (SECRET, str(secondary), "StandardErrorFile"):
+            self.assertNotIn(private, json.dumps(result))
 
     def test_journal_output_is_bounded(self):
         result = diagnostics.journal_summary(lambda _args: SimpleNamespace(returncode=0, stdout=b"a" * (2 * 1024 * 1024 + 1)))
