@@ -63,12 +63,15 @@ class DiagnosticTests(unittest.TestCase):
         self.lock.chmod(0o600)
         self.start = "{ path=/usr/bin/env; argv[]=" + text.split("ExecStart=")[-1].strip() + " ; }"
         self.commands = []
+        self.unit_text = ""
         self.messages = ["thread 'main' panicked at private/path.rs:1:1: permission denied " + SECRET,
                          "Program log: panicked at " + SECRET, "ordinary private data " + SECRET]
 
     def run_command(self, arguments):
         self.commands.append(arguments)
-        if arguments[0] == "systemctl":
+        if arguments[0] == "systemctl" and arguments[1] == "cat":
+            body = self.unit_text
+        elif arguments[0] == "systemctl":
             body = "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nResult=success\nExecMainStatus=0\nExecStart=" + self.start + "\n"
         elif arguments[0] == "journalctl":
             body = "\n".join(json.dumps({"MESSAGE": value}) for value in self.messages)
@@ -288,6 +291,30 @@ class DiagnosticTests(unittest.TestCase):
         self.assertTrue(result["namespaced"])
         self.assertIn("--namespace=" + SECRET, self.commands[-1])
         self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_systemd_append_path_is_resolved_from_unit_files_without_public_content(self):
+        target = self.root / "validator-output"
+        target.write_text("No space left on device " + SECRET)
+        self.unit_text = "[Service]\nEnvironment=TOKEN=" + SECRET + "\nStandardOutput=append:" + str(target) + "\n"
+        def append_sink(arguments):
+            result = self.run_command(arguments)
+            if arguments[0] == "systemctl" and arguments[1] == "show":
+                result.stdout += b"StandardOutput=append\n"
+            return result
+        result = diagnostics.collect_report(append_sink, self.state_root, self.dropin, self.lock)
+        files = result["operational"]["file_logs"]
+        self.assertTrue(any(item["source"] == "StandardOutput" and item.get("marker_counts") == {"disk_full": 1} for item in files))
+        for private in (SECRET, str(target), "Environment"):
+            self.assertNotIn(private, json.dumps(result))
+
+    def test_unit_sink_resets_and_unloaded_modes_are_not_used(self):
+        self.unit_text = "[Service]\nStandardOutput=append:/private/validator.log\n[Service]\nStandardOutput=null\n"
+        self.assertEqual(diagnostics.unit_log_sinks(self.run_command, {"StandardOutput": "append"}), {})
+        self.assertEqual(diagnostics.unit_log_sinks(self.run_command, {"StandardOutput": "null"}), {"StandardOutput": "null"})
+
+    def test_configured_credential_and_database_paths_are_not_log_sinks(self):
+        for path in (self.root / "identity.json", self.root / "id_ed25519", self.root / "000123.log", Path("/proc/self/environ")):
+            self.assertFalse(diagnostics.approved_log_path(path))
 
     def test_journal_output_is_bounded(self):
         result = diagnostics.journal_summary(lambda _args: SimpleNamespace(returncode=0, stdout=b"a" * (2 * 1024 * 1024 + 1)))
