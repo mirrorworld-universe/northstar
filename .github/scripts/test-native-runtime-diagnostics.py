@@ -245,6 +245,20 @@ class DiagnosticTests(unittest.TestCase):
         self.assertNotIn(SECRET, json.dumps(result))
         self.assertNotIn(str(default), json.dumps(result))
 
+    def test_short_validator_log_flag_is_discovered_without_a_working_directory(self):
+        activation_path = self.control / "activation.json"
+        activation = private_json(activation_path)
+        position = activation["arguments"].index("--log")
+        activation["arguments"][position] = "-o"
+        atomic_json(activation_path, activation)
+        self.logfile.write_text("too many open files " + SECRET)
+        records = {"recorded_plan_identity_matches": True, "managed_dropin_matches_original": True,
+                   "original_binary_matches": True, "original_revisions": [self.base.name], "validator": self.plan["validator"]}
+        result = diagnostics.operational_details({}, self.state_root, records)
+        self.assertEqual(len(result["file_logs"]), 1)
+        self.assertEqual(result["file_logs"][0]["marker_counts"], {"file_descriptor_limit": 1})
+        self.assertNotIn(SECRET, json.dumps(result))
+
     def test_unknown_managed_binding_cannot_read_file_logs(self):
         atomic_json(self.control / "plan.json", dict(self.plan, profile="0" * 64))
         result = self.collect()
@@ -268,6 +282,12 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(result["operational"]["file_logs"][-1]["marker_counts"], {"file_descriptor_limit": 1})
         for private in (SECRET, str(secondary), "StandardErrorFile"):
             self.assertNotIn(private, json.dumps(result))
+
+    def test_namespaced_journal_routes_privately_and_reports_no_namespace_value(self):
+        result = diagnostics.journal_summary(self.run_command, SECRET)
+        self.assertTrue(result["namespaced"])
+        self.assertIn("--namespace=" + SECRET, self.commands[-1])
+        self.assertNotIn(SECRET, json.dumps(result))
 
     def test_journal_output_is_bounded(self):
         result = diagnostics.journal_summary(lambda _args: SimpleNamespace(returncode=0, stdout=b"a" * (2 * 1024 * 1024 + 1)))
