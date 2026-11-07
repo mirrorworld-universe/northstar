@@ -1,6 +1,7 @@
 """Sonic: Public, read-only diagnostics; never expose command lines or journal text."""
 import errno
 import fcntl
+import gzip
 import hashlib
 import json
 import os
@@ -9,6 +10,8 @@ import re
 import shlex
 import stat
 import subprocess
+import time
+import zlib
 
 from continuity_devnet import DROPIN, SERVICE, public_bytes
 from continuity_rollout_state import ARTIFACTS, DEVNET, SDK_REVISION, canonical, file_hash, flag_value, private_json, service_dropin
@@ -27,6 +30,7 @@ MARKERS = {
     "panicked at": "runtime_panic",
     "permission denied": "permission_denied",
     "address already in use": "listener_in_use",
+    "duplicate running instances of the same validator node": "duplicate_validator_instance",
     "no space left on device": "disk_full",
     "insufficient disk space": "disk_full",
     "os error 28": "disk_full",
@@ -131,6 +135,63 @@ def file_log_summary(path):
             os.close(descriptor)
 
 
+def previous_log_rotations(path):
+    if not approved_log_path(path):
+        return []
+    found = []
+    try:
+        with os.scandir(path.parent) as entries:
+            for index, entry in enumerate(entries):
+                if index >= 128:
+                    break
+                if not entry.name.startswith(path.name) or not entry.is_file(follow_symlinks=False):
+                    continue
+                suffix = entry.name[len(path.name):]
+                if re.fullmatch(r"(?:\.[0-9]+|[-.][0-9]{8}|[-.][0-9]{4}-[0-9]{2}-[0-9]{2})(?:\.gz)?", suffix):
+                    candidate = Path(entry.path)
+                    if approved_log_path(candidate):
+                        found.append((entry.stat(follow_symlinks=False).st_mtime_ns, candidate))
+    except OSError:
+        return []
+    return [candidate for _, candidate in sorted(found, reverse=True)[:2]]
+
+
+def gzip_log_summary(path, *, max_decoded_bytes=1024 ** 3):
+    if not approved_log_path(path):
+        return {"status": "not_an_approved_log_sink"}
+    descriptor = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_NOATIME", 0))
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            return {"status": "not_a_regular_log"}
+        if info.st_size > 64 * 1024 * 1024:
+            return {"status": "rotation_over_limit"}
+        source = os.fdopen(descriptor, "rb")
+        descriptor = None
+        deadline, scanned, tail = time.monotonic() + 5, 0, b""
+        with source, gzip.GzipFile(fileobj=source, mode="rb") as archive:
+            while True:
+                if time.monotonic() > deadline:
+                    return {"status": "rotation_over_limit"}
+                chunk = archive.read(min(64 * 1024, max_decoded_bytes - scanned + 1))
+                if not chunk:
+                    break
+                scanned += len(chunk)
+                if scanned > max_decoded_bytes:
+                    return {"status": "rotation_over_limit"}
+                tail = (tail + chunk)[-64 * 1024:]
+        return {"status": "classified", "bytes_examined": len(tail), "decoded_bytes_scanned": scanned,
+                "modified_at_unix": int(info.st_mtime), "compressed": True,
+                "marker_counts": marker_counts(tail.decode(errors="replace").splitlines()),
+                "raw_messages_included": False, "markers_are_not_a_root_cause_diagnosis": True}
+    except (OSError, EOFError, zlib.error):
+        return {"status": "unavailable"}
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 def operational_details(values, root, records):
     report = {"filesystems": {"state_root": disk_summary(root)}, "file_logs": []}
     if not (records.get("recorded_plan_identity_matches") and records.get("managed_dropin_matches_original")
@@ -182,7 +243,13 @@ def operational_details(values, root, records):
         for source, path in candidates:
             if path not in seen:
                 seen.add(path)
-                report["file_logs"].append({"source": source, **file_log_summary(path)})
+                current = file_log_summary(path)
+                report["file_logs"].append({"source": source, **current})
+                if (values.get("ActiveState") in ("failed", "inactive") and not current.get("rotated_sibling")
+                        and not current.get("marker_counts")):
+                    for previous in previous_log_rotations(path):
+                        summary = gzip_log_summary(previous) if previous.suffix == ".gz" else file_log_summary(previous)
+                        report["file_logs"].append({"source": source + "_rotation", **summary})
     except (OSError, ValueError, TypeError, KeyError):
         report["log_lookup_status"] = "unavailable"
     return report

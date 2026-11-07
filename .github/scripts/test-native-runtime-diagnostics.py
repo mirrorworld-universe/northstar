@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Sonic: Diagnostics observe lifecycle/metadata without mutating or publishing private input."""
 import fcntl
+import gzip
 import hashlib
 import json
 import os
@@ -315,6 +316,45 @@ class DiagnosticTests(unittest.TestCase):
     def test_configured_credential_and_database_paths_are_not_log_sinks(self):
         for path in (self.root / "identity.json", self.root / "id_ed25519", self.root / "000123.log", Path("/proc/self/environ")):
             self.assertFalse(diagnostics.approved_log_path(path))
+
+    def test_empty_current_log_reads_a_bounded_previous_rotation(self):
+        self.logfile.write_text("")
+        previous = self.root / (self.logfile.name + ".1")
+        previous.write_text("duplicate running instances of the same validator node: " + SECRET)
+        result = self.collect()
+        rotations = [item for item in result["operational"]["file_logs"] if item["source"].endswith("_rotation")]
+        self.assertEqual(len(rotations), 1)
+        self.assertEqual(rotations[0]["marker_counts"], {"duplicate_validator_instance": 1})
+        self.assertNotIn(SECRET, json.dumps(result))
+        self.assertNotIn(str(previous), json.dumps(result))
+
+    def test_compressed_rotation_is_classified_without_exposing_messages(self):
+        previous = self.root / (self.logfile.name + ".1.gz")
+        previous.write_bytes(gzip.compress(("permission denied " + SECRET).encode()))
+        result = diagnostics.gzip_log_summary(previous)
+        self.assertEqual(result["status"], "classified")
+        self.assertEqual(result["marker_counts"], {"permission_denied": 1})
+        self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_compressed_rotation_decode_limit_is_explicit(self):
+        previous = self.root / (self.logfile.name + ".1.gz")
+        previous.write_bytes(gzip.compress(b"x" * 1000))
+        result = diagnostics.gzip_log_summary(previous, max_decoded_bytes=32)
+        self.assertEqual(result["status"], "rotation_over_limit")
+        self.assertNotIn("marker_counts", result)
+
+    def test_rotation_discovery_is_bounded_and_excludes_aliases_and_private_files(self):
+        for number in range(1, 5):
+            target = self.root / (self.logfile.name + "." + str(number))
+            target.write_text("ordinary")
+            os.utime(target, (number, number))
+        alias = self.root / (self.logfile.name + ".5")
+        alias.symlink_to(self.control / "plan.json")
+        (self.root / (self.logfile.name + ".6.json")).write_text(SECRET)
+        found = diagnostics.previous_log_rotations(self.logfile)
+        self.assertEqual(len(found), 2)
+        self.assertNotIn(alias, found)
+        self.assertTrue(all(path.suffix != ".json" for path in found))
 
     def test_journal_output_is_bounded(self):
         result = diagnostics.journal_summary(lambda _args: SimpleNamespace(returncode=0, stdout=b"a" * (2 * 1024 * 1024 + 1)))
