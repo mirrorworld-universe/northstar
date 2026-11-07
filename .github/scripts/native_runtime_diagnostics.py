@@ -37,6 +37,10 @@ MARKERS = {
     "too many open files": "file_descriptor_limit",
     "failed to open ledger": "ledger_open_failure",
     "bank hash mismatch": "bank_hash_mismatch",
+    "bank_hash_mismatch": "bank_hash_mismatch",
+    "we have tried to repair duplicate slot:": "duplicate_slot_repair_exhausted",
+    "we are attempting to dump a block that we produced": "local_block_hash_conflict",
+    "attempting to enable alpenglow but we have the wrong version": "migration_genesis_mismatch",
     "snapshot hash mismatch": "snapshot_hash_mismatch",
     "out of memory": "memory_limit",
     "oom-kill": "memory_limit",
@@ -61,6 +65,24 @@ def marker_counts(messages):
         for marker in {value for text, value in MARKERS.items() if text in message.lower()}:
             counts[marker] = counts.get(marker, 0) + 1
     return counts
+
+
+def panic_sites(messages):
+    repository = Path(__file__).resolve().parents[2]
+    sites = set()
+    for message in messages:
+        if not isinstance(message, str) or "program log:" in message.lower() or "panicked at" not in message.lower():
+            continue
+        for filename, line in re.findall(
+                r"(?:^|[/\s])((?:accounts-db|core|gossip|ledger|northstar|runtime|validator)/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\.rs):([1-9][0-9]{0,6})(?::[0-9]+)?", message):
+            if (repository / filename).is_file():
+                sites.add((filename, int(line)))
+    return [{"file": filename, "line": line} for filename, line in sorted(sites)[:8]]
+
+
+def tail_evidence(tail):
+    messages = tail.decode(errors="replace").splitlines()
+    return {"marker_counts": marker_counts(messages), "panic_sites": panic_sites(messages)}
 
 
 def disk_summary(directory):
@@ -126,7 +148,7 @@ def file_log_summary(path):
         os.lseek(descriptor, max(0, info.st_size - 64 * 1024), os.SEEK_SET)
         tail = os.read(descriptor, 64 * 1024)
         return {"status": "classified", "bytes_examined": len(tail), "modified_at_unix": int(info.st_mtime), "rotated_sibling": rotated,
-                "marker_counts": marker_counts(tail.decode(errors="replace").splitlines()),
+                **tail_evidence(tail),
                 "raw_messages_included": False, "markers_are_not_a_root_cause_diagnosis": True}
     except OSError:
         return {"status": "unavailable"}
@@ -184,7 +206,7 @@ def gzip_log_summary(path, *, max_compressed_bytes=4 * 1024 ** 3, max_decoded_by
                     return {"status": "rotation_over_limit", "limit_kind": "decoded_bytes", "decoded_bytes_scanned": scanned, **metadata}
                 tail = (tail + chunk)[-64 * 1024:]
         return {"status": "classified", "bytes_examined": len(tail), "decoded_bytes_scanned": scanned, **metadata,
-                "marker_counts": marker_counts(tail.decode(errors="replace").splitlines()),
+                **tail_evidence(tail),
                 "raw_messages_included": False, "markers_are_not_a_root_cause_diagnosis": True}
     except (OSError, EOFError, zlib.error):
         return {"status": "unavailable"}
@@ -277,7 +299,7 @@ def journal_summary(run, namespace=""):
         entries += 1
         message = entry.get("MESSAGE") if isinstance(entry, dict) else None
         messages.append(message)
-    return {"status": "classified", "entries_examined": entries, "marker_counts": marker_counts(messages), "namespaced": bool(selected_namespace),
+    return {"status": "classified", "entries_examined": entries, "marker_counts": marker_counts(messages), "panic_sites": panic_sites(messages), "namespaced": bool(selected_namespace),
             "raw_messages_included": False, "markers_are_not_a_root_cause_diagnosis": True}
 
 

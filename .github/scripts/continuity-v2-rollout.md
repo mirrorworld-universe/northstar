@@ -133,7 +133,8 @@ restart or reload a service, upload a program, or read transaction-journal conte
 The helper reports systemd lifecycle/exit properties and checks known managed
 activation records, executable bytes and journal-directory ownership/modes.
 Bounded systemd journal and configured validator-log scans emit only fixed error-marker
-counts, never raw messages, file paths, command lines, keys or private control contents.
+counts and bounded panic locations for repository source files, never raw messages,
+operational file paths, command lines, keys or private control contents.
 Operational file tails are capped at 64 KiB and accepted only from validated managed
 records; one rotated sibling alias is allowed, not arbitrary alias traversal.
 For an inactive service with no current marker, inspect at most two matching rotations
