@@ -9,6 +9,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 import native_runtime_diagnostics as diagnostics
 from continuity_devnet import public_text
@@ -342,6 +343,36 @@ class DiagnosticTests(unittest.TestCase):
         result = diagnostics.gzip_log_summary(previous, max_decoded_bytes=32)
         self.assertEqual(result["status"], "rotation_over_limit")
         self.assertNotIn("marker_counts", result)
+
+    def test_archive_between_old_and_approved_compressed_budget_is_read(self):
+        previous = self.root / (self.logfile.name + ".1.gz")
+        previous.write_bytes(gzip.compress(b"permission denied"))
+        actual = previous.stat()
+        larger = SimpleNamespace(st_mode=actual.st_mode, st_mtime=actual.st_mtime, st_size=128 * 1024 * 1024)
+        with mock.patch.object(diagnostics.os, "fstat", return_value=larger):
+            result = diagnostics.gzip_log_summary(previous)
+        self.assertEqual(result["status"], "classified")
+        self.assertEqual(result["compressed_bytes"], larger.st_size)
+        self.assertEqual(result["marker_counts"], {"permission_denied": 1})
+
+    def test_archive_limit_reports_which_budget_was_reached(self):
+        previous = self.root / (self.logfile.name + ".1.gz")
+        previous.write_bytes(gzip.compress(b"x" * 1000))
+        result = diagnostics.gzip_log_summary(previous, max_decoded_bytes=32)
+        self.assertEqual(result["status"], "rotation_over_limit")
+        self.assertEqual(result["limit_kind"], "decoded_bytes")
+        self.assertEqual(result["limits"]["decoded_bytes"], 32)
+        self.assertNotIn("marker_counts", result)
+
+    def test_compressed_and_time_limits_are_reported_without_partial_markers(self):
+        previous = self.root / (self.logfile.name + ".1.gz")
+        previous.write_bytes(gzip.compress(b"permission denied"))
+        for arguments, kind in (({"max_compressed_bytes": 1}, "compressed_bytes"), ({"max_seconds": -1}, "elapsed_seconds")):
+            result = diagnostics.gzip_log_summary(previous, **arguments)
+            self.assertEqual(result["status"], "rotation_over_limit")
+            self.assertEqual(result["limit_kind"], kind)
+            self.assertEqual(result["compressed_bytes"], previous.stat().st_size)
+            self.assertNotIn("marker_counts", result)
 
     def test_rotation_discovery_is_bounded_and_excludes_aliases_and_private_files(self):
         for number in range(1, 5):
