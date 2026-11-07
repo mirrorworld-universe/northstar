@@ -11,7 +11,7 @@ use {
     solana_runtime::{
         bank::{Bank, SlotLeader},
         bank_client::BankClient,
-        genesis_utils::{GenesisConfigInfo, create_genesis_config},
+        genesis_utils::{GenesisConfigInfo, create_genesis_config_with_default_rent},
         loader_utils::create_program,
     },
     solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
@@ -30,7 +30,7 @@ use {
 
 fn set_stake_history_sysvar_for_tests(bank: &Bank, stake_history: &StakeHistory) {
     let stake_history_account_size =
-        STAKE_HISTORY_ACCOUNT_SIZE.max(bincode::serialized_size(stake_history).unwrap() as usize);
+        STAKE_HISTORY_ACCOUNT_SIZE.max(wincode::serialized_size(stake_history).unwrap() as usize);
     let old_stake_history_account = bank.get_account(&stake_history::id()).unwrap();
     let lamports = old_stake_history_account
         .lamports()
@@ -57,7 +57,7 @@ fn test_sysvar_syscalls() {
         mut genesis_config,
         mint_keypair,
         ..
-    } = create_genesis_config(50);
+    } = create_genesis_config_with_default_rent(1_000_000_000_000);
     genesis_config.accounts.remove(&disable_fees_sysvar::id());
 
     let bank = Bank::new_for_tests(&genesis_config);

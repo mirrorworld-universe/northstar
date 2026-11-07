@@ -2,7 +2,7 @@
 mod geyser;
 
 use {
-    crate::banking_trace::BankingPacketSender,
+    crate::banking_channels::BankingPacketSender,
     agave_banking_stage_ingress_types::BankingPacketBatch,
     crossbeam_channel::{RecvTimeoutError, SendError, Sender, TryRecvError, TrySendError},
     log::*,
@@ -998,8 +998,7 @@ mod tests {
         let payer = Keypair::new();
         fund_test_payer(&bank, &payer);
         let transaction = signed_test_transfer(&bank, &payer);
-        let (settlement_sender, local_receiver) =
-            crate::banking_trace::BankingTracer::channel_for_test();
+        let (settlement_sender, local_receiver) = crate::banking_channels::channel_for_test();
         let (forward_sender, forward_receiver) = unbounded();
 
         submit_settlement_transactions(
@@ -1025,8 +1024,7 @@ mod tests {
         let payer = Keypair::new();
         fund_test_payer(&bank, &payer);
         let transaction = signed_test_transfer(&bank, &payer);
-        let (settlement_sender, _local_receiver) =
-            crate::banking_trace::BankingTracer::channel_for_test();
+        let (settlement_sender, _local_receiver) = crate::banking_channels::channel_for_test();
         let (forward_sender, forward_receiver) = bounded(0);
         drop(forward_receiver);
 
@@ -1162,8 +1160,7 @@ mod tests {
             manager_account: Arc::clone(&payer),
             checkpoint_plan_dir: None,
         });
-        let (settlement_sender, local_receiver) =
-            crate::banking_trace::BankingTracer::channel_for_test();
+        let (settlement_sender, local_receiver) = crate::banking_channels::channel_for_test();
         let (forward_sender, forward_receiver) = unbounded();
 
         assert!(submit_next_pending_settlement_if_ready(

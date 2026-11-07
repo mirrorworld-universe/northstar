@@ -632,7 +632,8 @@ fn vrf_coordinator_runtime_request_verify_callback() {
     let payer = Keypair::new();
     let fulfiller = Keypair::new();
     let genesis = curve_enabled_genesis();
-    let genesis_sha256: String = hashv(&[&bincode::serialize(&genesis).unwrap()])
+    let genesis_sha256: String = genesis
+        .hash()
         .to_bytes()
         .iter()
         .map(|byte| format!("{byte:02x}"))
