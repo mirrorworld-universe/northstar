@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import stat
 import subprocess
 
@@ -68,10 +69,37 @@ def disk_summary(directory):
         return {"status": "unavailable"}
 
 
+def approved_log_path(path):
+    return (path.is_absolute() and len(path.parts) > 1 and path.parts[1] not in ("proc", "sys", "dev", "etc")
+            and not any(part in ("..", "control", "keys", ".ssh", ".config", "checkpoints", "unsettled", "rocksdb", "accounts", "accounts_index", "snapshots") for part in path.parts)
+            and path.suffix.lower() not in (".json", ".key", ".pem", ".pub", ".bin", ".db", ".sqlite", ".so")
+            and not path.name.startswith(("id_", "MANIFEST-")) and path.name not in ("CURRENT", "IDENTITY", "LOCK")
+            and re.fullmatch(r"[0-9]+\.log", path.name) is None)
+
+
+def unit_log_sinks(run, values):
+    try:
+        result = run(["systemctl", "cat", "--no-pager", SERVICE])
+        if result.returncode or len(result.stdout) > 256 * 1024:
+            return {}
+        section, configured = "", {}
+        for raw in result.stdout.decode(errors="replace").splitlines():
+            line = raw.strip()
+            if line.startswith("[") and line.endswith("]"):
+                section = line
+            elif section == "[Service]" and "=" in line and not line.startswith(("#", ";")):
+                name, value = line.split("=", 1)
+                if name.strip() in ("StandardOutput", "StandardError"):
+                    tokens = shlex.split(value, comments=True)
+                    configured[name.strip()] = tokens[0] if len(tokens) == 1 else ""
+        return {name: value for name, value in configured.items()
+                if value.split(":", 1)[0] == values.get(name, "").split(":", 1)[0]}
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return {}
+
+
 def file_log_summary(path):
-    if (not path.is_absolute() or any(part in ("..", "control", "keys", ".ssh", ".config", "checkpoints", "unsettled", "rocksdb", "accounts", "accounts_index", "snapshots") for part in path.parts)
-            or not any(suffix in path.name for suffix in (".log", ".out", ".err"))
-            or not any(name in path.name.lower() for name in ("validator", "agave", "solana", "northstar", "native", "stderr", "stdout"))):
+    if not approved_log_path(path):
         return {"status": "not_an_approved_log_sink"}
     descriptor = None
     try:
@@ -84,8 +112,7 @@ def file_log_summary(path):
                 raise
             target = Path(os.readlink(path))
             target = target if target.is_absolute() else path.parent / target
-            if (target.parent != path.parent or not target.name.startswith(path.stem)
-                    or not any(suffix in target.name for suffix in (".log", ".out", ".err"))):
+            if target.parent != path.parent or not target.name.startswith(path.stem) or not approved_log_path(target):
                 return {"status": "unapproved_log_alias"}
             descriptor = os.open(target, flags)
             rotated = True
@@ -303,7 +330,13 @@ def collect_report(run=execute, root=STATE_ROOT, dropin=DROPIN, lock=LOCK):
             retained_start = ""
             report["managed_dropin_readable"] = False
         report["managed_records"] = managed_records(values.get("ExecStart", ""), root, dropin, retained_start)
-        report["operational"] = operational_details(values, root, report["managed_records"])
+        records = report["managed_records"]
+        if (records.get("recorded_plan_identity_matches") and records.get("managed_dropin_matches_original")
+                and records.get("original_binary_matches") and records.get("effective_start_mentions_original_binary")
+                and any(values.get(name) in ("append", "file", "truncate") and not values.get(name + "File")
+                        for name in ("StandardOutput", "StandardError"))):
+            values.update(unit_log_sinks(run, values))
+        report["operational"] = operational_details(values, root, records)
         report["status"] = "snapshot_collected"
     except FileNotFoundError:
         report["status"] = "deployment_lock_missing"
