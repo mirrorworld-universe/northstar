@@ -123,6 +123,24 @@ The public report/Slack scope is `native-upgrade`: read-only readiness and retai
 identity, **not fresh SOL/SPL payout, oracle, SP1 or proof-acceptance qualification**.
 It does not start, stop or reconfigure an existing oracle.
 
+## Read-only host diagnostics
+
+The manual **Native runtime diagnostics (read-only)** workflow runs only from
+`master` on the existing `devnet` runner. Use it when SSH is unavailable or an
+inactive/unknown service blocks the upgrade guard. It does not start, stop,
+restart or reload a service, upload a program, or read transaction-journal contents.
+
+The helper reports systemd lifecycle/exit properties and checks known managed
+activation records, executable bytes and journal-directory ownership/modes.
+A bounded systemd journal scan emits only fixed error-marker counts, never raw
+messages, command lines, keys or private control contents. Marker counts are not
+a root-cause diagnosis. The public JSON is the only uploaded artifact.
+
+Metadata inspection takes the deployment lock in shared, nonblocking, read-only
+mode. Missing/busy locks are reported without creating a lock or changing state.
+This report is **not** RPC/on-chain qualification or authorization to restart an
+uncertain runtime; recovery remains a separate operator decision.
+
 ## Required host configuration
 
 - The shared `devnet` runner and existing `northstar-validator.service` are on the
@@ -218,6 +236,7 @@ python3 -B .github/scripts/test-continuity-rollout-state.py
 python3 -B .github/scripts/test-continuity-devnet.py
 python3 -B .github/scripts/test-continuity-devnet-model.py
 python3 -B .github/scripts/test-native-upgrade.py
+python3 -B .github/scripts/test-native-runtime-diagnostics.py
 bun test ./.github/scripts/continuity-control-journal.test.mjs ./.github/scripts/devnet-continuity-smoke.test.mjs ./.github/scripts/native-upgrade-snapshot.test.mjs
 bash -n .github/scripts/prepare-continuity-sdk.sh
 ```

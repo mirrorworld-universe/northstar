@@ -1,0 +1,35 @@
+name: Native runtime diagnostics (read-only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-runtime-diagnostics
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    if: github.repository == 'mirrorworld-universe/northstar' && github.ref == 'refs/heads/master'
+    runs-on: [devnet]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Collect public read-only diagnostics
+        id: diagnostics
+        run: |
+          set -euo pipefail
+          umask 077
+          REPORT="$RUNNER_TEMP/native-runtime-diagnostics-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          sudo -n python3 -B .github/scripts/native_runtime_diagnostics.py | tee "$REPORT"
+          printf 'report_path=%s\n' "$REPORT" >> "$GITHUB_OUTPUT"
+      - name: Retain only the sanitized public report
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-runtime-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.diagnostics.outputs.report_path }}
+          if-no-files-found: error
