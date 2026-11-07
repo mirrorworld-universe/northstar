@@ -122,16 +122,27 @@ def operational_details(values, root, records):
         except ValueError:
             pass
         candidates = []
+        flags = [flag for flag in ("--log", "-o") if any(argument == flag or argument.startswith(flag + "=") for argument in arguments)]
+        modes = {"inherit", "null", "tty", "journal", "journal-or-kmsg", "kmsg", "socket", "file", "append", "truncate", "fd"}
+        report["logger_configuration"] = {"argument_flags": flags, "working_directory_set": working.is_absolute(),
+            **{name: values.get(name, "").split(":", 1)[0] if values.get(name, "").split(":", 1)[0] in modes else "unknown"
+               for name in ("StandardOutput", "StandardError")}}
         try:
-            configured = flag_value(arguments, "--log")
+            if len(flags) > 1:
+                report["logger_configuration"]["argument_mode"] = "ambiguous"
+                raise ValueError("ambiguous logger aliases")
+            configured = flag_value(arguments, flags[0] if flags else "--log")
+            report["logger_configuration"]["argument_mode"] = "stderr" if configured == "-" else "file"
             if configured != "-":
                 configured = Path(configured)
                 if not configured.is_absolute() and working.is_absolute():
                     configured = working / configured
                 candidates.append(("validator_flag", configured))
         except ValueError:
-            if working.is_absolute():
-                candidates.append(("validator_default", working / ("agave-validator-" + records["validator"] + ".log")))
+            if not flags:
+                report["logger_configuration"]["argument_mode"] = "default"
+                if working.is_absolute():
+                    candidates.append(("validator_default", working / ("agave-validator-" + records["validator"] + ".log")))
         for name in ("StandardOutput", "StandardError"):
             if not records.get("effective_start_mentions_original_binary"):
                 continue
@@ -150,10 +161,14 @@ def operational_details(values, root, records):
     return report
 
 
-def journal_summary(run):
+def journal_summary(run, namespace=""):
+    selected_namespace = namespace if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", namespace) else ""
     try:
-        result = run(["journalctl", "--unit", SERVICE, "--no-pager", "--lines=120", "--output=json",
-                      "--output-fields=MESSAGE,PRIORITY,__REALTIME_TIMESTAMP"])
+        arguments = ["journalctl", "--unit", SERVICE, "--no-pager", "--lines=120", "--output=json",
+                     "--output-fields=MESSAGE,PRIORITY,__REALTIME_TIMESTAMP"]
+        if selected_namespace:
+            arguments.append("--namespace=" + selected_namespace)
+        result = run(arguments)
     except (OSError, subprocess.TimeoutExpired):
         return {"status": "unavailable"}
     if result.returncode or len(result.stdout) > 2 * 1024 * 1024:
@@ -167,7 +182,7 @@ def journal_summary(run):
         entries += 1
         message = entry.get("MESSAGE") if isinstance(entry, dict) else None
         messages.append(message)
-    return {"status": "classified", "entries_examined": entries, "marker_counts": marker_counts(messages),
+    return {"status": "classified", "entries_examined": entries, "marker_counts": marker_counts(messages), "namespaced": bool(selected_namespace),
             "raw_messages_included": False, "markers_are_not_a_root_cause_diagnosis": True}
 
 
@@ -264,7 +279,7 @@ def managed_records(start, root, dropin, retained_start=""):
 def collect_report(run=execute, root=STATE_ROOT, dropin=DROPIN, lock=LOCK):
     report = {"version": 1, "read_only": True, "service": SERVICE,
               "scope": "systemd and retained metadata only; no RPC qualification or recovery"}
-    private_properties = ("ExecStart", "StandardOutput", "StandardOutputFile", "StandardError", "StandardErrorFile", "WorkingDirectory")
+    private_properties = ("ExecStart", "StandardOutput", "StandardOutputFile", "StandardError", "StandardErrorFile", "WorkingDirectory", "LogNamespace")
     result = run(["systemctl", "show", SERVICE, *["--property=" + name for name in (*PUBLIC_PROPERTIES, *private_properties)]])
     if len(result.stdout) > 64 * 1024:
         return {**report, "status": "service_query_unavailable"}
@@ -273,7 +288,7 @@ def collect_report(run=execute, root=STATE_ROOT, dropin=DROPIN, lock=LOCK):
         return {**report, "status": "service_query_unavailable"}
     report["systemd_query_exit_code"] = result.returncode
     report["systemd"] = {key: values[key][:160] for key in PUBLIC_PROPERTIES if key in values}
-    report["journal"] = journal_summary(run)
+    report["journal"] = journal_summary(run, values.get("LogNamespace", ""))
     descriptor = None
     try:
         descriptor = os.open(lock, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
