@@ -156,7 +156,7 @@ def previous_log_rotations(path):
     return [candidate for _, candidate in sorted(found, reverse=True)[:2]]
 
 
-def gzip_log_summary(path, *, max_decoded_bytes=1024 ** 3):
+def gzip_log_summary(path, *, max_compressed_bytes=4 * 1024 ** 3, max_decoded_bytes=64 * 1024 ** 3, max_seconds=90):
     if not approved_log_path(path):
         return {"status": "not_an_approved_log_sink"}
     descriptor = None
@@ -165,24 +165,25 @@ def gzip_log_summary(path, *, max_decoded_bytes=1024 ** 3):
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
             return {"status": "not_a_regular_log"}
-        if info.st_size > 64 * 1024 * 1024:
-            return {"status": "rotation_over_limit"}
+        metadata = {"compressed_bytes": info.st_size, "modified_at_unix": int(info.st_mtime), "compressed": True,
+                    "limits": {"compressed_bytes": max_compressed_bytes, "decoded_bytes": max_decoded_bytes, "seconds": max_seconds}}
+        if info.st_size > max_compressed_bytes:
+            return {"status": "rotation_over_limit", "limit_kind": "compressed_bytes", **metadata}
         source = os.fdopen(descriptor, "rb")
         descriptor = None
-        deadline, scanned, tail = time.monotonic() + 5, 0, b""
+        deadline, scanned, tail = time.monotonic() + max_seconds, 0, b""
         with source, gzip.GzipFile(fileobj=source, mode="rb") as archive:
             while True:
                 if time.monotonic() > deadline:
-                    return {"status": "rotation_over_limit"}
+                    return {"status": "rotation_over_limit", "limit_kind": "elapsed_seconds", "decoded_bytes_scanned": scanned, **metadata}
                 chunk = archive.read(min(64 * 1024, max_decoded_bytes - scanned + 1))
                 if not chunk:
                     break
                 scanned += len(chunk)
                 if scanned > max_decoded_bytes:
-                    return {"status": "rotation_over_limit"}
+                    return {"status": "rotation_over_limit", "limit_kind": "decoded_bytes", "decoded_bytes_scanned": scanned, **metadata}
                 tail = (tail + chunk)[-64 * 1024:]
-        return {"status": "classified", "bytes_examined": len(tail), "decoded_bytes_scanned": scanned,
-                "modified_at_unix": int(info.st_mtime), "compressed": True,
+        return {"status": "classified", "bytes_examined": len(tail), "decoded_bytes_scanned": scanned, **metadata,
                 "marker_counts": marker_counts(tail.decode(errors="replace").splitlines()),
                 "raw_messages_included": False, "markers_are_not_a_root_cause_diagnosis": True}
     except (OSError, EOFError, zlib.error):
