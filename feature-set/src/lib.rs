@@ -82,6 +82,7 @@ pub struct FeatureSnapshot {
     pub remove_inactive_stakes: bool,
     pub loader_v3_set_program_data_to_elf_length: bool,
     pub early_instruction_trace_overflow_detection: bool,
+    pub loaderv3_programdata_size_floor: bool,
 }
 
 impl From<&AHashMap<Pubkey, u64>> for FeatureSnapshot {
@@ -187,6 +188,7 @@ impl From<&AHashMap<Pubkey, u64>> for FeatureSnapshot {
             early_instruction_trace_overflow_detection: is_active(
                 &early_instruction_trace_overflow_detection::ID,
             ),
+            loaderv3_programdata_size_floor: is_active(&loaderv3_programdata_size_floor::ID),
         }
     }
 }
@@ -350,6 +352,7 @@ impl FeatureSet {
                 .loader_v3_set_program_data_to_elf_length,
             early_instruction_trace_overflow_detection: snapshot
                 .early_instruction_trace_overflow_detection,
+            loaderv3_programdata_size_floor: snapshot.loaderv3_programdata_size_floor,
         }
     }
 }
@@ -1551,6 +1554,10 @@ pub mod early_instruction_trace_overflow_detection {
     solana_pubkey::declare_id!("HeqqMQXVqavmiJsGTEXgCMydzMEWiiQTAgbs9KVKJVww");
 }
 
+pub mod loaderv3_programdata_size_floor {
+    solana_pubkey::declare_id!("8whkDenELnfwYLirBc4Wb4H2Z1z5K7tiykpdxJS7cWg1");
+}
+
 pub static FEATURE_NAMES: LazyLock<AHashMap<Pubkey, &'static str>> = LazyLock::new(|| {
     [
         (secp256k1_program_enabled::id(), "secp256k1 program"),
@@ -2649,6 +2656,10 @@ pub static FEATURE_NAMES: LazyLock<AHashMap<Pubkey, &'static str>> = LazyLock::n
             early_instruction_trace_overflow_detection::id(),
             "SIMD-582: Early detection of instruction trace overflow",
         ),
+        (
+            loaderv3_programdata_size_floor::id(),
+            "Apply a minimum loaded data size to loader-v3 ProgramData accounts",
+        ),
         /*************** ADD NEW FEATURES HERE ***************/
         /***** ADD NEW FEATURE BOOL TO `FeatureSnapshot` *****/
     ]
@@ -2689,6 +2700,20 @@ pub static FULL_INFLATION_FEATURE_PAIRS: LazyLock<AHashSet<FullInflationFeatureP
 #[cfg(test)]
 mod test {
     use super::*;
+
+    // Sonic: Devnet activated this consensus feature at the recorded failure slot.
+    #[test]
+    fn invariant_programdata_floor_activation_reaches_svm() {
+        let mut features = FeatureSet::default();
+        let feature = Pubkey::from_str_const("8whkDenELnfwYLirBc4Wb4H2Z1z5K7tiykpdxJS7cWg1");
+        assert!(FEATURE_NAMES.contains_key(&feature));
+        assert!(!features.snapshot().loaderv3_programdata_size_floor);
+        assert!(!features.runtime_features().loaderv3_programdata_size_floor);
+        features.activate(&feature, 519_264_000);
+        assert_eq!(features.activated_slot(&feature), Some(519_264_000));
+        assert!(features.snapshot().loaderv3_programdata_size_floor);
+        assert!(features.runtime_features().loaderv3_programdata_size_floor);
+    }
 
     #[test]
     fn test_full_inflation_features_enabled_devnet_and_testnet() {
