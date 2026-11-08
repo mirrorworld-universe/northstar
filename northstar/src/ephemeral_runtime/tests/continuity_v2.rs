@@ -661,6 +661,25 @@ fn regression_v2_manager_activation_installs_durable_lineage() {
 }
 
 #[test]
+fn invariant_v2_shutdown_releases_rpc_lineage_writer_before_return() {
+    let fixture = Fixture::new();
+    let directory = tempfile::tempdir().unwrap();
+    for attempt in 0..4 {
+        let path = directory.path().join(attempt.to_string());
+        let mut runtime = fixture.runtime(&path, StartupModeV2::InitializeNew);
+        let lineage = runtime.lineage_store_v2().unwrap();
+        let retained = Arc::downgrade(&lineage);
+        drop(lineage);
+        runtime.shutdown();
+        drop(runtime);
+        assert!(
+            retained.upgrade().is_none(),
+            "a stopped RPC worker still owns the lineage writer"
+        );
+    }
+}
+
+#[test]
 fn regression_v2_manager_resume_preserves_finalized_ingress() {
     let fixture = Fixture::new();
     let directory = tempfile::tempdir().unwrap();

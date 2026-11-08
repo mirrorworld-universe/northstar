@@ -114,8 +114,10 @@ jobs:
           python3 -B .github/scripts/test-continuity-devnet.py
           python3 -B .github/scripts/test-continuity-devnet-model.py
           python3 -B .github/scripts/test-native-upgrade.py
+          python3 -B .github/scripts/test-native-l1-recovery.py
+          python3 -B .github/scripts/test-native-runtime-diagnostics.py
           python3 -B .github/scripts/test-prepare-continuity-sdk.py
-          bun test ./.github/scripts/continuity-control-journal.test.mjs ./.github/scripts/devnet-continuity-smoke.test.mjs ./.github/scripts/continuity-workflow.test.mjs ./.github/scripts/native-upgrade-snapshot.test.mjs
+          bun test ./.github/scripts/continuity-control-journal.test.mjs ./.github/scripts/devnet-continuity-smoke.test.mjs ./.github/scripts/continuity-workflow.test.mjs ./.github/scripts/native-upgrade-snapshot.test.mjs ./.github/scripts/native-runtime-diagnostics-workflow.test.mjs
           bash -n .github/scripts/prepare-continuity-sdk.sh
       - uses: actions/setup-node@v4
         with:
@@ -198,6 +200,15 @@ jobs:
       # Sonic: Portal-enabled genesis must preserve explicitly pinned program artifacts.
       - name: Test explicit genesis program selection
         run: cargo test --locked -p solana-test-validator --lib portal_configuration_preserves_explicit -- --test-threads=1
+      - name: Test active devnet feature and implicit account locks
+        run: |
+          cargo test --locked -p agave-feature-set --features agave-unstable-api --lib
+          cargo test --locked -p solana-svm --features agave-unstable-api --lib account_loader::tests
+          cargo test --locked -p solana-runtime-transaction --features agave-unstable-api --lib
+          cargo test --locked -p solana-accounts-db --features agave-unstable-api --lib accounts::tests::
+          cargo test --locked -p solana-core --lib banking_stage::transaction_scheduler
+          cargo test --locked -p solana-unified-scheduler-logic --features agave-unstable-api --lib
+          cargo test --locked -p solana-runtime --features agave-unstable-api --lib test_bank_hash_deterministic_with_stakes_cache
       - name: Run Northstar crate tests
         run: BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar -p northstar-portal --no-fail-fast
       # Sonic: Isolate the continuity fixture from the default deployment artifact.
@@ -374,12 +385,18 @@ jobs:
         env:
           NATIVE_STAGE: ${{ steps.continuity_stage.outputs.directory }}
           CONTINUITY_SDK: ${{ steps.continuity_sdk.outputs.directory }}
+          L1_RECOVERY_SLOT: ${{ vars.NORTHSTAR_L1_RECOVERY_SLOT }}
         run: |
           set -euo pipefail
           export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+          recovery_args=()
+          if [[ -n "$L1_RECOVERY_SLOT" ]]; then
+            [[ "$L1_RECOVERY_SLOT" =~ ^[1-9][0-9]{0,19}$ ]]
+            recovery_args=(--recover-failed-l1-slot "$L1_RECOVERY_SLOT")
+          fi
           python3 -B .github/scripts/continuity_devnet.py run \
             --stage "$NATIVE_STAGE" --revision "$GITHUB_SHA" \
-            --sdk-checkout "$CONTINUITY_SDK" --upgrade-existing
+            --sdk-checkout "$CONTINUITY_SDK" --upgrade-existing "${recovery_args[@]}"
 
       - name: Retain public native qualification report
         uses: actions/upload-artifact@v4
@@ -459,6 +476,13 @@ jobs:
                 'Existing Portal/bridge programs, SessionV2 and journal paths were retained.' \
                 'Read-only session/RPC readiness and ER SSE health checks passed. No programs were deployed.' \
                 'This is not a fresh SOL/SPL payout, oracle, SP1 or proof-acceptance qualification.')
+              ;;
+            native-l1-recovery)
+              SUMMARY='Northstar native validator and L1 snapshot recovery succeeded.'
+              E2E_REPORT=$(printf '%s\n' \
+                'Prior L1 data and all ER journals were preserved. Portal/bridge programs and SessionV2 were retained.' \
+                'New L1 directories, a post-failure snapshot, session/RPC readiness and ER SSE health were qualified.' \
+                'No programs were deployed. This is not a fresh SOL/SPL payout, oracle, SP1 or proof-acceptance qualification.')
               ;;
             *) echo 'Unknown native qualification scope' >&2; exit 1 ;;
           esac

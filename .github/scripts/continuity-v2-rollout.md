@@ -123,6 +123,73 @@ The public report/Slack scope is `native-upgrade`: read-only readiness and retai
 identity, **not fresh SOL/SPL payout, oracle, SP1 or proof-acceptance qualification**.
 It does not start, stop or reconfigure an existing oracle.
 
+## Preserved-state failed-L1 recovery
+
+An already failed validator cannot satisfy the normal upgrade's live ER preflight.
+For the reviewed ProgramData feature mismatch, `--upgrade-existing
+--recover-failed-l1-slot <slot>` selects a separate, explicit recovery admission.
+Release CD adds this option only when the repository variable
+`NORTHSTAR_L1_RECOVERY_SLOT` is set. Remove that variable after successful recovery;
+ordinary upgrades must not select a new L1 namespace.
+
+Recovery requires target source history containing the reviewed native fix,
+a stopped original managed activation, no pending automatic restart,
+unchanged effective service configuration and owner, and the finalized
+feature account's activation slot equal to the supplied failure slot. It binds a
+read-only upstream SessionV2 snapshot to the retained SDK bootstrap identity,
+nonce-1 context, authority, profile, settings and separately pinned ER genesis.
+Missing bindings or changed controls stop admission. Unknown/manual installations
+and uncertain prior starts are not converted into recovery attempts.
+
+Only L1 data paths change: ledger, accounts, account index, snapshots/archives and
+tower use private directories under the new upgrade namespace. Snapshot/genesis
+fetching is enabled with the complete devnet genesis pinned, and voting is disabled.
+The original ledger/accounts/snapshots are not deleted, copied over or repaired.
+Existing Portal/bridge programs, session, protocol profile, keys, ER checkpoint and
+unsettled directories remain unchanged. This path does not load a signer, deploy
+programs or request additional SOL; ordinary runtime transaction fees are separate.
+
+The same immutable plan, frozen journals and durable one-start barrier apply.
+Unrecognized pre-start files in the new L1 directories block startup. The stopped
+original runtime is never automatically started, even if a pre-start fingerprint
+fails. Qualification requires a snapshot newer than the failure slot, current
+L1/ER synchronization, unchanged session identity/ER genesis and healthy ER SSE.
+All native bank-hash guards remain enabled. A qualification failure stops the new
+runtime without rollback or state clearing. A qualified same-plan retry does not
+start it again.
+
+The public qualification scope is `native-l1-recovery`, not fresh SOL/SPL payout,
+oracle, SP1 or proof-acceptance qualification. A later native upgrade can retain
+these qualified L1 paths without creating another ledger.
+
+## Read-only host diagnostics
+
+The manual **Native runtime diagnostics (read-only)** workflow runs only from
+`master` on the existing `devnet` runner. Use it when SSH is unavailable or an
+inactive/unknown service blocks the upgrade guard. It does not start, stop,
+restart or reload a service, upload a program, or read transaction-journal contents.
+
+The helper reports systemd lifecycle/exit properties and checks known managed
+activation records, executable bytes and journal-directory ownership/modes.
+Bounded systemd journal and configured validator-log scans emit only fixed error-marker
+counts and bounded panic locations for repository source files, never raw messages,
+operational file paths, command lines, keys or private control contents.
+Operational file tails are capped at 64 KiB and accepted only from validated managed
+records; one rotated sibling alias is allowed, not arbitrary alias traversal.
+For an inactive service with no current marker, inspect at most two matching rotations
+from a 128-entry directory scan. Gzip scans allow at most 4 GiB compressed and 64 GiB
+decoded, checking a 90-second deadline between chunks. Only the final 64 KiB is
+classified. Reports include archive size and the exact limit reached; incomplete
+scans are never treated as complete coverage.
+Filesystem availability is reported for the state root and recorded ledger. Transaction
+journals and account databases are not read. Marker counts are not a root-cause
+diagnosis. The public JSON is the only uploaded artifact.
+
+Metadata inspection takes the deployment lock in shared, nonblocking, read-only
+mode. Missing/busy locks are reported without creating a lock or changing state.
+This report is **not** RPC/on-chain qualification or authorization to restart an
+uncertain runtime; recovery remains a separate operator decision.
+
 ## Required host configuration
 
 - The shared `devnet` runner and existing `northstar-validator.service` are on the
@@ -218,6 +285,8 @@ python3 -B .github/scripts/test-continuity-rollout-state.py
 python3 -B .github/scripts/test-continuity-devnet.py
 python3 -B .github/scripts/test-continuity-devnet-model.py
 python3 -B .github/scripts/test-native-upgrade.py
+python3 -B .github/scripts/test-native-l1-recovery.py
+python3 -B .github/scripts/test-native-runtime-diagnostics.py
 bun test ./.github/scripts/continuity-control-journal.test.mjs ./.github/scripts/devnet-continuity-smoke.test.mjs ./.github/scripts/native-upgrade-snapshot.test.mjs
 bash -n .github/scripts/prepare-continuity-sdk.sh
 ```

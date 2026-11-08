@@ -6,6 +6,8 @@ from pathlib import Path
 import re
 import time
 
+import native_l1_recovery as recovery
+
 from continuity_rollout_state import (
     ARTIFACTS, DEVNET, SDK_REVISION, append_private, atomic_json, canonical, checked_directory,
     file_hash, flag_value, geyser_events_config, immutable_json, private_json, require,
@@ -215,6 +217,12 @@ class NativeUpgrade:
         self.ops.log = self.control / "operations.log"
         append_private(self.ops.log, b"")
         saved = private_json(self.record) if self.record.exists() else None
+        requested_recovery = getattr(self.args, "recover_failed_l1_slot", None)
+        self.recovery_slot = saved.get("recovery_failed_slot") if saved else requested_recovery
+        require(requested_recovery is None or requested_recovery == self.recovery_slot,
+                "established L1 recovery slot differs")
+        if self.recovery_slot is not None:
+            recovery.feature(self.ops, self.recovery_slot, self.args.revision)
         active = self.state() == "active"
         actual = self.ops.inventory() if active else None
         if saved:
@@ -225,15 +233,21 @@ class NativeUpgrade:
             self.stage = Path(saved["stage"])
             require(verify_artifacts(self.stage, self.args.revision)["sha256"] == saved["artifacts"], "retained upgrade stage differs")
         else:
-            require(active and not os.path.lexists(self.runtime) and not any(os.path.lexists(path) for path in (self.frozen, self.started, self.installed, self.progress, self.control / "report.json")),
+            require((active and self.recovery_slot is None or not active and self.recovery_slot is not None)
+                    and not os.path.lexists(self.runtime) and not any(os.path.lexists(path) for path in
+                    (self.frozen, self.started, self.installed, self.progress, self.control / "report.json")),
                     "native upgrade lacks an original active service or established plan")
-            before = actual
+            before = recovery.offline_inventory(self.ops, self.args.state_root, self.service, self.dropin) if self.recovery_slot is not None else actual
             self.stage = self.args.stage
         self.load_base(before)
         binding = self.binding(before)
+        if self.recovery_slot is not None:
+            recovery.verify_service_files(self.ops, self.base, self.service, self.dropin)
         config = self.runtime / "geyser-events.json"
-        desired = {**service_spec(before),
-                   "arguments": upgrade_arguments(before["arguments"], self.runtime / ARTIFACTS["validator"], config, binding["config"]),
+        desired_arguments = upgrade_arguments(before["arguments"], self.runtime / ARTIFACTS["validator"], config, binding["config"])
+        if self.recovery_slot is not None:
+            desired_arguments = recovery.arguments(desired_arguments, self.runtime)
+        desired = {**service_spec(before), "arguments": desired_arguments,
                    "binary_sha256": self.manifest["sha256"]["validator"]}
         self.ops.manifest = self.manifest
         self.ops.stage = self.stage
@@ -245,9 +259,11 @@ class NativeUpgrade:
         else:
             dropin = self.inspect([self.dropin])[str(self.dropin)]
             require(dropin.get("sha256") == binding["dropin_sha256"] and dropin.get("mode") == 0o600, "managed service drop-in changed")
-            snapshot = self.snapshot("online")
-            slots = [self.ops.l1.call("getSlot", [{"commitment": commitment}]) for commitment in ("processed", "confirmed", "finalized")]
-            slots.extend([self.ops.upstream.call("getSlot", [{"commitment": "confirmed"}]), self.program_floor])
+            snapshot = self.snapshot("l1" if self.recovery_slot is not None else "online")
+            if self.recovery_slot is not None:
+                snapshot = recovery.retained_snapshot(self.base_control, self.base_plan, self.args, snapshot)
+            slots = [] if self.recovery_slot is not None else [self.ops.l1.call("getSlot", [{"commitment": commitment}]) for commitment in ("processed", "confirmed", "finalized")]
+            slots.extend([self.ops.upstream.call("getSlot", [{"commitment": "confirmed"}]), self.program_floor, self.recovery_slot or 0])
             require(all(type(slot) is int and slot >= 0 for slot in slots), "invalid native recovery slot floor")
             floor = max(slots)
             retained = (set(before["retained_paths"]) - {str(self.dropin)}) | {str(self.base_control), before["arguments"][0], *before["state_environment"].values()}
@@ -258,6 +274,8 @@ class NativeUpgrade:
                          "artifacts": self.manifest["sha256"], "base_revision": self.base.name, "base_plan_sha256": digest(self.base_plan),
                          "before": service_spec(before), "binding": binding, "desired": desired, "retained_paths": retained,
                          "identity": snapshot["identity"], "er_genesis": snapshot["er_genesis"], "l1_floor": floor}
+            if self.recovery_slot is not None:
+                self.plan["recovery_failed_slot"] = self.recovery_slot
             immutable_json(self.record, self.plan)
             immutable_json(self.progress, {"version": 1, "plan_sha256": digest(self.plan), "phase": "prepared"})
         phase = self.phase()
@@ -274,7 +292,7 @@ class NativeUpgrade:
         if phase == "qualified":
             report = private_json(self.control / "report.json")
             require(report.get("upgrade_plan_sha256") == digest(self.plan) and report.get("result") == "passed"
-                    and report.get("qualification_kind") == "native-upgrade" and report.get("source_revision") == self.args.revision,
+                    and report.get("qualification_kind") == self.qualification_kind() and report.get("source_revision") == self.args.revision,
                     "established native report differs")
         self.current = service_spec(actual) if actual else None
         require(self.current is None or self.current in (self.plan["before"], desired), "running native service changed before upgrade")
@@ -283,7 +301,8 @@ class NativeUpgrade:
         elif phase in ("start-attempted", "qualified"):
             raise ValueError("native start was already attempted; reconcile the service before retry")
         if not active:
-            require(self.frozen.exists(), "inactive native upgrade lacks a frozen journal inventory")
+            require(self.frozen.exists() or self.recovery_slot is not None and phase == "prepared",
+                    "inactive native upgrade lacks a frozen journal inventory")
         require(self.snapshot("l1")["identity"] == self.plan["identity"], "retained session identity changed before upgrade")
 
     def freeze(self):
@@ -301,7 +320,7 @@ class NativeUpgrade:
             self.advance(("prepared",), "frozen")
         except BaseException:
             # Only the original runtime may resume before any configuration change.
-            if self.inspect([self.dropin])[str(self.dropin)].get("sha256") == self.plan["binding"]["dropin_sha256"]:
+            if self.current is not None and self.recovery_slot is None and self.inspect([self.dropin])[str(self.dropin)].get("sha256") == self.plan["binding"]["dropin_sha256"]:
                 self.ops.execute(["sudo", "-n", "systemctl", "start", self.service], timeout=180, allowed=True)
             raise
 
@@ -313,7 +332,7 @@ class NativeUpgrade:
     def install(self):
         before = self.plan["before"]
         uid, gid = str(before["uid"]), str(before["gid"])
-        directories = (self.runtime, self.runtime / "bin", self.runtime / "lib")
+        directories = (self.runtime, self.runtime / "bin", self.runtime / "lib", *recovery.paths(self.runtime)) if self.recovery_slot is not None else (self.runtime, self.runtime / "bin", self.runtime / "lib")
         targets = {role: self.runtime / ARTIFACTS[role] for role in ("validator", "geyser_events")}
         config = self.runtime / "geyser-events.json"
         observed = self.inspect([*directories, *targets.values(), config, self.dropin])
@@ -373,6 +392,10 @@ class NativeUpgrade:
                 and all(str(value) in effective for value in (self.runtime / ARTIFACTS["validator"], self.runtime / "geyser-events.json",
                 "--portal", "--er-geyser-plugin-config", self.base_plan["programs"]["portal"], *self.plan["before"]["state_environment"].values())),
                 "another systemd override replaces the native upgrade")
+        if self.recovery_slot is not None:
+            require(all(str(path) in effective for path in recovery.paths(self.runtime)[1:]),
+                    "effective L1 recovery paths differ")
+            recovery.verify_service_files(self.ops, self.base, self.service, self.dropin)
 
     def native_files(self):
         targets = {role: self.runtime / ARTIFACTS[role] for role in ("validator", "geyser_events")}
@@ -412,6 +435,8 @@ class NativeUpgrade:
             except (OSError, ValueError):
                 pass
             if status is not None:
+                if self.recovery_slot is not None:
+                    recovery.verify_snapshot(self.ops, self.recovery_slot)
                 require(status.get("checkpointError") is None, "native checkpoint quarantine blocks upgrade qualification")
                 if (status.get("isSyncing") is False and type(status.get("latestSyncedSlot")) is int
                         and type(status.get("latestL1Slot")) is int
@@ -427,6 +452,9 @@ class NativeUpgrade:
             time.sleep(1)
         raise RuntimeError("native upgrade readiness timed out; no automatic rollback is permitted")
 
+    def qualification_kind(self):
+        return "native-l1-recovery" if self.recovery_slot is not None else "native-upgrade"
+
     def qualify(self):
         self.verify_running_files()
         self.wait_ready()
@@ -436,7 +464,7 @@ class NativeUpgrade:
         require(frozen.get("plan_sha256") == digest(self.plan)
                 and frozen["protocol_controls"] == self.fingerprint([self.base_control]), "retained protocol control records changed")
         identity = self.plan["identity"]
-        report = {"version": 2, "result": "passed", "qualification_kind": "native-upgrade",
+        report = {"version": 2, "result": "passed", "qualification_kind": self.qualification_kind(),
                   "scope": "native binary/plugin and retained session readiness; not a fresh SOL/SPL, oracle, or SP1 qualification",
                   "source_revision": self.args.revision, "base_source_revision": self.base.name,
                   "upgrade_plan_sha256": digest(self.plan), "portal": identity["portal"], "token_bridge": identity["token_bridge"],
@@ -444,6 +472,8 @@ class NativeUpgrade:
                   "controller_onchain_transactions": 0, "program_deployments": 0, "session_replaced": False,
                   "journal_paths_preserved": True, "protocol_controls_unchanged": True, "sse_health": "ok",
                   "proof_acceptance_qualified": False}
+        if self.recovery_slot is not None:
+            report.update(recovery_failed_slot=self.recovery_slot, prior_l1_data_preserved=True)
         immutable_json(self.control / "report.json", report)
         self.advance(("start-attempted", "qualified"), "qualified")
         if os.environ.get("GITHUB_OUTPUT"):
@@ -458,6 +488,8 @@ class NativeUpgrade:
         if self.current != self.plan["desired"]:
             self.freeze()
             self.install()
+            if self.recovery_slot is not None:
+                recovery.verify_empty_paths(self.ops, self.runtime)
             require(self.snapshot("l1")["identity"] == self.plan["identity"], "retained session changed while stopped")
             floor = self.ops.upstream.call("getSlot", [{"commitment": "processed"}])
             require(type(floor) is int and floor >= 0, "invalid pre-start L1 slot floor")
