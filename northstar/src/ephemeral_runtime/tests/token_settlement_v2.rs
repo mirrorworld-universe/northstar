@@ -4,6 +4,7 @@ use {
         checkpoint_v2::CheckpointArtifactV2,
         portal_e2e_tests::token_bridge_v2::{delegated_token_world, TokenWorldV2},
     },
+    solana_hash::Hash,
     solana_program_pack::Pack,
 };
 
@@ -153,6 +154,7 @@ where
                     find_free_addr(),
                 )
                 .map_err(|error| error.to_string())?;
+            let active_before_resume = manager.has_active_runtime();
             if !manager.resume_active_session_from_l1(root.clone()) {
                 let session =
                     northstar_portal::find_session_pda(&manager.config.portal_program_id).0;
@@ -176,9 +178,28 @@ where
                         frame.base.settlement_status,
                     )
                 });
+                let lineage_files = frame.and_then(|frame| {
+                    let identity = frame.identity(&manager.config.portal_program_id, &session);
+                    let context = identity.commitment(crate::continuity_v2::hash_parts).ok()?;
+                    let parent = manager
+                        .config
+                        .checkpoint_plan_dir
+                        .as_ref()?
+                        .join("lineage-v2");
+                    let retained = parent.join(Hash::new_from_array(context).to_string());
+                    Some((
+                        retained.is_dir(),
+                        retained.join("established-v2").is_file(),
+                        retained.join("lineage-v2.borsh").is_file(),
+                        std::fs::read_dir(parent)
+                            .map(|entries| entries.count())
+                            .ok(),
+                    ))
+                });
                 return Err(format!(
                     "partial metadata settlement did not resume: phase={phase}, L1 slot={}, \
-                     active={}, physical={physical:?}, binding={binding:?}",
+                     active={}, active_before_resume={active_before_resume}, \
+                     physical={physical:?}, binding={binding:?}, lineage_files={lineage_files:?}",
                     root.slot(),
                     manager.has_active_runtime()
                 ));

@@ -51,6 +51,30 @@ fn transition(state: &CommittedStateV2) -> RecordedTransitionV2 {
 }
 
 #[test]
+fn invariant_lineage_lock_releases_when_owner_drops_with_an_inherited_descriptor() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("state");
+    let store =
+        CheckpointLineageStoreV2::open(&directory, identity(), None, StartupModeV2::InitializeNew)
+            .unwrap();
+    let inherited = store._lock.0.try_clone().unwrap();
+    assert!(
+        CheckpointLineageStoreV2::open(&directory, identity(), None, StartupModeV2::Resume,)
+            .is_err()
+    );
+    drop(store);
+    let resumed =
+        CheckpointLineageStoreV2::open(&directory, identity(), None, StartupModeV2::Resume)
+            .unwrap();
+    assert_eq!(resumed.accepted_state().identity(), &identity());
+    drop(inherited);
+    assert!(
+        CheckpointLineageStoreV2::open(&directory, identity(), None, StartupModeV2::Resume,)
+            .is_err()
+    );
+}
+
+#[test]
 fn regression_lineage_store_v2_settlement_plan_is_durable_and_immutable() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("state");
