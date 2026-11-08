@@ -398,6 +398,15 @@ class DiagnosticTests(unittest.TestCase):
         self.assertNotIn(SECRET, json.dumps(result))
         self.assertNotIn("solReplayStage", json.dumps(result))
 
+    def test_panic_site_survives_repeated_repository_directory_names(self):
+        message = "thread 'worker' panicked at /private/northstar/northstar/core/src/replay_stage.rs:2167:25:"
+        self.assertEqual(diagnostics.panic_sites([message]), [{"file": "core/src/replay_stage.rs", "line": 2167}])
+
+    def test_panic_site_is_found_in_multiline_metric_location(self):
+        messages = ['datapoint: panic message="panicked at',
+                    'location="/private/northstar/northstar/core/src/replay_stage.rs:2167:25"']
+        self.assertEqual(diagnostics.panic_sites(messages), [{"file": "core/src/replay_stage.rs", "line": 2167}])
+
     def test_panic_sites_reject_program_logs_and_non_repository_paths(self):
         messages = ["Program log: panicked at core/src/replay_stage.rs:2167:1",
                     "panicked at /private/keys/secret.rs:1:1", "panicked at core/src/not_a_committed_file.rs:1:1"]
