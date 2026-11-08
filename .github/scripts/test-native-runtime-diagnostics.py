@@ -407,6 +407,18 @@ class DiagnosticTests(unittest.TestCase):
                     'location="/private/northstar/northstar/core/src/replay_stage.rs:2167:25"']
         self.assertEqual(diagnostics.panic_sites(messages), [{"file": "core/src/replay_stage.rs", "line": 2167}])
 
+    def test_crate_relative_panic_source_is_resolved_only_when_unique(self):
+        self.assertEqual(diagnostics.panic_sites(["panicked at src/replay_stage.rs:2167:25"]),
+                         [{"file": "core/src/replay_stage.rs", "line": 2167}])
+        self.assertEqual(diagnostics.panic_sites(["panicked at src/lib.rs:1:1"]), [])
+
+    def test_panic_evidence_reports_fixed_failure_kinds_and_numeric_slots(self):
+        text = b"thread 'worker' panicked at src/replay_stage.rs:2167:25:\ncalled `Result::unwrap()` on an `Err` value: bank hash mismatch at slot 123: expected PRIVATE, got PRIVATE"
+        result = diagnostics.tail_evidence(text)
+        self.assertEqual(result["panic_kinds"], ["bank_hash_mismatch", "result_unwrap"])
+        self.assertEqual(result["bank_hash_slots"], [123])
+        self.assertNotIn("PRIVATE", json.dumps(result))
+
     def test_panic_sites_reject_program_logs_and_non_repository_paths(self):
         messages = ["Program log: panicked at core/src/replay_stage.rs:2167:1",
                     "panicked at /private/keys/secret.rs:1:1", "panicked at core/src/not_a_committed_file.rs:1:1"]

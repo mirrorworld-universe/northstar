@@ -85,12 +85,39 @@ def panic_sites(messages):
                 r"(?=(?:^|[/\s'\"])((?:accounts-db|core|gossip|ledger|northstar|runtime|validator)/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\.rs):([1-9][0-9]{0,6})(?::[0-9]+)?)", message):
             if (repository / filename).is_file():
                 sites.add((filename, int(line)))
+        for suffix, line in re.findall(
+                r"(?=(?:^|[/\s'\"])(src/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\.rs):([1-9][0-9]{0,6})(?::[0-9]+)?)", message):
+            candidates = [candidate for candidate in repository.glob("*/" + suffix) if candidate.is_file()]
+            if len(candidates) == 1:
+                sites.add((candidates[0].relative_to(repository).as_posix(), int(line)))
     return [{"file": filename, "line": line} for filename, line in sorted(sites)[:8]]
 
 
 def tail_evidence(tail):
-    messages = tail.decode(errors="replace").splitlines()
-    return {"marker_counts": marker_counts(messages), "panic_sites": panic_sites(messages)}
+    messages = [message for message in tail.decode(errors="replace").splitlines() if "program log:" not in message.lower()]
+    context, remaining = [], 0
+    for message in messages:
+        if "panicked at" in message.lower() or "datapoint: panic " in message.lower():
+            remaining = 4
+        if remaining:
+            context.append(message)
+            remaining -= 1
+    text = "\n".join(context)
+    kinds = set()
+    if "panicked at" in text.lower():
+        for kind, expression in {
+            "bank_hash_mismatch": r"bank(?: |_)hash(?: |_)mismatch",
+            "result_unwrap": r"called\s+`?Result::(?:unwrap|expect)",
+            "option_unwrap": r"called\s+`?Option::(?:unwrap|expect)",
+            "assertion_failed": r"assertion[^\n]*failed",
+        }.items():
+            if re.search(expression, text, re.IGNORECASE):
+                kinds.add(kind)
+    slots = {int(slot) for message in messages if "bank hash" in message.lower() or "bank_hash" in message.lower()
+             for slot in re.findall(r"(?:at |For )?slot\s+([0-9]{1,20})(?=[:\s,])", message)
+             if int(slot) <= 2 ** 64 - 1}
+    return {"marker_counts": marker_counts(messages), "panic_sites": panic_sites(messages),
+            "panic_kinds": sorted(kinds), "bank_hash_slots": sorted(slots)[:8]}
 
 
 def disk_summary(directory):
