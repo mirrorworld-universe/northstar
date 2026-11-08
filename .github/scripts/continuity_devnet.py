@@ -151,6 +151,11 @@ class Deployment:
         atomic_json(request, {"paths": list(map(str, paths))})
         return json.loads(self.execute(["sudo", "-n", "python3", "-B", __file__, "inspect", "--input", request]))
 
+    def empty_l1(self, paths):
+        request = self.control / "empty-l1-input.json"
+        atomic_json(request, {"paths": list(map(str, paths))})
+        return json.loads(self.execute(["sudo", "-n", "python3", "-B", __file__, "empty-l1", "--input", request]))
+
     def flush(self, paths):
         request = self.control / "flush-input.json"
         atomic_json(request, {"paths": list(map(str, paths))})
@@ -519,7 +524,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="operation", required=True)
     subcommands.add_parser("inventory")
-    for name in ("fingerprint", "inspect", "flush"):
+    for name in ("fingerprint", "inspect", "flush", "empty-l1"):
         inspector = subcommands.add_parser(name)
         inspector.add_argument("--input", type=Path, required=True)
     run = subcommands.add_parser("run")
@@ -537,6 +542,9 @@ def main():
     args = parser.parse_args()
     if args.operation == "inventory":
         print(json.dumps(inventory_service()))
+    elif args.operation == "empty-l1":
+        from native_l1_recovery import inspect_empty_paths
+        print(json.dumps(inspect_empty_paths(private_json(args.input)["paths"])))
     elif args.operation in ("fingerprint", "inspect", "flush"):
         inspect_function = {"fingerprint": retained_fingerprint, "inspect": inspect_paths, "flush": sync_paths}[args.operation]
         print(json.dumps(inspect_function(private_json(args.input)["paths"])))

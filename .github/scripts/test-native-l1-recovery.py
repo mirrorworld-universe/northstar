@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import pwd
 import runpy
+import subprocess
+import sys
 import unittest
 
 import continuity_devnet as rollout
@@ -31,6 +33,8 @@ class RecoveryHost(UPGRADE["UpgradeHost"]):
     def execute(self, arguments, timeout=120, allowed=False):
         arguments = list(map(str, arguments))
         self.world.recovery_commands.append(arguments)
+        if "empty-l1" in arguments:
+            return json.dumps(recovery.inspect_empty_paths(private_json(arguments[-1])["paths"]))
         properties = {
             "FragmentPath": str(self.world.fragment), "DropInPaths": str(rollout.DROPIN),
             "NeedDaemonReload": "no", "User": pwd.getpwuid(os.getuid()).pw_name,
@@ -102,6 +106,29 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(report["controller_onchain_transactions"], 0)
         self.assertEqual(report["recovery_failed_slot"], FAILED_SLOT)
         self.assertTrue(report["prior_l1_data_preserved"])
+
+    def test_empty_l1_helper_cli_checks_only_the_requested_empty_directory(self):
+        directory = self.root / "empty-l1-check"
+        directory.mkdir(mode=0o700)
+        request = self.root / "empty-l1-check.json"
+        atomic_json(request, {"paths": [str(directory)]})
+        result = subprocess.check_output([sys.executable, "-B", Path(rollout.__file__), "empty-l1", "--input", request], text=True)
+        self.assertIs(json.loads(result), True)
+
+    def test_empty_l1_helper_rejects_directory_aliases(self):
+        directory = self.root / "empty-l1-check"
+        directory.mkdir(mode=0o700)
+        alias = directory / "alias"
+        alias.symlink_to(self.old_ledger, target_is_directory=True)
+        with self.assertRaises(OSError):
+            recovery.inspect_empty_paths([str(directory), str(alias)])
+        self.assertEqual((self.old_ledger / "preserved.bin").read_bytes(), b"retained L1 data")
+
+    def test_prestart_empty_check_runs_with_service_directory_privileges(self):
+        RecoveryHost(self.world).run()
+        checks = [command for command in self.world.recovery_commands if "empty-l1" in command]
+        self.assertEqual(len(checks), 1)
+        self.assertEqual(checks[0][:4], ["sudo", "-n", "python3", "-B"])
 
     def test_qualified_recovery_retry_does_not_start_again(self):
         RecoveryHost(self.world).run()

@@ -489,7 +489,7 @@ class NativeUpgrade:
             self.freeze()
             self.install()
             if self.recovery_slot is not None:
-                recovery.verify_empty_paths(self.runtime)
+                recovery.verify_empty_paths(self.ops, self.runtime)
             require(self.snapshot("l1")["identity"] == self.plan["identity"], "retained session changed while stopped")
             floor = self.ops.upstream.call("getSlot", [{"commitment": "processed"}])
             require(type(floor) is int and floor >= 0, "invalid pre-start L1 slot floor")

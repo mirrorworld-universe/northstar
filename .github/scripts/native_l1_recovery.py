@@ -1,8 +1,10 @@
 """Sonic: Explicit failed-L1 recovery preserves the old ledger and protocol namespace."""
 import grp
+import os
 from pathlib import Path
 import pwd
 import re
+import stat
 
 from continuity_rollout_state import DEVNET, SDK_REVISION, checked_directory, flag_value, private_json, require
 
@@ -141,11 +143,27 @@ def retained_snapshot(base_control, base_plan, descriptor, snapshot):
     return {**snapshot, "er_genesis": config["er_genesis"]}
 
 
-def verify_empty_paths(runtime):
-    known = paths(runtime)
+def inspect_empty_paths(requested):
+    require(isinstance(requested, list) and 0 < len(requested) <= 16
+            and all(isinstance(value, str) and Path(value).is_absolute() and ".." not in Path(value).parts for value in requested),
+            "invalid recovery L1 path inspection")
+    known = set(map(Path, requested))
+    require(len(known) == len(requested), "duplicated recovery L1 path")
     for directory in known:
-        require(directory.is_dir() and not directory.is_symlink(), "recovery L1 directory differs")
-        require(all(entry in known for entry in directory.iterdir()), "recovery L1 directory contains unrecognized pre-start data")
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(descriptor)
+            require(stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o700, "recovery L1 directory differs")
+            with os.scandir(descriptor) as entries:
+                require(all(directory / entry.name in known for entry in entries),
+                        "recovery L1 directory contains unrecognized pre-start data")
+        finally:
+            os.close(descriptor)
+    return True
+
+
+def verify_empty_paths(operations, runtime):
+    require(operations.empty_l1(paths(runtime)) is True, "recovery L1 emptiness check failed")
 
 
 def verify_snapshot(operations, failed_slot):
