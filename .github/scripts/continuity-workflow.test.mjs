@@ -42,8 +42,8 @@ test('failed L1 recovery is explicitly selected, scoped and regression tested', 
   const guards = workflow.jobs.test.steps.find(step => step.name === 'Test continuity-v2 activation guards').run;
   expect(guards).toContain('test-native-l1-recovery.py');
   const compatibility = workflow.jobs.test.steps.find(step => step.name === 'Test active devnet feature and implicit account locks').run;
-  expect(compatibility).toContain('cargo test --locked -p agave-feature-set --lib');
-  expect(compatibility).toContain('cargo test --locked -p solana-svm --lib account_loader::tests');
+  expect(compatibility).toContain('cargo test --locked -p agave-feature-set --features agave-unstable-api --lib');
+  expect(compatibility).toContain('cargo test --locked -p solana-svm --features agave-unstable-api --lib account_loader::tests');
   expect(compatibility).toContain('cargo test --locked -p solana-core --lib banking_stage::transaction_scheduler');
   const notification = steps.find(step => step.name === 'Notify Slack');
   expect(notification.run).toContain('native-l1-recovery)');

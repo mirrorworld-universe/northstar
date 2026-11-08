@@ -202,12 +202,13 @@ jobs:
         run: cargo test --locked -p solana-test-validator --lib portal_configuration_preserves_explicit -- --test-threads=1
       - name: Test active devnet feature and implicit account locks
         run: |
-          cargo test --locked -p agave-feature-set --lib
-          cargo test --locked -p solana-svm --lib account_loader::tests
-          cargo test --locked -p solana-runtime-transaction --lib
-          cargo test --locked -p solana-accounts-db --lib accounts::tests::
+          cargo test --locked -p agave-feature-set --features agave-unstable-api --lib
+          cargo test --locked -p solana-svm --features agave-unstable-api --lib account_loader::tests
+          cargo test --locked -p solana-runtime-transaction --features agave-unstable-api --lib
+          cargo test --locked -p solana-accounts-db --features agave-unstable-api --lib accounts::tests::
           cargo test --locked -p solana-core --lib banking_stage::transaction_scheduler
-          cargo test --locked -p solana-runtime --lib test_bank_hash_deterministic_with_stakes_cache
+          cargo test --locked -p solana-unified-scheduler-logic --features agave-unstable-api --lib
+          cargo test --locked -p solana-runtime --features agave-unstable-api --lib test_bank_hash_deterministic_with_stakes_cache
       - name: Run Northstar crate tests
         run: BPF_OUT_DIR="$PWD/target/deploy" cargo test --locked -p northstar -p northstar-portal --no-fail-fast
       # Sonic: Isolate the continuity fixture from the default deployment artifact.
