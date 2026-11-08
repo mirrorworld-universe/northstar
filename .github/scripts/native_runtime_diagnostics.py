@@ -69,12 +69,20 @@ def marker_counts(messages):
 
 def panic_sites(messages):
     repository = Path(__file__).resolve().parents[2]
-    sites = set()
+    sites, context = set(), 0
     for message in messages:
-        if not isinstance(message, str) or "program log:" in message.lower() or "panicked at" not in message.lower():
+        if not isinstance(message, str) or "program log:" in message.lower():
+            context = 0
             continue
+        if "panicked at" in message.lower() or "datapoint: panic " in message.lower():
+            context = 3
+        elif context:
+            context -= 1
+        else:
+            continue
+        # Checkout paths can themselves contain northstar; match overlapping suffixes.
         for filename, line in re.findall(
-                r"(?:^|[/\s])((?:accounts-db|core|gossip|ledger|northstar|runtime|validator)/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\.rs):([1-9][0-9]{0,6})(?::[0-9]+)?", message):
+                r"(?=(?:^|[/\s'\"])((?:accounts-db|core|gossip|ledger|northstar|runtime|validator)/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\.rs):([1-9][0-9]{0,6})(?::[0-9]+)?)", message):
             if (repository / filename).is_file():
                 sites.add((filename, int(line)))
     return [{"file": filename, "line": line} for filename, line in sorted(sites)[:8]]
