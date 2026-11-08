@@ -170,7 +170,7 @@ pub struct EphemeralRuntime {
     bank_operation_lock: Arc<Mutex<()>>,
     block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
     optimistically_confirmed_bank: Arc<RwLock<OptimisticallyConfirmedBank>>,
-    rpc_service: JsonRpcService,
+    rpc_service: Option<JsonRpcService>,
     rpc_addr: SocketAddr,
     /// Sonic: PubSub WebSocket service for subscriptions.
     pubsub_service: Option<PubSubService>,
@@ -825,7 +825,7 @@ impl EphemeralRuntime {
             bank_operation_lock,
             block_commitment_cache,
             optimistically_confirmed_bank,
-            rpc_service,
+            rpc_service: Some(rpc_service),
             rpc_addr,
             pubsub_service,
             pubsub_trigger,
@@ -1625,7 +1625,9 @@ impl EphemeralRuntime {
         }
         // Then stop RPC service
         self.rpc_exit.store(true, Ordering::Relaxed);
-        self.rpc_service.exit();
+        if let Some(rpc_service) = self.rpc_service.take() {
+            let _ = rpc_service.join();
+        }
         Self::purge_bank_forks_slots(&self.bank_forks.read().unwrap());
         drop(self.retired_bank_forks_sender.take());
         if let Some(reaper) = self.retired_bank_forks_reaper.take() {

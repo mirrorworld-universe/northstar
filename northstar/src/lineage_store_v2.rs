@@ -172,11 +172,20 @@ pub enum StartupModeV2 {
     Resume,
 }
 
+struct LineageFileLock(File);
+
+impl Drop for LineageFileLock {
+    fn drop(&mut self) {
+        // Closing alone retains flock ownership while an unrelated fork still holds a duplicate.
+        let _ = self.0.unlock();
+    }
+}
+
 pub struct CheckpointLineageStoreV2 {
     directory: PathBuf,
     capsule: LineageCapsuleV2,
     poisoned: bool,
-    _lock: File,
+    _lock: LineageFileLock,
 }
 
 impl CheckpointLineageStoreV2 {
@@ -215,6 +224,7 @@ impl CheckpointLineageStoreV2 {
         }
         lock.try_lock()
             .map_err(|error| io::Error::other(format!("lineage store is locked: {error}")))?;
+        let lock = LineageFileLock(lock);
         let marker = directory.join(MARKER_FILE);
         let snapshot = directory.join(CAPSULE_FILE);
         let established = path_exists(&marker)?;
