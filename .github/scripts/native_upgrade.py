@@ -419,7 +419,7 @@ class NativeUpgrade:
 
     def wait_ready(self):
         floor = start_floor(self.started, self.plan)
-        end = time.monotonic() + 1200
+        end = time.monotonic() + (3600 if self.recovery_slot is not None else 1200)
         while time.monotonic() < end:
             require(self.state() == "active", "native upgraded runtime failed during startup")
             status = None
