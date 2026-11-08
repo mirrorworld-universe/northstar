@@ -503,6 +503,9 @@ class Deployment:
     def run(self):
         pending_upgrade = self.args.state_root / "upgrades" / self.args.revision
         same_activation = os.path.lexists(self.control / "activation.json")
+        if getattr(self.args, "recover_failed_l1_slot", None) is not None:
+            require(getattr(self.args, "upgrade_existing", False) and os.path.lexists(DROPIN) and not same_activation,
+                    "L1 recovery requires an existing managed native activation and explicit upgrade opt-in")
         if getattr(self.args, "upgrade_existing", False) and (os.path.lexists(pending_upgrade) or os.path.lexists(DROPIN) and not same_activation):
             from native_upgrade import NativeUpgrade
             return NativeUpgrade(self, SERVICE, DROPIN).run()
@@ -530,6 +533,7 @@ def main():
     run.add_argument("--er-rpc", default="http://127.0.0.1:8910")
     run.add_argument("--max-estimated-cost-lamports", type=int, default=10_000_000_000)
     run.add_argument("--upgrade-existing", action="store_true", help="Permit a guarded native-only upgrade of a known managed v2 activation.")
+    run.add_argument("--recover-failed-l1-slot", type=int, help="Recover a stopped validator past the bound feature activation using fresh L1 directories; preserve all prior data.")
     args = parser.parse_args()
     if args.operation == "inventory":
         print(json.dumps(inventory_service()))
