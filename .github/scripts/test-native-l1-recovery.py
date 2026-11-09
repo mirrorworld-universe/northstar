@@ -128,6 +128,31 @@ class RecoveryTests(unittest.TestCase):
         RecoveryHost(self.world).run()
         self.assertEqual(self.world.starts, self.starts + 2)
 
+    def test_reconciliation_accepts_native_accounts_mode_only_beneath_private_l1_parent(self):
+        self.interrupt_first_recovery()
+        accounts = self.upgrade / "runtime/l1/accounts"
+        accounts.chmod(0o755)
+        (accounts / "run").mkdir()
+        (accounts / "snapshot").mkdir()
+        (accounts / "run/retained.bin").write_bytes(b"retained account cache")
+        before = retained_fingerprint([self.upgrade / "runtime", self.base, self.old_ledger])
+        RecoveryHost(self.world).run()
+        self.assertEqual(self.world.starts, self.starts + 2)
+        self.assertEqual(accounts.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(before, retained_fingerprint([self.upgrade / "runtime", self.base, self.old_ledger]))
+
+    def test_reconciliation_refuses_shared_parent_or_writable_accounts_mode(self):
+        self.interrupt_first_recovery()
+        parent = self.upgrade / "runtime/l1"
+        accounts = parent / "accounts"
+        for directory, mode in ((accounts, 0o775), (accounts, 0o777), (parent, 0o755)):
+            with self.subTest(mode=mode, role=directory.name):
+                directory.chmod(mode)
+                with self.assertRaisesRegex(ValueError, "recovery directories differ"):
+                    RecoveryHost(self.world).run()
+                directory.chmod(0o700)
+                self.assertEqual(self.world.starts, self.starts + 1)
+
     def test_reconciliation_cli_rejects_an_explicit_replacement_stage(self):
         result = subprocess.run([sys.executable, "-B", rollout.__file__, "run", "--revision", "b" * 40,
             "--sdk-checkout", str(self.world.args.sdk_checkout), "--stage", str(self.world.args.stage),

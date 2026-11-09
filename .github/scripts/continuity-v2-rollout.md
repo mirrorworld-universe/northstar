@@ -175,8 +175,12 @@ The controller requires the same inactive service with a successful SIGTERM exit
 zero automatic restarts, no restart policy and no pending systemd reload. It verifies
 installed artifacts, exact effective arguments, retained program/session bindings
 and unchanged protocol control records. It captures the current ER fingerprints
-and checks ownership/modes of the existing recovery directories. Downloaded snapshots
-and all existing L1 files remain in place; no binaries, programs, keys or service
+and checks ownership/modes of the existing recovery directories. AccountsDb recreates
+its accounts root using the service umask during bootstrap; reconciliation accepts
+`0700` or the observed native `0755` for that directory only. The L1 parent and all
+other recovery directories must remain `0700`, with matching owner and group.
+The controller never changes permissions to make admission pass. Downloaded snapshots
+and existing L1 files are not cleared by reconciliation; no binaries, programs, keys or service
 configuration are installed or replaced. The CLI uses the retained artifact stage
 and rejects an explicit `--stage` during reconciliation.
 
