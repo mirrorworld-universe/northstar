@@ -117,7 +117,7 @@ jobs:
           python3 -B .github/scripts/test-native-l1-recovery.py
           python3 -B .github/scripts/test-native-runtime-diagnostics.py
           python3 -B .github/scripts/test-prepare-continuity-sdk.py
-          bun test ./.github/scripts/continuity-control-journal.test.mjs ./.github/scripts/devnet-continuity-smoke.test.mjs ./.github/scripts/continuity-workflow.test.mjs ./.github/scripts/native-upgrade-snapshot.test.mjs ./.github/scripts/native-runtime-diagnostics-workflow.test.mjs
+          bun test ./.github/scripts/continuity-control-journal.test.mjs ./.github/scripts/devnet-continuity-smoke.test.mjs ./.github/scripts/continuity-workflow.test.mjs ./.github/scripts/native-upgrade-snapshot.test.mjs ./.github/scripts/native-runtime-diagnostics-workflow.test.mjs ./.github/scripts/recovery-retry-workflow.test.mjs
           bash -n .github/scripts/prepare-continuity-sdk.sh
       - uses: actions/setup-node@v4
         with:

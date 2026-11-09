@@ -162,6 +162,34 @@ The public qualification scope is `native-l1-recovery`, not fresh SOL/SPL payout
 oracle, SP1 or proof-acceptance qualification. A later native upgrade can retain
 these qualified L1 paths without creating another ledger.
 
+### Explicit reconciliation after a readiness timeout
+
+A failed start remains blocked by its original durable barrier. Do not delete that
+barrier, replace the plan, clear L1 directories or repeatedly rerun release CD.
+After reviewing stopped-state diagnostics, an operator can authorize **one additional
+start** with the manual **Reconcile one stopped L1 recovery** workflow on `master`.
+Supply the original recovery source revision, failure slot and exact reviewed
+`ExecMainExitTimestamp`.
+
+The controller requires the same inactive service with a successful SIGTERM exit,
+zero automatic restarts, no restart policy and no pending systemd reload. It verifies
+installed artifacts, exact effective arguments, retained program/session bindings
+and unchanged protocol control records. It captures the current ER fingerprints
+and checks ownership/modes of the existing recovery directories. Downloaded snapshots
+and all existing L1 files remain in place; no binaries, programs, keys or service
+configuration are installed or replaced. The CLI uses the retained artifact stage
+and rejects an explicit `--stage` during reconciliation.
+
+A separate `control/l1-retry` authorization binds the original plan and first-start
+barrier, controller revision, reviewed stopped state and current retained fingerprints.
+Its own durable start barrier permits only one additional start, including after an
+uncertain command result or interrupted controller. Further attempts require a new
+operator decision; they are not automatically admitted by another workflow run.
+Recovery readiness allows 60 minutes, while ordinary native upgrades retain 20 minutes.
+Failed qualification stops the verified managed service without rollback or resets.
+The public scope is `native-l1-recovery-retry`, still not fresh SOL/SPL, oracle, SP1
+or proof-acceptance qualification.
+
 ## Read-only host diagnostics
 
 The manual **Native runtime diagnostics (read-only)** workflow runs only from
