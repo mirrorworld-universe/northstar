@@ -46,6 +46,7 @@ class NativeUpgrade:
         self.started = self.control / "start-attempted.json"
         self.installed = self.control / "installed.json"
         self.progress = self.control / "progress.json"
+        self.retrying = False
 
     def phase(self):
         value = private_json(self.progress)
@@ -279,6 +280,9 @@ class NativeUpgrade:
             immutable_json(self.record, self.plan)
             immutable_json(self.progress, {"version": 1, "plan_sha256": digest(self.plan), "phase": "prepared"})
         phase = self.phase()
+        reconcile = getattr(self.args, "reconcile_failed_l1", False)
+        require(not reconcile or self.recovery_slot is not None and phase == "start-attempted" and not active,
+                "reconciliation requires an unqualified stopped L1 recovery")
         if phase != "prepared":
             require(private_json(self.frozen).get("plan_sha256") == digest(self.plan), "native frozen inventory binding differs")
         if phase in ("installed", "start-attempted", "qualified"):
@@ -299,11 +303,14 @@ class NativeUpgrade:
         if self.current == desired:
             require(phase in ("start-attempted", "qualified"), "running native upgrade lacks its start barrier")
         elif phase in ("start-attempted", "qualified"):
-            raise ValueError("native start was already attempted; reconcile the service before retry")
+            require(reconcile, "native start was already attempted; reconcile the service before retry")
         if not active:
             require(self.frozen.exists() or self.recovery_slot is not None and phase == "prepared",
                     "inactive native upgrade lacks a frozen journal inventory")
         require(self.snapshot("l1")["identity"] == self.plan["identity"], "retained session identity changed before upgrade")
+        if reconcile:
+            from native_l1_recovery_retry import prepare
+            prepare(self)
 
     def freeze(self):
         if self.current is not None:
@@ -419,7 +426,10 @@ class NativeUpgrade:
 
     def wait_ready(self):
         floor = start_floor(self.started, self.plan)
-        end = time.monotonic() + 1200
+        if self.retrying:
+            from native_l1_recovery_retry import retry_floor
+            floor = max(floor, retry_floor(self))
+        end = time.monotonic() + (3600 if self.recovery_slot is not None else 1200)
         while time.monotonic() < end:
             require(self.state() == "active", "native upgraded runtime failed during startup")
             status = None
@@ -483,8 +493,24 @@ class NativeUpgrade:
                 output.write("report_path=" + str(self.control / "report.json") + "\n")
         return report
 
+    def quarantine(self):
+        # Cancel pending restarts too, but never revert journals or configuration.
+        try:
+            text = service_dropin(self.plan["desired"]["arguments"], *[self.plan["desired"]["state_environment"][key] for key in STATE_KEYS])
+            if self.inspect([self.dropin])[str(self.dropin)].get("sha256") == hashlib.sha256(text.encode()).hexdigest():
+                self.effective_start()
+                self.ops.stop()
+                return True
+        except Exception:
+            pass
+        append_private(self.ops.log, b"Native failure stop requires operator reconciliation.\n")
+        return False
+
     def run(self):
         self.prepare()
+        if self.retrying:
+            from native_l1_recovery_retry import run
+            return run(self)
         if self.current != self.plan["desired"]:
             self.freeze()
             self.install()
@@ -503,14 +529,7 @@ class NativeUpgrade:
                 self.ops.execute(["sudo", "-n", "systemctl", "start", self.service], timeout=180)
             report = self.qualify()
         except BaseException:
-            # Cancel this unit's pending restarts too, but never revert its journals or configuration.
-            try:
-                text = service_dropin(self.plan["desired"]["arguments"], *[self.plan["desired"]["state_environment"][key] for key in STATE_KEYS])
-                if self.inspect([self.dropin])[str(self.dropin)].get("sha256") == hashlib.sha256(text.encode()).hexdigest():
-                    self.effective_start()
-                    self.ops.stop()
-            except Exception:
-                append_private(self.ops.log, b"Native failure stop requires operator reconciliation.\n")
+            self.quarantine()
             raise
         print(json.dumps(report), flush=True)
         return report

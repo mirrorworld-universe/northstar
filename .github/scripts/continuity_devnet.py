@@ -508,6 +508,11 @@ class Deployment:
     def run(self):
         pending_upgrade = self.args.state_root / "upgrades" / self.args.revision
         same_activation = os.path.lexists(self.control / "activation.json")
+        if getattr(self.args, "reconcile_failed_l1", False):
+            require(getattr(self.args, "upgrade_existing", False)
+                    and getattr(self.args, "recover_failed_l1_slot", None) is not None
+                    and os.path.lexists(pending_upgrade / "control/plan.json") and not same_activation,
+                    "reconciliation requires an explicit retained L1 recovery")
         if getattr(self.args, "recover_failed_l1_slot", None) is not None:
             require(getattr(self.args, "upgrade_existing", False) and os.path.lexists(DROPIN) and not same_activation,
                     "L1 recovery requires an existing managed native activation and explicit upgrade opt-in")
@@ -528,7 +533,7 @@ def main():
         inspector = subcommands.add_parser(name)
         inspector.add_argument("--input", type=Path, required=True)
     run = subcommands.add_parser("run")
-    run.add_argument("--stage", type=Path, required=True)
+    run.add_argument("--stage", type=Path)
     run.add_argument("--revision", required=True)
     run.add_argument("--sdk-checkout", type=Path, required=True)
     run.add_argument("--state-root", type=Path, default=Path("/solana/northstar/continuity-v2"))
@@ -539,6 +544,8 @@ def main():
     run.add_argument("--max-estimated-cost-lamports", type=int, default=10_000_000_000)
     run.add_argument("--upgrade-existing", action="store_true", help="Permit a guarded native-only upgrade of a known managed v2 activation.")
     run.add_argument("--recover-failed-l1-slot", type=int, help="Recover a stopped validator past the bound feature activation using fresh L1 directories; preserve all prior data.")
+    run.add_argument("--reconcile-failed-l1", action="store_true", help="Authorize one additional start of a reviewed stopped L1 recovery, using its retained artifacts and data.")
+    run.add_argument("--reconcile-stopped-at", help="Exact reviewed systemd ExecMainExitTimestamp; required for explicit reconciliation.")
     args = parser.parse_args()
     if args.operation == "inventory":
         print(json.dumps(inventory_service()))
@@ -550,7 +557,13 @@ def main():
         print(json.dumps(inspect_function(private_json(args.input)["paths"])))
     else:
         require(args.state_root.is_absolute() and not any(character.isspace() for character in str(args.state_root))
-                and 0 < args.max_estimated_cost_lamports <= 50_000_000_000, "invalid rollout root or funding estimate limit")
+                and re.fullmatch("[0-9a-f]{40}", args.revision)
+                and 0 < args.max_estimated_cost_lamports <= 50_000_000_000, "invalid rollout root, revision or funding estimate limit")
+        if args.reconcile_failed_l1:
+            require(args.stage is None and args.upgrade_existing and args.recover_failed_l1_slot is not None
+                    and args.reconcile_stopped_at is not None, "reconciliation requires retained artifacts and explicit stopped-state evidence")
+        else:
+            require(args.stage is not None and args.reconcile_stopped_at is None, "a stage is required outside explicit reconciliation")
         for configured in (args.l1_rpc, args.er_rpc):
             url = urlsplit(configured)
             require(url.scheme in ("http", "https") and url.hostname in ("localhost", "127.0.0.1", "::1")
@@ -560,12 +573,21 @@ def main():
         require(upstream.scheme == "https" and upstream.hostname and not upstream.username and not upstream.password
                 and not upstream.query and not upstream.fragment, "upstream devnet RPC requires unauthenticated HTTPS")
         lock = Path("/solana/northstar/continuity-v2-deploy.lock")
-        descriptor = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        descriptor = os.open(lock, os.O_RDWR | os.O_NOFOLLOW | (0 if args.reconcile_failed_l1 else os.O_CREAT), 0o600)
         try:
             info = os.fstat(descriptor)
             require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077, "deployment lock is not private regular state")
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             args.lock_descriptor = descriptor
+            if args.reconcile_failed_l1:
+                control = args.state_root / "upgrades" / args.revision / "control"
+                for directory in (args.state_root, control.parent.parent, control.parent, control):
+                    checked_directory(directory, private=directory == control)
+                saved = private_json(control / "plan.json")
+                require(saved.get("version") == 1 and saved.get("kind") == "native-upgrade"
+                        and saved.get("source_revision") == args.revision
+                        and saved.get("recovery_failed_slot") == args.recover_failed_l1_slot, "retained reconciliation plan differs")
+                args.stage = Path(saved["stage"])
             Deployment(args).run()
         finally:
             os.close(descriptor)

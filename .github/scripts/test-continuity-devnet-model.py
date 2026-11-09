@@ -125,7 +125,7 @@ class FakeHost(rollout.Deployment):
             if "--property=MainPID" in arguments:
                 return "42" if self.world.active else "0"
             if "--property=ExecStart" in arguments:
-                return "{ path=/usr/bin/env ; argv[]=" + rollout.DROPIN.read_text().split("ExecStart=")[-1] + "; }"
+                return "{ path=/usr/bin/env ; argv[]=" + rollout.DROPIN.read_text().split("ExecStart=")[-1].strip() + " ; }"
             if "daemon-reload" in arguments:
                 return ""
         if "program" in arguments and "deploy" in arguments:
