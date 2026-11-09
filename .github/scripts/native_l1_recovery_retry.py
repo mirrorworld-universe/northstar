@@ -46,9 +46,12 @@ def retained_state(upgrade):
     require(controls == private_json(upgrade.frozen)["protocol_controls"], "retained protocol control records changed")
     directories = recovery.paths(upgrade.runtime)
     observed = upgrade.inspect(directories)
+    accounts = upgrade.runtime / "l1/accounts"
     require(all(observed[str(directory)].get("directory") is True
                 and observed[str(directory)].get("uid") == upgrade.plan["desired"]["uid"]
-                and observed[str(directory)].get("mode") == 0o700 for directory in directories),
+                and observed[str(directory)].get("gid") == upgrade.plan["desired"]["gid"]
+                and observed[str(directory)].get("mode") in ({0o700, 0o755} if directory == accounts else {0o700})
+                for directory in directories),
             "retained recovery directories differ")
     return retained, observed
 
