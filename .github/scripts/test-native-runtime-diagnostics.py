@@ -13,7 +13,7 @@ from unittest import mock
 
 import native_runtime_diagnostics as diagnostics
 from continuity_devnet import public_text
-from continuity_rollout_state import atomic_json, file_hash, private_json, retained_fingerprint, service_dropin
+from continuity_rollout_state import atomic_json, file_hash, geyser_events_config, private_json, retained_fingerprint, service_dropin
 
 SECRET = "PRIVATE_DIAGNOSTIC_SENTINEL"
 
@@ -83,6 +83,112 @@ class DiagnosticTests(unittest.TestCase):
 
     def collect(self):
         return diagnostics.collect_report(self.run_command, self.state_root, self.dropin, self.lock)
+
+    def install_upgrade(self, stderr=False):
+        revision = "b" * 40
+        namespace = self.state_root / "upgrades" / revision
+        control, runtime = namespace / "control", namespace / "runtime"
+        control.mkdir(parents=True, mode=0o700)
+        (runtime / "bin").mkdir(parents=True)
+        (runtime / "lib").mkdir()
+        binary = runtime / "bin/agave-validator"
+        binary.write_bytes(b"\x7fELFupgraded-validator")
+        binary.chmod(0o500)
+        plugin = runtime / diagnostics.ARTIFACTS["geyser_events"]
+        plugin.write_bytes(b"\x7fELFupgraded-plugin")
+        plugin.chmod(0o500)
+        configuration = runtime / "geyser-events.json"
+        atomic_json(configuration, geyser_events_config(plugin))
+        configuration.chmod(0o400)
+        activation = private_json(self.control / "activation.json")
+        arguments = [*activation["arguments"], "--er-geyser-plugin-config", str(configuration)]
+        arguments[0] = str(binary)
+        if stderr:
+            arguments[arguments.index("--log") + 1] = "-"
+        ledger = runtime / "l1/ledger"
+        ledger.mkdir(parents=True)
+        arguments[arguments.index("--ledger") + 1] = str(ledger)
+        desired = {"arguments": arguments, "binary_sha256": file_hash(binary),
+                   "state_environment": activation["state_environment"], "uid": os.getuid(), "gid": os.getgid()}
+        plan = {"version": 1, "kind": "native-upgrade", "source_revision": revision,
+                "base_revision": self.base.name, "base_plan_sha256": diagnostics.digest(self.plan),
+                "desired": desired, "before": {**desired, "arguments": activation["arguments"]},
+                "artifacts": {**self.plan["artifacts"], "validator": file_hash(binary), "geyser_events": file_hash(plugin)},
+                "l1_floor": 1, "private": SECRET}
+        text = service_dropin(arguments, *activation["state_environment"].values())
+        self.dropin.write_text(text)
+        self.dropin.chmod(0o600)
+        self.start = "{ path=/usr/bin/env; argv[]=" + text.split("ExecStart=")[-1].strip() + " ; }"
+        atomic_json(control / "plan.json", plan)
+        atomic_json(control / "progress.json", {"version": 1, "plan_sha256": diagnostics.digest(plan), "phase": "start-attempted"})
+        atomic_json(control / "frozen.json", {"plan_sha256": diagnostics.digest(plan)})
+        atomic_json(control / "installed.json", {"sha256": hashlib.sha256(text.encode()).hexdigest()})
+        atomic_json(control / "start-attempted.json", {"plan_sha256": diagnostics.digest(plan), "l1_floor": 2})
+        return control
+
+    def test_unqualified_upgrade_logs_require_bound_service_and_start_barriers(self):
+        self.install_upgrade()
+        self.logfile.write_text("snapshot hash mismatch " + SECRET)
+        before = retained_fingerprint([self.root])
+        result = self.collect()
+        self.assertTrue(result["operational"]["file_logs"], "bound upgrade logs must remain available before qualification")
+        self.assertTrue(result["managed_records"]["upgrade_record"]["runtime_binding_matches"])
+        self.assertEqual(result["operational"]["file_logs"][0]["marker_counts"], {"snapshot_hash_mismatch": 1})
+        self.assertEqual(result["managed_records"]["upgrade_record"]["phase"], "start-attempted")
+        self.assertFalse(result["managed_records"]["onchain_state_checked"])
+        for private in (SECRET, str(self.root), "arguments", "state_environment"):
+            self.assertNotIn(private, json.dumps(result))
+        self.assertEqual(before, retained_fingerprint([self.root]))
+
+    def test_upgrade_systemd_append_sink_is_resolved_without_private_unit_content(self):
+        self.install_upgrade(stderr=True)
+        target = self.root / "validator-output"
+        target.write_text("No snapshots available " + SECRET)
+        self.unit_text = "[Service]\nEnvironment=TOKEN=" + SECRET + "\nStandardOutput=append:" + str(target) + "\n"
+        def append_sink(arguments):
+            result = self.run_command(arguments)
+            if arguments[0] == "systemctl" and arguments[1] == "show":
+                result.stdout += b"StandardOutput=append\n"
+            return result
+        result = diagnostics.collect_report(append_sink, self.state_root, self.dropin, self.lock)
+        self.assertEqual(result["operational"]["file_logs"][0]["marker_counts"], {"snapshot_unavailable": 1})
+        self.assertNotIn(SECRET, json.dumps(result))
+        self.assertNotIn(str(target), json.dumps(result))
+
+    def test_upgrade_binding_rejects_changed_frozen_record(self):
+        control = self.install_upgrade()
+        atomic_json(control / "frozen.json", {"plan_sha256": "0" * 64})
+        self.assertEqual(self.collect()["operational"]["file_logs"], [])
+
+    def test_upgrade_binding_rejects_missing_barrier_or_changed_effective_arguments(self):
+        control = self.install_upgrade()
+        self.logfile.write_text("snapshot hash mismatch " + SECRET)
+        original = self.start
+        self.start = self.start.replace("--portal", "--different-portal")
+        self.assertEqual(self.collect()["operational"]["file_logs"], [])
+        self.start = original
+        (control / "start-attempted.json").unlink()
+        self.assertEqual(self.collect()["operational"]["file_logs"], [])
+
+    def test_upgrade_binding_rejects_changed_native_artifact(self):
+        control = self.install_upgrade()
+        plan = private_json(control / "plan.json")
+        binary = Path(plan["desired"]["arguments"][0])
+        binary.unlink()
+        binary.write_bytes(b"different")
+        binary.chmod(0o500)
+        self.assertEqual(self.collect()["operational"]["file_logs"], [])
+
+    def test_bootstrap_and_resume_markers_are_fixed_and_exclude_program_logs(self):
+        evidence = diagnostics.tail_evidence(("Searching for an RPC service with shred version 1 " + SECRET
+            + "\nNo snapshots available " + SECRET
+            + "\nFailed to download a snapshot archive for slot 42 from " + SECRET
+            + "\nLoading bank from full snapshot archive: " + SECRET
+            + "\nCannot resume continuity session: " + SECRET
+            + "\nProgram log: No snapshots available").encode())
+        self.assertEqual(evidence["marker_counts"], {"rpc_peer_search": 1, "snapshot_unavailable": 1,
+            "snapshot_download_failed": 1, "snapshot_load_started": 1, "continuity_resume_failed": 1})
+        self.assertNotIn(SECRET, json.dumps(evidence))
 
     def test_stopped_service_and_known_binding_are_reported_without_private_content(self):
         result = self.collect()
