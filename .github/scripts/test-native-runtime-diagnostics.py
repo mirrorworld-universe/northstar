@@ -493,6 +493,31 @@ class DiagnosticTests(unittest.TestCase):
         self.assertNotIn(alias, found)
         self.assertTrue(all(path.suffix != ".json" for path in found))
 
+    def test_startup_stage_reports_only_fixed_names_timestamps_and_bounded_progress(self):
+        text = ("[2026-11-08T23:23:10.000000Z INFO agave_snapshots::unarchive] Extracting " + SECRET
+            + "\n[2026-11-08T23:28:00.000000Z INFO agave_snapshots::unarchive] Extracted " + SECRET
+            + "\n[2026-11-08T23:28:01.000000Z INFO solana_runtime::serde_snapshot] Building accounts index..."
+            + "\n[2026-11-08T23:42:59.000000Z INFO solana_accounts_db::accounts_db] generating index: processed 42/100 slots... " + SECRET
+            + "\nProgram log: [2026-11-08T23:43:00Z INFO solana_rpc::rpc_service] rpc bound to " + SECRET)
+        result = diagnostics.tail_evidence(text.encode())
+        startup = result.get("startup", {})
+        self.assertEqual(startup.get("last_stage"), "accounts_index_progress")
+        self.assertEqual(startup["stage_counts"], {"snapshot_extract_started": 1, "snapshot_extract_completed": 1,
+            "accounts_index_started": 1, "accounts_index_progress": 1})
+        self.assertEqual(startup["last_stage_at"], "2026-11-08T23:42:59.000000Z")
+        self.assertEqual(startup["index_progress"], {"processed": 42, "total": 100})
+        self.assertNotIn(SECRET, json.dumps(result))
+        self.assertNotIn("agave_snapshots::", json.dumps(result))
+
+    def test_startup_stage_rejects_unknown_modules_and_invalid_progress(self):
+        text = ("[2026-11-08T23:42:59Z INFO unknown_module] generating index: processed 42/100 slots... " + SECRET
+            + "\n[2026-11-08T23:42:59Z INFO solana_accounts_db::accounts_db] generating index: processed 101/100 slots..."
+            + "\n[2026-11-08T23:42:59Z INFO solana_accounts_db::accounts_db] generating index: processed 1/0 slots...")
+        result = diagnostics.tail_evidence(text.encode())
+        self.assertEqual(result.get("startup", {}).get("stage_counts", {}), {})
+        self.assertNotIn("index_progress", result.get("startup", {}))
+        self.assertNotIn(SECRET, json.dumps(result))
+
     def test_panic_evidence_includes_only_committed_source_and_fixed_reason(self):
         previous = self.root / (self.logfile.name + ".1.gz")
         text = ("thread 'solReplayStage' panicked at /" + SECRET + "/core/src/replay_stage.rs:2167:25:\n"

@@ -99,6 +99,41 @@ def panic_sites(messages):
     return [{"file": filename, "line": line} for filename, line in sorted(sites)[:8]]
 
 
+def startup_evidence(messages):
+    report = {"stage_counts": {}}
+    stages = (
+        ("solana_runtime::snapshot_bank_utils", "Loading bank from full snapshot archive:", "snapshot_load_started"),
+        ("agave_snapshots::unarchive", "Extracting ", "snapshot_extract_started"),
+        ("agave_snapshots::unarchive", "Extracted ", "snapshot_extract_completed"),
+        ("solana_runtime::serde_snapshot", "Building accounts index... Done in ", "accounts_index_completed"),
+        ("solana_runtime::serde_snapshot", "Building accounts index...", "accounts_index_started"),
+        ("solana_accounts_db::accounts_db", "generating index: processed all slots", "accounts_index_slots_completed"),
+        ("solana_runtime::snapshot_bank_utils", "Rebuilding status cache from ", "snapshot_status_cache"),
+        ("solana_rpc::rpc_service", "rpc bound to ", "rpc_listener_started"),
+        ("northstar", "Ephemeral rollup started on ", "er_runtime_started"),
+    )
+    for message in messages:
+        if not isinstance(message, str) or "program log:" in message.lower():
+            continue
+        matched = re.fullmatch(r"\[([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z)\s+"
+                               r"(?:ERROR|WARN|INFO|DEBUG|TRACE)\s+([a-z0-9_:]+)\]\s*(.*)", message)
+        if not matched:
+            continue
+        timestamp, module, body = matched.groups()
+        stage = next((name for expected_module, prefix, name in stages if module == expected_module and body.startswith(prefix)), None)
+        progress = re.match(r"generating index: processed ([0-9]{1,20})/([0-9]{1,20}) slots\.\.\.(?:\s|$)", body)
+        if module == "solana_accounts_db::accounts_db" and progress:
+            processed, total = map(int, progress.groups())
+            if 0 <= processed <= total <= 2 ** 64 - 1 and total > 0:
+                report.setdefault("first_index_progress", {"processed": processed, "total": total, "at": timestamp})
+                report["index_progress"] = {"processed": processed, "total": total}
+                stage = "accounts_index_progress"
+        if stage:
+            report["stage_counts"][stage] = report["stage_counts"].get(stage, 0) + 1
+            report.update(last_stage=stage, last_stage_at=timestamp)
+    return report
+
+
 def tail_evidence(tail):
     messages = [message for message in tail.decode(errors="replace").splitlines() if "program log:" not in message.lower()]
     context, remaining = [], 0
@@ -123,7 +158,7 @@ def tail_evidence(tail):
              for slot in re.findall(r"(?:at |For )?slot\s+([0-9]{1,20})(?=[:\s,])", message)
              if int(slot) <= 2 ** 64 - 1}
     return {"marker_counts": marker_counts(messages), "panic_sites": panic_sites(messages),
-            "panic_kinds": sorted(kinds), "bank_hash_slots": sorted(slots)[:8]}
+            "panic_kinds": sorted(kinds), "bank_hash_slots": sorted(slots)[:8], "startup": startup_evidence(messages)}
 
 
 def disk_summary(directory):
