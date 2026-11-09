@@ -14,6 +14,7 @@ import time
 import zlib
 
 from continuity_devnet import DROPIN, SERVICE, public_bytes
+from native_l1_recovery import STATE_PATHS
 from continuity_rollout_state import ARTIFACTS, DEVNET, SDK_REVISION, canonical, file_hash, flag_value, geyser_events_config, private_json, service_dropin
 
 STATE_ROOT = Path("/solana/northstar/continuity-v2")
@@ -459,6 +460,27 @@ def upgrade_runtime_arguments(start, root, dropin, revision, plan, base_plan, re
         return []
 
 
+def recovery_directory_metadata(namespace, owner):
+    directories = {}
+    roles = [("l1_root", ""), *((flag.removeprefix("--").replace("-", "_"), suffix) for flag, suffix in STATE_PATHS.items())]
+    for role, suffix in roles:
+        try:
+            info = (namespace / "runtime/l1" / suffix).lstat()
+            directories[role] = {"directory": stat.S_ISDIR(info.st_mode), "symlink": stat.S_ISLNK(info.st_mode),
+                                 "mode": f"{stat.S_IMODE(info.st_mode):04o}", "owner_matches_record": info.st_uid == owner["uid"],
+                                 "group_matches_record": info.st_gid == owner["gid"]}
+        except FileNotFoundError:
+            directories[role] = {"absent": True}
+        except OSError:
+            directories[role] = {"status": "unavailable"}
+    retry = namespace / "control/l1-retry"
+    records = {"authorization": "authorization.json", "start_attempted": "start-attempted.json",
+               "outcome": "outcome.json", "failure": "failure.json"}
+    if os.path.lexists(retry) and not stat.S_ISDIR(retry.lstat().st_mode):
+        return {"l1_directories": directories, "retry_directory": "invalid"}
+    return {"l1_directories": directories, "retry_records": {name: os.path.lexists(retry / filename) for name, filename in records.items()}}
+
+
 def managed_records(start, root, dropin, retained_start="", bound_arguments=None):
     references = start + "\n" + retained_start
     original = sorted(set(re.findall(re.escape(str(root)) + r"/([0-9a-f]{40})/runtime/(?:bin/agave-validator|checkpoints|unsettled)", references)))
@@ -538,6 +560,8 @@ def managed_records(start, root, dropin, retained_start="", bound_arguments=None
             if identity_ok and report["upgrade_record"]["identity_matches"]:
                 arguments = upgrade_runtime_arguments(start, root, dropin, upgraded[0], upgrade_plan, plan, reservation, expected_environment, binding)
             report["upgrade_record"].update(runtime_binding_matches=bool(arguments), runtime_binding_stage=binding["stage"])
+            if arguments and type(upgrade_plan.get("recovery_failed_slot")) is int:
+                report["upgrade_record"].update(recovery_directory_metadata(root / "upgrades" / upgraded[0], upgrade_plan["desired"]))
             if arguments and bound_arguments is not None:
                 bound_arguments[:] = arguments
     except FileNotFoundError:

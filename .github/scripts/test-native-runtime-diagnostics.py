@@ -114,7 +114,7 @@ class DiagnosticTests(unittest.TestCase):
                 "base_revision": self.base.name, "base_plan_sha256": diagnostics.digest(self.plan),
                 "desired": desired, "before": {**desired, "arguments": activation["arguments"]},
                 "artifacts": {**self.plan["artifacts"], "validator": file_hash(binary), "geyser_events": file_hash(plugin)},
-                "l1_floor": 1, "private": SECRET}
+                "l1_floor": 1, "recovery_failed_slot": 519264000, "private": SECRET}
         text = service_dropin(arguments, *activation["state_environment"].values())
         self.dropin.write_text(text)
         self.dropin.chmod(0o600)
@@ -159,6 +159,21 @@ class DiagnosticTests(unittest.TestCase):
         control = self.install_upgrade()
         atomic_json(control / "frozen.json", {"plan_sha256": "0" * 64})
         self.assertEqual(self.collect()["operational"]["file_logs"], [])
+
+    def test_bound_recovery_reports_only_directory_metadata_and_retry_barrier_presence(self):
+        self.install_upgrade()
+        before = retained_fingerprint([self.root])
+        result = self.collect()
+        upgrade = result["managed_records"]["upgrade_record"]
+        self.assertIn("l1_directories", upgrade)
+        self.assertEqual(upgrade["l1_directories"]["ledger"]["mode"], "0755")
+        self.assertTrue(upgrade["l1_directories"]["ledger"]["owner_matches_record"])
+        self.assertTrue(upgrade["l1_directories"]["tower"]["absent"])
+        self.assertEqual(upgrade["retry_records"], {"authorization": False, "start_attempted": False,
+            "outcome": False, "failure": False})
+        self.assertEqual(before, retained_fingerprint([self.root]))
+        for private in (SECRET, str(self.root), "retained.bin", "snapshot-cache.bin"):
+            self.assertNotIn(private, json.dumps(result))
 
     def test_upgrade_binding_rejects_missing_barrier_or_changed_effective_arguments(self):
         control = self.install_upgrade()
