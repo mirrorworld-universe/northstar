@@ -9,7 +9,7 @@ import stat
 import tempfile
 
 DEVNET = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"
-SDK_REVISION = "24030ce9fc3b80aa21738db2bb9f5a5fbea030d8"
+SDK_REVISION = "a099451216fc045adbebe062a9716eb4fd512909"
 ARTIFACTS = {
     "validator": "bin/agave-validator",
     "cli": "bin/solana",

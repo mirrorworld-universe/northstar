@@ -8,7 +8,7 @@ publish = false
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-pinocchio = { version = "0.11.2", features = ["cpi"] }
+pinocchio = { version = "0.12.0", features = ["cpi"] }
 
 [lints.rust]
 unexpected_cfgs = "allow"

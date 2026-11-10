@@ -153,7 +153,7 @@ fn process_undelegate_inner(
     }
     drop(delegated_data);
 
-    unsafe { delegated_account.assign(owner_program.address()) };
+    delegated_account.assign(owner_program.address());
 
     let refund_lamports = delegation_record
         .lamports()

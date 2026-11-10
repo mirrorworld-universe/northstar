@@ -38,7 +38,7 @@ pub fn runtime_identities() -> ([u8; 32], [u8; 32], [u8; 32]) {
         config.enable_address_translation as u8,
         config.enable_stack_frame_gaps as u8,
         config.enable_instruction_meter as u8,
-        config.enable_register_tracing as u8,
+        solana_program_runtime::vm::REGISTER_TRACING_ENABLED as u8,
         config.enable_symbol_and_section_labels as u8,
         config.reject_broken_elfs as u8,
         config.optimize_rodata as u8,

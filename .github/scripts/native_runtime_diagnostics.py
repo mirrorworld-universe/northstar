@@ -489,7 +489,8 @@ def recovery_directory_metadata(namespace, owner):
 def managed_records(start, root, dropin, retained_start="", bound_arguments=None):
     references = start + "\n" + retained_start
     original = sorted(set(re.findall(re.escape(str(root)) + r"/([0-9a-f]{40})/runtime/(?:bin/agave-validator|checkpoints|unsettled)", references)))
-    upgraded = sorted(set(re.findall(re.escape(str(root)) + r"/upgrades/([0-9a-f]{40})/runtime/", references)))
+    # Retained L1 directories may belong to an older upgrade; only executables select a runtime.
+    upgraded = sorted(set(re.findall(re.escape(str(root)) + r"/upgrades/([0-9a-f]{40})/runtime/bin/agave-validator\b", references)))
     report = {"original_revisions": original, "upgrade_revisions": upgraded, "onchain_state_checked": False}
     if len(original) != 1 or len(upgraded) > 1:
         return {**report, "status": "no_unambiguous_managed_binding"}

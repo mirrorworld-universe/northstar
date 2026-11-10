@@ -44,3 +44,6 @@ log-*/
 
 # Vim
 *.swp
+
+# download-test-vectors.sh artifacts
+/fd-vectors/

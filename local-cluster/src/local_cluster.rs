@@ -6,14 +6,14 @@ use {
         validator_configs::*,
     },
     agave_feature_set::{FeatureSet, bls_pubkey_management_in_vote_account},
-    agave_snapshots::{paths::BANK_SNAPSHOTS_DIR, snapshot_config::SnapshotConfig},
+    agave_snapshots::paths::BANK_SNAPSHOTS_DIR,
     agave_votor::vote_history_storage::FileVoteHistoryStorage,
     itertools::izip,
     log::*,
     solana_account::{
         Account, AccountSharedData, ReadableAccount, state_traits::StateMutWincode as _,
     },
-    solana_accounts_db::utils::create_accounts_run_and_snapshot_dirs,
+    solana_accounts_db::utils::create_accounts_run_dir,
     solana_clock::{DEFAULT_DEV_SLOTS_PER_EPOCH, DEFAULT_TICKS_PER_SLOT, Slot},
     solana_cluster_type::ClusterType,
     solana_commitment_config::CommitmentConfig,
@@ -79,14 +79,6 @@ use {
 
 pub const DEFAULT_MINT_LAMPORTS: u64 = 10_000_000 * LAMPORTS_PER_SOL;
 const DUMMY_SNAPSHOT_CONFIG_PATH_MARKER: &str = "dummy";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AlpenglowMode {
-    /// No alpenglow
-    Disabled,
-    /// Full alpenglow - Activates alpenglow feature and set GenesisCertificate
-    Enabled,
-}
 
 pub struct ClusterConfig {
     /// The validator config that should be applied to every node in the cluster
@@ -182,11 +174,7 @@ impl LocalCluster {
         config: &mut ValidatorConfig,
         ledger_path: &Path,
     ) {
-        config.account_paths = vec![
-            create_accounts_run_and_snapshot_dirs(ledger_path.join("accounts"))
-                .unwrap()
-                .0,
-        ];
+        config.account_paths = vec![create_accounts_run_dir(ledger_path.join("accounts")).unwrap()];
         config.tower_storage = Arc::new(FileTowerStorage::new(ledger_path.to_path_buf()));
         config.accounts_db_config.bank_hash_details_dir = ledger_path.to_path_buf();
         config.vote_history_storage =
@@ -204,18 +192,10 @@ impl LocalCluster {
 
     pub fn new(config: &mut ClusterConfig, socket_addr_space: SocketAddrSpace) -> Self {
         config.poh_config.hashes_per_tick = None;
-        Self::init(config, socket_addr_space, AlpenglowMode::Enabled)
+        Self::init(config, socket_addr_space)
     }
 
-    pub fn new_tower(config: &mut ClusterConfig, socket_addr_space: SocketAddrSpace) -> Self {
-        Self::init(config, socket_addr_space, AlpenglowMode::Disabled)
-    }
-
-    pub fn init(
-        config: &mut ClusterConfig,
-        socket_addr_space: SocketAddrSpace,
-        alpenglow_mode: AlpenglowMode,
-    ) -> Self {
+    fn init(config: &mut ClusterConfig, socket_addr_space: SocketAddrSpace) -> Self {
         assert_eq!(config.validator_configs.len(), config.node_stakes.len());
 
         let mut validator_keys = {
@@ -282,10 +262,7 @@ impl LocalCluster {
         let leader_pubkey = leader_keypair.pubkey();
         let leader_node = Node::new_localhost_with_pubkey(&leader_pubkey);
 
-        let mut feature_set = FeatureSet::all_enabled();
-        if alpenglow_mode != AlpenglowMode::Enabled {
-            feature_set.deactivate(&agave_feature_set::alpenglow::id());
-        }
+        let feature_set = FeatureSet::all_enabled();
 
         let stakes_in_genesis_for_funding = stakes_in_genesis.clone();
         let GenesisConfigInfo {
@@ -1198,17 +1175,6 @@ impl LocalCluster {
             }
             (Err(_), _) => Err(Error::other("unable to retrieve stake account data")),
             (_, Err(_)) => Err(Error::other("unable to retrieve vote account data")),
-        }
-    }
-
-    pub fn create_dummy_load_only_snapshot_config() -> SnapshotConfig {
-        // DUMMY_SNAPSHOT_CONFIG_PATH_MARKER will be replaced with real value as part of cluster
-        // node lifecycle.
-        // There must be some place holder for now...
-        SnapshotConfig {
-            full_snapshot_archives_dir: DUMMY_SNAPSHOT_CONFIG_PATH_MARKER.into(),
-            bank_snapshots_dir: DUMMY_SNAPSHOT_CONFIG_PATH_MARKER.into(),
-            ..SnapshotConfig::new_load_only()
         }
     }
 

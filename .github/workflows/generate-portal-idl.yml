@@ -35,7 +35,7 @@ jobs:
           cache-on-failure: true
 
       - name: Install Pinocchio IDL CLI
-        run: cargo install pinocchio-idl --version 0.1.1 --locked
+        run: cargo install pinocchio-idl --version 0.1.2 --locked
 
       - name: Test Portal IDL generation and validation
         run: python3 -B .github/scripts/test-portal-idl.py
