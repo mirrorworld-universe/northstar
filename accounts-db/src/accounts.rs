@@ -569,7 +569,8 @@ mod tests {
         message: Message,
         recent_blockhash: Hash,
     ) -> RuntimeTransaction<SanitizedTransaction> {
-        RuntimeTransaction::from_transaction_for_tests(Transaction::new(
+        // Sonic: Include synthetic duplicate and oversized lock sets in lock-layer coverage.
+        RuntimeTransaction::from_transaction_for_account_lock_tests(Transaction::new(
             from_keypairs,
             message,
             recent_blockhash,

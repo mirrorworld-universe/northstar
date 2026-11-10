@@ -39,6 +39,15 @@ impl RuntimeTransaction<SanitizedVersionedTransaction> {
             crate::transaction_limits::validate_transaction_config(&message.config)?;
         }
 
+        Self::load_static_metadata(sanitized_versioned_tx, message_hash, is_simple_vote_tx)
+    }
+
+    // Sonic: Share metadata extraction with synthetic lock-layer test fixtures.
+    fn load_static_metadata(
+        sanitized_versioned_tx: SanitizedVersionedTransaction,
+        message_hash: MessageHash,
+        is_simple_vote_tx: Option<bool>,
+    ) -> Result<Self> {
         let message_hash = match message_hash {
             MessageHash::Precomputed(hash) => hash,
             MessageHash::Compute => sanitized_versioned_tx.get_message().message.hash(),
@@ -182,6 +191,36 @@ impl RuntimeTransaction<SanitizedTransaction> {
             &HashSet::new(),
         )
         .expect("failed to create RuntimeTransaction from Transaction");
+        tx.load_implicit_read_locks();
+        tx
+    }
+
+    // Sonic: Lock-layer fixtures must reach guards below transaction admission limits.
+    pub fn from_transaction_for_account_lock_tests(
+        transaction: solana_transaction::Transaction,
+    ) -> Self {
+        let transaction =
+            SanitizedVersionedTransaction::try_from(VersionedTransaction::from(transaction))
+                .expect("invalid transaction fixture");
+        let static_tx = RuntimeTransaction::<SanitizedVersionedTransaction>::load_static_metadata(
+            transaction,
+            MessageHash::Compute,
+            None,
+        )
+        .expect("invalid transaction metadata fixture");
+        let transaction = SanitizedTransaction::try_new(
+            static_tx.transaction,
+            static_tx.meta.message_hash,
+            static_tx.meta.is_simple_vote_transaction,
+            solana_message::SimpleAddressLoader::Disabled,
+            &HashSet::new(),
+        )
+        .expect("invalid resolved transaction fixture");
+        let mut tx = Self {
+            transaction,
+            meta: static_tx.meta,
+            implicit_read_locks: static_tx.implicit_read_locks,
+        };
         tx.load_implicit_read_locks();
         tx
     }
