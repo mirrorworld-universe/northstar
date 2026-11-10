@@ -117,7 +117,7 @@ jobs:
           python3 -B .github/scripts/test-native-l1-recovery.py
           python3 -B .github/scripts/test-native-runtime-diagnostics.py
           python3 -B .github/scripts/test-prepare-continuity-sdk.py
-          bun test ./.github/scripts/continuity-control-journal.test.mjs ./.github/scripts/devnet-continuity-smoke.test.mjs ./.github/scripts/continuity-workflow.test.mjs ./.github/scripts/native-upgrade-snapshot.test.mjs ./.github/scripts/native-runtime-diagnostics-workflow.test.mjs
+          bun test ./.github/scripts/continuity-control-journal.test.mjs ./.github/scripts/devnet-continuity-smoke.test.mjs ./.github/scripts/continuity-workflow.test.mjs ./.github/scripts/native-upgrade-snapshot.test.mjs ./.github/scripts/native-runtime-diagnostics-workflow.test.mjs ./.github/scripts/recovery-retry-workflow.test.mjs
           bash -n .github/scripts/prepare-continuity-sdk.sh
       - uses: actions/setup-node@v4
         with:
@@ -354,7 +354,7 @@ jobs:
           solana --version
 
       # Sonic: Build v2 artifacts without replacing binaries used by the retained v1 runtime.
-      - name: Stage continuity-v2 artifacts and ER event plugin without activation
+      - name: Stage continuity-v2 artifacts and L1 event plugin without activation
         id: continuity_stage
         env:
           NORTHSTAR_CONTINUITY_BUILD_TARGET_DIR: /solana/northstar/continuity-v2-build-cache

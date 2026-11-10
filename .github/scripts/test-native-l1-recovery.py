@@ -8,10 +8,11 @@ import runpy
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 import continuity_devnet as rollout
 from continuity_rollout_state import atomic_json, private_json, retained_fingerprint
-from native_upgrade import digest
+from native_upgrade import NativeUpgrade, digest
 import native_l1_recovery as recovery
 
 UPGRADE = runpy.run_path(str(Path(__file__).with_name("test-native-upgrade.py")))
@@ -38,8 +39,11 @@ class RecoveryHost(UPGRADE["UpgradeHost"]):
         properties = {
             "FragmentPath": str(self.world.fragment), "DropInPaths": str(rollout.DROPIN),
             "NeedDaemonReload": "no", "User": pwd.getpwuid(os.getuid()).pw_name,
-            "Group": "", "DynamicUser": "no", "Restart": "no",
+            "Group": "", "DynamicUser": "no", "Restart": "no", "SubState": "dead" if not self.world.active else "running",
+            "Result": "success", "ExecMainCode": "2", "ExecMainStatus": "15", "NRestarts": "0",
+            "ExecMainExitTimestamp": "Sun 2026-11-08 23:43:05 UTC",
         }
+        properties.update(getattr(self.world, "retry_stop_overrides", {}))
         if arguments[:2] == ["systemctl", "show"]:
             for name, value in properties.items():
                 if "--property=" + name in arguments:
@@ -88,6 +92,141 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.world.starts, self.starts)
         self.assertEqual(self.world.uploads, self.uploads)
         self.assertEqual(self.world.key_generations, self.keys)
+
+    def interrupt_first_recovery(self):
+        with mock.patch.object(NativeUpgrade, "wait_ready", side_effect=RuntimeError("native upgrade readiness timed out")):
+            with self.assertRaisesRegex(RuntimeError, "readiness timed out"):
+                RecoveryHost(self.world).run()
+        self.assertFalse(self.world.active)
+        self.world.args.reconcile_failed_l1 = True
+        self.world.args.reconcile_stopped_at = "Sun 2026-11-08 23:43:05 UTC"
+
+    def test_explicit_reconciliation_allows_only_one_start_and_preserves_first_attempt(self):
+        self.interrupt_first_recovery()
+        first_barrier = (self.upgrade / "control/start-attempted.json").read_bytes()
+        cached = self.upgrade / "runtime/l1/ledger/snapshot-cache.bin"
+        cached.write_bytes(b"retained downloaded L1 data")
+        before = retained_fingerprint([self.base, self.old_ledger, self.world.fragment, self.upgrade / "runtime"])
+        commands_before = len(self.world.recovery_commands)
+        self.world.args.funder_keypair.unlink()
+        RecoveryHost(self.world).run()
+        self.assertEqual(self.world.starts, self.starts + 2)
+        self.assertEqual(self.world.uploads, self.uploads)
+        self.assertEqual(self.world.key_generations, self.keys)
+        self.assertEqual((self.upgrade / "control/start-attempted.json").read_bytes(), first_barrier)
+        self.assertEqual(before, retained_fingerprint([self.base, self.old_ledger, self.world.fragment, self.upgrade / "runtime"]))
+        after = self.world.recovery_commands[commands_before:]
+        self.assertFalse(any("install" in command or "mv" in command or "empty-l1" in command for command in after))
+        report = private_json(self.upgrade / "control/l1-retry/report.json")
+        self.assertEqual(report["qualification_kind"], "native-l1-recovery-retry")
+        self.assertEqual(report["readiness_seconds"], 3600)
+        self.assertEqual(report["controller_onchain_transactions"], 0)
+        self.assertEqual(report["retry_authorization_sha256"], digest(private_json(self.upgrade / "control/l1-retry/authorization.json")))
+        with self.assertRaises(ValueError):
+            RecoveryHost(self.world).run()
+        self.world.args.reconcile_failed_l1 = False
+        RecoveryHost(self.world).run()
+        self.assertEqual(self.world.starts, self.starts + 2)
+
+    def test_reconciliation_accepts_native_accounts_mode_only_beneath_private_l1_parent(self):
+        self.interrupt_first_recovery()
+        accounts = self.upgrade / "runtime/l1/accounts"
+        accounts.chmod(0o755)
+        (accounts / "run").mkdir()
+        (accounts / "snapshot").mkdir()
+        (accounts / "run/retained.bin").write_bytes(b"retained account cache")
+        before = retained_fingerprint([self.upgrade / "runtime", self.base, self.old_ledger])
+        RecoveryHost(self.world).run()
+        self.assertEqual(self.world.starts, self.starts + 2)
+        self.assertEqual(accounts.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(before, retained_fingerprint([self.upgrade / "runtime", self.base, self.old_ledger]))
+
+    def test_reconciliation_refuses_shared_parent_or_writable_accounts_mode(self):
+        self.interrupt_first_recovery()
+        parent = self.upgrade / "runtime/l1"
+        accounts = parent / "accounts"
+        for directory, mode in ((accounts, 0o775), (accounts, 0o777), (parent, 0o755)):
+            with self.subTest(mode=mode, role=directory.name):
+                directory.chmod(mode)
+                with self.assertRaisesRegex(ValueError, "recovery directories differ"):
+                    RecoveryHost(self.world).run()
+                directory.chmod(0o700)
+                self.assertEqual(self.world.starts, self.starts + 1)
+
+    def test_reconciliation_cli_rejects_an_explicit_replacement_stage(self):
+        result = subprocess.run([sys.executable, "-B", rollout.__file__, "run", "--revision", "b" * 40,
+            "--sdk-checkout", str(self.world.args.sdk_checkout), "--stage", str(self.world.args.stage),
+            "--upgrade-existing", "--recover-failed-l1-slot", str(FAILED_SLOT), "--reconcile-failed-l1",
+            "--reconcile-stopped-at", "Sun 2026-11-08 23:43:05 UTC"], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("reconciliation requires retained artifacts", result.stderr)
+        self.assert_no_new_start()
+
+    def test_reconciliation_refuses_an_active_service_without_stopping_it(self):
+        self.interrupt_first_recovery()
+        self.world.active = True
+        with self.assertRaisesRegex(ValueError, "unqualified stopped"):
+            RecoveryHost(self.world).run()
+        self.assertTrue(self.world.active)
+        self.assertEqual(self.world.starts, self.starts + 1)
+
+    def test_reconciliation_rejects_unreviewed_stopped_state(self):
+        self.interrupt_first_recovery()
+        for name, value in (("ExecMainExitTimestamp", "different stop"), ("ExecMainStatus", "1"),
+                            ("Result", "exit-code"), ("Restart", "always"), ("NRestarts", "1"),
+                            ("NeedDaemonReload", "yes"), ("ExecMainCode", "1")):
+            with self.subTest(property=name):
+                self.world.retry_stop_overrides = {name: value}
+                with self.assertRaisesRegex(ValueError, "service|properties"):
+                    RecoveryHost(self.world).run()
+                self.assertEqual(self.world.starts, self.starts + 1)
+
+    def test_reconciliation_rejects_changed_protocol_controls(self):
+        self.interrupt_first_recovery()
+        (self.base / "control/new-metadata").write_bytes(b"changed control state")
+        with self.assertRaisesRegex(ValueError, "protocol control records"):
+            RecoveryHost(self.world).run()
+        self.assertEqual(self.world.starts, self.starts + 1)
+
+    def test_reconciliation_rejects_state_changes_after_authorization(self):
+        self.interrupt_first_recovery()
+        class ChangedAfterAuthorization(RecoveryHost):
+            def execute(host, arguments, timeout=120, allowed=False):
+                result = super().execute(arguments, timeout, allowed)
+                if "flush" in list(map(str, arguments)) and (self.upgrade / "control/l1-retry/authorization.json").exists():
+                    (self.base / "runtime/checkpoints/retained.bin").write_bytes(b"changed after authorization")
+                return result
+        with self.assertRaisesRegex(ValueError, "state changed"):
+            ChangedAfterAuthorization(self.world).run()
+        self.assertEqual(self.world.starts, self.starts + 1)
+        self.assertFalse((self.upgrade / "control/l1-retry/start-attempted.json").exists())
+
+    def test_failed_reconciled_start_is_stopped_and_cannot_repeat(self):
+        self.interrupt_first_recovery()
+        self.world.checkpoint_error = "checkpoint_lineage_recovery_failed"
+        with self.assertRaisesRegex(ValueError, "quarantine"):
+            RecoveryHost(self.world).run()
+        self.assertFalse(self.world.active)
+        failure = private_json(self.upgrade / "control/l1-retry/failure.json")
+        self.assertTrue(failure["stop_verified"])
+        self.assertEqual(self.world.starts, self.starts + 2)
+        with self.assertRaisesRegex(ValueError, "already attempted"):
+            RecoveryHost(self.world).run()
+        self.assertEqual(self.world.starts, self.starts + 2)
+
+    def test_reconciliation_cannot_reuse_a_consumed_start_barrier(self):
+        self.interrupt_first_recovery()
+        class InterruptedAdditionalStart(RecoveryHost):
+            def execute(host, arguments, timeout=120, allowed=False):
+                if list(map(str, arguments)) == ["sudo", "-n", "systemctl", "start", rollout.SERVICE]:
+                    raise RuntimeError("additional start interrupted")
+                return super().execute(arguments, timeout, allowed)
+        with self.assertRaisesRegex(RuntimeError, "start interrupted"):
+            InterruptedAdditionalStart(self.world).run()
+        self.assertEqual(self.world.starts, self.starts + 1)
+        with self.assertRaisesRegex(ValueError, "already attempted"):
+            RecoveryHost(self.world).run()
+        self.assertEqual(self.world.starts, self.starts + 1)
 
     def test_failed_l1_recovery_uses_new_data_directories_and_preserves_protocol_state(self):
         self.world.args.funder_keypair.unlink()

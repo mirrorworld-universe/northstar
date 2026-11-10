@@ -1,0 +1,66 @@
+name: Reconcile one stopped L1 recovery
+
+on:
+  workflow_dispatch:
+    inputs:
+      recovery_revision:
+        description: Full source revision of the installed, unqualified L1 recovery
+        type: string
+        required: true
+      stopped_at:
+        description: Exact reviewed systemd ExecMainExitTimestamp from read-only diagnostics
+        type: string
+        required: true
+      failed_slot:
+        description: Reviewed ProgramData feature activation slot
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-l1-recovery-retry
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: github.repository == 'mirrorworld-universe/northstar' && github.ref == 'refs/heads/master'
+    runs-on: [devnet]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.21.0"
+      - name: Prepare pinned public continuity SDK
+        id: sdk
+        run: |
+          set -euo pipefail
+          SDK="$RUNNER_TEMP/recovery-retry-sdk-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          bash .github/scripts/prepare-continuity-sdk.sh "$SDK"
+          printf 'directory=%s\n' "$SDK" >> "$GITHUB_OUTPUT"
+      - name: Reconcile and perform one guarded recovery start
+        id: retry
+        env:
+          RECOVERY_REVISION: ${{ inputs.recovery_revision }}
+          EXPECTED_STOP: ${{ inputs.stopped_at }}
+          FAILED_SLOT: ${{ inputs.failed_slot }}
+          CONTINUITY_SDK: ${{ steps.sdk.outputs.directory }}
+        run: |
+          set -euo pipefail
+          [[ "$RECOVERY_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$FAILED_SLOT" =~ ^[1-9][0-9]{0,19}$ ]]
+          python3 -B .github/scripts/continuity_devnet.py run \
+            --revision "$RECOVERY_REVISION" --sdk-checkout "$CONTINUITY_SDK" \
+            --upgrade-existing --recover-failed-l1-slot "$FAILED_SLOT" \
+            --reconcile-failed-l1 --reconcile-stopped-at "$EXPECTED_STOP"
+      - name: Retain only the public retry qualification report
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-l1-recovery-retry-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.retry.outputs.report_path }}
+          if-no-files-found: error
