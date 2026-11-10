@@ -14,7 +14,11 @@ import time
 import zlib
 
 from continuity_devnet import DROPIN, SERVICE, public_bytes
-from continuity_rollout_state import ARTIFACTS, DEVNET, SDK_REVISION, canonical, file_hash, flag_value, private_json, service_dropin
+from native_l1_recovery import STATE_PATHS
+from continuity_rollout_state import (
+    ARTIFACTS, DEVNET, SDK_REVISION, canonical, file_hash, flag_value, geyser_event_source,
+    geyser_events_config, private_json, service_dropin, upgrade_arguments,
+)
 
 STATE_ROOT = Path("/solana/northstar/continuity-v2")
 LOCK = Path("/solana/northstar/continuity-v2-deploy.lock")
@@ -46,6 +50,12 @@ MARKERS = {
     "oom-kill": "memory_limit",
     "failed to load er geyser plugins": "event_plugin_load_failure",
     "error while loading shared libraries": "native_library_load_failure",
+    "searching for an rpc service with shred version": "rpc_peer_search",
+    "no snapshots available": "snapshot_unavailable",
+    "unable to find any rpc peers": "rpc_peer_unavailable",
+    "failed to download a snapshot archive for slot": "snapshot_download_failed",
+    "loading bank from full snapshot archive:": "snapshot_load_started",
+    "cannot resume continuity session:": "continuity_resume_failed",
 }
 
 
@@ -93,6 +103,41 @@ def panic_sites(messages):
     return [{"file": filename, "line": line} for filename, line in sorted(sites)[:8]]
 
 
+def startup_evidence(messages):
+    report = {"stage_counts": {}}
+    stages = (
+        ("solana_runtime::snapshot_bank_utils", "Loading bank from full snapshot archive:", "snapshot_load_started"),
+        ("agave_snapshots::unarchive", "Extracting ", "snapshot_extract_started"),
+        ("agave_snapshots::unarchive", "Extracted ", "snapshot_extract_completed"),
+        ("solana_runtime::serde_snapshot", "Building accounts index... Done in ", "accounts_index_completed"),
+        ("solana_runtime::serde_snapshot", "Building accounts index...", "accounts_index_started"),
+        ("solana_accounts_db::accounts_db", "generating index: processed all slots", "accounts_index_slots_completed"),
+        ("solana_runtime::snapshot_bank_utils", "Rebuilding status cache from ", "snapshot_status_cache"),
+        ("solana_rpc::rpc_service", "rpc bound to ", "rpc_listener_started"),
+        ("northstar", "Ephemeral rollup started on ", "er_runtime_started"),
+    )
+    for message in messages:
+        if not isinstance(message, str) or "program log:" in message.lower():
+            continue
+        matched = re.fullmatch(r"\[([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z)\s+"
+                               r"(?:ERROR|WARN|INFO|DEBUG|TRACE)\s+([a-z0-9_:]+)\]\s*(.*)", message)
+        if not matched:
+            continue
+        timestamp, module, body = matched.groups()
+        stage = next((name for expected_module, prefix, name in stages if module == expected_module and body.startswith(prefix)), None)
+        progress = re.match(r"generating index: processed ([0-9]{1,20})/([0-9]{1,20}) slots\.\.\.(?:\s|$)", body)
+        if module == "solana_accounts_db::accounts_db" and progress:
+            processed, total = map(int, progress.groups())
+            if 0 <= processed <= total <= 2 ** 64 - 1 and total > 0:
+                report.setdefault("first_index_progress", {"processed": processed, "total": total, "at": timestamp})
+                report["index_progress"] = {"processed": processed, "total": total}
+                stage = "accounts_index_progress"
+        if stage:
+            report["stage_counts"][stage] = report["stage_counts"].get(stage, 0) + 1
+            report.update(last_stage=stage, last_stage_at=timestamp)
+    return report
+
+
 def tail_evidence(tail):
     messages = [message for message in tail.decode(errors="replace").splitlines() if "program log:" not in message.lower()]
     context, remaining = [], 0
@@ -117,7 +162,7 @@ def tail_evidence(tail):
              for slot in re.findall(r"(?:at |For )?slot\s+([0-9]{1,20})(?=[:\s,])", message)
              if int(slot) <= 2 ** 64 - 1}
     return {"marker_counts": marker_counts(messages), "panic_sites": panic_sites(messages),
-            "panic_kinds": sorted(kinds), "bank_hash_slots": sorted(slots)[:8]}
+            "panic_kinds": sorted(kinds), "bank_hash_slots": sorted(slots)[:8], "startup": startup_evidence(messages)}
 
 
 def disk_summary(directory):
@@ -250,14 +295,17 @@ def gzip_log_summary(path, *, max_compressed_bytes=4 * 1024 ** 3, max_decoded_by
             os.close(descriptor)
 
 
-def operational_details(values, root, records):
+def operational_details(values, root, records, bound_arguments=None):
     report = {"filesystems": {"state_root": disk_summary(root)}, "file_logs": []}
-    if not (records.get("recorded_plan_identity_matches") and records.get("managed_dropin_matches_original")
+    if bound_arguments is not None:
+        if not bound_arguments:
+            return report
+    elif not (records.get("recorded_plan_identity_matches") and records.get("managed_dropin_matches_original")
             and records.get("original_binary_matches") and len(records.get("original_revisions", [])) == 1):
         return report
     try:
-        activation = private_json(root / records["original_revisions"][0] / "control/activation.json")
-        arguments = activation["arguments"]
+        arguments = bound_arguments if bound_arguments is not None else private_json(
+            root / records["original_revisions"][0] / "control/activation.json")["arguments"]
         working = Path(values.get("WorkingDirectory", ""))
         try:
             ledger = Path(flag_value(arguments, "--ledger"))
@@ -290,7 +338,7 @@ def operational_details(values, root, records):
                 if working.is_absolute():
                     candidates.append(("validator_default", working / ("agave-validator-" + records["validator"] + ".log")))
         for name in ("StandardOutput", "StandardError"):
-            if not records.get("effective_start_mentions_original_binary"):
+            if not (bound_arguments or records.get("effective_start_mentions_original_binary")):
                 continue
             value = values.get(name, "")
             if ":" in value and value.split(":", 1)[0] in ("append", "file", "truncate"):
@@ -349,7 +397,96 @@ def read_dropin(dropin):
         os.close(descriptor)
 
 
-def managed_records(start, root, dropin, retained_start=""):
+def effective_arguments_match(start, text):
+    paths = re.findall(r"(?:^|[ {])path=([^;]+);", start)
+    arguments = re.findall(r"(?:^|[ ;])argv\[\]=(.*?)(?= ; |;| \})", start)
+    try:
+        return (len(paths) == len(arguments) == 1 and paths[0].strip() == "/usr/bin/env"
+                and shlex.split(arguments[0]) == shlex.split(text.rsplit("ExecStart=", 1)[1].strip()))
+    except (ValueError, IndexError):
+        return False
+
+
+def upgrade_runtime_arguments(start, root, dropin, revision, plan, base_plan, reservation, environment, binding):
+    namespace = root / "upgrades" / revision
+    control, runtime = namespace / "control", namespace / "runtime"
+    try:
+        binding["stage"] = "directories"
+        for directory in (root / "upgrades", namespace, control, runtime, runtime / "bin", runtime / "lib"):
+            if not stat.S_ISDIR(directory.lstat().st_mode):
+                return []
+        binding["stage"] = "service_plan"
+        desired, artifacts = plan["desired"], plan["artifacts"]
+        arguments = desired["arguments"]
+        event_source = geyser_event_source(plan)
+        if (not isinstance(arguments, list) or not arguments or len(arguments) > 4096
+                or not all(isinstance(value, str) and not any(character in value for character in "\n\r;") for value in arguments)
+                or set(artifacts) != set(ARTIFACTS)
+                or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value) for value in artifacts.values())
+                or arguments[0] != str(runtime / ARTIFACTS["validator"])
+                or desired["state_environment"] != environment or plan["before"]["state_environment"] != environment
+                or any(desired[key] != reservation["original"][key] for key in ("uid", "gid"))
+                or flag_value(arguments, "--portal") != base_plan["programs"]["portal"]
+                or any(artifacts[role] != base_plan["artifacts"][role] for role in ("portal", "token_bridge"))):
+            return []
+        upgrade_arguments(arguments, runtime / ARTIFACTS["validator"], runtime / "geyser-events.json", runtime / "geyser-events.json",
+                          previous_source=event_source, event_source=event_source)
+        binding["stage"] = "barriers_and_effective_start"
+        text = service_dropin(arguments, *environment.values())
+        installed = {"sha256": hashlib.sha256(text.encode()).hexdigest()}
+        progress = private_json(control / "progress.json")
+        started = private_json(control / "start-attempted.json")
+        if (progress != {"version": 1, "plan_sha256": digest(plan), "phase": progress.get("phase")}
+                or progress.get("phase") not in ("start-attempted", "qualified")
+                or private_json(control / "frozen.json").get("plan_sha256") != digest(plan)
+                or private_json(control / "installed.json") != installed
+                or set(started) != {"plan_sha256", "l1_floor"} or started["plan_sha256"] != digest(plan)
+                or type(plan.get("l1_floor")) is not int or type(started["l1_floor"]) is not int
+                or not 0 <= plan["l1_floor"] <= started["l1_floor"] <= 2 ** 64 - 1
+                or file_hash(dropin) != installed["sha256"] or stat.S_IMODE(dropin.lstat().st_mode) != 0o600
+                or not effective_arguments_match(start, text) or desired["binary_sha256"] != artifacts["validator"]):
+            return []
+        binding["stage"] = "native_artifacts"
+        for role in ("validator", "geyser_events"):
+            target = runtime / ARTIFACTS[role]
+            info = target.lstat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != desired["uid"]
+                    or stat.S_IMODE(info.st_mode) != 0o500 or file_hash(target) != artifacts[role]):
+                return []
+        binding["stage"] = "plugin_configuration"
+        configuration = runtime / "geyser-events.json"
+        info = configuration.lstat()
+        if (info.st_uid != desired["uid"] or stat.S_IMODE(info.st_mode) != 0o400
+                or private_json(configuration) != geyser_events_config(runtime / ARTIFACTS["geyser_events"], event_source)):
+            return []
+        binding["stage"] = "matched"
+        return arguments
+    except (OSError, ValueError, TypeError, KeyError):
+        return []
+
+
+def recovery_directory_metadata(namespace, owner):
+    directories = {}
+    roles = [("l1_root", ""), *((flag.removeprefix("--").replace("-", "_"), suffix) for flag, suffix in STATE_PATHS.items())]
+    for role, suffix in roles:
+        try:
+            info = (namespace / "runtime/l1" / suffix).lstat()
+            directories[role] = {"directory": stat.S_ISDIR(info.st_mode), "symlink": stat.S_ISLNK(info.st_mode),
+                                 "mode": f"{stat.S_IMODE(info.st_mode):04o}", "owner_matches_record": info.st_uid == owner["uid"],
+                                 "group_matches_record": info.st_gid == owner["gid"]}
+        except FileNotFoundError:
+            directories[role] = {"absent": True}
+        except OSError:
+            directories[role] = {"status": "unavailable"}
+    retry = namespace / "control/l1-retry"
+    records = {"authorization": "authorization.json", "start_attempted": "start-attempted.json",
+               "outcome": "outcome.json", "failure": "failure.json"}
+    if os.path.lexists(retry) and not stat.S_ISDIR(retry.lstat().st_mode):
+        return {"l1_directories": directories, "retry_directory": "invalid"}
+    return {"l1_directories": directories, "retry_records": {name: os.path.lexists(retry / filename) for name, filename in records.items()}}
+
+
+def managed_records(start, root, dropin, retained_start="", bound_arguments=None):
     references = start + "\n" + retained_start
     original = sorted(set(re.findall(re.escape(str(root)) + r"/([0-9a-f]{40})/runtime/(?:bin/agave-validator|checkpoints|unsettled)", references)))
     upgraded = sorted(set(re.findall(re.escape(str(root)) + r"/upgrades/([0-9a-f]{40})/runtime/", references)))
@@ -397,6 +534,9 @@ def managed_records(start, root, dropin, retained_start=""):
         if identity_ok:
             report.update(portal=plan["programs"]["portal"], token_bridge=plan["programs"]["token_bridge"],
                           validator=plan["validator"], profile=plan["profile"])
+        if (identity_ok and report["managed_dropin_matches_original"] and report["original_binary_matches"]
+                and effective_arguments_match(start, text) and bound_arguments is not None):
+            bound_arguments.extend(activation["arguments"])
         report["journal_directories"] = {}
         for role in ("checkpoints", "unsettled"):
             directory = base / "runtime" / role
@@ -421,6 +561,14 @@ def managed_records(start, root, dropin, retained_start=""):
                 "progress_matches": progress.get("version") == 1 and progress.get("plan_sha256") == digest(upgrade_plan),
                 "start_barrier_present": os.path.lexists(upgrade_control / "start-attempted.json"),
             }
+            arguments, binding = [], {"stage": "identity"}
+            if identity_ok and report["upgrade_record"]["identity_matches"]:
+                arguments = upgrade_runtime_arguments(start, root, dropin, upgraded[0], upgrade_plan, plan, reservation, expected_environment, binding)
+            report["upgrade_record"].update(runtime_binding_matches=bool(arguments), runtime_binding_stage=binding["stage"])
+            if arguments and type(upgrade_plan.get("recovery_failed_slot")) is int:
+                report["upgrade_record"].update(recovery_directory_metadata(root / "upgrades" / upgraded[0], upgrade_plan["desired"]))
+            if arguments and bound_arguments is not None:
+                bound_arguments[:] = arguments
     except FileNotFoundError:
         report["status"] = "missing_record_or_path"
     except (OSError, ValueError, TypeError, KeyError):
@@ -454,14 +602,13 @@ def collect_report(run=execute, root=STATE_ROOT, dropin=DROPIN, lock=LOCK):
         except (OSError, ValueError):
             retained_start = ""
             report["managed_dropin_readable"] = False
-        report["managed_records"] = managed_records(values.get("ExecStart", ""), root, dropin, retained_start)
+        bound_arguments = []
+        report["managed_records"] = managed_records(values.get("ExecStart", ""), root, dropin, retained_start, bound_arguments)
         records = report["managed_records"]
-        if (records.get("recorded_plan_identity_matches") and records.get("managed_dropin_matches_original")
-                and records.get("original_binary_matches") and records.get("effective_start_mentions_original_binary")
-                and any(values.get(name) in ("append", "file", "truncate") and not values.get(name + "File")
-                        for name in ("StandardOutput", "StandardError"))):
+        if (bound_arguments and any(values.get(name) in ("append", "file", "truncate") and not values.get(name + "File")
+                                    for name in ("StandardOutput", "StandardError"))):
             values.update(unit_log_sinks(run, values))
-        report["operational"] = operational_details(values, root, records)
+        report["operational"] = operational_details(values, root, records, bound_arguments)
         report["status"] = "snapshot_collected"
     except FileNotFoundError:
         report["status"] = "deployment_lock_missing"

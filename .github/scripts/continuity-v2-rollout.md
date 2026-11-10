@@ -47,18 +47,33 @@ including numeric/string wire cursors that the SDK normalizes to `bigint`.
    program keys, checkpoint directory, unsettled state or L1 ledger.
 5. Installs an isolated validator and event plugin, a read-only plugin config, and
    the systemd drop-in. It replaces executable and Portal arguments and adds
-   `--er-geyser-plugin-config`, preserving other service arguments. Existing ER
+   `--geyser-plugin-config` for L1 SSE, preserving other service arguments. Existing ER
    plugin flags require explicit review before uploads or service changes.
    Checkpoint and unsettled directories point to the new namespace. Plugin and
    configuration hashes are checked on retries; changed files are not overwritten.
    Directory entries and key/configuration files are flushed before activation.
    Startup must reach the finalized program deployment slots, catch up to the
-   current devnet head, and pass the ER event listener health check on every restart.
+   current devnet head, and pass the managed L1 event listener health check on every restart.
 6. Opens and pins canonical nonce-1 SessionV2 with the full L1 genesis, explicit
    profile and actual validator identity. ER genesis is pinned separately; it must
    not be assumed equal to L1 genesis.
 7. Runs the versioned SOL/SPL qualification below, verifies retained old state is
    unchanged and publishes only the public result report.
+
+New activation and native-upgrade plans default to **L1 SSE**, using the normal
+Geyser service. The configuration records `event_source: "l1"` and binds the
+standard `--geyser-plugin-config` argument. `--event-source er` is available only
+as an explicit ER choice. Existing records without `event_source` describe the
+historical ER setup; retries preserve their exact arguments and configuration
+hashes. A source change requires a new guarded native-upgrade plan, not editing
+an established plan or redeploying Portal/session state. Clients changing from
+ER to L1 must discard their ER cursors and backfill through native L1 RPC.
+
+These activation controls remain devnet-only. Production uses a Northstar node
+following Solana mainnet-beta with standard L1 Geyser and native JSON-RPC; see
+[the L1 network configuration](../../northstar/geyser-events/README.md#configure).
+The plugin does not switch networks or route native RPC through an upstream
+provider. L1 RPC and SSE reuse the same environment's Northstar node.
 
 The durable namespace is
 `/solana/northstar/continuity-v2/<source-revision>`. Its control files and signing
@@ -95,8 +110,10 @@ The upgrade:
    the upgrade controller, and it does not read the deployer keypair.
 3. Stops the original service and fingerprints retained journals and original
    private controls. It installs only new validator/plugin copies and their config
-   in the upgrade namespace. Only the executable and this controller's ER plugin
-   argument change; Portal, L1 plugins and other service arguments are preserved.
+   in the upgrade namespace. Only the executable and this controller's managed
+   plugin argument change. New plans select L1, replacing the old managed ER
+   argument when present; Portal, unrelated L1 plugins and other service
+   arguments are preserved.
 4. Checks frozen hashes, ownership, effective systemd arguments and the unchanged
    L1 session through a read-only upstream query before recording a durable start
    barrier. Its L1 recovery floor includes the old local processed/confirmed/finalized
@@ -153,7 +170,7 @@ The same immutable plan, frozen journals and durable one-start barrier apply.
 Unrecognized pre-start files in the new L1 directories block startup. The stopped
 original runtime is never automatically started, even if a pre-start fingerprint
 fails. Qualification requires a snapshot newer than the failure slot, current
-L1/ER synchronization, unchanged session identity/ER genesis and healthy ER SSE.
+L1/ER synchronization, unchanged session identity/ER genesis and healthy managed SSE.
 All native bank-hash guards remain enabled. A qualification failure stops the new
 runtime without rollback or state clearing. A qualified same-plan retry does not
 start it again.
@@ -161,6 +178,38 @@ start it again.
 The public qualification scope is `native-l1-recovery`, not fresh SOL/SPL payout,
 oracle, SP1 or proof-acceptance qualification. A later native upgrade can retain
 these qualified L1 paths without creating another ledger.
+
+### Explicit reconciliation after a readiness timeout
+
+A failed start remains blocked by its original durable barrier. Do not delete that
+barrier, replace the plan, clear L1 directories or repeatedly rerun release CD.
+After reviewing stopped-state diagnostics, an operator can authorize **one additional
+start** with the manual **Reconcile one stopped L1 recovery** workflow on `master`.
+Supply the original recovery source revision, failure slot and exact reviewed
+`ExecMainExitTimestamp`.
+
+The controller requires the same inactive service with a successful SIGTERM exit,
+zero automatic restarts, no restart policy and no pending systemd reload. It verifies
+installed artifacts, exact effective arguments, retained program/session bindings
+and unchanged protocol control records. It captures the current ER fingerprints
+and checks ownership/modes of the existing recovery directories. AccountsDb recreates
+its accounts root using the service umask during bootstrap; reconciliation accepts
+`0700` or the observed native `0755` for that directory only. The L1 parent and all
+other recovery directories must remain `0700`, with matching owner and group.
+The controller never changes permissions to make admission pass. Downloaded snapshots
+and existing L1 files are not cleared by reconciliation; no binaries, programs, keys or service
+configuration are installed or replaced. The CLI uses the retained artifact stage
+and rejects an explicit `--stage` during reconciliation.
+
+A separate `control/l1-retry` authorization binds the original plan and first-start
+barrier, controller revision, reviewed stopped state and current retained fingerprints.
+Its own durable start barrier permits only one additional start, including after an
+uncertain command result or interrupted controller. Further attempts require a new
+operator decision; they are not automatically admitted by another workflow run.
+Recovery readiness allows 60 minutes, while ordinary native upgrades retain 20 minutes.
+Failed qualification stops the verified managed service without rollback or resets.
+The public scope is `native-l1-recovery-retry`, still not fresh SOL/SPL, oracle, SP1
+or proof-acceptance qualification.
 
 ## Read-only host diagnostics
 

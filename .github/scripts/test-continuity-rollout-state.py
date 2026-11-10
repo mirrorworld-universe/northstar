@@ -8,7 +8,7 @@ import unittest
 
 from continuity_rollout_state import (
     ARTIFACTS, append_private, atomic_json, checked_directory, file_hash, flag_value, geyser_events_config, immutable_json,
-    inspect_paths, private_json, retained_fingerprint, service_arguments, service_dropin,
+    geyser_event_source, inspect_paths, private_json, retained_fingerprint, service_arguments, service_dropin,
     sync_paths, systemd_argument, upgrade_arguments, verify_artifacts,
 )
 
@@ -76,6 +76,47 @@ class StateTests(unittest.TestCase):
             "libpath": "/isolated/lib/events.so", "name": "er-events", "listen_addr": "0.0.0.0:9101", "commitment": "confirmed"})
         with self.assertRaisesRegex(ValueError, "plugin path.*absolute"):
             geyser_events_config("relative.so")
+
+    def test_l1_delivery_uses_standard_geyser_and_keeps_legacy_er_hashes(self):
+        original = ["/retained/agave-validator", "--portal", "old", "--geyser-plugin-config", "/retained/other.json"]
+        arguments = service_arguments(original, "/isolated/bin/agave-validator", "new", "/isolated/events.json", "l1")
+        self.assertEqual(arguments[-2:], ["--geyser-plugin-config", "/isolated/events.json"])
+        self.assertEqual(arguments[3:-2], original[3:])
+        self.assertEqual(geyser_events_config("/isolated/events.so", "l1")["name"], "l1-events")
+        self.assertEqual(geyser_events_config("/isolated/events.so")["name"], "er-events")
+        self.assertEqual(geyser_event_source({}), "er")
+        self.assertEqual(geyser_event_source({"event_source": "l1"}), "l1")
+        for source in (None, "mainnet", "devnet", "unknown"):
+            with self.subTest(source=source), self.assertRaisesRegex(ValueError, "unknown event source"):
+                geyser_event_source({"event_source": source})
+
+    def test_l1_upgrade_replaces_only_the_manifest_bound_plugin(self):
+        original = ["/retained/agave-validator", "--portal", "retained", "--ledger", "/retained/ledger",
+                    "--geyser-plugin-config", "/retained/third-party.json"]
+        expected = ["/upgrade/bin/agave-validator", *original[1:], "--geyser-plugin-config", "/upgrade/events.json"]
+        for source, suffix in (("er", ["--er-geyser-plugin-config", "/retained/events.json"]),
+                               ("er", ["--er-geyser-plugin-config=/retained/events.json"]),
+                               ("l1", ["--geyser-plugin-config", "/retained/events.json"]),
+                               ("l1", ["--accountsdb-plugin-config=/retained/events.json"])):
+            with self.subTest(source=source, suffix=suffix):
+                self.assertEqual(upgrade_arguments(original + suffix, expected[0], expected[-1], "/retained/events.json",
+                                                   previous_source=source, event_source="l1"), expected)
+                for invalid in (original, original + suffix + suffix):
+                    with self.assertRaises(ValueError):
+                        upgrade_arguments(invalid, expected[0], expected[-1], "/retained/events.json",
+                                          previous_source=source, event_source="l1")
+
+    def test_l1_configuration_preserves_native_rpc_and_each_solana_cluster(self):
+        for genesis in ("EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+                        "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"):
+            with self.subTest(genesis=genesis):
+                original = ["/retained/agave-validator", "--portal", "retained", "--expected-genesis-hash", genesis,
+                            "--rpc-port", "8899", "--full-rpc-api", "--enable-rpc-transaction-history"]
+                configured = upgrade_arguments(original, "/upgrade/bin/agave-validator", "/upgrade/events.json", event_source="l1")
+                self.assertEqual(configured[1:-2], original[1:])
+                self.assertEqual(configured[-2:], ["--geyser-plugin-config", "/upgrade/events.json"])
+                self.assertEqual(flag_value(configured, "--expected-genesis-hash"), genesis)
+                self.assertEqual(flag_value(configured, "--rpc-port"), "8899")
 
     def test_native_upgrade_preserves_portal_and_replaces_only_its_owned_plugin(self):
         original = ["/retained/agave-validator", "--portal=existing", "--ledger", "/retained/ledger",

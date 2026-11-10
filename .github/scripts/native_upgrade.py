@@ -10,7 +10,7 @@ import native_l1_recovery as recovery
 
 from continuity_rollout_state import (
     ARTIFACTS, DEVNET, SDK_REVISION, append_private, atomic_json, canonical, checked_directory,
-    file_hash, flag_value, geyser_events_config, immutable_json, private_json, require,
+    file_hash, flag_value, geyser_event_source, geyser_events_config, geyser_plugin_flag, immutable_json, private_json, require,
     service_dropin, upgrade_arguments, verify_artifacts,
 )
 
@@ -46,6 +46,7 @@ class NativeUpgrade:
         self.started = self.control / "start-attempted.json"
         self.installed = self.control / "installed.json"
         self.progress = self.control / "progress.json"
+        self.retrying = False
 
     def phase(self):
         value = private_json(self.progress)
@@ -155,6 +156,7 @@ class NativeUpgrade:
             marker = private_json(self.base_control / "activation-installed.json")
             config = self.base / "runtime/geyser-events.json" if "geyser_config_sha256" in self.base_activation else None
             artifacts = self.base_manifest["sha256"]
+            self.previous_event_source = geyser_event_source(self.base_activation)
         else:
             previous = binary.parent.parent.parent
             require(previous.parent == self.parent and re.fullmatch("[0-9a-f]{40}", previous.name)
@@ -177,6 +179,7 @@ class NativeUpgrade:
             require(saved["artifacts"] == artifacts, "previous native artifact binding differs")
             config = previous / "runtime/geyser-events.json"
             marker = private_json(previous / "control/installed.json")
+            self.previous_event_source = geyser_event_source(saved)
         require(before["binary_sha256"] == artifacts["validator"], "retained native manifest and executable differ")
         text = service_dropin(before["arguments"], *[before["state_environment"][key] for key in STATE_KEYS])
         require(marker == {"sha256": hashlib.sha256(text.encode()).hexdigest()}, "retained service drop-in binding differs")
@@ -193,7 +196,7 @@ class NativeUpgrade:
                     and observed[before["state_environment"][key]].get("mode") == 0o700, "retained journal directory differs")
         if config is not None:
             plugin = binary.parent.parent / ARTIFACTS["geyser_events"]
-            expected_config = canonical(geyser_events_config(plugin)) + b"\n"
+            expected_config = canonical(geyser_events_config(plugin, self.previous_event_source)) + b"\n"
             require((binary != base_binary or self.base_activation.get("geyser_config_sha256") == hashlib.sha256(expected_config).hexdigest())
                     and observed[str(config)].get("sha256") == hashlib.sha256(expected_config).hexdigest()
                     and observed[str(config)].get("mode") == 0o400 and observed[str(config)].get("uid") == before["uid"]
@@ -217,6 +220,9 @@ class NativeUpgrade:
         self.ops.log = self.control / "operations.log"
         append_private(self.ops.log, b"")
         saved = private_json(self.record) if self.record.exists() else None
+        requested_source = getattr(self.args, "event_source", None)
+        self.event_source = geyser_event_source(saved) if saved else requested_source or "l1"
+        require(requested_source is None or requested_source == self.event_source, "established event source differs")
         requested_recovery = getattr(self.args, "recover_failed_l1_slot", None)
         self.recovery_slot = saved.get("recovery_failed_slot") if saved else requested_recovery
         require(requested_recovery is None or requested_recovery == self.recovery_slot,
@@ -244,7 +250,8 @@ class NativeUpgrade:
         if self.recovery_slot is not None:
             recovery.verify_service_files(self.ops, self.base, self.service, self.dropin)
         config = self.runtime / "geyser-events.json"
-        desired_arguments = upgrade_arguments(before["arguments"], self.runtime / ARTIFACTS["validator"], config, binding["config"])
+        desired_arguments = upgrade_arguments(before["arguments"], self.runtime / ARTIFACTS["validator"], config, binding["config"],
+                                              previous_source=self.previous_event_source, event_source=self.event_source)
         if self.recovery_slot is not None:
             desired_arguments = recovery.arguments(desired_arguments, self.runtime)
         desired = {**service_spec(before), "arguments": desired_arguments,
@@ -271,6 +278,7 @@ class NativeUpgrade:
                 retained.update([binding["config"], str(Path(binding["config"]).parent / ARTIFACTS["geyser_events"])])
             retained = sorted(retained)
             self.plan = {"version": 1, "kind": "native-upgrade", "source_revision": self.args.revision, "stage": str(self.stage),
+                         "event_source": self.event_source,
                          "artifacts": self.manifest["sha256"], "base_revision": self.base.name, "base_plan_sha256": digest(self.base_plan),
                          "before": service_spec(before), "binding": binding, "desired": desired, "retained_paths": retained,
                          "identity": snapshot["identity"], "er_genesis": snapshot["er_genesis"], "l1_floor": floor}
@@ -279,6 +287,9 @@ class NativeUpgrade:
             immutable_json(self.record, self.plan)
             immutable_json(self.progress, {"version": 1, "plan_sha256": digest(self.plan), "phase": "prepared"})
         phase = self.phase()
+        reconcile = getattr(self.args, "reconcile_failed_l1", False)
+        require(not reconcile or self.recovery_slot is not None and phase == "start-attempted" and not active,
+                "reconciliation requires an unqualified stopped L1 recovery")
         if phase != "prepared":
             require(private_json(self.frozen).get("plan_sha256") == digest(self.plan), "native frozen inventory binding differs")
         if phase in ("installed", "start-attempted", "qualified"):
@@ -299,11 +310,14 @@ class NativeUpgrade:
         if self.current == desired:
             require(phase in ("start-attempted", "qualified"), "running native upgrade lacks its start barrier")
         elif phase in ("start-attempted", "qualified"):
-            raise ValueError("native start was already attempted; reconcile the service before retry")
+            require(reconcile, "native start was already attempted; reconcile the service before retry")
         if not active:
             require(self.frozen.exists() or self.recovery_slot is not None and phase == "prepared",
                     "inactive native upgrade lacks a frozen journal inventory")
         require(self.snapshot("l1")["identity"] == self.plan["identity"], "retained session identity changed before upgrade")
+        if reconcile:
+            from native_l1_recovery_retry import prepare
+            prepare(self)
 
     def freeze(self):
         if self.current is not None:
@@ -353,7 +367,7 @@ class NativeUpgrade:
             else:
                 require(info.get("sha256") == self.plan["artifacts"][role] and info.get("uid") == before["uid"] and info.get("mode") == 0o500,
                         "retained upgrade native artifact differs")
-        configuration = geyser_events_config(targets["geyser_events"])
+        configuration = geyser_events_config(targets["geyser_events"], self.event_source)
         source = self.control / "geyser-events.json"
         immutable_json(source, configuration)
         info = observed[str(config)]
@@ -390,7 +404,7 @@ class NativeUpgrade:
         paths = re.findall(r"(?:^|[ {])path=([^;]+);", effective)
         require(len(paths) == 1 and paths[0].strip() == "/usr/bin/env"
                 and all(str(value) in effective for value in (self.runtime / ARTIFACTS["validator"], self.runtime / "geyser-events.json",
-                "--portal", "--er-geyser-plugin-config", self.base_plan["programs"]["portal"], *self.plan["before"]["state_environment"].values())),
+                "--portal", geyser_plugin_flag(self.event_source), self.base_plan["programs"]["portal"], *self.plan["before"]["state_environment"].values())),
                 "another systemd override replaces the native upgrade")
         if self.recovery_slot is not None:
             require(all(str(path) in effective for path in recovery.paths(self.runtime)[1:]),
@@ -405,7 +419,7 @@ class NativeUpgrade:
             require(observed[str(target)].get("sha256") == self.plan["artifacts"][role]
                     and observed[str(target)].get("mode") == 0o500 and observed[str(target)].get("uid") == self.plan["before"]["uid"],
                     "installed native upgrade artifact differs")
-        require(observed[str(config)].get("sha256") == hashlib.sha256(canonical(geyser_events_config(targets["geyser_events"])) + b"\n").hexdigest()
+        require(observed[str(config)].get("sha256") == hashlib.sha256(canonical(geyser_events_config(targets["geyser_events"], self.event_source)) + b"\n").hexdigest()
                 and observed[str(config)].get("mode") == 0o400 and observed[str(config)].get("uid") == self.plan["before"]["uid"],
                 "installed native upgrade plugin configuration differs")
 
@@ -419,6 +433,9 @@ class NativeUpgrade:
 
     def wait_ready(self):
         floor = start_floor(self.started, self.plan)
+        if self.retrying:
+            from native_l1_recovery_retry import retry_floor
+            floor = max(floor, retry_floor(self))
         end = time.monotonic() + (3600 if self.recovery_slot is not None else 1200)
         while time.monotonic() < end:
             require(self.state() == "active", "native upgraded runtime failed during startup")
@@ -472,6 +489,8 @@ class NativeUpgrade:
                   "controller_onchain_transactions": 0, "program_deployments": 0, "session_replaced": False,
                   "journal_paths_preserved": True, "protocol_controls_unchanged": True, "sse_health": "ok",
                   "proof_acceptance_qualified": False}
+        if "event_source" in self.plan:
+            report["event_source"] = self.event_source
         if self.recovery_slot is not None:
             report.update(recovery_failed_slot=self.recovery_slot, prior_l1_data_preserved=True)
         immutable_json(self.control / "report.json", report)
@@ -483,8 +502,24 @@ class NativeUpgrade:
                 output.write("report_path=" + str(self.control / "report.json") + "\n")
         return report
 
+    def quarantine(self):
+        # Cancel pending restarts too, but never revert journals or configuration.
+        try:
+            text = service_dropin(self.plan["desired"]["arguments"], *[self.plan["desired"]["state_environment"][key] for key in STATE_KEYS])
+            if self.inspect([self.dropin])[str(self.dropin)].get("sha256") == hashlib.sha256(text.encode()).hexdigest():
+                self.effective_start()
+                self.ops.stop()
+                return True
+        except Exception:
+            pass
+        append_private(self.ops.log, b"Native failure stop requires operator reconciliation.\n")
+        return False
+
     def run(self):
         self.prepare()
+        if self.retrying:
+            from native_l1_recovery_retry import run
+            return run(self)
         if self.current != self.plan["desired"]:
             self.freeze()
             self.install()
@@ -503,14 +538,7 @@ class NativeUpgrade:
                 self.ops.execute(["sudo", "-n", "systemctl", "start", self.service], timeout=180)
             report = self.qualify()
         except BaseException:
-            # Cancel this unit's pending restarts too, but never revert its journals or configuration.
-            try:
-                text = service_dropin(self.plan["desired"]["arguments"], *[self.plan["desired"]["state_environment"][key] for key in STATE_KEYS])
-                if self.inspect([self.dropin])[str(self.dropin)].get("sha256") == hashlib.sha256(text.encode()).hexdigest():
-                    self.effective_start()
-                    self.ops.stop()
-            except Exception:
-                append_private(self.ops.log, b"Native failure stop requires operator reconciliation.\n")
+            self.quarantine()
             raise
         print(json.dumps(report), flush=True)
         return report
