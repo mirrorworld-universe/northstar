@@ -15,7 +15,10 @@ import zlib
 
 from continuity_devnet import DROPIN, SERVICE, public_bytes
 from native_l1_recovery import STATE_PATHS
-from continuity_rollout_state import ARTIFACTS, DEVNET, SDK_REVISION, canonical, file_hash, flag_value, geyser_events_config, private_json, service_dropin
+from continuity_rollout_state import (
+    ARTIFACTS, DEVNET, SDK_REVISION, canonical, file_hash, flag_value, geyser_event_source,
+    geyser_events_config, private_json, service_dropin, upgrade_arguments,
+)
 
 STATE_ROOT = Path("/solana/northstar/continuity-v2")
 LOCK = Path("/solana/northstar/continuity-v2-deploy.lock")
@@ -415,6 +418,7 @@ def upgrade_runtime_arguments(start, root, dropin, revision, plan, base_plan, re
         binding["stage"] = "service_plan"
         desired, artifacts = plan["desired"], plan["artifacts"]
         arguments = desired["arguments"]
+        event_source = geyser_event_source(plan)
         if (not isinstance(arguments, list) or not arguments or len(arguments) > 4096
                 or not all(isinstance(value, str) and not any(character in value for character in "\n\r;") for value in arguments)
                 or set(artifacts) != set(ARTIFACTS)
@@ -423,9 +427,10 @@ def upgrade_runtime_arguments(start, root, dropin, revision, plan, base_plan, re
                 or desired["state_environment"] != environment or plan["before"]["state_environment"] != environment
                 or any(desired[key] != reservation["original"][key] for key in ("uid", "gid"))
                 or flag_value(arguments, "--portal") != base_plan["programs"]["portal"]
-                or flag_value(arguments, "--er-geyser-plugin-config") != str(runtime / "geyser-events.json")
                 or any(artifacts[role] != base_plan["artifacts"][role] for role in ("portal", "token_bridge"))):
             return []
+        upgrade_arguments(arguments, runtime / ARTIFACTS["validator"], runtime / "geyser-events.json", runtime / "geyser-events.json",
+                          previous_source=event_source, event_source=event_source)
         binding["stage"] = "barriers_and_effective_start"
         text = service_dropin(arguments, *environment.values())
         installed = {"sha256": hashlib.sha256(text.encode()).hexdigest()}
@@ -452,7 +457,7 @@ def upgrade_runtime_arguments(start, root, dropin, revision, plan, base_plan, re
         configuration = runtime / "geyser-events.json"
         info = configuration.lstat()
         if (info.st_uid != desired["uid"] or stat.S_IMODE(info.st_mode) != 0o400
-                or private_json(configuration) != geyser_events_config(runtime / ARTIFACTS["geyser_events"])):
+                or private_json(configuration) != geyser_events_config(runtime / ARTIFACTS["geyser_events"], event_source)):
             return []
         binding["stage"] = "matched"
         return arguments

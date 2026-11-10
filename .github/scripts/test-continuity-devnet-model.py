@@ -50,8 +50,10 @@ class FakeHost(rollout.Deployment):
     def event_listener_ready(self):
         self.world.event_probes += 1
         arguments = self.world.current["arguments"]
-        config_path = Path(arguments[arguments.index("--er-geyser-plugin-config") + 1])
+        flag = "--geyser-plugin-config" if "--geyser-plugin-config" in arguments else "--er-geyser-plugin-config"
+        config_path = Path(arguments[arguments.index(flag) + 1])
         configuration = json.loads(config_path.read_text())
+        assert configuration["name"] == ("l1-events" if flag == "--geyser-plugin-config" else "er-events")
         assert configuration["listen_addr"] == "0.0.0.0:9101"
         assert file_hash(configuration["libpath"]) == self.manifest["sha256"]["geyser_events"]
         return True
@@ -185,6 +187,33 @@ class ModelTests(unittest.TestCase):
         patch.object(rollout, "file_hash", side_effect=lambda name: "c9c3eab30574777558d737d043060eadfec8c156b41ee4b313bbab2d05910ded" if Path(name) == lock else file_hash(name)).start()
         patch.dict(os.environ, {"GITHUB_OUTPUT": str(self.root / "outputs")}).start()
 
+    def test_default_public_event_stream_uses_native_l1_geyser(self):
+        FakeHost(self.world).run()
+        arguments = self.world.current["arguments"]
+        config = Path(rollout.flag_value(arguments, "--geyser-plugin-config"))
+        self.assertEqual(json.loads(config.read_text())["name"], "l1-events")
+        self.assertFalse(any(value == "--er-geyser-plugin-config" or value.startswith("--er-geyser-plugin-config=") for value in arguments))
+        activation = private_json(self.root / "state" / self.world.args.revision / "control/activation.json")
+        self.assertEqual(activation["event_source"], "l1")
+
+    def test_unmarked_activation_retains_its_original_er_binding(self):
+        self.world.args.event_source = "er"
+        FakeHost(self.world).run()
+        path = self.world.args.state_root / self.world.args.revision / "control/activation.json"
+        activation = private_json(path)
+        del activation["event_source"]
+        atomic_json(path, activation)
+        self.world.args.event_source = None
+        FakeHost(self.world).run()
+        self.assertEqual(private_json(path), activation)
+        self.assertIn("--er-geyser-plugin-config", self.world.current["arguments"])
+        starts = self.world.starts
+        self.world.args.event_source = "l1"
+        with self.assertRaisesRegex(ValueError, "established event source differs"):
+            FakeHost(self.world).run()
+        self.assertEqual(self.world.starts, starts)
+        self.assertTrue(self.world.active)
+
     def test_first_activation_and_repeat_preserve_legacy_and_do_not_upload_again(self):
         before = retained_fingerprint(self.world.original["retained_paths"])
         FakeHost(self.world).run()
@@ -196,7 +225,8 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(self.world.key_generations, 4)
         self.assertEqual(retained_fingerprint(self.world.original["retained_paths"]), before)
 
-    def test_activation_starts_with_the_public_er_event_plugin(self):
+    def test_explicit_er_plugin_stays_separate_from_native_l1_geyser(self):
+        self.world.args.event_source = "er"
         FakeHost(self.world).run()
         arguments = self.world.current["arguments"]
         self.assertIn("--er-geyser-plugin-config", arguments)

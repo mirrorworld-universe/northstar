@@ -153,12 +153,25 @@ def flag_value(arguments, name):
     return matches[0]
 
 
-def geyser_events_config(library):
+def geyser_plugin_flag(event_source):
+    require(event_source in ("l1", "er"), "unknown event source")
+    return "--geyser-plugin-config" if event_source == "l1" else "--er-geyser-plugin-config"
+
+
+def geyser_event_source(specification):
+    # Unmarked retained records predate L1 delivery and must keep their original ER hashes and arguments.
+    source = specification.get("event_source", "er")
+    geyser_plugin_flag(source)
+    return source
+
+
+def geyser_events_config(library, event_source="er"):
     require(Path(library).is_absolute(), "event plugin path must be absolute")
-    return {"libpath": str(library), "name": "er-events", "listen_addr": "0.0.0.0:9101", "commitment": "confirmed"}
+    geyser_plugin_flag(event_source)
+    return {"libpath": str(library), "name": event_source + "-events", "listen_addr": "0.0.0.0:9101", "commitment": "confirmed"}
 
 
-def service_arguments(original, executable, portal, geyser_config=None):
+def service_arguments(original, executable, portal, geyser_config=None, event_source="er"):
     require(isinstance(original, list) and original and all(isinstance(value, str) and value for value in original), "invalid service argument vector")
     flag_value(original, "--portal")
     result = list(original)
@@ -172,31 +185,38 @@ def service_arguments(original, executable, portal, geyser_config=None):
         require(Path(geyser_config).is_absolute(), "event plugin config path must be absolute")
         require(not any(argument == "--er-geyser-plugin-config" or argument.startswith("--er-geyser-plugin-config=")
                         for argument in original), "existing ER Geyser configuration requires explicit deployment review")
-        result.extend(["--er-geyser-plugin-config", str(geyser_config)])
+        result.extend([geyser_plugin_flag(event_source), str(geyser_config)])
     return result
 
 
-def upgrade_arguments(original, executable, geyser_config, previous_config=None):
+def upgrade_arguments(original, executable, geyser_config, previous_config=None, *, previous_source="er", event_source="er"):
     require(isinstance(original, list) and original and all(isinstance(value, str) and value for value in original), "invalid upgrade argument vector")
     flag_value(original, "--portal")
+    source_flag = geyser_plugin_flag(previous_source)
+    source_flags = (source_flag, "--accountsdb-plugin-config") if previous_source == "l1" else (source_flag,)
+    target_flag = geyser_plugin_flag(event_source)
     result = [str(executable)]
     found = []
     position = 1
     while position < len(original):
         argument = original[position]
-        if argument == "--er-geyser-plugin-config":
-            require(position + 1 < len(original), "event plugin flag value is missing")
-            found.append(original[position + 1])
-            position += 2
-        elif argument.startswith("--er-geyser-plugin-config="):
-            found.append(argument.split("=", 1)[1])
-            position += 1
+        matched = next((flag for flag in source_flags if argument == flag or argument.startswith(flag + "=")), None)
+        if matched:
+            width = 2 if argument == matched else 1
+            require(width == 1 or position + 1 < len(original), "event plugin flag value is missing")
+            value = original[position + 1] if width == 2 else argument.split("=", 1)[1]
+            require(value and not value.startswith("--"), "event plugin flag value is missing")
+            if previous_source == "er" or value == str(previous_config):
+                found.append(value)
+            else:
+                result.extend(original[position:position + width])
+            position += width
         else:
             result.append(argument)
             position += 1
-    require(found == ([str(previous_config)] if previous_config else []), "unknown or duplicated retained ER plugin configuration")
+    require(found == ([str(previous_config)] if previous_config else []), "unknown or duplicated retained " + previous_source.upper() + " plugin configuration")
     require(Path(executable).is_absolute() and Path(geyser_config).is_absolute(), "upgrade native paths must be absolute")
-    return [*result, "--er-geyser-plugin-config", str(geyser_config)]
+    return [*result, target_flag, str(geyser_config)]
 
 
 def systemd_argument(value):
