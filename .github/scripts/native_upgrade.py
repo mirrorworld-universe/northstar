@@ -10,7 +10,7 @@ import native_l1_recovery as recovery
 
 from continuity_rollout_state import (
     ARTIFACTS, DEVNET, SDK_REVISION, append_private, atomic_json, canonical, checked_directory,
-    file_hash, flag_value, geyser_events_config, immutable_json, private_json, require,
+    file_hash, flag_value, geyser_event_source, geyser_events_config, geyser_plugin_flag, immutable_json, private_json, require,
     service_dropin, upgrade_arguments, verify_artifacts,
 )
 
@@ -156,6 +156,7 @@ class NativeUpgrade:
             marker = private_json(self.base_control / "activation-installed.json")
             config = self.base / "runtime/geyser-events.json" if "geyser_config_sha256" in self.base_activation else None
             artifacts = self.base_manifest["sha256"]
+            self.previous_event_source = geyser_event_source(self.base_activation)
         else:
             previous = binary.parent.parent.parent
             require(previous.parent == self.parent and re.fullmatch("[0-9a-f]{40}", previous.name)
@@ -178,6 +179,7 @@ class NativeUpgrade:
             require(saved["artifacts"] == artifacts, "previous native artifact binding differs")
             config = previous / "runtime/geyser-events.json"
             marker = private_json(previous / "control/installed.json")
+            self.previous_event_source = geyser_event_source(saved)
         require(before["binary_sha256"] == artifacts["validator"], "retained native manifest and executable differ")
         text = service_dropin(before["arguments"], *[before["state_environment"][key] for key in STATE_KEYS])
         require(marker == {"sha256": hashlib.sha256(text.encode()).hexdigest()}, "retained service drop-in binding differs")
@@ -194,7 +196,7 @@ class NativeUpgrade:
                     and observed[before["state_environment"][key]].get("mode") == 0o700, "retained journal directory differs")
         if config is not None:
             plugin = binary.parent.parent / ARTIFACTS["geyser_events"]
-            expected_config = canonical(geyser_events_config(plugin)) + b"\n"
+            expected_config = canonical(geyser_events_config(plugin, self.previous_event_source)) + b"\n"
             require((binary != base_binary or self.base_activation.get("geyser_config_sha256") == hashlib.sha256(expected_config).hexdigest())
                     and observed[str(config)].get("sha256") == hashlib.sha256(expected_config).hexdigest()
                     and observed[str(config)].get("mode") == 0o400 and observed[str(config)].get("uid") == before["uid"]
@@ -218,6 +220,9 @@ class NativeUpgrade:
         self.ops.log = self.control / "operations.log"
         append_private(self.ops.log, b"")
         saved = private_json(self.record) if self.record.exists() else None
+        requested_source = getattr(self.args, "event_source", None)
+        self.event_source = geyser_event_source(saved) if saved else requested_source or "l1"
+        require(requested_source is None or requested_source == self.event_source, "established event source differs")
         requested_recovery = getattr(self.args, "recover_failed_l1_slot", None)
         self.recovery_slot = saved.get("recovery_failed_slot") if saved else requested_recovery
         require(requested_recovery is None or requested_recovery == self.recovery_slot,
@@ -245,7 +250,8 @@ class NativeUpgrade:
         if self.recovery_slot is not None:
             recovery.verify_service_files(self.ops, self.base, self.service, self.dropin)
         config = self.runtime / "geyser-events.json"
-        desired_arguments = upgrade_arguments(before["arguments"], self.runtime / ARTIFACTS["validator"], config, binding["config"])
+        desired_arguments = upgrade_arguments(before["arguments"], self.runtime / ARTIFACTS["validator"], config, binding["config"],
+                                              previous_source=self.previous_event_source, event_source=self.event_source)
         if self.recovery_slot is not None:
             desired_arguments = recovery.arguments(desired_arguments, self.runtime)
         desired = {**service_spec(before), "arguments": desired_arguments,
@@ -272,6 +278,7 @@ class NativeUpgrade:
                 retained.update([binding["config"], str(Path(binding["config"]).parent / ARTIFACTS["geyser_events"])])
             retained = sorted(retained)
             self.plan = {"version": 1, "kind": "native-upgrade", "source_revision": self.args.revision, "stage": str(self.stage),
+                         "event_source": self.event_source,
                          "artifacts": self.manifest["sha256"], "base_revision": self.base.name, "base_plan_sha256": digest(self.base_plan),
                          "before": service_spec(before), "binding": binding, "desired": desired, "retained_paths": retained,
                          "identity": snapshot["identity"], "er_genesis": snapshot["er_genesis"], "l1_floor": floor}
@@ -360,7 +367,7 @@ class NativeUpgrade:
             else:
                 require(info.get("sha256") == self.plan["artifacts"][role] and info.get("uid") == before["uid"] and info.get("mode") == 0o500,
                         "retained upgrade native artifact differs")
-        configuration = geyser_events_config(targets["geyser_events"])
+        configuration = geyser_events_config(targets["geyser_events"], self.event_source)
         source = self.control / "geyser-events.json"
         immutable_json(source, configuration)
         info = observed[str(config)]
@@ -397,7 +404,7 @@ class NativeUpgrade:
         paths = re.findall(r"(?:^|[ {])path=([^;]+);", effective)
         require(len(paths) == 1 and paths[0].strip() == "/usr/bin/env"
                 and all(str(value) in effective for value in (self.runtime / ARTIFACTS["validator"], self.runtime / "geyser-events.json",
-                "--portal", "--er-geyser-plugin-config", self.base_plan["programs"]["portal"], *self.plan["before"]["state_environment"].values())),
+                "--portal", geyser_plugin_flag(self.event_source), self.base_plan["programs"]["portal"], *self.plan["before"]["state_environment"].values())),
                 "another systemd override replaces the native upgrade")
         if self.recovery_slot is not None:
             require(all(str(path) in effective for path in recovery.paths(self.runtime)[1:]),
@@ -412,7 +419,7 @@ class NativeUpgrade:
             require(observed[str(target)].get("sha256") == self.plan["artifacts"][role]
                     and observed[str(target)].get("mode") == 0o500 and observed[str(target)].get("uid") == self.plan["before"]["uid"],
                     "installed native upgrade artifact differs")
-        require(observed[str(config)].get("sha256") == hashlib.sha256(canonical(geyser_events_config(targets["geyser_events"])) + b"\n").hexdigest()
+        require(observed[str(config)].get("sha256") == hashlib.sha256(canonical(geyser_events_config(targets["geyser_events"], self.event_source)) + b"\n").hexdigest()
                 and observed[str(config)].get("mode") == 0o400 and observed[str(config)].get("uid") == self.plan["before"]["uid"],
                 "installed native upgrade plugin configuration differs")
 
@@ -482,6 +489,8 @@ class NativeUpgrade:
                   "controller_onchain_transactions": 0, "program_deployments": 0, "session_replaced": False,
                   "journal_paths_preserved": True, "protocol_controls_unchanged": True, "sse_health": "ok",
                   "proof_acceptance_qualified": False}
+        if "event_source" in self.plan:
+            report["event_source"] = self.event_source
         if self.recovery_slot is not None:
             report.update(recovery_failed_slot=self.recovery_slot, prior_l1_data_preserved=True)
         immutable_json(self.control / "report.json", report)

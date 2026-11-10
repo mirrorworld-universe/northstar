@@ -84,7 +84,7 @@ class DiagnosticTests(unittest.TestCase):
     def collect(self):
         return diagnostics.collect_report(self.run_command, self.state_root, self.dropin, self.lock)
 
-    def install_upgrade(self, stderr=False):
+    def install_upgrade(self, stderr=False, event_source=None):
         revision = "b" * 40
         namespace = self.state_root / "upgrades" / revision
         control, runtime = namespace / "control", namespace / "runtime"
@@ -98,10 +98,13 @@ class DiagnosticTests(unittest.TestCase):
         plugin.write_bytes(b"\x7fELFupgraded-plugin")
         plugin.chmod(0o500)
         configuration = runtime / "geyser-events.json"
-        atomic_json(configuration, geyser_events_config(plugin))
+        atomic_json(configuration, geyser_events_config(plugin, event_source or "er"))
         configuration.chmod(0o400)
         activation = private_json(self.control / "activation.json")
-        arguments = [*activation["arguments"], "--er-geyser-plugin-config", str(configuration)]
+        flag = "--geyser-plugin-config" if event_source == "l1" else "--er-geyser-plugin-config"
+        arguments = [*activation["arguments"], flag, str(configuration)]
+        if event_source == "l1":
+            arguments.extend(["--geyser-plugin-config", str(self.root / "other-l1-plugin.json")])
         arguments[0] = str(binary)
         if stderr:
             arguments[arguments.index("--log") + 1] = "-"
@@ -115,6 +118,8 @@ class DiagnosticTests(unittest.TestCase):
                 "desired": desired, "before": {**desired, "arguments": activation["arguments"]},
                 "artifacts": {**self.plan["artifacts"], "validator": file_hash(binary), "geyser_events": file_hash(plugin)},
                 "l1_floor": 1, "recovery_failed_slot": 519264000, "private": SECRET}
+        if event_source is not None:
+            plan["event_source"] = event_source
         text = service_dropin(arguments, *activation["state_environment"].values())
         self.dropin.write_text(text)
         self.dropin.chmod(0o600)
@@ -125,6 +130,25 @@ class DiagnosticTests(unittest.TestCase):
         atomic_json(control / "installed.json", {"sha256": hashlib.sha256(text.encode()).hexdigest()})
         atomic_json(control / "start-attempted.json", {"plan_sha256": diagnostics.digest(plan), "l1_floor": 2})
         return control
+
+    def test_l1_runtime_binding_preserves_other_standard_geyser_plugins(self):
+        self.install_upgrade(event_source="l1")
+        before = retained_fingerprint([self.root])
+        result = self.collect()
+        self.assertTrue(result["managed_records"]["upgrade_record"]["runtime_binding_matches"])
+        self.assertEqual(before, retained_fingerprint([self.root]))
+        self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_l1_binding_rejects_an_er_plugin_configuration(self):
+        control = self.install_upgrade(event_source="l1")
+        configuration = control.parent / "runtime/geyser-events.json"
+        value = private_json(configuration)
+        value["name"] = "er-events"
+        atomic_json(configuration, value)
+        configuration.chmod(0o400)
+        result = self.collect()
+        self.assertFalse(result["managed_records"]["upgrade_record"]["runtime_binding_matches"])
+        self.assertEqual(result["operational"]["file_logs"], [])
 
     def test_unqualified_upgrade_logs_require_bound_service_and_start_barriers(self):
         self.install_upgrade()

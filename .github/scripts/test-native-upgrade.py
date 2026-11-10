@@ -51,8 +51,14 @@ class UpgradeTests(unittest.TestCase):
         self.addCleanup(fixture.doCleanups)
         self.root, self.world = fixture.root, fixture.world
         self.world.args.upgrade_existing = True
+        self.world.args.event_source = "er"
         MODEL["FakeHost"](self.world).run()
+        self.world.args.event_source = None
         self.base = self.world.args.state_root / self.world.args.revision
+        activation_path = self.base / "control/activation.json"
+        activation = private_json(activation_path)
+        del activation["event_source"]
+        atomic_json(activation_path, activation)
         plan = private_json(self.base / "control/plan.json")
         self.world.session_identity = {
             "version": 2, "genesis": rollout.DEVNET, "portal": plan["programs"]["portal"],
@@ -85,6 +91,49 @@ class UpgradeTests(unittest.TestCase):
         self.uploads = self.world.uploads[:]
         self.keys = self.world.key_generations
         self.starts = self.world.starts
+
+    def test_public_event_upgrade_uses_l1_callbacks_not_er_callbacks(self):
+        activation = (self.base / "control/activation.json").read_bytes()
+        UpgradeHost(self.world).run()
+        arguments = self.world.current["arguments"]
+        configuration = Path(rollout.flag_value(arguments, "--geyser-plugin-config"))
+        self.assertFalse(any(value == "--er-geyser-plugin-config" or value.startswith("--er-geyser-plugin-config=") for value in arguments))
+        self.assertEqual(private_json(self.upgrade / "control/plan.json")["event_source"], "l1")
+        self.assertEqual(json.loads(configuration.read_text())["name"], "l1-events")
+        self.assertEqual(private_json(self.upgrade / "control/report.json")["event_source"], "l1")
+        self.assertEqual((self.base / "control/activation.json").read_bytes(), activation)
+        self.assertEqual(self.world.current["state_environment"], self.state_environment)
+        self.assertEqual(self.world.uploads, self.uploads)
+        self.assertEqual(self.world.key_generations, self.keys)
+
+    def test_unmarked_upgrade_keeps_legacy_er_records_without_a_new_start(self):
+        self.world.args.event_source = "er"
+        UpgradeHost(self.world).run()
+        path = self.upgrade / "control/plan.json"
+        plan = private_json(path)
+        del plan["event_source"]
+        atomic_json(path, plan)
+        for filename, key in (("progress.json", "plan_sha256"), ("frozen.json", "plan_sha256"),
+                              ("start-attempted.json", "plan_sha256"), ("report.json", "upgrade_plan_sha256")):
+            filename = self.upgrade / "control" / filename
+            value = private_json(filename)
+            value[key] = digest(plan)
+            if filename.name == "report.json":
+                del value["event_source"]
+            atomic_json(filename, value)
+        self.world.args.event_source = None
+        UpgradeHost(self.world).run()
+        self.assertEqual(private_json(path), plan)
+        self.assertIn("--er-geyser-plugin-config", self.world.current["arguments"])
+        self.assertEqual(self.world.starts, self.starts + 1)
+
+    def test_recorded_l1_source_cannot_change_on_a_same_plan_retry(self):
+        UpgradeHost(self.world).run()
+        self.world.args.event_source = "er"
+        with self.assertRaisesRegex(ValueError, "established event source differs"):
+            UpgradeHost(self.world).run()
+        self.assertTrue(self.world.active)
+        self.assertEqual(self.world.starts, self.starts + 1)
 
     def test_native_upgrade_preserves_program_session_and_journal_bindings(self):
         UpgradeHost(self.world).run()

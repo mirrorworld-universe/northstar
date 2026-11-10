@@ -18,7 +18,8 @@ import urllib.request
 from urllib.parse import urlsplit
 
 from continuity_rollout_state import (
-    ARTIFACTS, DEVNET, SDK_REVISION, append_private, atomic_json, canonical, checked_directory, file_hash, flag_value, geyser_events_config,
+    ARTIFACTS, DEVNET, SDK_REVISION, append_private, atomic_json, canonical, checked_directory, file_hash, flag_value,
+    geyser_event_source, geyser_events_config, geyser_plugin_flag,
     immutable_json, inspect_paths, private_json, require, retained_fingerprint, service_arguments,
     service_dropin, sync_paths, verify_artifacts,
 )
@@ -230,8 +231,12 @@ class Deployment:
                            "stage": str(self.stage), "original": self.original, "validator": validator, "old_portal": old_portal,
                            "l1_rpc": self.args.l1_rpc, "er_rpc": self.args.er_rpc, "devnet_rpc": self.args.devnet_rpc}
             immutable_json(self.control / "reservation.json", reservation)
+        requested_source = getattr(self.args, "event_source", None)
+        activation = self.control / "activation.json"
+        event_source = geyser_event_source(private_json(activation)) if activation.exists() else requested_source or "l1"
+        require(requested_source is None or requested_source == event_source, "established event source differs")
         service_arguments(self.original["arguments"], self.runtime / ARTIFACTS["validator"],
-                          flag_value(self.original["arguments"], "--portal"), self.runtime / "geyser-events.json")
+                          flag_value(self.original["arguments"], "--portal"), self.runtime / "geyser-events.json", event_source)
         self.log = self.control / "operations.log"
         if not self.log.exists():
             descriptor = os.open(self.log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -371,14 +376,20 @@ class Deployment:
         binary = self.runtime / ARTIFACTS["validator"]
         plugin = self.runtime / ARTIFACTS["geyser_events"]
         plugin_config = self.runtime / "geyser-events.json"
-        configuration = geyser_events_config(plugin)
+        record = self.control / "activation.json"
+        saved = private_json(record) if record.exists() else None
+        requested_source = getattr(self.args, "event_source", None)
+        event_source = geyser_event_source(saved) if saved else requested_source or "l1"
+        require(requested_source is None or requested_source == event_source, "established event source differs")
+        configuration = geyser_events_config(plugin, event_source)
         config_digest = hashlib.sha256(canonical(configuration) + b"\n").hexdigest()
-        arguments = service_arguments(self.original["arguments"], binary, self.plan["programs"]["portal"], plugin_config)
+        arguments = service_arguments(self.original["arguments"], binary, self.plan["programs"]["portal"], plugin_config, event_source)
         expected = {"NORTHSTAR_CHECKPOINT_PLAN_DIR": str(self.runtime / "checkpoints"),
                     "NORTHSTAR_UNSETTLED_STATE_DIR": str(self.runtime / "unsettled")}
         spec = {"version": 2, "arguments": arguments, "state_environment": expected, "artifacts": self.plan["artifacts"],
                 "geyser_config_sha256": config_digest}
-        record = self.control / "activation.json"
+        if saved is None or "event_source" in saved:
+            spec["event_source"] = event_source
         if not record.exists():
             actual = self.inventory()
             require(actual["arguments"] == self.original["arguments"] and actual["binary_sha256"] == self.original["binary_sha256"], "original native service changed before activation")
@@ -462,7 +473,7 @@ class Deployment:
         effective = self.execute(["systemctl", "show", "--property=ExecStart", "--value", SERVICE])
         effective_paths = re.findall(r"(?:^|[ {])path=([^;]+);", effective)
         require(len(effective_paths) == 1 and effective_paths[0].strip() == "/usr/bin/env" and str(binary) in effective
-                and self.plan["programs"]["portal"] in effective and "--er-geyser-plugin-config" in effective
+                and self.plan["programs"]["portal"] in effective and geyser_plugin_flag(event_source) in effective
                 and str(plugin_config) in effective, "effective service start differs from isolated activation")
         immutable_json(installed_marker, {"sha256": digest})
         self.flush([binary, plugin, plugin_config, *reversed(directories), self.namespace, DROPIN, DROPIN.parent])
@@ -496,6 +507,9 @@ class Deployment:
                   "portal": config["portal"], "token_bridge": config["token_bridge"], "validator": self.plan["validator"],
                   "profile": self.plan["profile"], "context": phases[0]["context"], "phases": phases,
                   "legacy_state_unchanged": True, "proof_acceptance_qualified": False}
+        activation = private_json(self.control / "activation.json")
+        if "event_source" in activation:
+            report["event_source"] = geyser_event_source(activation)
         atomic_json(self.control / "report.json", report)
         print(json.dumps(report), flush=True)
         output = os.environ.get("GITHUB_OUTPUT")
@@ -543,6 +557,7 @@ def main():
     run.add_argument("--er-rpc", default="http://127.0.0.1:8910")
     run.add_argument("--max-estimated-cost-lamports", type=int, default=10_000_000_000)
     run.add_argument("--upgrade-existing", action="store_true", help="Permit a guarded native-only upgrade of a known managed v2 activation.")
+    run.add_argument("--event-source", choices=("l1", "er"), help="Select the managed SSE source. New plans default to L1; established plans retain their recorded source.")
     run.add_argument("--recover-failed-l1-slot", type=int, help="Recover a stopped validator past the bound feature activation using fresh L1 directories; preserve all prior data.")
     run.add_argument("--reconcile-failed-l1", action="store_true", help="Authorize one additional start of a reviewed stopped L1 recovery, using its retained artifacts and data.")
     run.add_argument("--reconcile-stopped-at", help="Exact reviewed systemd ExecMainExitTimestamp; required for explicit reconciliation.")
