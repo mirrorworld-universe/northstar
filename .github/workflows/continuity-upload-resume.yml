@@ -47,6 +47,7 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
+          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
           python3 -B .github/scripts/continuity_upload_resume.py \
             --revision "$TARGET_REVISION" --replace-context "$REPLACE_CONTEXT" \
             --sdk-checkout "$CONTINUITY_SDK"

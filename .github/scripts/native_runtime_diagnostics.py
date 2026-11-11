@@ -652,6 +652,41 @@ def upload_operation_errors(path, owner):
         return {"status": "unavailable", "raw_messages_included": False}
 
 
+def upload_reconciliation_status(control, plan, reservation, specification):
+    unavailable = {"status": "unavailable"}
+    marker = control / "program-upload-reconcile.json"
+    if not os.path.lexists(marker):
+        return unavailable if os.path.lexists(control / "program-upload-reconcile-report.json") else {
+            "status": "not-recorded", "attempt_barrier_present": False}
+    try:
+        record = private_json(marker)
+        if not isinstance(record, dict):
+            return unavailable
+        phase = record.get("phase")
+        keys = {"version", "kind", "plan_sha256", "controller_revision", "source_revision", "submission_rpc",
+                "previous_service_sha256", "pending_roles", "attempt_budget", "phase"}
+        if phase == "failed":
+            keys.add("operator_reconciliation_required")
+        roles = record.get("pending_roles")
+        if (set(record) != keys or type(record.get("version")) is not int or record["version"] != 1
+                or record.get("kind") != "retained-program-upload"
+                or record.get("plan_sha256") != digest(plan) or record.get("source_revision") != plan["source_revision"]
+                or not isinstance(record.get("controller_revision"), str)
+                or not re.fullmatch("[0-9a-f]{40}", record["controller_revision"])
+                or record.get("submission_rpc") != reservation.get("l1_rpc")
+                or record.get("previous_service_sha256") != digest(specification)
+                or type(record.get("attempt_budget")) is not int or record["attempt_budget"] != 1
+                or phase not in ("attempted", "completed", "failed")
+                or phase == "failed" and record.get("operator_reconciliation_required") is not True
+                or not isinstance(roles, list) or not roles or len(roles) != len(set(roles))
+                or not set(roles) <= {"portal", "token_bridge"}):
+            return unavailable
+        return {"status": "recorded", "attempt_barrier_present": True, "phase": phase,
+                "controller_revision": record["controller_revision"], "operator_reconciliation_required": phase != "completed"}
+    except (OSError, ValueError, TypeError, KeyError):
+        return unavailable
+
+
 def pending_fresh_upload(root, revision, specification):
     report = {"status": "unavailable", "onchain_state_checked": False, "recovery_performed": False}
     if not re.fullmatch("[0-9a-f]{40}", revision) or not specification:
@@ -705,7 +740,8 @@ def pending_fresh_upload(root, revision, specification):
                 return report
             uploads[role] = "unresolved" if entry["complete"] is None else "recorded-complete"
         report.update(status="inspected", source_revision=revision, phase="prepared", previous_service_matches=True, native_start_recorded=False,
-                      uploads=uploads, operation_errors=upload_operation_errors(control / "operations.log", owner))
+                      uploads=uploads, operation_errors=upload_operation_errors(control / "operations.log", owner),
+                      upload_reconciliation=upload_reconciliation_status(control, plan, reservation, specification))
     except (OSError, ValueError, TypeError, KeyError):
         pass
     return report

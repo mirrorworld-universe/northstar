@@ -12,7 +12,7 @@ from unittest.mock import Mock
 
 import continuity_devnet as rollout
 from continuity_rollout_state import ARTIFACTS, DEVNET, atomic_json, private_json
-from continuity_upload_resume import resume_uploads
+from continuity_upload_resume import failure_summary, resume_uploads
 from fresh_devnet import digest
 
 
@@ -110,6 +110,15 @@ class UploadResumeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.run_resume()
         self.assertEqual(len(self.signed_calls()), 2)
+
+    def test_failure_summary_exposes_only_allowlisted_phase_and_type(self):
+        secret = "private-command-output-must-not-be-published"
+        summary = failure_summary(FileNotFoundError(2, secret), "source-prepare")
+        self.assertEqual(summary["failure_type"], "FileNotFoundError")
+        self.assertEqual(summary["phase"], "source-prepare")
+        self.assertEqual(summary["errno"], 2)
+        self.assertNotIn(secret, str(summary))
+        self.assertFalse(summary["raw_error_included"])
 
     def test_unknown_error_cannot_authorize_a_signed_retry(self):
         self.ops.log.write_text("unclassified private message")

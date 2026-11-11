@@ -116,6 +116,27 @@ test('retained upload reconciliation is explicit master-only and never starts na
   expect(workflow.jobs.test.steps.map(value => value.run ?? '').join('\n')).toContain('test-continuity-upload-resume.py');
 });
 
+test('upload reconciliation exposes the installed Solana toolkit before controller invocation', async () => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const home = await mkdtemp(`${tmpdir()}/upload-tool-path-`);
+  try {
+    const binaryDirectory = `${home}/.local/share/solana/install/active_release/bin`;
+    await mkdir(binaryDirectory, { recursive: true });
+    await writeFile(`${binaryDirectory}/solana-keygen`, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    const uploadWorkflow = Bun.YAML.parse(await Bun.file(new URL('../workflows/continuity-upload-resume.yml', import.meta.url)).text());
+    const run = uploadWorkflow.jobs.reconcile.steps.find(step => step.id === 'reconcile').run;
+    const setup = run.split('\n').find(line => line.trim().startsWith('export PATH=')) ?? ':';
+    const result = Bun.spawnSync([Bun.which('bash'), '-c', `${setup}; command -v solana-keygen`], {
+      env: { ...process.env, HOME: home, PATH: '/usr/bin:/bin' },
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString().trim()).toBe(`${binaryDirectory}/solana-keygen`);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('artifact upload selects only the verified public report', () => {
   const uploads = steps.filter(step => step.uses?.startsWith('actions/upload-artifact@'));
   expect(uploads).toHaveLength(1);
