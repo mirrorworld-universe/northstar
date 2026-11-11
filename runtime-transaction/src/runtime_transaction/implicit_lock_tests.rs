@@ -53,17 +53,13 @@ fn test_implicit_locks_after_resolution(
     };
     let bytes = Bytes::from(wincode::serialize(&transaction).unwrap());
     let sdk = RuntimeTransaction::<SanitizedVersionedTransaction>::try_from(
-        SanitizedVersionedTransaction::try_from(transaction).unwrap(),
+        transaction,
         MessageHash::Compute,
         None,
     )
     .unwrap();
     let view = RuntimeTransaction::<SanitizedTransactionView<_>>::try_new(
-        SanitizedTransactionView::try_new_sanitized(
-            bytes,
-            &crate::sanitize_config::sanitize_config(),
-        )
-        .unwrap(),
+        SanitizedTransactionView::try_new_sanitized(bytes).unwrap(),
         MessageHash::Compute,
         None,
     )

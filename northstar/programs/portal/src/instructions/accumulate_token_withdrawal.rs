@@ -319,7 +319,7 @@ fn load_bridge(
     if !bridge.is_valid()
         || bridge.session != *session.address()
         || session_bridge.address() != &expected_bridge
-        || bridge.bridge_program != *vault.owner()
+        || bridge.bridge_program != vault.owner()
         || bridge.vault != *vault.address()
         || bridge.mint != *mint.address()
         || bridge.token_program != *token_program.address()

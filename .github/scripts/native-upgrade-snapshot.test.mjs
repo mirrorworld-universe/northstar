@@ -8,7 +8,7 @@ import { snapshotIdentity } from './native-upgrade-snapshot.mjs';
 const DEVNET = 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG';
 const key = value => ({ toBase58: () => value });
 function fixture() {
-  const config = { genesis: DEVNET, sdk_revision: '24030ce9fc3b80aa21738db2bb9f5a5fbea030d8',
+  const config = { genesis: DEVNET, sdk_revision: 'beb895f5178bdb21fbfe13786981b19241d3d8c4',
     profile: '01'.repeat(32), portal: 'portal', token_bridge: 'bridge', validator: 'validator' };
   const state = { nonce: 2n, gridId: 3n, authority: key('authority'), validator: key('validator'),
     createdAt: 1n, ttlSlots: 1000n, feeCap: 10n, settlementIntervalSlots: 75n };

@@ -27,10 +27,10 @@ elif tool == 'git':
         directory.mkdir()
         (directory / 'package-lock.json').write_text('{}')
     elif 'rev-parse' in args:
-        print('24030ce9fc3b80aa21738db2bb9f5a5fbea030d8')
+        print('beb895f5178bdb21fbfe13786981b19241d3d8c4')
 elif tool == 'sha256sum':
     assert args == ['--check', '--status']
-    assert sys.stdin.read().startswith('c9c3eab30574777558d737d043060eadfec8c156b41ee4b313bbab2d05910ded  ')
+    assert sys.stdin.read().startswith('78697b65487a7c5932151165ec887b37246e25a3571af752b8c151cc636cd00c  ')
 elif tool == 'node':
     print('v24.21.0')
 else:

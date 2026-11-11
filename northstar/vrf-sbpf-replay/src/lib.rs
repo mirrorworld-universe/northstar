@@ -26,7 +26,7 @@ use {
     solana_svm_transaction::svm_message::SVMStaticMessage,
     solana_transaction_context::{
         DropOnBailOut,
-        transaction::{ExecutionRecord, TransactionContext},
+        transaction::{ComputeMeter, ExecutionRecord, TransactionContext},
     },
     solana_transaction_error::TransactionError,
     std::sync::Arc,
@@ -106,10 +106,7 @@ impl InvokeContextCallback for BoundedCallback {}
 
 /// The fixed development feature profile; the envelope must authenticate exactly this profile.
 pub fn feature_set() -> SVMFeatureSet {
-    SVMFeatureSet {
-        curve25519_syscall_enabled: true,
-        ..SVMFeatureSet::default()
-    }
+    SVMFeatureSet::default()
 }
 
 fn reserved_keys() -> std::collections::HashSet<Pubkey> {
@@ -404,6 +401,7 @@ pub fn execute(input: &ExecutionInput) -> Result<ExecutionOutput, ReplayError> {
         execution_budget.max_instruction_stack_depth,
         execution_budget.max_instruction_trace_length,
         input.message.num_instructions(),
+        ComputeMeter::new(input.compute_unit_limit),
         DropOnBailOut::Disabled,
     );
     let pre_rent = transaction_account_state_info::TransactionAccountStateInfo::new_pre_exec(

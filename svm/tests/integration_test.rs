@@ -31,9 +31,7 @@ use {
         loaded_programs::{ProgramCacheForTxBatch, ProgramRuntimeEnvironments},
     },
     solana_pubkey::Pubkey,
-    solana_sdk_ids::{
-        bpf_loader, bpf_loader_deprecated, bpf_loader_upgradeable, compute_budget, native_loader,
-    },
+    solana_sdk_ids::{bpf_loader, bpf_loader_deprecated, bpf_loader_upgradeable, compute_budget},
     solana_signer::Signer,
     solana_svm::{
         account_loader::{
@@ -3351,288 +3349,9 @@ fn program_cache_stats() {
     );
 }
 
-#[derive(Clone, PartialEq, Eq)]
-enum Inspect<'a> {
-    LiveRead(&'a AccountSharedData),
-    LiveWrite(&'a AccountSharedData),
-    #[allow(dead_code)]
-    DeadRead,
-    DeadWrite,
-}
-impl From<Inspect<'_>> for (Option<AccountSharedData>, bool) {
-    fn from(inspect: Inspect) -> Self {
-        match inspect {
-            Inspect::LiveRead(account) => (Some(account.clone()), false),
-            Inspect::LiveWrite(account) => (Some(account.clone()), true),
-            Inspect::DeadRead => (None, false),
-            Inspect::DeadWrite => (None, true),
-        }
-    }
-}
-
-#[derive(Clone, Default)]
-struct InspectedAccounts(pub HashMap<Pubkey, Vec<(Option<AccountSharedData>, bool)>>);
-impl InspectedAccounts {
-    fn inspect(&mut self, pubkey: Pubkey, inspect: Inspect) {
-        self.0.entry(pubkey).or_default().push(inspect.into())
-    }
-}
-
-#[test_case(false; "separate_nonce::old")]
-#[test_case(true; "fee_paying_nonce::old")]
-fn svm_inspect_nonce_load_failure(fee_paying_nonce: bool) {
-    let mut test_entry = SvmTestEntry::default();
-    let mut expected_inspected_accounts = InspectedAccounts::default();
-
-    let fee_payer_keypair = Keypair::new();
-    let separate_nonce_keypair = Keypair::new();
-
-    let fee_payer = fee_payer_keypair.pubkey();
-    let nonce_pubkey = if fee_paying_nonce {
-        fee_payer
-    } else {
-        separate_nonce_keypair.pubkey()
-    };
-
-    let initial_durable = DurableNonce::from_blockhash(&Hash::new_unique());
-    let initial_nonce_data =
-        nonce::state::Data::new(fee_payer, initial_durable, LAMPORTS_PER_SIGNATURE);
-    let mut initial_nonce_account = AccountSharedData::new_data(
-        LAMPORTS_PER_SOL,
-        &nonce::versions::Versions::new(nonce::state::State::Initialized(initial_nonce_data)),
-        &system_program::id(),
-    )
-    .unwrap();
-    initial_nonce_account.set_rent_epoch(u64::MAX);
-    let initial_nonce_account = initial_nonce_account;
-    let initial_nonce_info = NonceInfo::new(nonce_pubkey, initial_nonce_account.clone());
-
-    let advanced_durable = DurableNonce::from_blockhash(&LAST_BLOCKHASH);
-    let mut advanced_nonce_info = initial_nonce_info;
-    advanced_nonce_info
-        .try_advance_nonce(advanced_durable, LAMPORTS_PER_SIGNATURE)
-        .unwrap();
-
-    let compute_instruction = ComputeBudgetInstruction::set_loaded_accounts_data_size_limit(1);
-    let advance_instruction = system_instruction::advance_nonce_account(&nonce_pubkey, &fee_payer);
-    let fee_only_noop_instruction = Instruction::new_with_bytes(Pubkey::new_unique(), &[], vec![]);
-
-    test_entry.add_initial_account(nonce_pubkey, &initial_nonce_account);
-
-    let mut separate_fee_payer_account = AccountSharedData::default();
-    separate_fee_payer_account.set_lamports(LAMPORTS_PER_SOL);
-    let separate_fee_payer_account = separate_fee_payer_account;
-
-    // we always inspect the nonce at least once
-    expected_inspected_accounts.inspect(nonce_pubkey, Inspect::LiveWrite(&initial_nonce_account));
-
-    // if we have a fee-paying nonce, we happen to inspect it again
-    // this is an unimportant implementation detail and also means these cases are trivial
-    // the true test is a separate nonce, to ensure we inspect it in pre-checks
-    if fee_paying_nonce {
-        expected_inspected_accounts
-            .inspect(nonce_pubkey, Inspect::LiveWrite(&initial_nonce_account));
-    } else {
-        test_entry.add_initial_account(fee_payer, &separate_fee_payer_account);
-        expected_inspected_accounts
-            .inspect(fee_payer, Inspect::LiveWrite(&separate_fee_payer_account));
-    }
-
-    let transaction = Transaction::new_signed_with_payer(
-        &[
-            advance_instruction,
-            compute_instruction,
-            fee_only_noop_instruction,
-        ],
-        Some(&fee_payer),
-        &[&fee_payer_keypair],
-        *initial_durable.as_hash(),
-    );
-
-    test_entry.push_nonce_transaction_with_status(
-        transaction,
-        nonce_pubkey,
-        ExecutionStatus::ProcessedFailed,
-    );
-
-    test_entry.decrease_expected_lamports(&fee_payer, LAMPORTS_PER_SIGNATURE);
-    test_entry
-        .final_accounts
-        .get_mut(&nonce_pubkey)
-        .unwrap()
-        .data_as_mut_slice()
-        .copy_from_slice(advanced_nonce_info.account().data());
-
-    let env = SvmTestEnvironment::create(test_entry.clone());
-    env.execute();
-
-    let actual_inspected_accounts = env.mock_bank.inspected_accounts.read().unwrap().clone();
-    for (expected_pubkey, expected_account) in &expected_inspected_accounts.0 {
-        let actual_account = actual_inspected_accounts.get(expected_pubkey).unwrap();
-        assert_eq!(
-            expected_account, actual_account,
-            "pubkey: {expected_pubkey}",
-        );
-    }
-}
-
 #[test]
-fn svm_inspect_account() {
-    let mut initial_test_entry = SvmTestEntry::default();
-    let mut expected_inspected_accounts = InspectedAccounts::default();
-
-    let fee_payer_keypair = Keypair::new();
-    let sender_keypair = Keypair::new();
-
-    let fee_payer = fee_payer_keypair.pubkey();
-    let sender = sender_keypair.pubkey();
-    let recipient = Pubkey::new_unique();
-
-    // Setting up the accounts for the transfer
-
-    // fee payer
-    let mut fee_payer_account = AccountSharedData::default();
-    fee_payer_account.set_lamports(10_000_000);
-    fee_payer_account.set_rent_epoch(u64::MAX);
-    initial_test_entry.add_initial_account(fee_payer, &fee_payer_account);
-    expected_inspected_accounts.inspect(fee_payer, Inspect::LiveWrite(&fee_payer_account));
-
-    // sender
-    let mut sender_account = AccountSharedData::default();
-    sender_account.set_lamports(11_000_000);
-    sender_account.set_rent_epoch(u64::MAX);
-    initial_test_entry.add_initial_account(sender, &sender_account);
-    expected_inspected_accounts.inspect(sender, Inspect::LiveWrite(&sender_account));
-
-    // recipient -- initially dead
-    expected_inspected_accounts.inspect(recipient, Inspect::DeadWrite);
-
-    // system program
-    let system_account = AccountSharedData::create_from_existing_shared_data(
-        5000,
-        Arc::new("system_program".as_bytes().to_vec()),
-        native_loader::id(),
-        true,
-        0,
-    );
-    expected_inspected_accounts.inspect(system_program::id(), Inspect::LiveRead(&system_account));
-
-    let transfer_amount = 1_000_000;
-    let transaction = Transaction::new_signed_with_payer(
-        &[system_instruction::transfer(
-            &sender,
-            &recipient,
-            transfer_amount,
-        )],
-        Some(&fee_payer),
-        &[&fee_payer_keypair, &sender_keypair],
-        Hash::default(),
-    );
-
-    initial_test_entry.push_transaction(transaction);
-
-    let mut recipient_account = AccountSharedData::default();
-    recipient_account.set_lamports(transfer_amount);
-
-    initial_test_entry.decrease_expected_lamports(&fee_payer, LAMPORTS_PER_SIGNATURE * 2);
-    initial_test_entry.decrease_expected_lamports(&sender, transfer_amount);
-    initial_test_entry.create_expected_account(recipient, &recipient_account);
-
-    let initial_test_entry = initial_test_entry;
-
-    // Load and execute the transaction
-    let mut env = SvmTestEnvironment::create(initial_test_entry.clone());
-    env.execute();
-
-    // do another transfer; recipient should be alive now
-
-    // fee payer
-    let intermediate_fee_payer_account = initial_test_entry
-        .final_accounts
-        .get(&fee_payer)
-        .cloned()
-        .unwrap();
-    expected_inspected_accounts.inspect(
-        fee_payer,
-        Inspect::LiveWrite(&intermediate_fee_payer_account),
-    );
-
-    // sender
-    let intermediate_sender_account = initial_test_entry
-        .final_accounts
-        .get(&sender)
-        .cloned()
-        .unwrap();
-    expected_inspected_accounts.inspect(sender, Inspect::LiveWrite(&intermediate_sender_account));
-
-    // recipient -- now alive
-    let intermediate_recipient_account = initial_test_entry
-        .final_accounts
-        .get(&recipient)
-        .cloned()
-        .unwrap();
-    expected_inspected_accounts.inspect(
-        recipient,
-        Inspect::LiveWrite(&intermediate_recipient_account),
-    );
-
-    // system program
-    expected_inspected_accounts.inspect(system_program::id(), Inspect::LiveRead(&system_account));
-
-    let mut final_test_entry = SvmTestEntry {
-        initial_accounts: initial_test_entry.final_accounts.clone(),
-        final_accounts: initial_test_entry.final_accounts,
-        ..SvmTestEntry::default()
-    };
-
-    let transfer_amount = 456;
-    let transaction = Transaction::new_signed_with_payer(
-        &[system_instruction::transfer(
-            &sender,
-            &recipient,
-            transfer_amount,
-        )],
-        Some(&fee_payer),
-        &[&fee_payer_keypair, &sender_keypair],
-        Hash::default(),
-    );
-
-    final_test_entry.push_transaction(transaction);
-
-    final_test_entry.decrease_expected_lamports(&fee_payer, LAMPORTS_PER_SIGNATURE * 2);
-    final_test_entry.decrease_expected_lamports(&sender, transfer_amount);
-    final_test_entry.increase_expected_lamports(&recipient, transfer_amount);
-
-    // Load and execute the second transaction
-    env.test_entry = final_test_entry;
-    env.execute();
-
-    // Ensure all the expected inspected accounts were inspected
-    let actual_inspected_accounts = env.mock_bank.inspected_accounts.read().unwrap().clone();
-    for (expected_pubkey, expected_account) in &expected_inspected_accounts.0 {
-        let actual_account = actual_inspected_accounts.get(expected_pubkey).unwrap();
-        assert_eq!(
-            expected_account, actual_account,
-            "pubkey: {expected_pubkey}",
-        );
-    }
-
-    let num_expected_inspected_accounts: usize =
-        expected_inspected_accounts.0.values().map(Vec::len).sum();
-    let num_actual_inspected_accounts: usize =
-        actual_inspected_accounts.values().map(Vec::len).sum();
-
-    assert_eq!(
-        num_expected_inspected_accounts,
-        num_actual_inspected_accounts,
-    );
-}
-
-#[test_case(false; "old_fee_only")]
-#[test_case(true; "simd186_fee_only")]
-fn fee_only_loaded_transaction_data_size(define_ltds_fee_only_semantics: bool) {
+fn fee_only_loaded_transaction_data_size() {
     let mut common_test_entry = SvmTestEntry::default();
-    common_test_entry.feature_set.define_ltds_fee_only_semantics = define_ltds_fee_only_semantics;
 
     let program_name = "hello-solana";
     let program_id = program_address(program_name);
@@ -3646,8 +3365,9 @@ fn fee_only_loaded_transaction_data_size(define_ltds_fee_only_semantics: bool) {
     let fee_payer = fee_payer_keypair.pubkey();
     let loaded_fee_payer_size = TRANSACTION_ACCOUNT_BASE_SIZE as u32;
 
-    let fee_payer_data =
-        AccountSharedData::new_rent_epoch(LAMPORTS_PER_SOL, 0, &Pubkey::default(), u64::MAX);
+    let mut fee_payer_data =
+        AccountSharedData::new_with_data(LAMPORTS_PER_SOL, Vec::new(), &Pubkey::default());
+    fee_payer_data.set_rent_epoch(u64::MAX);
 
     common_test_entry.add_initial_account(fee_payer, &fee_payer_data);
 
@@ -3658,12 +3378,12 @@ fn fee_only_loaded_transaction_data_size(define_ltds_fee_only_semantics: bool) {
         let base_size = 2_usize.pow(i);
 
         let pubkey = Pubkey::new_unique();
-        let account_data = AccountSharedData::new_rent_epoch(
+        let mut account_data = AccountSharedData::new_with_data(
             LAMPORTS_PER_SOL,
-            base_size,
+            vec![0; base_size],
             &Pubkey::default(),
-            u64::MAX,
         );
+        account_data.set_rent_epoch(u64::MAX);
 
         common_test_entry.add_initial_account(pubkey, &account_data);
         loaded_account_sizes.push((pubkey, base_size + TRANSACTION_ACCOUNT_BASE_SIZE));
@@ -3747,30 +3467,15 @@ fn fee_only_loaded_transaction_data_size(define_ltds_fee_only_semantics: bool) {
             .unwrap()
             .loaded_accounts_data_size();
 
-        // blowing limit with define_ltds_fee_only_semantics sets the size to the limit
-        // otherwise it is the raw sum of rollback sizes which here is zero
-        assert_eq!(
-            if define_ltds_fee_only_semantics {
-                size_limit
-            } else {
-                0
-            },
-            fail_limit_loaded_size,
-        );
+        assert_eq!(size_limit, fail_limit_loaded_size);
 
         let fail_program_id_loaded_size = output.processing_results[2]
             .as_ref()
             .unwrap()
             .loaded_accounts_data_size();
 
-        // violating constraints *after* passing size with define_ltds_fee_only_semantics uses the size
-        // otherwise as above it is the raw sum of rollback sizes which here is zero
         assert_eq!(
-            if define_ltds_fee_only_semantics {
-                loaded_fee_payer_size + other_accounts_size
-            } else {
-                0
-            },
+            loaded_fee_payer_size + other_accounts_size,
             fail_program_id_loaded_size,
         );
     }

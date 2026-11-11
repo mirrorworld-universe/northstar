@@ -39,7 +39,6 @@ stable-abi = [
     "solana-gossip/stable-abi",
     "solana-hash/stable-abi",
     "solana-ledger/stable-abi",
-    "solana-packet/stable-abi",
     "solana-perf/stable-abi",
     "solana-pubkey/stable-abi",
     "solana-runtime/stable-abi",
@@ -52,6 +51,7 @@ stable-abi = [
 agave-banking-stage-ingress-types = { workspace = true }
 agave-bls-cert-verify = { workspace = true }
 agave-bls-sigverify = { workspace = true }
+agave-event-system = { workspace = true }
 agave-feature-set = { workspace = true }
 agave-fs = { workspace = true }
 agave-jemalloc = { workspace = true }
@@ -65,6 +65,7 @@ agave-transaction-view = { workspace = true }
 agave-votor = { workspace = true }
 agave-votor-messages = { workspace = true }
 agave-votor-transport = { workspace = true }
+agave-wake-channel = { workspace = true }
 agave-xdp = { workspace = true }
 ahash = { workspace = true }
 anyhow = { workspace = true }
@@ -90,7 +91,6 @@ qualifier_attr = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
 rayon = { workspace = true }
-rolling-file = { workspace = true }
 rts-alloc = { workspace = true }
 rustls = { workspace = true }
 serde = { workspace = true }
@@ -102,7 +102,6 @@ smallvec = { workspace = true }
 solana-account = { workspace = true, features = ["wincode"] }
 solana-accounts-db = { workspace = true }
 solana-address-lookup-table-interface = { workspace = true }
-solana-bincode = { workspace = true }
 solana-bls-signatures = { workspace = true }
 solana-client = { workspace = true }
 solana-clock = { workspace = true }
@@ -110,6 +109,7 @@ solana-cluster-type = { workspace = true }
 solana-compute-budget-interface = { workspace = true }
 solana-connection-cache = { workspace = true }
 solana-cost-model = { workspace = true }
+solana-ed25519-program = { workspace = true }
 solana-entry = { workspace = true }
 solana-epoch-schedule = { workspace = true }
 solana-fee = { workspace = true }
@@ -145,6 +145,8 @@ solana-rpc-client-api = { workspace = true }
 solana-runtime = { workspace = true }
 solana-runtime-transaction = { workspace = true }
 solana-sdk-ids = { workspace = true }
+solana-secp256k1-program = { workspace = true }
+solana-secp256r1-program = { workspace = true }
 solana-send-transaction-service = { workspace = true }
 solana-sha256-hasher = { workspace = true }
 solana-shred-version = { workspace = true }
@@ -207,7 +209,7 @@ solana-account = { workspace = true, features = ["wincode"] }
 solana-bpf-loader-program = { path = "../programs/bpf_loader", default-features = false, features = ["agave-unstable-api", "svm-internal"] }
 solana-client = { path = "../client", features = ["dev-context-only-utils"] }
 solana-commitment-config = { workspace = true }
-solana-compute-budget = { workspace = true }
+solana-compute-budget = { path = "../compute-budget", features = ["agave-unstable-api"] }
 solana-compute-budget-interface = { workspace = true }
 solana-compute-budget-program = { path = "../programs/compute-budget", features = ["agave-unstable-api"] }
 solana-core = { path = ".", features = ["agave-unstable-api", "dev-context-only-utils"] }

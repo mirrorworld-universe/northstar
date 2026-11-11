@@ -6,7 +6,7 @@ import { readPrivateJson } from './continuity-control-journal.mjs';
 import { assertDevelopmentNetwork } from './devnet-continuity-smoke.mjs';
 
 const DEVNET = 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG';
-const SDK_REVISION = '24030ce9fc3b80aa21738db2bb9f5a5fbea030d8';
+const SDK_REVISION = 'beb895f5178bdb21fbfe13786981b19241d3d8c4';
 function requireValue(condition, message) { if (!condition) throw new Error(message); }
 function key(value) { return value.toBase58(); }
 

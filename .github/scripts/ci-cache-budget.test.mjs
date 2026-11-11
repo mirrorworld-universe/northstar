@@ -9,7 +9,7 @@ test.each(["clippy", "test"])("%s prepares hosted-runner disk before restoring R
   const cache = steps.findIndex((step) => step.uses === "Swatinem/rust-cache@v2");
   expect(cleanup).toBeGreaterThanOrEqual(0);
   expect(cache).toBeGreaterThan(cleanup);
-  expect(steps[cache].with["prefix-key"]).toBe("native-no-debug-v1");
+  expect(steps[cache].with["prefix-key"]).toBe("native-no-debug-ubuntu24-v2");
 });
 
 test("native CI uses bounded debug artifacts rather than restoring the old full-debug profile", () => {

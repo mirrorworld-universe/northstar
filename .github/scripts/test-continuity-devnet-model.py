@@ -184,7 +184,7 @@ class ModelTests(unittest.TestCase):
         self.addCleanup(patch.stopall)
         patch.object(rollout, "DROPIN", self.root / "unit/managed.conf").start()
         patch.object(rollout, "print", create=True).start()
-        patch.object(rollout, "file_hash", side_effect=lambda name: "c9c3eab30574777558d737d043060eadfec8c156b41ee4b313bbab2d05910ded" if Path(name) == lock else file_hash(name)).start()
+        patch.object(rollout, "file_hash", side_effect=lambda name: "78697b65487a7c5932151165ec887b37246e25a3571af752b8c151cc636cd00c" if Path(name) == lock else file_hash(name)).start()
         patch.dict(os.environ, {"GITHUB_OUTPUT": str(self.root / "outputs")}).start()
 
     def test_default_public_event_stream_uses_native_l1_geyser(self):

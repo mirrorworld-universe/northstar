@@ -10,7 +10,7 @@ import { ControlJournal, atomicPrivateJson, readPrivateJson } from './continuity
 
 const DEVNET = 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG';
 const MAINNET = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d';
-const SDK_REVISION = '24030ce9fc3b80aa21738db2bb9f5a5fbea030d8';
+const SDK_REVISION = 'beb895f5178bdb21fbfe13786981b19241d3d8c4';
 export const sameMetadata = isDeepStrictEqual;
 function requireValue(condition, message) { if (!condition) throw new Error(message); }
 function hex(value) { return Buffer.from(value).toString('hex'); }
@@ -19,16 +19,23 @@ function immutable(filename, value) {
   else atomicPrivateJson(filename, value);
 }
 
-export function assertDevelopmentNetwork(genesis, l1, er, sandbox = process.env.NORTHSTAR_SANDBOX === '1', interfaces = os.networkInterfaces()) {
+export function assertDevelopmentNetwork(genesis, l1, er, sandbox = process.env.NORTHSTAR_SANDBOX === '1', interfaces = os.networkInterfaces(), hostOptIn = process.env.NORTHSTAR_ALLOW_LOCAL_HOST_E2E === '1') {
   requireValue(genesis !== MAINNET, 'Mainnet is never eligible for deployment qualification');
   for (const endpoint of [l1, er]) {
     const url = new URL(endpoint);
     requireValue(['http:', 'https:'].includes(url.protocol) && !url.username && !url.password &&
       ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) && url.pathname === '/' && !url.search && !url.hash,
       'Control RPC must be a colocated loopback root');
-    if (genesis !== DEVNET) requireValue(sandbox, 'Non-devnet tests require local sandbox RPC');
+    if (genesis !== DEVNET) requireValue(sandbox || hostOptIn, 'Non-devnet tests require local sandbox RPC or explicit host qualification');
   }
-  if (genesis !== DEVNET) requireValue(Object.keys(interfaces).every(name => name === 'lo'), 'Local qualification requires private loopback networking');
+  if (genesis !== DEVNET && !hostOptIn) requireValue(Object.keys(interfaces).every(name => name === 'lo'), 'Local qualification requires private loopback networking');
+}
+
+export function delegatedTokenAmount(account, bridge, portal, parse) {
+  // RPC can briefly expose the Portal-owned L1 projection before delegation import.
+  if (account === null || account.owner.equals(portal)) return null;
+  requireValue(account.owner.equals(bridge), 'ER token owner differs');
+  return parse(account.data).amount;
 }
 
 export async function waitForBoundSession(readers, timeoutMs = 180_000, pollMs = 250) {
@@ -185,10 +192,8 @@ export async function runSmoke(configPath, phase) {
     return (await token.getAccount(l1, address, commitment, token.TOKEN_PROGRAM_ID)).amount;
   }
   async function erAmount(address) {
-    const account = await er.getAccountInfo(address, 'confirmed');
-    if (account === null) return null;
-    requireValue(account?.owner.equals(bridge), 'ER token owner differs');
-    return sdk.tokenBridge.parseErTokenAccount(account.data).amount;
+    return delegatedTokenAmount(await er.getAccountInfo(address, 'confirmed'), bridge, portal,
+      data => sdk.tokenBridge.parseErTokenAccount(data));
   }
   const completion = path.join(root, phase + '.json');
   if (fs.existsSync(completion)) {
