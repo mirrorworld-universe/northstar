@@ -88,7 +88,7 @@ jobs:
         with:
           bun-version: 1.4.2
       - name: Test CI cache disk budget
-        run: bun test ./.github/scripts/ci-cache-budget.test.mjs ./.github/scripts/hosted-dependencies.test.mjs
+        run: bun test ./.github/scripts/ci-cache-budget.test.mjs ./.github/scripts/hosted-dependencies.test.mjs ./.github/scripts/rust-toolchain.test.mjs
       - name: Test CPU VRF evidence and RPC clients
         run: |
           python3 -B -m unittest discover -s northstar/scripts -p 'test_vrf_evidence.py'

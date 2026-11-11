@@ -1,0 +1,31 @@
+name: Native build preflight (no activation)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-build-preflight
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.repository == 'mirrorworld-universe/northstar' && github.ref == 'refs/heads/master'
+    runs-on: [devnet]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/ensure-rust-toolchain
+      - name: Verify build tools without activation
+        run: |
+          set -euo pipefail
+          export RUSTUP_AUTO_INSTALL=0
+          export PATH="$HOME/.cargo/bin:$HOME/.local/share/solana/install/active_release/bin:$PATH"
+          rustc --version
+          cargo --version
+          cargo build-sbf --version
+          printf '%s\n' 'Build preflight only: no artifacts uploaded, programs deployed, or services changed.'
