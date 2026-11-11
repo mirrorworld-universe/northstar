@@ -959,6 +959,17 @@ pub fn process_open_challenge(
     if !challenger.is_signer() {
         return Err(PortalError::Unauthorized.into());
     }
+    // Continuity-v2 checkpoints have no qualified resolver: CreateStepProof rejects
+    // them, and the manager cannot settle a Challenged checkpoint. Refuse entry before
+    // any checkpoint, challenge, or bond state changes, so the checkpoint stays Pending
+    // and ordinary settlement continues. Until a resolver is qualified, the v2
+    // challenge window is an operator-backed waiting period, not trustless finality.
+    if session
+        .try_borrow()?
+        .starts_with(&crate::SessionV2::DISCRIMINATOR)
+    {
+        return Err(PortalError::StepProofVerifierUnavailable.into());
+    }
 
     let session_state = load_session(program_id, session)?;
     let session_key = session.address();

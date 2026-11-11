@@ -80,5 +80,10 @@ and malformed decimals, registry data and authorization tuples.
 - CLI, consumer, and operator bindings must select the same protocol and session.
 - Configured proof coordination is rejected until the new relation is qualified.
   Historical guest keys and proofs are not accepted as continuity evidence.
+- Portal rejects `OpenChallenge` and `CreateStepProof` on v2 sessions with
+  `StepProofVerifierUnavailable` before any checkpoint, challenge, or bond state
+  changes. The v2 challenge window is therefore an operator-backed waiting period,
+  not trustless finality. Enabling proof-based v2 challenges requires a separately
+  qualified resolver, relation, and recovery path.
 - Hosted rollout requires fresh isolated session identities, retained old state,
   native lifecycle validation, and separate ordinary VRF callback evidence.
