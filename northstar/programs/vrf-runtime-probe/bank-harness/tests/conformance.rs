@@ -126,10 +126,6 @@ fn feature_and_pda_fixture() {
             er.feature_set.is_active(&curve25519_syscall_enabled::id()),
             enabled
         );
-        assert_eq!(
-            er.feature_set.runtime_features().curve25519_syscall_enabled,
-            enabled
-        );
     }
     assert_eq!(
         authority().to_string(),
@@ -162,7 +158,13 @@ fn sbf_runtime_conformance() {
                 Instruction::new_with_bytes(PROBE, &[0], vec![]),
             ),
         );
-        assert_eq!(result.result.is_ok(), enabled, "{:?}", result.logs);
+        // Agave registers curve syscalls independently of the legacy feature account.
+        assert_eq!(
+            result.result,
+            Ok(()),
+            "legacy feature={enabled}: {:?}",
+            result.logs
+        );
         observations.push(serde_json::json!({
             "case": "curve_known_answers", "feature_enabled": enabled,
             "result": format!("{:?}", result.result), "units_consumed": result.units_consumed,

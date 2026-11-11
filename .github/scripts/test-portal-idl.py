@@ -95,9 +95,11 @@ class PortalIdlTests(unittest.TestCase):
     def test_missing_v2_catalog_definition_is_rejected(self):
         catalog = [definition for definition in json.loads(CATALOG.read_text()) if definition["name"] != "StateRootOpeningV2"]
         self.catalog.write_text(json.dumps(catalog))
+        original = self.output.read_bytes()
         result = self.run_step("Resolve Portal custom types")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("unresolved IDL type: StateRootOpeningV2", result.stderr)
+        self.assertIn("missing IDL definition: StateRootOpeningV2", result.stderr)
+        self.assertEqual(self.output.read_bytes(), original)
 
     def test_unused_catalog_definition_is_rejected(self):
         catalog = json.loads(CATALOG.read_text())

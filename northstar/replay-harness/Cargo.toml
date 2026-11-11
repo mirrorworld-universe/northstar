@@ -14,12 +14,12 @@ agave-feature-set = { workspace = true }
 bincode = { workspace = true }
 northstar-zk-types = { workspace = true }
 serde = { workspace = true }
-solana-rent = { workspace = true }
+solana-rent = { workspace = true, features = ["serde"] }
 wincode = { workspace = true }
 solana-account = { workspace = true }
 solana-accounts-db = { workspace = true }
-solana-clock = { workspace = true }
-solana-epoch-schedule = { workspace = true }
+solana-clock = { workspace = true, features = ["serde"] }
+solana-epoch-schedule = { workspace = true, features = ["serde"] }
 solana-fee-calculator = { workspace = true }
 solana-fee-structure = { workspace = true }
 solana-hash = { workspace = true }
@@ -33,7 +33,7 @@ solana-runtime = { workspace = true, features = ["northstar-replay"] }
 solana-sdk-ids = { workspace = true }
 solana-sha256-hasher = { workspace = true }
 solana-signer = { workspace = true }
-solana-slot-hashes = { workspace = true }
+solana-slot-hashes = { workspace = true, features = ["wincode"] }
 solana-svm = { workspace = true }
 solana-svm-transaction = { workspace = true }
 solana-transaction = { workspace = true }

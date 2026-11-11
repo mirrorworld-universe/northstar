@@ -15,9 +15,9 @@ checkpoint-continuity-v2 = ["northstar-portal/checkpoint-continuity-v2"]
 borsh = { version = "1", default-features = false, features = ["derive"] }
 northstar-portal = { path = "../portal", features = ["no-entrypoint"] }
 northstar-zk-types = { workspace = true }
-pinocchio = "0.11.2"
-pinocchio-system = "0.6.1"
-pinocchio-token = "0.7.0"
+pinocchio = "0.12.0"
+pinocchio-system = "0.7.0"
+pinocchio-token = "0.8.0"
 solana-account-info = { workspace = true }
 solana-instruction = { workspace = true }
 solana-msg = { workspace = true }

@@ -49,7 +49,8 @@ class DiagnosticTests(unittest.TestCase):
         self.plan = {"version": 2, "source_revision": self.base.name, "sdk_revision": diagnostics.SDK_REVISION,
                      "genesis": diagnostics.DEVNET, "programs": programs, "validator": public_text(bytes([7]) * 32),
                      "profile": profile, "artifacts": artifacts, "original_sha256": diagnostics.digest(original), "private": SECRET}
-        reservation = {"version": 2, "source_revision": self.base.name, "original": original, "plan_sha256": diagnostics.digest(self.plan)}
+        reservation = {"version": 2, "source_revision": self.base.name, "sdk_revision": diagnostics.SDK_REVISION,
+                       "original": original, "plan_sha256": diagnostics.digest(self.plan)}
         environment = {"NORTHSTAR_CHECKPOINT_PLAN_DIR": str(self.runtime / "checkpoints"),
                        "NORTHSTAR_UNSETTLED_STATE_DIR": str(self.runtime / "unsettled")}
         activation = {"version": 2, "arguments": arguments, "state_environment": environment, "artifacts": artifacts}
@@ -84,7 +85,7 @@ class DiagnosticTests(unittest.TestCase):
     def collect(self):
         return diagnostics.collect_report(self.run_command, self.state_root, self.dropin, self.lock)
 
-    def install_upgrade(self, stderr=False, event_source=None):
+    def install_upgrade(self, stderr=False, event_source=None, retained_l1_revision=None):
         revision = "b" * 40
         namespace = self.state_root / "upgrades" / revision
         control, runtime = namespace / "control", namespace / "runtime"
@@ -108,7 +109,8 @@ class DiagnosticTests(unittest.TestCase):
         arguments[0] = str(binary)
         if stderr:
             arguments[arguments.index("--log") + 1] = "-"
-        ledger = runtime / "l1/ledger"
+        ledger_runtime = self.state_root / "upgrades" / retained_l1_revision / "runtime" if retained_l1_revision else runtime
+        ledger = ledger_runtime / "l1/ledger"
         ledger.mkdir(parents=True)
         arguments[arguments.index("--ledger") + 1] = str(ledger)
         desired = {"arguments": arguments, "binary_sha256": file_hash(binary),
@@ -136,6 +138,17 @@ class DiagnosticTests(unittest.TestCase):
         before = retained_fingerprint([self.root])
         result = self.collect()
         self.assertTrue(result["managed_records"]["upgrade_record"]["runtime_binding_matches"])
+        self.assertEqual(before, retained_fingerprint([self.root]))
+        self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_active_upgrade_binding_ignores_retained_l1_namespace(self):
+        self.install_upgrade(event_source="l1", retained_l1_revision="c" * 40)
+        before = retained_fingerprint([self.root])
+        result = self.collect()
+        records = result["managed_records"]
+        self.assertEqual(records["status"], "inspected")
+        self.assertEqual(records["upgrade_revisions"], ["b" * 40])
+        self.assertTrue(records["upgrade_record"]["runtime_binding_matches"])
         self.assertEqual(before, retained_fingerprint([self.root]))
         self.assertNotIn(SECRET, json.dumps(result))
 
@@ -244,6 +257,28 @@ class DiagnosticTests(unittest.TestCase):
         encoded = json.dumps(result)
         for private in (SECRET, "ExecStart", "private/path.rs", str(self.root)):
             self.assertNotIn(private, encoded)
+
+    def test_recorded_sdk_revision_not_current_tooling_binds_historical_profile(self):
+        plan = dict(self.plan, sdk_revision="c" * 40)
+        plan["profile"] = diagnostics.digest({"version": 2, "source": self.base.name, "artifacts": plan["artifacts"],
+                                              "sdk": plan["sdk_revision"], "proof_acceptance_qualified": False})
+        reservation = private_json(self.control / "reservation.json")
+        reservation.update(sdk_revision=plan["sdk_revision"], plan_sha256=diagnostics.digest(plan))
+        atomic_json(self.control / "plan.json", plan)
+        atomic_json(self.control / "reservation.json", reservation)
+        before = retained_fingerprint([self.root])
+        result = self.collect()["managed_records"]
+        self.assertTrue(result["recorded_plan_identity_matches"])
+        self.assertEqual(result["profile"], plan["profile"])
+        self.assertEqual(retained_fingerprint([self.root]), before)
+
+    def test_mismatched_recorded_sdk_revisions_cannot_publish_identity(self):
+        reservation = private_json(self.control / "reservation.json")
+        reservation["sdk_revision"] = "c" * 40
+        atomic_json(self.control / "reservation.json", reservation)
+        result = self.collect()["managed_records"]
+        self.assertFalse(result["recorded_plan_identity_matches"])
+        self.assertNotIn("profile", result)
 
     def test_every_retained_byte_and_mode_is_unchanged(self):
         before = retained_fingerprint([self.root])

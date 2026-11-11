@@ -2,7 +2,7 @@
 mod geyser;
 
 use {
-    crate::banking_trace::BankingPacketSender,
+    crate::banking_channels::BankingPacketSender,
     agave_banking_stage_ingress_types::BankingPacketBatch,
     crossbeam_channel::{RecvTimeoutError, SendError, Sender, TryRecvError, TrySendError},
     log::*,
@@ -877,7 +877,7 @@ mod tests {
         solana_instruction::{AccountMeta, Instruction},
         solana_keypair::{Keypair, Signer},
         solana_leader_schedule::SlotLeader,
-        solana_net_utils::SocketAddrSpace,
+        solana_net_utils::{SocketAddrSpace, sockets::bind_to},
         solana_pubkey::Pubkey,
         solana_rent::Rent,
         solana_rpc::{
@@ -893,7 +893,12 @@ mod tests {
         solana_sdk_ids::system_program,
         solana_system_interface::instruction::transfer,
         solana_transaction::Transaction,
-        std::{net::TcpListener, sync::RwLock, time::Duration},
+        std::{
+            collections::HashSet,
+            net::TcpListener,
+            sync::{LazyLock, Mutex, RwLock},
+            time::Duration,
+        },
     };
 
     fn create_test_bank() -> solana_runtime::bank::Bank {
@@ -998,8 +1003,7 @@ mod tests {
         let payer = Keypair::new();
         fund_test_payer(&bank, &payer);
         let transaction = signed_test_transfer(&bank, &payer);
-        let (settlement_sender, local_receiver) =
-            crate::banking_trace::BankingTracer::channel_for_test();
+        let (settlement_sender, local_receiver) = crate::banking_channels::channel_for_test();
         let (forward_sender, forward_receiver) = unbounded();
 
         submit_settlement_transactions(
@@ -1025,8 +1029,7 @@ mod tests {
         let payer = Keypair::new();
         fund_test_payer(&bank, &payer);
         let transaction = signed_test_transfer(&bank, &payer);
-        let (settlement_sender, _local_receiver) =
-            crate::banking_trace::BankingTracer::channel_for_test();
+        let (settlement_sender, _local_receiver) = crate::banking_channels::channel_for_test();
         let (forward_sender, forward_receiver) = bounded(0);
         drop(forward_receiver);
 
@@ -1162,8 +1165,7 @@ mod tests {
             manager_account: Arc::clone(&payer),
             checkpoint_plan_dir: None,
         });
-        let (settlement_sender, local_receiver) =
-            crate::banking_trace::BankingTracer::channel_for_test();
+        let (settlement_sender, local_receiver) = crate::banking_channels::channel_for_test();
         let (forward_sender, forward_receiver) = unbounded();
 
         assert!(submit_next_pending_settlement_if_ready(
@@ -1266,8 +1268,41 @@ mod tests {
     }
 
     fn find_free_addr() -> SocketAddr {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap()
+        test_address_from_listener(TcpListener::bind("127.0.0.1:0").unwrap())
+    }
+
+    fn test_address_from_listener(mut listener: TcpListener) -> SocketAddr {
+        static ISSUED: LazyLock<Mutex<HashSet<SocketAddr>>> =
+            LazyLock::new(|| Mutex::new(HashSet::new()));
+        // RPC and TPU fixtures share an allocator but bind different protocols.
+        for _ in 0..128 {
+            let address = listener.local_addr().unwrap();
+            let mut issued = ISSUED.lock().unwrap();
+            if !issued.contains(&address) && bind_to(address.ip(), address.port()).is_ok() {
+                issued.insert(address);
+                return address;
+            }
+            drop(issued);
+            listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        }
+        panic!("could not reserve a unique TCP/UDP fixture address")
+    }
+
+    #[test]
+    fn runtime_fixture_address_skips_existing_udp_binding() {
+        let candidate = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = candidate.local_addr().unwrap();
+        let occupied = bind_to(address.ip(), address.port()).unwrap();
+        let address = test_address_from_listener(candidate);
+        assert_ne!(address, occupied.local_addr().unwrap());
+        assert!(bind_to(address.ip(), address.port()).is_ok());
+    }
+
+    #[test]
+    fn runtime_fixture_addresses_are_not_reissued() {
+        let first = find_free_addr();
+        let rebound = TcpListener::bind(first).unwrap();
+        assert_ne!(test_address_from_listener(rebound), first);
     }
 
     fn create_test_bank_forks(

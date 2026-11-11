@@ -1,0 +1,41 @@
+name: Install Linux dependencies
+description: Install declared Ubuntu packages through signature-checked HTTPS sources
+inputs:
+  packages:
+    description: Space-separated Ubuntu package names
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      if: runner.environment == 'github-hosted'
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        set -euo pipefail
+        read -r -a packages <<< "$PACKAGES"
+        test "${#packages[@]}" -gt 0
+        for package in "${packages[@]}"; do
+          [[ "$package" =~ ^[a-z0-9][a-z0-9+.-]*$ ]] || exit 1
+        done
+        . /etc/os-release
+        test "$ID" = ubuntu && test "$VERSION_ID" = 24.04
+        test -r /usr/share/keyrings/ubuntu-archive-keyring.gpg
+        sources=$(mktemp -d "$RUNNER_TEMP/northstar-apt.XXXXXX")
+        trap 'rm -rf "$sources"' EXIT
+        chmod 755 "$sources"
+        selected=
+        for mirror in https://archive.ubuntu.com/ubuntu https://mirrors.edge.kernel.org/ubuntu; do
+          if curl --fail --silent --show-error --connect-timeout 5 --max-time 20 \
+            "$mirror/dists/noble/InRelease" --output "$sources/mirror-check"; then
+            selected=$mirror
+            break
+          fi
+        done
+        test -n "$selected"
+        printf 'Types: deb\nURIs: %s\nSuites: noble noble-updates noble-security\nComponents: main restricted universe multiverse\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' \
+          "$selected" > "$sources/ubuntu.sources"
+        options=(-o Dir::Etc::sourcelist=/dev/null -o "Dir::Etc::sourceparts=$sources"
+          -o Acquire::Retries=2 -o Acquire::https::Timeout=30 -o APT::Update::Error-Mode=any)
+        sudo -n apt-get "${options[@]}" update
+        sudo -n apt-get "${options[@]}" install -y "${packages[@]}"

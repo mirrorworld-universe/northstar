@@ -8,7 +8,7 @@ import unittest
 
 from continuity_rollout_state import (
     ARTIFACTS, append_private, atomic_json, checked_directory, file_hash, flag_value, geyser_events_config, immutable_json,
-    geyser_event_source, inspect_paths, private_json, retained_fingerprint, service_arguments, service_dropin,
+    geyser_event_source, inspect_paths, private_json, release_mode_arguments, retained_fingerprint, service_arguments, service_dropin,
     sync_paths, systemd_argument, upgrade_arguments, verify_artifacts,
 )
 
@@ -18,6 +18,22 @@ class StateTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+
+    def test_release_mode_defaults_to_native_upgrade_and_scopes_recovery(self):
+        self.assertEqual(release_mode_arguments(), ["--upgrade-existing"])
+        self.assertEqual(release_mode_arguments("519264000"), ["--upgrade-existing", "--recover-failed-l1-slot", "519264000"])
+        for value in ("0", "-1", "18446744073709551616", "519264000;true"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                release_mode_arguments(value)
+
+    def test_fresh_release_requires_an_exact_context_and_excludes_recovery(self):
+        context = "ab" * 32
+        self.assertEqual(release_mode_arguments("", context), ["--replace-context", context, "--abandon-previous-state"])
+        for value in ("ab", "ab" * 31, "AB" * 32, " ", context + "\n"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                release_mode_arguments("", value)
+        with self.assertRaises(ValueError):
+            release_mode_arguments("519264000", context)
 
     def test_metadata_is_immutable_and_private(self):
         filename = self.root / "plan.json"

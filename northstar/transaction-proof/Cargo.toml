@@ -26,12 +26,9 @@ host = [
 [dependencies]
 ark-bn254 = "0.6"
 ark-ff = "0.6"
-# light-poseidon 0.4 still uses Arkworks 0.5; isolate its field types at the adapter boundary.
-poseidon-ark-bn254 = { package = "ark-bn254", version = "0.5" }
-poseidon-ark-ff = { package = "ark-ff", version = "0.5" }
 borsh = { workspace = true, features = ["derive"] }
 ed25519-dalek = { version = "3.0", default-features = false, features = ["alloc", "fast", "zeroize"] }
-light-poseidon = "0.4"
+light-poseidon = "0.5"
 northstar-zk-types = { workspace = true }
 thiserror = { workspace = true }
 
@@ -46,7 +43,7 @@ solana-svm = { workspace = true, optional = true }
 solana-svm-transaction = { workspace = true, optional = true }
 
 [target.'cfg(not(target_os = "zkvm"))'.dependencies]
-sha2 = "0.11"
+sha2 = "0.11.1"
 
 # SP1's precompile patch targets 0.10.9; native hashing stays on 0.11.
 [target.'cfg(target_os = "zkvm")'.dependencies]

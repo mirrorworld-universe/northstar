@@ -26,13 +26,19 @@ Staging itself performs no activation. Build-generated program keypairs are neve
 deployment signing identities.
 
 `prepare-continuity-sdk.sh` checks out public NorthStarSDK revision
-`24030ce9fc3b80aa21738db2bb9f5a5fbea030d8`, checks its dependency-lock hash,
+`beb895f5178bdb21fbfe13786981b19241d3d8c4`, checks its dependency-lock hash,
 installs frozen dependencies without lifecycle scripts and builds the bindings.
 No private-source credential is needed for this SDK checkout. Both CI validation
 and deployment pin Node 24.21.0/npm 11; the helper rejects npm 10 before checkout
 because that resolver rejects the unchanged pinned dependency lock. CI also tests
 the native snapshot reader against this actual SDK over a loopback RPC fixture,
 including numeric/string wire cursors that the SDK normalizes to `bigint`.
+Hosted Rust jobs pin Ubuntu 24.04 and use image-scoped native/proof caches.
+
+Non-devnet smoke tests default to sandboxed loopback networking. Task-authorized
+host tests may explicitly set `NORTHSTAR_ALLOW_LOCAL_HOST_E2E=1`; control endpoints
+must still be loopback roots, the actual genesis is checked, and mainnet remains
+forbidden. This opt-in neither claims sandbox isolation nor qualifies deployment.
 
 `continuity_devnet.py run` then:
 
@@ -81,11 +87,57 @@ keys belong to the runner; runtime data belongs to the validator service user.
 The default checkpoint directory follows the retained ledger unless explicitly
 overridden. The production validator now honors that override.
 
-Without `--upgrade-existing`, this controller supports only first activation and
-retries of that same recorded activation. An existing managed drop-in still fails
-closed. Release CD explicitly enables the native-only path below; it never falls
-back to a fresh activation when retained upgrade metadata is incomplete.
-There is no protocol migration, cursor rewriting or automatic v2 rollover.
+Without an explicit replacement context, this controller supports only first
+activation, same-plan retries, and the native-only upgrade path below. An existing
+managed drop-in still fails closed outside those modes. A native-upgrade failure
+never falls back to fresh activation. There is no automatic protocol migration,
+cursor rewriting, or v2 rollover.
+
+## Explicit fresh devnet replacement
+
+`--replace-context <64 lowercase hex characters> --abandon-previous-state` selects
+a separate fresh-stack plan. It is not a native-only upgrade or a retirement API.
+The operator must explicitly approve leaving the previous on-chain programs and
+session state unused. No balance migration, refund, ownership restoration, or
+delegation retirement is performed. Existing accounts remain on-chain; old local
+keys, controls, and journals remain archived rather than being deleted or reset.
+
+Admission verifies the previous qualified managed activation, effective systemd
+binding, artifact bytes, private directories, finalized program deployments, and
+actual SessionV2 context. The context is checked again immediately before stopping
+the old runtime. Unknown installations, incomplete previous starts, changed
+bindings, reused program/upload identities, and missing provenance fail closed.
+Retained profiles use their recorded SDK revision; current tooling never rewrites
+those historical profiles or control records.
+
+The fresh plan uses new Portal, bridge, upload-buffer, profile, and canonical
+nonce-1 session identities. It retains the validator identity, L1 data paths,
+native RPC flags, and unrelated Geyser plugins. Only the managed executable,
+Portal argument, event plugin, and ER journal directories change. The existing
+CI-owned ER oracle is quiesced through its scoped controller; the independent
+public L1 worker and HTTP services are not changed. No airdrop or personal wallet
+funding is performed; the usual explicit deployment-cost limit still applies.
+
+Each planned start (`activate`, `resume-sol`, `resume-spl`) has a durable,
+plan-bound intent and readiness receipt. Qualification verifies new SOL/SPL credit,
+restart recovery, finalized L1 payouts, managed L1 SSE health, the pinned new
+session/ER genesis, and unchanged archived native controls and journals. Reports
+use `qualification_kind: fresh-stack` and explicitly report that old delegations
+were not retired. They do not qualify an oracle callback, SP1, or proof acceptance.
+
+A same-plan pre-start interruption can resume only with unchanged evidence. Any
+uncertain or failed post-start runtime is stopped only after verifying its exact
+managed binding; otherwise operator reconciliation is recorded. There is no
+automatic rollback or additional start. Fully qualified retries verify evidence
+without uploading, signing new transactions, or restarting the service.
+
+Release CD freezes its mode before building artifacts. The default remains
+`--upgrade-existing`. To authorize one fresh release, set repository variable
+`NORTHSTAR_FRESH_CONTEXT` to the reviewed previous context. It is mutually exclusive
+with `NORTHSTAR_L1_RECOVERY_SLOT`; malformed or conflicting selectors stop before
+builds. Remove the fresh selector immediately after qualification. Removing it is
+configuration-only and performs no service operation. A stale selector cannot
+silently abandon a later context because admission requires the exact old hash.
 
 ## Guarded native-only upgrades
 

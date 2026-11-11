@@ -12,8 +12,8 @@ if [[ ! $npm_version =~ ^11\. ]]; then
   echo "Pinned continuity SDK requires npm 11 (validated with Node 24.21.0); found $npm_version" >&2
   exit 2
 fi
-revision=24030ce9fc3b80aa21738db2bb9f5a5fbea030d8
-lock=c9c3eab30574777558d737d043060eadfec8c156b41ee4b313bbab2d05910ded
+revision=beb895f5178bdb21fbfe13786981b19241d3d8c4
+lock=78697b65487a7c5932151165ec887b37246e25a3571af752b8c151cc636cd00c
 checkout=$1
 git init --quiet "$checkout"
 git -C "$checkout" remote add origin https://github.com/mirrorworld-universe/NorthStarSDK.git

@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -153,6 +155,53 @@ class BuildTests(unittest.TestCase):
             self.assertNotIn(legacy, deployment)
         for command in ("test-continuity-devnet-model.py", "continuity-control-journal.test.mjs", "devnet-continuity-smoke.test.mjs"):
             self.assertIn(command, WORKFLOW.read_text())
+
+
+class SbfWrapperTests(unittest.TestCase):
+    def run_wrapper(self, backend=True, install_failure=False):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        calls = root / "calls.jsonl"
+        cargo = root / "cargo"
+        cargo.write_text(f"#!{sys.executable}\n" + r'''
+import json
+import os
+import sys
+with open(os.environ["FAKE_CARGO_CALLS"], "a") as output:
+    output.write(json.dumps(sys.argv[1:]) + "\n")
+if sys.argv[1:] == ["--list"]:
+    print("\x1b[32m    build-sbf\x1b[0m")
+if sys.argv[1] == "install" and os.environ.get("FAKE_INSTALL_FAILURE") == "1":
+    sys.exit(23)
+''')
+        cargo.chmod(0o755)
+        (root / "grep").symlink_to(shutil.which("grep"))
+        if backend:
+            executable = root / "cargo-build-sbf"
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o755)
+        env = {**os.environ, "PATH": str(root), "FAKE_CARGO_CALLS": str(calls),
+               "FAKE_INSTALL_FAILURE": "1" if install_failure else "0"}
+        result = subprocess.run([shutil.which("bash"), str(ROOT / "cargo-build-sbf"), "--version"],
+                                env=env, capture_output=True, text=True, timeout=10)
+        return result, [json.loads(line) for line in calls.read_text().splitlines()]
+
+    def test_existing_backend_does_not_depend_on_colored_cargo_listing(self):
+        result, calls = self.run_wrapper()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, [["build-sbf", "--arch", "v0", "--tools-version", "v1.56", "--version"]])
+
+    def test_missing_backend_installation_is_version_and_lock_pinned(self):
+        result, calls = self.run_wrapper(backend=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls[0], ["install", "cargo-build-sbf", "--version", "4.5.0", "--locked"])
+        self.assertEqual(calls[1], ["build-sbf", "--arch", "v0", "--tools-version", "v1.56", "--version"])
+
+    def test_failed_backend_installation_never_runs_a_build(self):
+        result, calls = self.run_wrapper(backend=False, install_failure=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(call[0] == "build-sbf" for call in calls))
 
 
 if __name__ == "__main__":

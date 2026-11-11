@@ -31,6 +31,7 @@ agave-unstable-api = []
 [dependencies]
 agave-feature-set = { workspace = true }
 agave-reserved-account-keys = { workspace = true }
+agave-shred-wire-format = { workspace = true }
 agave-snapshots = { workspace = true }
 agave-transaction-view = { workspace = true }
 agave-votor-messages = { workspace = true }
@@ -45,7 +46,6 @@ chrono-humanize = { workspace = true }
 crossbeam-channel = { workspace = true }
 dashmap = { workspace = true, features = ["rayon", "raw-api"] }
 eager = { workspace = true }
-fs_extra = { workspace = true }
 futures = { workspace = true }
 itertools = { workspace = true }
 lazy-lru = { workspace = true }

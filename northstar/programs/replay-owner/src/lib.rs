@@ -56,9 +56,7 @@ fn process_instruction(
         .copy_from_slice(&target.try_borrow()?);
     target.try_borrow_mut()?.fill(0);
     // All data borrows end before the owner changes and Portal receives the account.
-    unsafe {
-        target.assign(portal.address());
-    }
+    target.assign(portal.address());
     let metas = [
         InstructionAccount::writable_signer(payer.address()),
         InstructionAccount::readonly(system.address()),

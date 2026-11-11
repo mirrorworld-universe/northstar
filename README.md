@@ -55,6 +55,15 @@ $ ./cargo build
 > [!NOTE]
 > Note that this builds a debug version that is **not suitable for running a testnet or mainnet validator**. Please read [the install guide](https://docs.anza.xyz/cli/install#build-from-source) for instructions to build a release version for test and production uses.
 
+### Northstar replay builds
+
+With SBPF 0.26, enabling `solana-runtime/northstar-replay` enables register tracing
+for all SBPF execution in that build, including ordinary transactions. This also
+applies to proof-coordinator builds, which enable replay transitively. Expect
+additional memory and CPU use; standard validator builds without replay do not
+enable register tracing. Full witness collection remains limited to explicit
+replay requests.
+
 ## **4. Grant capabilities for XDP (Linux-only).**
 
 XDP transmit is enabled on Linux by default and requires extra capabilities. After building, grant them to the validator binary:

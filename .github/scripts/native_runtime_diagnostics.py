@@ -489,7 +489,8 @@ def recovery_directory_metadata(namespace, owner):
 def managed_records(start, root, dropin, retained_start="", bound_arguments=None):
     references = start + "\n" + retained_start
     original = sorted(set(re.findall(re.escape(str(root)) + r"/([0-9a-f]{40})/runtime/(?:bin/agave-validator|checkpoints|unsettled)", references)))
-    upgraded = sorted(set(re.findall(re.escape(str(root)) + r"/upgrades/([0-9a-f]{40})/runtime/", references)))
+    # Retained L1 directories may belong to an older upgrade; only executables select a runtime.
+    upgraded = sorted(set(re.findall(re.escape(str(root)) + r"/upgrades/([0-9a-f]{40})/runtime/bin/agave-validator\b", references)))
     report = {"original_revisions": original, "upgrade_revisions": upgraded, "onchain_state_checked": False}
     if len(original) != 1 or len(upgraded) > 1:
         return {**report, "status": "no_unambiguous_managed_binding"}
@@ -510,13 +511,15 @@ def managed_records(start, root, dropin, retained_start="", bound_arguments=None
             return {**report, "status": "unknown_artifact_roles"}
         for value in (plan["programs"]["portal"], plan["programs"]["token_bridge"], plan["validator"]):
             public_bytes(value)
+        recorded_sdk = plan.get("sdk_revision")
         profile = digest({"version": 2, "source": original[0], "artifacts": artifacts,
-                          "sdk": SDK_REVISION, "proof_acceptance_qualified": False})
+                          "sdk": recorded_sdk, "proof_acceptance_qualified": False})
         expected_environment = {"NORTHSTAR_CHECKPOINT_PLAN_DIR": str(base / "runtime/checkpoints"),
                                 "NORTHSTAR_UNSETTLED_STATE_DIR": str(base / "runtime/unsettled")}
         identity_ok = (plan.get("version") == reservation.get("version") == activation.get("version") == 2
                        and plan.get("source_revision") == reservation.get("source_revision") == original[0]
-                       and plan.get("sdk_revision") == SDK_REVISION and plan.get("genesis") == DEVNET
+                       and isinstance(recorded_sdk, str) and re.fullmatch("[0-9a-f]{40}", recorded_sdk)
+                       and reservation.get("sdk_revision") == recorded_sdk and plan.get("genesis") == DEVNET
                        and reservation.get("plan_sha256") == digest(plan)
                        and plan.get("original_sha256") == digest(reservation["original"])
                        and plan.get("profile") == profile and activation.get("artifacts") == artifacts
