@@ -192,6 +192,28 @@ The public report/Slack scope is `native-upgrade`: read-only readiness and retai
 identity, **not fresh SOL/SPL payout, oracle, SP1 or proof-acceptance qualification**.
 It does not start, stop or reconfigure an existing oracle.
 
+## Native L1 account indexes
+
+`--upgrade-existing --l1-rpc-profile full` records unrestricted `program-id`,
+`spl-token-owner`, and `spl-token-mint` indexes in the immutable native upgrade
+plan. These support standard native account/token queries without full AccountsDB
+scans; they do not add an RPC proxy or change ER methods. The profile requires a
+qualified retained context, including qualified progress for a fresh replacement.
+Program identities, SessionV2, journals, and protocol controls remain unchanged.
+
+Release CI freezes `NORTHSTAR_L1_RPC_PROFILE=full` before builds. This selector
+cannot be combined with fresh replacement or failed-L1 recovery. Existing key
+inclusion/exclusion filters and unknown index types fail closed rather than being
+silently replaced. Subsequent upgrades inherit the recorded profile; an unset
+selector does not remove retained indexes. Index startup still has the ordinary
+native readiness bound and quarantine-on-failure contract. Allow memory and
+startup time for rebuilding indexes before scheduling the restart.
+
+Read-only diagnostics report only configured index types and whether key filters
+exist, after effective service binding validation. They do not disclose filtered
+keys or claim that an index has finished loading. Public method checks remain
+separate from native retained-state qualification.
+
 ## Preserved-state failed-L1 recovery
 
 An already failed validator cannot satisfy the normal upgrade's live ER preflight.

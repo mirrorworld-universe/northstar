@@ -11,7 +11,7 @@ import native_l1_recovery as recovery
 from continuity_rollout_state import (
     ARTIFACTS, DEVNET, SDK_REVISION, append_private, atomic_json, canonical, checked_directory,
     file_hash, flag_value, geyser_event_source, geyser_events_config, geyser_plugin_flag, immutable_json, private_json, require,
-    service_dropin, upgrade_arguments, verify_artifacts,
+    l1_rpc_arguments, service_dropin, upgrade_arguments, verify_artifacts,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -47,6 +47,7 @@ class NativeUpgrade:
         self.installed = self.control / "installed.json"
         self.progress = self.control / "progress.json"
         self.retrying = False
+        self.rpc_profile = None
 
     def phase(self):
         value = private_json(self.progress)
@@ -165,6 +166,7 @@ class NativeUpgrade:
             config = self.base / "runtime/geyser-events.json" if "geyser_config_sha256" in self.base_activation else None
             artifacts = self.base_manifest["sha256"]
             self.previous_event_source = geyser_event_source(self.base_activation)
+            self.previous_rpc_profile = self.base_activation.get("l1_rpc_profile")
         else:
             previous = binary.parent.parent.parent
             require(previous.parent == self.parent and re.fullmatch("[0-9a-f]{40}", previous.name)
@@ -188,6 +190,8 @@ class NativeUpgrade:
             config = previous / "runtime/geyser-events.json"
             marker = private_json(previous / "control/installed.json")
             self.previous_event_source = geyser_event_source(saved)
+            self.previous_rpc_profile = saved.get("l1_rpc_profile")
+        require(self.previous_rpc_profile in (None, "full"), "retained L1 RPC profile differs")
         require(before["binary_sha256"] == artifacts["validator"], "retained native manifest and executable differ")
         text = service_dropin(before["arguments"], *[before["state_environment"][key] for key in STATE_KEYS])
         require(marker == {"sha256": hashlib.sha256(text.encode()).hexdigest()}, "retained service drop-in binding differs")
@@ -255,11 +259,17 @@ class NativeUpgrade:
             self.stage = self.args.stage
         self.load_base(before)
         binding = self.binding(before)
+        requested_profile = getattr(self.args, "l1_rpc_profile", None)
+        self.rpc_profile = saved.get("l1_rpc_profile") if saved else requested_profile or self.previous_rpc_profile
+        require(self.rpc_profile in (None, "full") and (requested_profile is None or requested_profile == self.rpc_profile),
+                "established L1 RPC profile differs")
+        require(not self.rpc_profile or self.event_source == "l1" and self.recovery_slot is None,
+                "L1 RPC profile requires an ordinary L1 native upgrade")
         if self.recovery_slot is not None:
             recovery.verify_service_files(self.ops, self.base, self.service, self.dropin)
         config = self.runtime / "geyser-events.json"
-        desired_arguments = upgrade_arguments(before["arguments"], self.runtime / ARTIFACTS["validator"], config, binding["config"],
-                                              previous_source=self.previous_event_source, event_source=self.event_source)
+        desired_arguments = l1_rpc_arguments(upgrade_arguments(before["arguments"], self.runtime / ARTIFACTS["validator"], config, binding["config"],
+                                              previous_source=self.previous_event_source, event_source=self.event_source), self.rpc_profile)
         if self.recovery_slot is not None:
             desired_arguments = recovery.arguments(desired_arguments, self.runtime)
         desired = {**service_spec(before), "arguments": desired_arguments,
@@ -292,9 +302,24 @@ class NativeUpgrade:
                          "identity": snapshot["identity"], "er_genesis": snapshot["er_genesis"], "l1_floor": floor}
             if self.recovery_slot is not None:
                 self.plan["recovery_failed_slot"] = self.recovery_slot
+            if self.rpc_profile:
+                self.plan["l1_rpc_profile"] = self.rpc_profile
             immutable_json(self.record, self.plan)
             immutable_json(self.progress, {"version": 1, "plan_sha256": digest(self.plan), "phase": "prepared"})
         phase = self.phase()
+        if self.rpc_profile:
+            base_report = private_json(self.base_control / "report.json")
+            identity = self.plan["identity"]
+            require(base_report.get("result") == "passed" and base_report.get("source_revision") == self.base.name
+                    and base_report.get("qualification_kind") in ("first-activation", "fresh-stack")
+                    and all(base_report.get(key) == identity[key] for key in ("portal", "token_bridge", "validator", "profile", "context")),
+                    "L1 RPC profile requires a qualified retained context")
+            if "replacement" in private_json(self.base_control / "reservation.json"):
+                require(base_report.get("qualification_kind") == "fresh-stack"
+                        and base_report.get("fresh_plan_sha256") == digest(self.base_plan)
+                        and private_json(self.base_control / "fresh-progress.json") ==
+                        {"version": 1, "plan_sha256": digest(self.base_plan), "phase": "qualified"},
+                        "fresh L1 RPC base lacks qualified progress")
         reconcile = getattr(self.args, "reconcile_failed_l1", False)
         require(not reconcile or self.recovery_slot is not None and phase == "start-attempted" and not active,
                 "reconciliation requires an unqualified stopped L1 recovery")
@@ -499,6 +524,8 @@ class NativeUpgrade:
                   "proof_acceptance_qualified": False}
         if "event_source" in self.plan:
             report["event_source"] = self.event_source
+        if self.rpc_profile:
+            report["l1_rpc_profile"] = self.rpc_profile
         if self.recovery_slot is not None:
             report.update(recovery_failed_slot=self.recovery_slot, prior_l1_data_preserved=True)
         immutable_json(self.control / "report.json", report)

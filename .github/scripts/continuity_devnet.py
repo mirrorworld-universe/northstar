@@ -586,6 +586,7 @@ def main():
     mode = subcommands.add_parser("mode")
     mode.add_argument("--recovery-slot", default="")
     mode.add_argument("--replace-context", default="")
+    mode.add_argument("--l1-rpc-profile", default="")
     for name in ("fingerprint", "inspect", "flush", "empty-l1"):
         inspector = subcommands.add_parser(name)
         inspector.add_argument("--input", type=Path, required=True)
@@ -600,6 +601,7 @@ def main():
     run.add_argument("--er-rpc", default="http://127.0.0.1:8910")
     run.add_argument("--max-estimated-cost-lamports", type=int, default=10_000_000_000)
     run.add_argument("--upgrade-existing", action="store_true", help="Permit a guarded native-only upgrade of a known managed v2 activation.")
+    run.add_argument("--l1-rpc-profile", choices=("full",), help="Bind unrestricted program, token-owner, and token-mint indexes to a native-only L1 upgrade.")
     run.add_argument("--replace-context", help="Exact reviewed SessionV2 context to abandon during a guarded fresh devnet cutover.")
     run.add_argument("--abandon-previous-state", action="store_true", help="Explicitly leave old on-chain state unused while retaining its local files.")
     run.add_argument("--event-source", choices=("l1", "er"), help="Select the managed SSE source. New plans default to L1; established plans retain their recorded source.")
@@ -608,7 +610,7 @@ def main():
     run.add_argument("--reconcile-stopped-at", help="Exact reviewed systemd ExecMainExitTimestamp; required for explicit reconciliation.")
     args = parser.parse_args()
     if args.operation == "mode":
-        print(" ".join(release_mode_arguments(args.recovery_slot, args.replace_context)))
+        print(" ".join(release_mode_arguments(args.recovery_slot, args.replace_context, args.l1_rpc_profile)))
     elif args.operation == "inventory":
         print(json.dumps(inventory_service()))
     elif args.operation == "empty-l1":
@@ -621,6 +623,9 @@ def main():
         require(args.state_root.is_absolute() and not any(character.isspace() for character in str(args.state_root))
                 and re.fullmatch("[0-9a-f]{40}", args.revision)
                 and 0 < args.max_estimated_cost_lamports <= 50_000_000_000, "invalid rollout root, revision or funding estimate limit")
+        require(not args.l1_rpc_profile or args.upgrade_existing and args.event_source in (None, "l1")
+                and args.recover_failed_l1_slot is None and args.replace_context is None,
+                "L1 RPC profile requires an ordinary L1 native upgrade")
         if args.reconcile_failed_l1:
             require(args.stage is None and args.upgrade_existing and args.recover_failed_l1_slot is not None
                     and args.reconcile_stopped_at is not None, "reconciliation requires retained artifacts and explicit stopped-state evidence")

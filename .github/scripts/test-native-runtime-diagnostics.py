@@ -280,6 +280,29 @@ class DiagnosticTests(unittest.TestCase):
         self.assertFalse(result["recorded_plan_identity_matches"])
         self.assertNotIn("profile", result)
 
+    def test_verified_service_reports_configured_rpc_indexes_without_private_arguments(self):
+        before = retained_fingerprint([self.root])
+        result = self.collect()
+        self.assertEqual(result["operational"]["rpc_account_indexes"],
+                         {"status": "observed", "configured": [], "key_filter": "unrestricted"})
+        self.assertNotIn(SECRET, json.dumps(result))
+        self.assertEqual(retained_fingerprint([self.root]), before)
+
+    def test_rpc_index_reporting_accepts_cli_forms_but_never_discloses_keys_or_unknown_values(self):
+        configured = ["validator", "--account-index", "program-id", "spl-token-owner",
+                      "--account-index=spl-token-mint", "--private-option", SECRET]
+        self.assertEqual(diagnostics.rpc_index_configuration(configured), {"status": "observed",
+                         "configured": ["program-id", "spl-token-mint", "spl-token-owner"], "key_filter": "unrestricted"})
+        filtered = configured + ["--account-index-include-key", public_text(bytes([13]) * 32)]
+        report = diagnostics.rpc_index_configuration(filtered)
+        self.assertEqual(report["key_filter"], "include-only")
+        self.assertNotIn(public_text(bytes([13]) * 32), json.dumps(report))
+        invalid = diagnostics.rpc_index_configuration(["validator", "--account-index", SECRET])
+        self.assertEqual(invalid, {"status": "ambiguous"})
+        self.assertNotIn(SECRET, json.dumps(invalid))
+        unbound = diagnostics.operational_details({}, self.state_root, {}, [])
+        self.assertNotIn("rpc_account_indexes", unbound)
+
     def test_every_retained_byte_and_mode_is_unchanged(self):
         before = retained_fingerprint([self.root])
         self.collect()

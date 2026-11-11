@@ -11,6 +11,18 @@ test('native validation uses a pinned supported Ubuntu image', () => {
   }
 });
 
+test('L1 RPC profile is frozen before builds and never selects fresh activation', () => {
+  const mode = steps.find(step => step.id === 'continuity_mode');
+  expect(mode.env.L1_RPC_PROFILE).toBe('${{ vars.NORTHSTAR_L1_RPC_PROFILE }}');
+  expect(mode.run).toContain('--l1-rpc-profile "$L1_RPC_PROFILE"');
+  const selected = Bun.spawnSync(['python3', '-B', '.github/scripts/continuity_devnet.py', 'mode', '--l1-rpc-profile', 'full']);
+  expect(selected.exitCode).toBe(0);
+  expect(selected.stdout.toString().trim()).toBe('--upgrade-existing --l1-rpc-profile full');
+  const mixed = Bun.spawnSync(['python3', '-B', '.github/scripts/continuity_devnet.py', 'mode',
+    '--replace-context', 'ab'.repeat(32), '--l1-rpc-profile', 'full']);
+  expect(mixed.exitCode).not.toBe(0);
+});
+
 test('fresh release mode is frozen before builds and remains separate from recovery', () => {
   const mode = steps.find(step => step.id === 'continuity_mode');
   expect(mode).toBeDefined();
