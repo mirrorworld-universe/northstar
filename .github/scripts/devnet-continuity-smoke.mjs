@@ -31,6 +31,13 @@ export function assertDevelopmentNetwork(genesis, l1, er, sandbox = process.env.
   if (genesis !== DEVNET && !hostOptIn) requireValue(Object.keys(interfaces).every(name => name === 'lo'), 'Local qualification requires private loopback networking');
 }
 
+export function delegatedTokenAmount(account, bridge, portal, parse) {
+  // RPC can briefly expose the Portal-owned L1 projection before delegation import.
+  if (account === null || account.owner.equals(portal)) return null;
+  requireValue(account.owner.equals(bridge), 'ER token owner differs');
+  return parse(account.data).amount;
+}
+
 export async function waitForBoundSession(readers, timeoutMs = 180_000, pollMs = 250) {
   const end = Date.now() + timeoutMs;
   while (Date.now() < end) {
@@ -185,10 +192,8 @@ export async function runSmoke(configPath, phase) {
     return (await token.getAccount(l1, address, commitment, token.TOKEN_PROGRAM_ID)).amount;
   }
   async function erAmount(address) {
-    const account = await er.getAccountInfo(address, 'confirmed');
-    if (account === null) return null;
-    requireValue(account?.owner.equals(bridge), 'ER token owner differs');
-    return sdk.tokenBridge.parseErTokenAccount(account.data).amount;
+    return delegatedTokenAmount(await er.getAccountInfo(address, 'confirmed'), bridge, portal,
+      data => sdk.tokenBridge.parseErTokenAccount(data));
   }
   const completion = path.join(root, phase + '.json');
   if (fs.existsSync(completion)) {

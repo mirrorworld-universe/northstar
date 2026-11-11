@@ -1,6 +1,6 @@
 // Sonic: Guard the funded adapter before reading keys or contacting a chain.
 import { test, expect } from 'bun:test';
-import { assertDevelopmentNetwork, runSmoke, sameMetadata, waitForBoundSession } from './devnet-continuity-smoke.mjs';
+import { assertDevelopmentNetwork, delegatedTokenAmount, runSmoke, sameMetadata, waitForBoundSession } from './devnet-continuity-smoke.mjs';
 
 const DEVNET = 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG';
 const MAINNET = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d';
@@ -47,6 +47,21 @@ test('recovery waits for the persisted L1 receipt floor despite a matching sessi
   await waitForBoundSession(readers, 200, 1);
   expect(reads).toBeGreaterThanOrEqual(2);
   expect(executions).toBe(1);
+});
+
+test('delegated token polling waits for the Portal projection without parsing it', () => {
+  const bridge = {}, portal = {};
+  const parse = () => { throw new Error('Pending account data must not be parsed'); };
+  expect(delegatedTokenAmount(null, bridge, portal, parse)).toBeNull();
+  expect(delegatedTokenAmount({ owner: { equals: value => value === portal } }, bridge, portal, parse)).toBeNull();
+});
+
+test('delegated token polling only accepts the bound bridge owner', () => {
+  const bridge = {}, portal = {};
+  expect(delegatedTokenAmount({ owner: { equals: value => value === bridge }, data: 'token-data' }, bridge, portal,
+    data => ({ amount: data === 'token-data' ? 0n : 1n }))).toBe(0n);
+  expect(() => delegatedTokenAmount({ owner: { equals: () => false } }, bridge, portal,
+    () => ({ amount: 0n }))).toThrow('ER token owner differs');
 });
 
 test('unknown phases are rejected before any private configuration lookup', async () => {
