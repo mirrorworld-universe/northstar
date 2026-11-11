@@ -33,6 +33,12 @@ and deployment pin Node 24.21.0/npm 11; the helper rejects npm 10 before checkou
 because that resolver rejects the unchanged pinned dependency lock. CI also tests
 the native snapshot reader against this actual SDK over a loopback RPC fixture,
 including numeric/string wire cursors that the SDK normalizes to `bigint`.
+Hosted Rust jobs pin Ubuntu 24.04 and use image-scoped native/proof caches.
+
+Non-devnet smoke tests default to sandboxed loopback networking. Task-authorized
+host tests may explicitly set `NORTHSTAR_ALLOW_LOCAL_HOST_E2E=1`; control endpoints
+must still be loopback roots, the actual genesis is checked, and mainnet remains
+forbidden. This opt-in neither claims sandbox isolation nor qualifies deployment.
 
 `continuity_devnet.py run` then:
 

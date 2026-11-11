@@ -5,6 +5,12 @@ const workflow = Bun.YAML.parse(await Bun.file(new URL('../workflows/ci.yml', im
 const deployment = workflow.jobs.deploy;
 const steps = deployment.steps;
 
+test('native validation uses a pinned supported Ubuntu image', () => {
+  for (const name of ['fmt', 'clippy', 'test', 'network-prover']) {
+    expect(workflow.jobs[name]['runs-on']).toBe('ubuntu-24.04');
+  }
+});
+
 test('fresh release mode is frozen before builds and remains separate from recovery', () => {
   const mode = steps.find(step => step.id === 'continuity_mode');
   expect(mode).toBeDefined();

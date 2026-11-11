@@ -23,9 +23,15 @@ test('mainnet and remote control roots are rejected', () => {
 });
 
 test('non-devnet qualification requires real sandbox loopback isolation', () => {
-  expect(() => assertDevelopmentNetwork('local', l1, er, false, { lo: [] })).toThrow('sandbox');
-  expect(() => assertDevelopmentNetwork('local', l1, er, true, { lo: [], eth0: [] })).toThrow('private loopback');
-  assertDevelopmentNetwork('local', l1, er, true, { lo: [] });
+  expect(() => assertDevelopmentNetwork('local', l1, er, false, { lo: [] }, false)).toThrow('sandbox');
+  expect(() => assertDevelopmentNetwork('local', l1, er, true, { lo: [], eth0: [] }, false)).toThrow('private loopback');
+  assertDevelopmentNetwork('local', l1, er, true, { lo: [] }, false);
+});
+
+test('explicit host qualification stays loopback-only and never permits mainnet', () => {
+  expect(() => assertDevelopmentNetwork('local', l1, er, false, { lo: [], eth0: [] }, true)).not.toThrow();
+  expect(() => assertDevelopmentNetwork(MAINNET, l1, er, false, { lo: [] }, true)).toThrow('Mainnet');
+  expect(() => assertDevelopmentNetwork('local', 'https://example.com', er, false, { lo: [] }, true)).toThrow('loopback');
 });
 
 test('recovery waits for the persisted L1 receipt floor despite a matching session context', async () => {

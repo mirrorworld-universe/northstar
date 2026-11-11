@@ -21,7 +21,7 @@ env:
 jobs:
   fmt:
     name: Format
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ensure-rust-toolchain
@@ -34,7 +34,7 @@ jobs:
 
   clippy:
     name: Clippy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/prepare-runner-disk
@@ -48,7 +48,7 @@ jobs:
       - run: rustup component add clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: native-no-debug-v1
+          prefix-key: native-no-debug-ubuntu24-v2
           save-if: ${{ env.SAVE_CI_CACHE }}
       - name: Install dependencies
         run: |
@@ -64,7 +64,7 @@ jobs:
 
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/prepare-runner-disk
@@ -77,7 +77,7 @@ jobs:
           rm -rf ~/.cargo/registry/src/**/.cargo-lock*
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: native-no-debug-v1
+          prefix-key: native-no-debug-ubuntu24-v2
           save-if: ${{ env.SAVE_CI_CACHE }}
       - name: Install dependencies
         run: |
@@ -252,7 +252,7 @@ jobs:
   # Sonic: The network adapter is an isolated SP1 workspace; tests use no GPU or paid requests.
   network-prover:
     name: Network prover (CPU)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       SP1_SKIP_PROGRAM_BUILD: "true"
@@ -266,6 +266,7 @@ jobs:
       - run: rustup component add clippy
       - uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: cpu-proof-ubuntu24-v1
           workspaces: northstar/zkvm-replay -> target
           save-if: ${{ env.SAVE_CI_CACHE }}
       - name: Install SDK build dependencies

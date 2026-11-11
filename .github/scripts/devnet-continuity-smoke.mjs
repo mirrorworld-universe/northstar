@@ -19,16 +19,16 @@ function immutable(filename, value) {
   else atomicPrivateJson(filename, value);
 }
 
-export function assertDevelopmentNetwork(genesis, l1, er, sandbox = process.env.NORTHSTAR_SANDBOX === '1', interfaces = os.networkInterfaces()) {
+export function assertDevelopmentNetwork(genesis, l1, er, sandbox = process.env.NORTHSTAR_SANDBOX === '1', interfaces = os.networkInterfaces(), hostOptIn = process.env.NORTHSTAR_ALLOW_LOCAL_HOST_E2E === '1') {
   requireValue(genesis !== MAINNET, 'Mainnet is never eligible for deployment qualification');
   for (const endpoint of [l1, er]) {
     const url = new URL(endpoint);
     requireValue(['http:', 'https:'].includes(url.protocol) && !url.username && !url.password &&
       ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) && url.pathname === '/' && !url.search && !url.hash,
       'Control RPC must be a colocated loopback root');
-    if (genesis !== DEVNET) requireValue(sandbox, 'Non-devnet tests require local sandbox RPC');
+    if (genesis !== DEVNET) requireValue(sandbox || hostOptIn, 'Non-devnet tests require local sandbox RPC or explicit host qualification');
   }
-  if (genesis !== DEVNET) requireValue(Object.keys(interfaces).every(name => name === 'lo'), 'Local qualification requires private loopback networking');
+  if (genesis !== DEVNET && !hostOptIn) requireValue(Object.keys(interfaces).every(name => name === 'lo'), 'Local qualification requires private loopback networking');
 }
 
 export async function waitForBoundSession(readers, timeoutMs = 180_000, pollMs = 250) {
