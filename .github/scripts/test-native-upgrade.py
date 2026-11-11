@@ -154,6 +154,23 @@ class UpgradeTests(unittest.TestCase):
         self.assertFalse(report["session_replaced"])
         self.assertIn("not a fresh SOL/SPL", report["scope"])
 
+    def test_retained_profile_uses_its_recorded_sdk_revision(self):
+        plan_path = self.base / "control/plan.json"
+        reservation_path = self.base / "control/reservation.json"
+        plan = private_json(plan_path)
+        plan["sdk_revision"] = "d" * 40
+        plan["profile"] = digest({"version": 2, "source": self.base.name, "artifacts": plan["artifacts"],
+                                  "sdk": plan["sdk_revision"], "proof_acceptance_qualified": False})
+        atomic_json(plan_path, plan)
+        reservation = private_json(reservation_path)
+        reservation.update(sdk_revision=plan["sdk_revision"], plan_sha256=digest(plan))
+        atomic_json(reservation_path, reservation)
+        self.world.session_identity["profile"] = plan["profile"]
+        UpgradeHost(self.world).run()
+        self.assertEqual(private_json(self.upgrade / "control/plan.json")["identity"]["profile"], plan["profile"])
+        self.assertEqual(private_json(plan_path)["sdk_revision"], "d" * 40)
+        self.assertEqual(self.world.uploads, self.uploads)
+
     @property
     def upgrade(self):
         return self.world.args.state_root / "upgrades" / self.world.args.revision

@@ -9,7 +9,7 @@ import stat
 import tempfile
 
 DEVNET = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"
-SDK_REVISION = "a099451216fc045adbebe062a9716eb4fd512909"
+SDK_REVISION = "beb895f5178bdb21fbfe13786981b19241d3d8c4"
 ARTIFACTS = {
     "validator": "bin/agave-validator",
     "cli": "bin/solana",
@@ -22,6 +22,20 @@ ARTIFACTS = {
 def require(condition, message):
     if not condition:
         raise ValueError(message)
+
+
+def release_mode_arguments(recovery_slot="", replace_context=""):
+    require(isinstance(recovery_slot, str) and isinstance(replace_context, str), "native mode selectors must be strings")
+    require(not (recovery_slot and replace_context), "fresh activation and L1 recovery selectors are mutually exclusive")
+    if replace_context:
+        require(re.fullmatch("[0-9a-f]{64}", replace_context), "invalid fresh context selector")
+        return ["--replace-context", replace_context, "--abandon-previous-state"]
+    result = ["--upgrade-existing"]
+    if recovery_slot:
+        require(re.fullmatch("[1-9][0-9]{0,19}", recovery_slot) and int(recovery_slot) < 1 << 64,
+                "invalid L1 recovery slot selector")
+        result.extend(["--recover-failed-l1-slot", recovery_slot])
+    return result
 
 
 def canonical(value):
