@@ -57,6 +57,14 @@ class DeploymentTests(unittest.TestCase):
         self.assertFalse(any("deploy" in call.args[0] for call in value.execute.call_args_list))
         self.assertIsNone(private_json(value.control / "programs.json")["roles"]["portal"]["complete"])
 
+    def test_partial_upload_scope_cannot_use_an_unrecorded_rpc_or_worker_stop(self):
+        value = self.deployment
+        value.execute = Mock()
+        for rpc, stop in (("https://unrecorded.invalid", False), (value.args.l1_rpc, True)):
+            with self.assertRaisesRegex(ValueError, "submission scope"):
+                value.deploy_programs(resume_roles={"portal"}, submission_rpc=rpc, stop_worker=stop)
+        value.execute.assert_not_called()
+
     def test_insufficient_balance_stops_before_service_or_chain_mutation(self):
         value = self.deployment
         value.upstream.call = lambda method, *_: 1000 if method == "getMinimumBalanceForRentExemption" else {"value": 1}

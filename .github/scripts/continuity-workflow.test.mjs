@@ -102,6 +102,20 @@ test('pending upload diagnostics remain master-only and never invoke activation'
   expect(job.steps.map(step => step.uses).filter(Boolean)).toEqual(['actions/checkout@v4', 'actions/upload-artifact@v4']);
 });
 
+test('retained upload reconciliation is explicit master-only and never starts native services', async () => {
+  const uploadWorkflow = Bun.YAML.parse(await Bun.file(new URL('../workflows/continuity-upload-resume.yml', import.meta.url)).text());
+  const job = uploadWorkflow.jobs.reconcile;
+  expect(job.if).toContain("github.ref == 'refs/heads/master'");
+  expect(job['runs-on']).toBe('devnet');
+  const step = job.steps.find(value => value.id === 'reconcile');
+  expect(step.env.TARGET_REVISION).toBe('${{ inputs.revision }}');
+  expect(step.env.REPLACE_CONTEXT).toBe('${{ inputs.replace_context }}');
+  expect(step.run).toContain('continuity_upload_resume.py');
+  expect(step.run).not.toMatch(/systemctl|build-continuity|continuity_devnet\.py|--stage|fund/);
+  expect(job.steps.at(-1).with.path).toBe('${{ steps.reconcile.outputs.report_path }}');
+  expect(workflow.jobs.test.steps.map(value => value.run ?? '').join('\n')).toContain('test-continuity-upload-resume.py');
+});
+
 test('artifact upload selects only the verified public report', () => {
   const uploads = steps.filter(step => step.uses?.startsWith('actions/upload-artifact@'));
   expect(uploads).toHaveLength(1);
