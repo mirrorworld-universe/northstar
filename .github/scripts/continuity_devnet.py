@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 from continuity_rollout_state import (
     ARTIFACTS, DEVNET, SDK_REVISION, append_private, atomic_json, canonical, checked_directory, file_hash, flag_value,
     geyser_event_source, geyser_events_config, geyser_plugin_flag,
-    immutable_json, inspect_paths, private_json, require, retained_fingerprint, service_arguments,
+    immutable_json, inspect_paths, private_json, release_mode_arguments, require, retained_fingerprint, service_arguments,
     service_dropin, sync_paths, verify_artifacts,
 )
 
@@ -123,6 +123,7 @@ class Deployment:
         self.control = self.namespace / "control"
         self.runtime = self.namespace / "runtime"
         self.log = None
+        self.fresh = None
 
     def execute(self, arguments, timeout=120, allowed=False):
         if self.log:
@@ -148,6 +149,8 @@ class Deployment:
         return json.loads(self.execute(["sudo", "-n", "python3", "-B", __file__, "fingerprint", "--input", path], timeout=300))
 
     def inspect(self, paths):
+        if self.fresh is not None and not self.control.exists():
+            return self.fresh.inspect_temporary(paths)
         request = self.control / "inspection-input.json"
         atomic_json(request, {"paths": list(map(str, paths))})
         return json.loads(self.execute(["sudo", "-n", "python3", "-B", __file__, "inspect", "--input", request]))
@@ -179,6 +182,11 @@ class Deployment:
         self.execute(["git", "-C", self.args.sdk_checkout, "diff", "--quiet", "HEAD"])
         require(file_hash(self.args.sdk_checkout / "package-lock.json") == "78697b65487a7c5932151165ec887b37246e25a3571af752b8c151cc636cd00c", "SDK dependency lock differs")
 
+    def activation_arguments(self, original, executable, portal, geyser_config, event_source):
+        if self.fresh is not None:
+            return self.fresh.arguments(original, executable, portal, geyser_config, event_source)
+        return service_arguments(original, executable, portal, geyser_config, event_source)
+
     def prepare(self):
         require(self.upstream.call("getGenesisHash") == DEVNET, "native rollout is devnet-only")
         require(re.fullmatch("[0-9a-f]{40}", self.args.revision), "full source revision required")
@@ -204,10 +212,17 @@ class Deployment:
             self.original = reservation["original"]
             self.stage = Path(reservation["stage"])
             self.manifest = verify_artifacts(self.stage, self.args.revision)
+            if self.fresh is not None:
+                self.fresh.adopt_reservation(reservation)
         else:
-            require(not os.path.lexists(DROPIN), "an existing managed native activation requires explicit review")
+            if self.fresh is None:
+                require(not os.path.lexists(DROPIN), "an existing managed native activation requires explicit review")
+            else:
+                self.fresh.admit()
             require(self.l1.call("getGenesisHash") == DEVNET, "colocated L1 network differs")
             self.original = self.inventory()
+            if self.fresh is not None:
+                self.original = self.fresh.archive_inventory(self.original)
             for retained in self.original["retained_paths"]:
                 require(Path(retained).parent != DROPIN.parent or Path(retained).name < DROPIN.name,
                         "an existing service drop-in would override isolated activation")
@@ -220,8 +235,11 @@ class Deployment:
             reported_session = self.er.call("getSessionPda")
             require(reported_session is None or reported_session == canonical_session, "old ER session address differs from its configured Portal")
             frame = self.upstream.account(canonical_session)
-            require(frame is None or (frame["owner"] == old_portal and not frame["raw"].startswith(b"NSSESS02")),
-                    "existing v2 context requires explicit upgrade review, not fresh replacement")
+            if self.fresh is None:
+                require(frame is None or (frame["owner"] == old_portal and not frame["raw"].startswith(b"NSSESS02")),
+                        "existing v2 context requires explicit upgrade review, not fresh replacement")
+            else:
+                self.fresh.previous_session(frame, old_portal, canonical_session)
             self.namespace.mkdir(mode=0o711)
             self.control.mkdir(mode=0o700)
             (self.control / "keys").mkdir(mode=0o700)
@@ -230,13 +248,15 @@ class Deployment:
             reservation = {"version": 2, "plan_sha256": None, "source_revision": self.args.revision, "funder": funder, "sdk_revision": SDK_REVISION,
                            "stage": str(self.stage), "original": self.original, "validator": validator, "old_portal": old_portal,
                            "l1_rpc": self.args.l1_rpc, "er_rpc": self.args.er_rpc, "devnet_rpc": self.args.devnet_rpc}
+            if self.fresh is not None:
+                reservation["replacement"] = self.fresh.previous
             immutable_json(self.control / "reservation.json", reservation)
         requested_source = getattr(self.args, "event_source", None)
         activation = self.control / "activation.json"
         event_source = geyser_event_source(private_json(activation)) if activation.exists() else requested_source or "l1"
         require(requested_source is None or requested_source == event_source, "established event source differs")
-        service_arguments(self.original["arguments"], self.runtime / ARTIFACTS["validator"],
-                          flag_value(self.original["arguments"], "--portal"), self.runtime / "geyser-events.json", event_source)
+        self.activation_arguments(self.original["arguments"], self.runtime / ARTIFACTS["validator"],
+                                  flag_value(self.original["arguments"], "--portal"), self.runtime / "geyser-events.json", event_source)
         self.log = self.control / "operations.log"
         if not self.log.exists():
             descriptor = os.open(self.log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -255,6 +275,9 @@ class Deployment:
                      "validator": reservation["validator"], "funder": funder, "programs": ids, "profile": profile,
                      "artifacts": self.manifest["sha256"], "max_estimated_cost_lamports": self.args.max_estimated_cost_lamports,
                      "original_sha256": hashlib.sha256(canonical(self.original)).hexdigest()}
+        if self.fresh is not None:
+            self.plan.update(mode="fresh-stack", replacement_sha256=hashlib.sha256(canonical(self.fresh.previous)).hexdigest())
+            self.fresh.check_new_identities(ids)
         immutable_json(private_json_guard, self.plan)
         digest = hashlib.sha256(canonical(self.plan)).hexdigest()
         require(reservation["plan_sha256"] is None or reservation["plan_sha256"] == digest, "native reservation plan binding changed")
@@ -338,6 +361,8 @@ class Deployment:
                 raise RuntimeError("native program finalization timed out; upload barrier retained")
 
     def stop(self):
+        if self.fresh is not None:
+            self.fresh.before_stop()
         self.execute(["sudo", "-n", "systemctl", "stop", SERVICE], timeout=180)
         state = self.execute(["systemctl", "show", "--property=ActiveState", "--value", SERVICE]).strip()
         pid = self.execute(["systemctl", "show", "--property=MainPID", "--value", SERVICE]).strip()
@@ -349,6 +374,11 @@ class Deployment:
             return response.status == 200 and response.read(16) == b"ok"
 
     def start(self):
+        if self.fresh is not None:
+            return self.fresh.start(self.start_runtime)
+        return self.start_runtime()
+
+    def start_runtime(self):
         uploads = private_json(self.control / "programs.json")
         floor = max(uploads["roles"][role]["complete"]["deployment_slot"] for role in ("portal", "token_bridge"))
         require(type(floor) is int and floor >= 0, "invalid native program deployment floor")
@@ -383,7 +413,7 @@ class Deployment:
         require(requested_source is None or requested_source == event_source, "established event source differs")
         configuration = geyser_events_config(plugin, event_source)
         config_digest = hashlib.sha256(canonical(configuration) + b"\n").hexdigest()
-        arguments = service_arguments(self.original["arguments"], binary, self.plan["programs"]["portal"], plugin_config, event_source)
+        arguments = self.activation_arguments(self.original["arguments"], binary, self.plan["programs"]["portal"], plugin_config, event_source)
         expected = {"NORTHSTAR_CHECKPOINT_PLAN_DIR": str(self.runtime / "checkpoints"),
                     "NORTHSTAR_UNSETTLED_STATE_DIR": str(self.runtime / "unsettled")}
         spec = {"version": 2, "arguments": arguments, "state_environment": expected, "artifacts": self.plan["artifacts"],
@@ -391,14 +421,15 @@ class Deployment:
         if saved is None or "event_source" in saved:
             spec["event_source"] = event_source
         if not record.exists():
-            actual = self.inventory()
+            actual = self.inventory() if self.fresh is None else self.fresh.original_inventory()
             require(actual["arguments"] == self.original["arguments"] and actual["binary_sha256"] == self.original["binary_sha256"], "original native service changed before activation")
             self.stop()
             try:
                 immutable_json(self.control / "retained.json", self.retention())
                 immutable_json(record, spec)
             except BaseException:
-                self.execute(["sudo", "-n", "systemctl", "start", SERVICE], timeout=180, allowed=True)
+                if self.fresh is None:
+                    self.execute(["sudo", "-n", "systemctl", "start", SERVICE], timeout=180, allowed=True)
                 raise
         else:
             require(private_json(record) == spec, "established activation specification changed")
@@ -465,7 +496,10 @@ class Deployment:
             require(private_json(installed_marker) == {"sha256": digest} and previous.get("sha256") == digest,
                     "established service drop-in is missing or changed")
         elif not previous.get("absent"):
-            require(previous.get("sha256") == digest, "unrecorded service drop-in differs")
+            if self.fresh is None:
+                require(previous.get("sha256") == digest, "unrecorded service drop-in differs")
+            else:
+                self.fresh.replacing_dropin(previous, digest)
         self.execute(["sudo", "-n", "install", "-d", "-m", "755", DROPIN.parent])
         self.execute(["sudo", "-n", "install", "-m", "600", dropin, str(DROPIN) + ".new"])
         self.execute(["sudo", "-n", "mv", str(DROPIN) + ".new", DROPIN])
@@ -510,6 +544,8 @@ class Deployment:
         activation = private_json(self.control / "activation.json")
         if "event_source" in activation:
             report["event_source"] = geyser_event_source(activation)
+        if self.fresh is not None:
+            report = self.fresh.report(report)
         atomic_json(self.control / "report.json", report)
         print(json.dumps(report), flush=True)
         output = os.environ.get("GITHUB_OUTPUT")
@@ -520,6 +556,10 @@ class Deployment:
                 stream.write("report_path=" + str(self.control / "report.json") + "\n")
 
     def run(self):
+        if getattr(self.args, "replace_context", None) is not None or getattr(self.args, "abandon_previous_state", False):
+            from fresh_devnet import FreshStack
+            self.fresh = FreshStack(self, SERVICE, DROPIN)
+            return self.fresh.run()
         pending_upgrade = self.args.state_root / "upgrades" / self.args.revision
         same_activation = os.path.lexists(self.control / "activation.json")
         if getattr(self.args, "reconcile_failed_l1", False):
@@ -543,6 +583,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="operation", required=True)
     subcommands.add_parser("inventory")
+    mode = subcommands.add_parser("mode")
+    mode.add_argument("--recovery-slot", default="")
+    mode.add_argument("--replace-context", default="")
     for name in ("fingerprint", "inspect", "flush", "empty-l1"):
         inspector = subcommands.add_parser(name)
         inspector.add_argument("--input", type=Path, required=True)
@@ -557,12 +600,16 @@ def main():
     run.add_argument("--er-rpc", default="http://127.0.0.1:8910")
     run.add_argument("--max-estimated-cost-lamports", type=int, default=10_000_000_000)
     run.add_argument("--upgrade-existing", action="store_true", help="Permit a guarded native-only upgrade of a known managed v2 activation.")
+    run.add_argument("--replace-context", help="Exact reviewed SessionV2 context to abandon during a guarded fresh devnet cutover.")
+    run.add_argument("--abandon-previous-state", action="store_true", help="Explicitly leave old on-chain state unused while retaining its local files.")
     run.add_argument("--event-source", choices=("l1", "er"), help="Select the managed SSE source. New plans default to L1; established plans retain their recorded source.")
     run.add_argument("--recover-failed-l1-slot", type=int, help="Recover a stopped validator past the bound feature activation using fresh L1 directories; preserve all prior data.")
     run.add_argument("--reconcile-failed-l1", action="store_true", help="Authorize one additional start of a reviewed stopped L1 recovery, using its retained artifacts and data.")
     run.add_argument("--reconcile-stopped-at", help="Exact reviewed systemd ExecMainExitTimestamp; required for explicit reconciliation.")
     args = parser.parse_args()
-    if args.operation == "inventory":
+    if args.operation == "mode":
+        print(" ".join(release_mode_arguments(args.recovery_slot, args.replace_context)))
+    elif args.operation == "inventory":
         print(json.dumps(inventory_service()))
     elif args.operation == "empty-l1":
         from native_l1_recovery import inspect_empty_paths

@@ -96,13 +96,17 @@ class NativeUpgrade:
         return result
 
     def programs(self):
+        for role in ("portal", "token_bridge"):
+            require(self.base_manifest["sha256"][role] == self.manifest["sha256"][role],
+                    "native upgrade cannot change on-chain program artifacts")
+        self.retained_programs()
+
+    def retained_programs(self):
         self.program_floor = 0
         uploads = private_json(self.base_control / "programs.json")
         require(uploads.get("version") == 2 and set(uploads.get("roles", {})) == {"portal", "token_bridge"},
                 "retained program upload records are incomplete")
         for role in ("portal", "token_bridge"):
-            require(self.base_manifest["sha256"][role] == self.manifest["sha256"][role],
-                    "native upgrade cannot change on-chain program artifacts")
             entry = uploads["roles"][role]
             observed = self.ops.program_view(role, stage=self.base_stage, plan=self.base_plan)
             require(entry.get("elf_sha256") == self.base_manifest["sha256"][role]
@@ -111,6 +115,10 @@ class NativeUpgrade:
             self.program_floor = max(self.program_floor, observed["deployment_slot"])
 
     def load_base(self, before):
+        self.load_retained_base(before)
+        self.programs()
+
+    def load_retained_base(self, before):
         environment = before["state_environment"]
         require(set(environment) == set(STATE_KEYS) and all(isinstance(environment[key], str) for key in STATE_KEYS),
                 "managed runtime state bindings are missing")
@@ -132,11 +140,12 @@ class NativeUpgrade:
                 and reservation.get("plan_sha256") == digest(plan)
                 and all(reservation.get(name) == getattr(self.args, name) for name in ("l1_rpc", "er_rpc", "devnet_rpc"))
                 and plan.get("version") == 2 and plan.get("source_revision") == self.base.name
-                and plan.get("sdk_revision") == SDK_REVISION and plan.get("genesis") == DEVNET
+                and isinstance(plan.get("sdk_revision"), str) and re.fullmatch("[0-9a-f]{40}", plan["sdk_revision"])
+                and reservation.get("sdk_revision") == plan["sdk_revision"] and plan.get("genesis") == DEVNET
                 and plan.get("artifacts") == self.base_manifest["sha256"]
                 and plan.get("original_sha256") == digest(reservation["original"]), "retained native plan binding differs")
         expected_profile = digest({"version": 2, "source": self.base.name, "artifacts": plan["artifacts"],
-                                   "sdk": SDK_REVISION, "proof_acceptance_qualified": False})
+                                   "sdk": plan["sdk_revision"], "proof_acceptance_qualified": False})
         require(plan.get("profile") == expected_profile and self.base_activation.get("version") == 2
                 and self.base_activation.get("artifacts") == plan["artifacts"]
                 and self.base_activation.get("state_environment") == environment
@@ -144,7 +153,6 @@ class NativeUpgrade:
                 and self.base_activation["arguments"][0] == str(self.base / "runtime" / ARTIFACTS["validator"])
                 and before["uid"] == reservation["original"]["uid"] and before["gid"] == reservation["original"]["gid"],
                 "retained activation specification differs")
-        self.programs()
 
     def binding(self, before):
         binary = Path(before["arguments"][0])

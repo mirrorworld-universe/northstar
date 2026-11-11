@@ -5,6 +5,29 @@ const workflow = Bun.YAML.parse(await Bun.file(new URL('../workflows/ci.yml', im
 const deployment = workflow.jobs.deploy;
 const steps = deployment.steps;
 
+test('native validation uses a pinned supported Ubuntu image', () => {
+  for (const name of ['fmt', 'clippy', 'test', 'network-prover']) {
+    expect(workflow.jobs[name]['runs-on']).toBe('ubuntu-24.04');
+  }
+});
+
+test('fresh release mode is frozen before builds and remains separate from recovery', () => {
+  const mode = steps.find(step => step.id === 'continuity_mode');
+  expect(mode).toBeDefined();
+  expect(steps.indexOf(mode)).toBeLessThan(steps.findIndex(step => step.id === 'continuity_stage'));
+  expect(mode.env.FRESH_CONTEXT).toBe('${{ vars.NORTHSTAR_FRESH_CONTEXT }}');
+  expect(mode.env.L1_RECOVERY_SLOT).toBe('${{ vars.NORTHSTAR_L1_RECOVERY_SLOT }}');
+  expect(mode.run).toContain('continuity_devnet.py mode');
+  expect(mode.run).toContain('--replace-context "$FRESH_CONTEXT"');
+  const activation = steps.find(step => step.id === 'continuity_activate');
+  expect(activation.env.NATIVE_MODE_ARGS).toBe('${{ steps.continuity_mode.outputs.arguments }}');
+  expect(activation.run).toContain('"${activation_args[@]}"');
+  expect(activation.env).not.toHaveProperty('L1_RECOVERY_SLOT');
+  expect(steps.find(step => step.name === 'Notify Slack').run).toContain('fresh-stack)');
+  const guards = workflow.jobs.test.steps.find(step => step.name === 'Test continuity-v2 activation guards').run;
+  expect(guards).toContain('test-fresh-devnet.py');
+});
+
 test('release-only deployment stages both inputs before isolated activation', () => {
   expect(deployment.if).toContain("github.ref == 'refs/heads/release'");
   expect(deployment.if).toContain("github.event_name == 'push'");
@@ -18,11 +41,14 @@ test('release-only deployment stages both inputs before isolated activation', ()
   expect(steps[activation].env).toEqual({
     NATIVE_STAGE: '${{ steps.continuity_stage.outputs.directory }}',
     CONTINUITY_SDK: '${{ steps.continuity_sdk.outputs.directory }}',
-    L1_RECOVERY_SLOT: '${{ vars.NORTHSTAR_L1_RECOVERY_SLOT }}',
+    NATIVE_MODE_ARGS: '${{ steps.continuity_mode.outputs.arguments }}',
   });
   expect(steps[activation].run).toContain('continuity_devnet.py run');
   expect(steps[activation].run).toContain('--revision "$GITHUB_SHA"');
-  expect(steps[activation].run).toContain('--upgrade-existing');
+  expect(steps[activation].run).toContain('read -r -a activation_args');
+  const defaultMode = Bun.spawnSync(['python3', '-B', '.github/scripts/continuity_devnet.py', 'mode']);
+  expect(defaultMode.exitCode).toBe(0);
+  expect(defaultMode.stdout.toString().trim()).toBe('--upgrade-existing');
   expect(steps[activation]['timeout-minutes']).toBe(120);
   expect(steps.find(step => step.uses === 'actions/setup-node@v4').with['node-version']).toBe('24.21.0');
   const testSteps = workflow.jobs.test.steps;
@@ -34,11 +60,14 @@ test('release-only deployment stages both inputs before isolated activation', ()
 
 test('failed L1 recovery is explicitly selected, scoped and regression tested', () => {
   const activation = steps.find(step => step.id === 'continuity_activate');
-  expect(activation.run).toContain('recovery_args=()');
-  expect(activation.run).toContain('if [[ -n "$L1_RECOVERY_SLOT" ]]');
-  expect(activation.run).toContain('[[ "$L1_RECOVERY_SLOT" =~ ^[1-9][0-9]{0,19}$ ]]');
-  expect(activation.run).toContain('--recover-failed-l1-slot "$L1_RECOVERY_SLOT"');
-  expect(activation.run).toContain('"${recovery_args[@]}"');
+  const mode = steps.find(step => step.id === 'continuity_mode');
+  expect(mode.run).toContain('--recovery-slot "$L1_RECOVERY_SLOT"');
+  expect(activation.run).toContain('"${activation_args[@]}"');
+  const selected = Bun.spawnSync(['python3', '-B', '.github/scripts/continuity_devnet.py', 'mode', '--recovery-slot', '519264000']);
+  expect(selected.exitCode).toBe(0);
+  expect(selected.stdout.toString().trim()).toBe('--upgrade-existing --recover-failed-l1-slot 519264000');
+  const mixed = Bun.spawnSync(['python3', '-B', '.github/scripts/continuity_devnet.py', 'mode', '--recovery-slot', '519264000', '--replace-context', 'ab'.repeat(32)]);
+  expect(mixed.exitCode).not.toBe(0);
   const guards = workflow.jobs.test.steps.find(step => step.name === 'Test continuity-v2 activation guards').run;
   expect(guards).toContain('test-native-l1-recovery.py');
   const compatibility = workflow.jobs.test.steps.find(step => step.name === 'Test active devnet feature and implicit account locks').run;
