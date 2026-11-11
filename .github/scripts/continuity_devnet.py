@@ -306,7 +306,7 @@ class Deployment:
         return {"programdata": address, "deployment_slot": int.from_bytes(stored["raw"][4:12], "little"),
                 "sha256": hashlib.sha256(stored["raw"]).hexdigest()}
 
-    def deploy_programs(self, *, resume_roles=frozenset(), submission_rpc=None, stop_worker=True):
+    def deploy_programs(self, *, resume_roles=frozenset(), submission_rpc=None, stop_worker=True, before_submit=None):
         require(set(resume_roles) <= {"portal", "token_bridge"}
                 and (not resume_roles or submission_rpc == self.args.l1_rpc and not stop_worker)
                 and (submission_rpc is None or submission_rpc == self.args.l1_rpc and not stop_worker)
@@ -356,6 +356,8 @@ class Deployment:
             if submission_rpc is not None:
                 require(self.l1.call("getHealth") == "ok" and self.l1.call("getGenesisHash") == DEVNET
                         and self.l1.call("getIdentity")["identity"] == self.plan["validator"], "program submission L1 identity differs")
+            if before_submit is not None:
+                before_submit(role)
             self.execute([self.stage / ARTIFACTS["cli"], "--url", submission_rpc or self.args.devnet_rpc,
                           "--keypair", self.args.funder_keypair, "program", "deploy", self.stage / ARTIFACTS[role],
                           "--program-id", self.control / "keys" / (role + ".json"), "--buffer", self.control / "keys" / (role + "-buffer.json"),

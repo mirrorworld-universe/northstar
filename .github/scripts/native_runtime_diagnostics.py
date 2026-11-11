@@ -652,23 +652,33 @@ def upload_operation_errors(path, owner):
         return {"status": "unavailable", "raw_messages_included": False}
 
 
-def upload_reconciliation_status(control, plan, reservation, specification):
+def upload_attempt_status(control, plan, reservation, specification, prefix, previous_sha256=None):
     unavailable = {"status": "unavailable"}
-    marker = control / "program-upload-reconcile.json"
+    marker = control / (prefix + ".json")
     if not os.path.lexists(marker):
-        return unavailable if os.path.lexists(control / "program-upload-reconcile-report.json") else {
+        return unavailable if os.path.lexists(control / (prefix + "-report.json")) else {
             "status": "not-recorded", "attempt_barrier_present": False}
     try:
         record = private_json(marker)
         if not isinstance(record, dict):
             return unavailable
-        phase = record.get("phase")
+        version, phase = record.get("version"), record.get("phase")
         keys = {"version", "kind", "plan_sha256", "controller_revision", "source_revision", "submission_rpc",
                 "previous_service_sha256", "pending_roles", "attempt_budget", "phase"}
         if phase == "failed":
             keys.add("operator_reconciliation_required")
+        if version == 2:
+            keys.update(("read_rpc", "submission_roles"))
+            submitted = record.get("submission_roles")
+            if (record.get("read_rpc") != reservation.get("l1_rpc") or not isinstance(submitted, list)
+                    or len(submitted) != len(set(submitted)) or not set(submitted) <= {"portal", "token_bridge"}):
+                return unavailable
+        if previous_sha256 is not None:
+            keys.add("previous_failed_record_sha256")
+            if version != 2 or record.get("previous_failed_record_sha256") != previous_sha256:
+                return unavailable
         roles = record.get("pending_roles")
-        if (set(record) != keys or type(record.get("version")) is not int or record["version"] != 1
+        if (set(record) != keys or type(version) is not int or version not in (1, 2)
                 or record.get("kind") != "retained-program-upload"
                 or record.get("plan_sha256") != digest(plan) or record.get("source_revision") != plan["source_revision"]
                 or not isinstance(record.get("controller_revision"), str)
@@ -681,10 +691,27 @@ def upload_reconciliation_status(control, plan, reservation, specification):
                 or not isinstance(roles, list) or not roles or len(roles) != len(set(roles))
                 or not set(roles) <= {"portal", "token_bridge"}):
             return unavailable
-        return {"status": "recorded", "attempt_barrier_present": True, "phase": phase,
-                "controller_revision": record["controller_revision"], "operator_reconciliation_required": phase != "completed"}
+        summary = {"status": "recorded", "attempt_barrier_present": True, "phase": phase,
+                   "controller_revision": record["controller_revision"], "record_sha256": digest(record),
+                   "operator_reconciliation_required": phase != "completed"}
+        if version == 2:
+            summary["submission_roles"] = record["submission_roles"]
+        return summary
     except (OSError, ValueError, TypeError, KeyError):
         return unavailable
+
+
+def upload_reconciliation_status(control, plan, reservation, specification):
+    summary = upload_attempt_status(control, plan, reservation, specification, "program-upload-reconcile")
+    extra = any(os.path.lexists(control / name) for name in
+                ("program-upload-reconcile-retry.json", "program-upload-reconcile-retry-report.json"))
+    if summary["status"] == "not-recorded" and extra:
+        return {"status": "unavailable"}
+    if summary["status"] == "recorded":
+        summary["additional_pass"] = upload_attempt_status(control, plan, reservation, specification,
+            "program-upload-reconcile-retry", summary["record_sha256"]) if summary["phase"] == "failed" else (
+                {"status": "unavailable"} if extra else {"status": "not-recorded", "attempt_barrier_present": False})
+    return summary
 
 
 def pending_fresh_upload(root, revision, specification):

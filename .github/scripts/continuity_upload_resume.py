@@ -15,12 +15,13 @@ from continuity_devnet import Deployment, DROPIN, LOADER, SERVICE, public_bytes
 from continuity_rollout_state import (ARTIFACTS, DEVNET, atomic_json, checked_directory,
                                      immutable_json, private_json, require)
 from fresh_devnet import FreshStack, digest
-from native_runtime_diagnostics import upload_operation_errors
+from native_runtime_diagnostics import upload_operation_errors, upload_reconciliation_status
 from native_upgrade import service_spec
 
 STATE_ROOT = Path("/solana/northstar/continuity-v2")
 LOCK = Path("/solana/northstar/continuity-v2-deploy.lock")
 ROLES = {"portal", "token_bridge"}
+REVIEWED_FAILED_CONTROLLER = "e83cadadd9ad4003a2d5303f395e92244ebb0362"
 CURRENT_PHASE = "invocation"
 PHASES = {"invocation", "trusted-source", "deployment-lock", "retained-directories", "retained-reservation",
           "recorded-rpc-bindings", "construct-controller", "retained-records", "retry-evidence", "source-prepare",
@@ -48,6 +49,8 @@ def failure_summary(error, phase):
               "raw_error_included": False}
     if isinstance(error, OSError) and type(error.errno) is int and 0 < error.errno < 65536:
         report["errno"] = error.errno
+    if name == "HTTPError" and type(getattr(error, "code", None)) is int and 100 <= error.code <= 599:
+        report["http_status"] = error.code
     return report
 
 
@@ -117,12 +120,32 @@ def validate_buffers(ops):
     return pending
 
 
-def resume_uploads(ops, controller_revision):
+def attempt_context(ops, plan, reservation, failed_record_sha256):
+    primary = ops.control / "program-upload-reconcile.json"
+    primary_report = ops.control / "program-upload-reconcile-report.json"
+    retry = ops.control / "program-upload-reconcile-retry.json"
+    retry_report = ops.control / "program-upload-reconcile-retry-report.json"
+    require(not os.path.lexists(retry) and not os.path.lexists(retry_report),
+            "additional reconciliation pass already recorded; operator reconciliation required")
+    if failed_record_sha256 is None:
+        require(not os.path.lexists(primary) and not os.path.lexists(primary_report),
+                "upload retry pass already recorded; operator reconciliation required")
+        return primary, primary_report, {}
+    require(re.fullmatch("[0-9a-f]{64}", failed_record_sha256), "invalid failed upload acknowledgement")
+    previous = private_json(primary)
+    summary = upload_reconciliation_status(ops.control, plan, reservation, reservation["replacement"]["service"])
+    require(summary.get("status") == "recorded" and summary.get("phase") == "failed"
+            and summary.get("controller_revision") == REVIEWED_FAILED_CONTROLLER
+            and digest(previous) == failed_record_sha256, "reviewed failed upload record differs")
+    require(private_json(primary_report) == {"version": 1, "result": "failed", "source_revision": ops.args.revision,
+            "controller_revision": REVIEWED_FAILED_CONTROLLER, "native_cutover_performed": False,
+            "operator_reconciliation_required": True}, "reviewed failed upload report differs")
+    return retry, retry_report, {"previous_failed_record_sha256": failed_record_sha256}
+
+
+def resume_uploads(ops, controller_revision, *, failed_record_sha256=None):
     mark_phase("retained-records")
     require(re.fullmatch("[0-9a-f]{40}", controller_revision), "invalid upload controller revision")
-    require(not any(os.path.lexists(ops.control / name) for name in
-                    ("program-upload-reconcile.json", "program-upload-reconcile-report.json")),
-            "upload retry pass already recorded; operator reconciliation required")
     original_plan = private_json(ops.control / "plan.json")
     original_reservation = private_json(ops.control / "reservation.json")
     private_json(ops.control / "programs.json")
@@ -134,6 +157,7 @@ def resume_uploads(ops, controller_revision):
             and not any(os.path.lexists(ops.control / name) for name in
                         ("fresh-starts", "activation.json", "activation-installed.json"))
             and not os.path.lexists(ops.runtime), "retained upload requires an existing prepared plan")
+    marker, report_path, acknowledgement = attempt_context(ops, original_plan, original_reservation, failed_record_sha256)
     mark_phase("retry-evidence")
     errors = upload_operation_errors(ops.control / "operations.log", ops.control.stat().st_uid)
     markers = errors.get("markers", {})
@@ -141,6 +165,9 @@ def resume_uploads(ops, controller_revision):
             and markers.get("retry_budget_exhausted", 0) > 0
             and not any(markers.get(name) for name in ("insufficient_funds", "elf_verification", "program_size", "transaction_rejected")),
             "retained upload retry exhaustion is not established")
+    require(ops.l1.call("getHealth") == "ok" and ops.l1.call("getGenesisHash") == DEVNET
+            and ops.l1.call("getIdentity")["identity"] == original_plan["validator"], "recorded L1 RPC identity differs")
+    ops.upstream = ops.l1
     mark_phase("source-prepare")
     ops.fresh.authorize()
     ops.prepare()
@@ -153,16 +180,21 @@ def resume_uploads(ops, controller_revision):
     mark_phase("buffer-binding")
     pending = validate_buffers(ops)
     mark_phase("attempt-record")
-    marker = ops.control / "program-upload-reconcile.json"
-    record = {"version": 1, "kind": "retained-program-upload", "plan_sha256": digest(ops.plan),
+    record = {"version": 2, "kind": "retained-program-upload", "plan_sha256": digest(ops.plan),
               "controller_revision": controller_revision, "source_revision": ops.args.revision,
-              "submission_rpc": ops.args.l1_rpc, "previous_service_sha256": digest(ops.fresh.previous["service"]),
-              "pending_roles": sorted(pending), "attempt_budget": 1, "phase": "attempted"}
+              "read_rpc": ops.args.l1_rpc, "submission_rpc": ops.args.l1_rpc,
+              "previous_service_sha256": digest(ops.fresh.previous["service"]), "submission_roles": [],
+              "pending_roles": sorted(pending), "attempt_budget": 1, "phase": "attempted", **acknowledgement}
     immutable_json(marker, record)
     ops.flush([marker, ops.control])
+    def before_submit(role):
+        require(role in ROLES and role not in record["submission_roles"], "program submission barrier differs")
+        record["submission_roles"].append(role)
+        atomic_json(marker, record)
+        ops.flush([marker, ops.control])
     try:
         mark_phase("submission")
-        ops.deploy_programs(resume_roles=pending, submission_rpc=ops.args.l1_rpc, stop_worker=False)
+        ops.deploy_programs(resume_roles=pending, submission_rpc=ops.args.l1_rpc, stop_worker=False, before_submit=before_submit)
         mark_phase("finalized-programs")
         state = private_json(ops.control / "programs.json")
         require(set(state["roles"]) == ROLES and all(state["roles"][role]["complete"] is not None
@@ -178,18 +210,19 @@ def resume_uploads(ops, controller_revision):
                   "controller_revision": controller_revision, "plan_sha256": digest(ops.plan),
                   "programs": {role: ops.plan["programs"][role] for role in sorted(ROLES)},
                   "native_cutover_performed": False, "previous_service_unchanged": True,
-                  "original_keys_retained": True, "controller_upload_passes": 1}
-        atomic_json(ops.control / "program-upload-reconcile-report.json", report)
-        ops.flush([marker, ops.control / "programs.json", ops.control / "program-upload-reconcile-report.json", ops.control])
+                  "original_keys_retained": True, "controller_upload_passes": 1, "cli_submissions": len(record["submission_roles"]),
+                  **acknowledgement}
+        atomic_json(report_path, report)
+        ops.flush([marker, ops.control / "programs.json", report_path, ops.control])
         return report
     except BaseException:
         record.update(phase="failed", operator_reconciliation_required=True)
         atomic_json(marker, record)
-        atomic_json(ops.control / "program-upload-reconcile-report.json", {
+        atomic_json(report_path, {
             "version": 1, "result": "failed", "source_revision": ops.args.revision,
             "controller_revision": controller_revision, "native_cutover_performed": False,
-            "operator_reconciliation_required": True})
-        ops.flush([marker, ops.control / "program-upload-reconcile-report.json", ops.control])
+            "operator_reconciliation_required": True, **acknowledgement})
+        ops.flush([marker, report_path, ops.control])
         raise
 
 
@@ -199,6 +232,7 @@ def main():
     parser.add_argument("--revision", required=True)
     parser.add_argument("--replace-context", required=True)
     parser.add_argument("--sdk-checkout", required=True, type=Path)
+    parser.add_argument("--failed-record-sha256")
     args = parser.parse_args()
     require(re.fullmatch("[0-9a-f]{40}", args.revision) and re.fullmatch("[0-9a-f]{64}", args.replace_context)
             and os.environ.get("GITHUB_REF") == "refs/heads/master"
@@ -241,13 +275,14 @@ def main():
             raise InterruptedError("upload reconciliation interrupted")
         previous_handler = signal.signal(signal.SIGTERM, interrupted)
         try:
-            report = resume_uploads(ops, os.environ["GITHUB_SHA"])
+            report = resume_uploads(ops, os.environ["GITHUB_SHA"], failed_record_sha256=args.failed_record_sha256)
         finally:
             signal.signal(signal.SIGTERM, previous_handler)
         print(json.dumps(report), flush=True)
         if os.environ.get("GITHUB_OUTPUT"):
             with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-                output.write("report_path=" + str(ops.control / "program-upload-reconcile-report.json") + "\n")
+                name = "program-upload-reconcile-retry-report.json" if args.failed_record_sha256 else "program-upload-reconcile-report.json"
+                output.write("report_path=" + str(ops.control / name) + "\n")
     finally:
         os.close(descriptor)
 

@@ -378,6 +378,34 @@ class DiagnosticTests(unittest.TestCase):
         atomic_json(control / "program-upload-reconcile.json", marker)
         self.assertEqual(self.collect_pending(revision)["pending_fresh_upload"]["upload_reconciliation"]["status"], "unavailable")
 
+    def test_pending_upload_binds_additional_pass_to_the_unchanged_failed_record(self):
+        revision, control = self.install_pending_upload()
+        plan = private_json(control / "plan.json")
+        saved = private_json(control / "reservation.json")
+        primary = {"version": 1, "kind": "retained-program-upload", "plan_sha256": diagnostics.digest(plan),
+                   "controller_revision": "d" * 40, "source_revision": revision, "submission_rpc": saved["l1_rpc"],
+                   "previous_service_sha256": diagnostics.digest(saved["replacement"]["service"]),
+                   "pending_roles": ["portal"], "attempt_budget": 1, "phase": "failed", "operator_reconciliation_required": True}
+        atomic_json(control / "program-upload-reconcile.json", primary)
+        retry = {key: value for key, value in primary.items() if key != "operator_reconciliation_required"}
+        retry.update(version=2, phase="attempted", read_rpc=saved["l1_rpc"], submission_roles=["portal"],
+                     previous_failed_record_sha256=diagnostics.digest(primary))
+        atomic_json(control / "program-upload-reconcile-retry.json", retry)
+        summary = self.collect_pending(revision)["pending_fresh_upload"]["upload_reconciliation"]
+        self.assertEqual(summary["record_sha256"], diagnostics.digest(primary))
+        self.assertEqual(summary["additional_pass"]["phase"], "attempted")
+        self.assertEqual(summary["additional_pass"]["submission_roles"], ["portal"])
+        retry["previous_failed_record_sha256"] = "f" * 64
+        atomic_json(control / "program-upload-reconcile-retry.json", retry)
+        self.assertEqual(self.collect_pending(revision)["pending_fresh_upload"]["upload_reconciliation"]["additional_pass"]["status"], "unavailable")
+
+    def test_pending_upload_does_not_infer_unused_budget_from_an_orphan_additional_pass(self):
+        revision, control = self.install_pending_upload()
+        atomic_json(control / "program-upload-reconcile-retry.json", {"private": SECRET})
+        summary = self.collect_pending(revision)["pending_fresh_upload"]["upload_reconciliation"]
+        self.assertEqual(summary["status"], "unavailable")
+        self.assertNotIn(SECRET, json.dumps(summary))
+
     def test_pending_upload_never_claims_absent_budget_when_a_report_remains(self):
         revision, control = self.install_pending_upload()
         atomic_json(control / "program-upload-reconcile-report.json", {"result": "failed", "private": SECRET})
