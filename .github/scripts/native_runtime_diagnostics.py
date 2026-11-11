@@ -17,7 +17,7 @@ from continuity_devnet import DROPIN, SERVICE, public_bytes
 from native_l1_recovery import STATE_PATHS
 from continuity_rollout_state import (
     ARTIFACTS, DEVNET, SDK_REVISION, canonical, file_hash, flag_value, geyser_event_source,
-    geyser_events_config, private_json, service_dropin, upgrade_arguments,
+    geyser_events_config, l1_rpc_arguments, private_json, service_dropin, upgrade_arguments,
 )
 
 STATE_ROOT = Path("/solana/northstar/continuity-v2")
@@ -295,6 +295,39 @@ def gzip_log_summary(path, *, max_compressed_bytes=4 * 1024 ** 3, max_decoded_by
             os.close(descriptor)
 
 
+def rpc_index_configuration(arguments):
+    allowed = {"program-id", "spl-token-owner", "spl-token-mint"}
+    configured, filters = set(), set()
+    if not isinstance(arguments, list) or len(arguments) > 4096 or not all(isinstance(value, str) for value in arguments):
+        return {"status": "ambiguous"}
+    try:
+        for index, argument in enumerate(arguments):
+            flag, separator, inline = argument.partition("=")
+            if flag not in ("--account-index", "--account-index-include-key", "--account-index-exclude-key"):
+                continue
+            selected = [inline] if separator else []
+            for value in arguments[index + 1:]:
+                if value.startswith("-"):
+                    break
+                selected.append(value)
+            selected = [part for value in selected for part in value.split(",")]
+            if not selected or any(not value for value in selected):
+                return {"status": "ambiguous"}
+            if flag == "--account-index":
+                if not set(selected) <= allowed:
+                    return {"status": "ambiguous"}
+                configured.update(selected)
+            else:
+                for value in selected:
+                    public_bytes(value)
+                filters.add("include-only" if flag == "--account-index-include-key" else "exclude-list")
+        if len(filters) > 1:
+            return {"status": "ambiguous"}
+        return {"status": "observed", "configured": sorted(configured), "key_filter": next(iter(filters), "unrestricted")}
+    except (TypeError, ValueError):
+        return {"status": "ambiguous"}
+
+
 def operational_details(values, root, records, bound_arguments=None):
     report = {"filesystems": {"state_root": disk_summary(root)}, "file_logs": []}
     if bound_arguments is not None:
@@ -306,6 +339,7 @@ def operational_details(values, root, records, bound_arguments=None):
     try:
         arguments = bound_arguments if bound_arguments is not None else private_json(
             root / records["original_revisions"][0] / "control/activation.json")["arguments"]
+        report["rpc_account_indexes"] = rpc_index_configuration(arguments)
         working = Path(values.get("WorkingDirectory", ""))
         try:
             ledger = Path(flag_value(arguments, "--ledger"))
@@ -424,6 +458,7 @@ def upgrade_runtime_arguments(start, root, dropin, revision, plan, base_plan, re
                 or set(artifacts) != set(ARTIFACTS)
                 or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value) for value in artifacts.values())
                 or arguments[0] != str(runtime / ARTIFACTS["validator"])
+                or l1_rpc_arguments(arguments, plan.get("l1_rpc_profile")) != arguments
                 or desired["state_environment"] != environment or plan["before"]["state_environment"] != environment
                 or any(desired[key] != reservation["original"][key] for key in ("uid", "gid"))
                 or flag_value(arguments, "--portal") != base_plan["programs"]["portal"]

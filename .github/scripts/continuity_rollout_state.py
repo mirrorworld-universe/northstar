@@ -24,9 +24,38 @@ def require(condition, message):
         raise ValueError(message)
 
 
-def release_mode_arguments(recovery_slot="", replace_context=""):
-    require(isinstance(recovery_slot, str) and isinstance(replace_context, str), "native mode selectors must be strings")
+L1_RPC_INDEXES = ("program-id", "spl-token-owner", "spl-token-mint")
+
+
+def l1_rpc_arguments(arguments, profile=None):
+    require(profile in (None, "full"), "unknown L1 RPC profile")
+    if profile is None:
+        return list(arguments)
+    result, index = [], 0
+    while index < len(arguments):
+        argument = arguments[index]
+        flag, separator, value = argument.partition("=")
+        require(flag not in ("--account-index-include-key", "--account-index-exclude-key"),
+                "full L1 RPC requires unrestricted index keys")
+        if flag != "--account-index":
+            result.append(argument)
+            index += 1
+            continue
+        selected = [value] if separator else []
+        index += 1
+        while index < len(arguments) and not arguments[index].startswith("-"):
+            selected.append(arguments[index])
+            index += 1
+        selected = [part for value in selected for part in value.split(",")]
+        require(selected and all(value in L1_RPC_INDEXES for value in selected), "unknown or empty native account index")
+    return result + ["--account-index", *L1_RPC_INDEXES]
+
+
+def release_mode_arguments(recovery_slot="", replace_context="", l1_rpc_profile=""):
+    require(all(isinstance(value, str) for value in (recovery_slot, replace_context, l1_rpc_profile)), "native mode selectors must be strings")
     require(not (recovery_slot and replace_context), "fresh activation and L1 recovery selectors are mutually exclusive")
+    require(l1_rpc_profile in ("", "full"), "unknown L1 RPC profile selector")
+    require(not l1_rpc_profile or not (recovery_slot or replace_context), "L1 RPC profile requires an ordinary native upgrade")
     if replace_context:
         require(re.fullmatch("[0-9a-f]{64}", replace_context), "invalid fresh context selector")
         return ["--replace-context", replace_context, "--abandon-previous-state"]
@@ -35,6 +64,8 @@ def release_mode_arguments(recovery_slot="", replace_context=""):
         require(re.fullmatch("[1-9][0-9]{0,19}", recovery_slot) and int(recovery_slot) < 1 << 64,
                 "invalid L1 recovery slot selector")
         result.extend(["--recover-failed-l1-slot", recovery_slot])
+    if l1_rpc_profile:
+        result.extend(["--l1-rpc-profile", l1_rpc_profile])
     return result
 
 

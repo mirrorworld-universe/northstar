@@ -92,6 +92,69 @@ class UpgradeTests(unittest.TestCase):
         self.keys = self.world.key_generations
         self.starts = self.world.starts
 
+    def test_full_l1_rpc_profile_is_manifest_bound_without_program_or_session_changes(self):
+        self.world.args.l1_rpc_profile = "full"
+        UpgradeHost(self.world).run()
+        arguments = self.world.current["arguments"]
+        for index in ("program-id", "spl-token-owner", "spl-token-mint"):
+            self.assertIn(index, arguments)
+        plan = private_json(self.upgrade / "control/plan.json")
+        self.assertEqual(plan["l1_rpc_profile"], "full")
+        self.assertEqual(private_json(self.upgrade / "control/report.json")["l1_rpc_profile"], "full")
+        self.assertEqual(self.world.current["state_environment"], self.state_environment)
+        self.assertEqual(self.world.uploads, self.uploads)
+        self.assertEqual(self.world.key_generations, self.keys)
+        self.assertEqual(self.old_binary.read_bytes(), self.old_binary_bytes)
+        self.assertEqual(rollout.flag_value(arguments, "--portal"), self.portal)
+        self.world.args.l1_rpc_profile = None
+        UpgradeHost(self.world).run()
+        self.assertEqual(private_json(self.upgrade / "control/plan.json"), plan)
+        self.assertEqual(self.world.uploads, self.uploads)
+
+    def test_l1_rpc_profile_rejects_unqualified_retained_context_before_stop(self):
+        report_path = self.base / "control/report.json"
+        report = private_json(report_path)
+        report["result"] = "failed"
+        atomic_json(report_path, report)
+        self.world.args.l1_rpc_profile = "full"
+        with self.assertRaises(ValueError):
+            UpgradeHost(self.world).run()
+        self.assertEqual(self.world.starts, self.starts)
+        self.assertEqual(self.world.uploads, self.uploads)
+        self.assertTrue(self.world.active)
+
+    def test_l1_rpc_profile_requires_qualified_fresh_progress_when_replacement_is_recorded(self):
+        reservation_path = self.base / "control/reservation.json"
+        reservation = private_json(reservation_path)
+        reservation["replacement"] = {"reviewed": True}
+        atomic_json(reservation_path, reservation)
+        plan_hash = digest(private_json(self.base / "control/plan.json"))
+        report_path = self.base / "control/report.json"
+        report = private_json(report_path)
+        report.update(qualification_kind="fresh-stack", fresh_plan_sha256=plan_hash)
+        atomic_json(report_path, report)
+        self.world.args.l1_rpc_profile = "full"
+        with self.assertRaises((ValueError, OSError)):
+            UpgradeHost(self.world).run()
+        self.assertEqual(self.world.starts, self.starts)
+        progress = self.base / "control/fresh-progress.json"
+        atomic_json(progress, {"version": 1, "plan_sha256": plan_hash, "phase": "running"})
+        with self.assertRaises(ValueError):
+            UpgradeHost(self.world).run()
+        self.assertEqual(self.world.starts, self.starts)
+        atomic_json(progress, {"version": 1, "plan_sha256": plan_hash, "phase": "qualified"})
+        UpgradeHost(self.world).run()
+        self.assertEqual(self.world.uploads, self.uploads)
+        self.assertEqual(private_json(self.upgrade / "control/report.json")["l1_rpc_profile"], "full")
+
+    def test_full_l1_rpc_profile_refuses_er_source_before_start(self):
+        self.world.args.l1_rpc_profile = "full"
+        self.world.args.event_source = "er"
+        with self.assertRaises(ValueError):
+            UpgradeHost(self.world).run()
+        self.assertEqual(self.world.starts, self.starts)
+        self.assertEqual(self.world.uploads, self.uploads)
+
     def test_public_event_upgrade_uses_l1_callbacks_not_er_callbacks(self):
         activation = (self.base / "control/activation.json").read_bytes()
         UpgradeHost(self.world).run()
@@ -411,6 +474,14 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual(poll.call_count, 1)
         self.assertEqual(self.world.starts, self.starts + 1)
 
+    def test_next_upgrade_inherits_the_qualified_full_rpc_profile(self):
+        self.world.args.l1_rpc_profile = "full"
+        self.test_next_upgrade_uses_the_qualified_native_binding()
+        plan = private_json(self.world.args.state_root / "upgrades" / ("c" * 40) / "control/plan.json")
+        self.assertEqual(plan["l1_rpc_profile"], "full")
+        for index in ("program-id", "spl-token-owner", "spl-token-mint"):
+            self.assertIn(index, self.world.current["arguments"])
+
     def test_next_upgrade_uses_the_qualified_native_binding(self):
         UpgradeHost(self.world).run()
         previous = Path(self.world.current["arguments"][0])
@@ -421,6 +492,7 @@ class UpgradeTests(unittest.TestCase):
         atomic_json(stage / "manifest.json", manifest)
         self.world.args.stage = stage
         self.world.args.revision = "c" * 40
+        self.world.args.l1_rpc_profile = None
         UpgradeHost(self.world).run()
         self.assertNotEqual(Path(self.world.current["arguments"][0]), previous)
         self.assertTrue(previous.exists())

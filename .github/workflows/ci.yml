@@ -88,7 +88,7 @@ jobs:
         with:
           bun-version: 1.4.2
       - name: Test CI cache disk budget
-        run: bun test ./.github/scripts/ci-cache-budget.test.mjs ./.github/scripts/hosted-dependencies.test.mjs
+        run: bun test ./.github/scripts/ci-cache-budget.test.mjs ./.github/scripts/hosted-dependencies.test.mjs ./.github/scripts/rust-toolchain.test.mjs
       - name: Test CPU VRF evidence and RPC clients
         run: |
           python3 -B -m unittest discover -s northstar/scripts -p 'test_vrf_evidence.py'
@@ -307,10 +307,12 @@ jobs:
         env:
           L1_RECOVERY_SLOT: ${{ vars.NORTHSTAR_L1_RECOVERY_SLOT }}
           FRESH_CONTEXT: ${{ vars.NORTHSTAR_FRESH_CONTEXT }}
+          L1_RPC_PROFILE: ${{ vars.NORTHSTAR_L1_RPC_PROFILE }}
         run: |
           set -euo pipefail
           mode=$(python3 -B .github/scripts/continuity_devnet.py mode \
-            --recovery-slot "$L1_RECOVERY_SLOT" --replace-context "$FRESH_CONTEXT")
+            --recovery-slot "$L1_RECOVERY_SLOT" --replace-context "$FRESH_CONTEXT" \
+            --l1-rpc-profile "$L1_RPC_PROFILE")
           printf 'arguments=%s\n' "$mode" >> "$GITHUB_OUTPUT"
 
       - name: Check for program changes
