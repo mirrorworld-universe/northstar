@@ -51,9 +51,9 @@ jobs:
           prefix-key: native-no-debug-ubuntu24-v2
           save-if: ${{ env.SAVE_CI_CACHE }}
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler libprotobuf-dev libudev-dev libclang-dev
+        uses: ./.github/actions/install-linux-dependencies
+        with:
+          packages: protobuf-compiler libprotobuf-dev libudev-dev libclang-dev
       - run: cargo clippy --locked --all --tests -- -D warnings
       # Sonic: Check opt-in paths without enabling them in deployment builds.
       - run: cargo clippy --locked --all --tests --features northstar/proof-coordinator-test-hooks,agave-validator/proof-coordinator-test-hooks,northstar-portal/zk-verifier-profile -- -D warnings
@@ -80,15 +80,15 @@ jobs:
           prefix-key: native-no-debug-ubuntu24-v2
           save-if: ${{ env.SAVE_CI_CACHE }}
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler libprotobuf-dev libudev-dev libclang-dev
+        uses: ./.github/actions/install-linux-dependencies
+        with:
+          packages: protobuf-compiler libprotobuf-dev libudev-dev libclang-dev
       # Sonic: CPU-only VRF clients require no hosted ER or proving service.
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
       - name: Test CI cache disk budget
-        run: bun test ./.github/scripts/ci-cache-budget.test.mjs
+        run: bun test ./.github/scripts/ci-cache-budget.test.mjs ./.github/scripts/hosted-dependencies.test.mjs
       - name: Test CPU VRF evidence and RPC clients
         run: |
           python3 -B -m unittest discover -s northstar/scripts -p 'test_vrf_evidence.py'
@@ -270,9 +270,9 @@ jobs:
           workspaces: northstar/zkvm-replay -> target
           save-if: ${{ env.SAVE_CI_CACHE }}
       - name: Install SDK build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config clang protobuf-compiler libprotobuf-dev
+        uses: ./.github/actions/install-linux-dependencies
+        with:
+          packages: libssl-dev pkg-config clang protobuf-compiler libprotobuf-dev
       - name: Prepare the frozen guest
         working-directory: northstar/zkvm-replay
         run: |
