@@ -321,7 +321,8 @@ class DiagnosticTests(unittest.TestCase):
         plan["profile"] = diagnostics.digest({"version": 2, "source": revision, "artifacts": artifacts,
                                              "sdk": diagnostics.SDK_REVISION, "proof_acceptance_qualified": False})
         reservation = {"version": 2, "source_revision": revision, "sdk_revision": diagnostics.SDK_REVISION,
-                       "plan_sha256": diagnostics.digest(plan), "original": service, "replacement": replacement}
+                       "plan_sha256": diagnostics.digest(plan), "original": service, "replacement": replacement,
+                       "l1_rpc": "http://127.0.0.1:8899"}
         atomic_json(control / "plan.json", plan)
         atomic_json(control / "reservation.json", reservation)
         atomic_json(control / "fresh-progress.json", {"version": 1, "plan_sha256": diagnostics.digest(plan), "phase": "prepared"})
@@ -358,6 +359,31 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(pending["source_revision"], revision)
         self.assertEqual(pending["operation_errors"]["markers"], {"upload_write_failure": 1, "retry_budget_exhausted": 1})
         self.assertNotIn(SECRET, json.dumps(pending))
+
+    def test_pending_upload_reports_absent_or_bound_reconciliation_attempts(self):
+        revision, control = self.install_pending_upload()
+        pending = self.collect_pending(revision)["pending_fresh_upload"]
+        self.assertEqual(pending["upload_reconciliation"], {"status": "not-recorded", "attempt_barrier_present": False})
+        plan = private_json(control / "plan.json")
+        saved = private_json(control / "reservation.json")
+        marker = {"version": 1, "kind": "retained-program-upload", "plan_sha256": diagnostics.digest(plan),
+                  "controller_revision": "d" * 40, "source_revision": revision, "submission_rpc": saved["l1_rpc"],
+                  "previous_service_sha256": diagnostics.digest(saved["replacement"]["service"]),
+                  "pending_roles": ["portal"], "attempt_budget": 1, "phase": "attempted"}
+        atomic_json(control / "program-upload-reconcile.json", marker)
+        observed = self.collect_pending(revision)["pending_fresh_upload"]["upload_reconciliation"]
+        self.assertEqual(observed["phase"], "attempted")
+        self.assertTrue(observed["attempt_barrier_present"])
+        marker["plan_sha256"] = "e" * 64
+        atomic_json(control / "program-upload-reconcile.json", marker)
+        self.assertEqual(self.collect_pending(revision)["pending_fresh_upload"]["upload_reconciliation"]["status"], "unavailable")
+
+    def test_pending_upload_never_claims_absent_budget_when_a_report_remains(self):
+        revision, control = self.install_pending_upload()
+        atomic_json(control / "program-upload-reconcile-report.json", {"result": "failed", "private": SECRET})
+        observed = self.collect_pending(revision)["pending_fresh_upload"]["upload_reconciliation"]
+        self.assertEqual(observed["status"], "unavailable")
+        self.assertNotIn(SECRET, json.dumps(observed))
 
     def test_pending_upload_logs_are_suppressed_for_changed_plan_or_any_start(self):
         revision, control = self.install_pending_upload()

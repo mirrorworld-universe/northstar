@@ -21,6 +21,34 @@ from native_upgrade import service_spec
 STATE_ROOT = Path("/solana/northstar/continuity-v2")
 LOCK = Path("/solana/northstar/continuity-v2-deploy.lock")
 ROLES = {"portal", "token_bridge"}
+CURRENT_PHASE = "invocation"
+PHASES = {"invocation", "trusted-source", "deployment-lock", "retained-directories", "retained-reservation",
+          "recorded-rpc-bindings", "construct-controller", "retained-records", "retry-evidence", "source-prepare",
+          "previous-service", "buffer-binding", "attempt-record", "submission", "finalized-programs",
+          "previous-service-validation", "completion"}
+
+
+def mark_phase(value):
+    global CURRENT_PHASE
+    require(value in PHASES, "unknown reconciliation phase")
+    CURRENT_PHASE = value
+
+
+def failure_summary(error, phase):
+    allowed = {"FileNotFoundError", "PermissionError", "BlockingIOError", "ValueError", "TypeError", "KeyError",
+               "RuntimeError", "AttributeError", "TimeoutExpired", "InterruptedError", "TimeoutError", "HTTPError", "URLError"}
+    name = type(error).__name__
+    codes = {"SDK revision differs": "sdk-revision", "SDK dependency lock differs": "sdk-lock",
+             "deployment directory ownership or permissions differ": "directory-binding",
+             "deployment lock is not private regular state": "lock-binding",
+             "upload retry pass already recorded; operator reconciliation required": "attempt-budget",
+             "retained upload retry exhaustion is not established": "retry-evidence"}
+    report = {"status": "reconciliation-failed", "phase": phase if phase in PHASES else "unavailable",
+              "failure_type": name if name in allowed else "unclassified", "failure_code": codes.get(str(error), "unclassified"),
+              "raw_error_included": False}
+    if isinstance(error, OSError) and type(error.errno) is int and 0 < error.errno < 65536:
+        report["errno"] = error.errno
+    return report
 
 
 def prepared(ops):
@@ -90,6 +118,7 @@ def validate_buffers(ops):
 
 
 def resume_uploads(ops, controller_revision):
+    mark_phase("retained-records")
     require(re.fullmatch("[0-9a-f]{40}", controller_revision), "invalid upload controller revision")
     require(not any(os.path.lexists(ops.control / name) for name in
                     ("program-upload-reconcile.json", "program-upload-reconcile-report.json")),
@@ -105,20 +134,25 @@ def resume_uploads(ops, controller_revision):
             and not any(os.path.lexists(ops.control / name) for name in
                         ("fresh-starts", "activation.json", "activation-installed.json"))
             and not os.path.lexists(ops.runtime), "retained upload requires an existing prepared plan")
+    mark_phase("retry-evidence")
     errors = upload_operation_errors(ops.control / "operations.log", ops.control.stat().st_uid)
     markers = errors.get("markers", {})
     require(errors.get("status") == "classified" and markers.get("upload_write_failure", 0) > 0
             and markers.get("retry_budget_exhausted", 0) > 0
             and not any(markers.get(name) for name in ("insufficient_funds", "elf_verification", "program_size", "transaction_rejected")),
             "retained upload retry exhaustion is not established")
+    mark_phase("source-prepare")
     ops.fresh.authorize()
     ops.prepare()
     require(ops.plan == original_plan, "retained plan changed during preparation")
     prepared(ops)
+    mark_phase("previous-service")
     pid = unchanged_service(ops)
     require(ops.l1.call("getHealth") == "ok" and ops.l1.call("getGenesisHash") == DEVNET
             and ops.l1.call("getIdentity")["identity"] == ops.plan["validator"], "recorded L1 RPC identity differs")
+    mark_phase("buffer-binding")
     pending = validate_buffers(ops)
+    mark_phase("attempt-record")
     marker = ops.control / "program-upload-reconcile.json"
     record = {"version": 1, "kind": "retained-program-upload", "plan_sha256": digest(ops.plan),
               "controller_revision": controller_revision, "source_revision": ops.args.revision,
@@ -127,13 +161,17 @@ def resume_uploads(ops, controller_revision):
     immutable_json(marker, record)
     ops.flush([marker, ops.control])
     try:
+        mark_phase("submission")
         ops.deploy_programs(resume_roles=pending, submission_rpc=ops.args.l1_rpc, stop_worker=False)
+        mark_phase("finalized-programs")
         state = private_json(ops.control / "programs.json")
         require(set(state["roles"]) == ROLES and all(state["roles"][role]["complete"] is not None
                 and ops.program_view(role) == state["roles"][role]["complete"] for role in ROLES),
                 "program uploads are not finalized against the frozen artifacts")
+        mark_phase("previous-service-validation")
         require(unchanged_service(ops) == pid, "previous service process changed during upload reconciliation")
         prepared(ops)
+        mark_phase("completion")
         record["phase"] = "completed"
         atomic_json(marker, record)
         report = {"version": 1, "result": "uploads-completed", "source_revision": ops.args.revision,
@@ -156,6 +194,7 @@ def resume_uploads(ops, controller_revision):
 
 
 def main():
+    mark_phase("trusted-source")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--revision", required=True)
     parser.add_argument("--replace-context", required=True)
@@ -165,19 +204,23 @@ def main():
             and os.environ.get("GITHUB_REF") == "refs/heads/master"
             and os.environ.get("GITHUB_REPOSITORY") == "mirrorworld-universe/northstar"
             and re.fullmatch("[0-9a-f]{40}", os.environ.get("GITHUB_SHA", "")), "upload reconciliation requires the trusted master workflow")
+    mark_phase("deployment-lock")
     descriptor = os.open(LOCK, os.O_RDWR | os.O_NOFOLLOW)
     try:
         info = os.fstat(descriptor)
         require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077,
                 "deployment lock is not private regular state")
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        mark_phase("retained-directories")
         control = STATE_ROOT / args.revision / "control"
         for directory in (STATE_ROOT, control.parent, control):
             checked_directory(directory, private=directory == control)
+        mark_phase("retained-reservation")
         saved = private_json(control / "reservation.json")
         require(saved.get("version") == 2 and saved.get("source_revision") == args.revision
                 and saved.get("replacement", {}).get("snapshot", {}).get("identity", {}).get("context") == args.replace_context,
                 "retained upload reservation identity differs")
+        mark_phase("recorded-rpc-bindings")
         for endpoint in (saved["l1_rpc"], saved["er_rpc"]):
             url = urlsplit(endpoint)
             require(url.scheme in ("http", "https") and url.hostname in ("localhost", "127.0.0.1", "::1")
@@ -186,6 +229,7 @@ def main():
         upstream = urlsplit(saved["devnet_rpc"])
         require(upstream.scheme == "https" and upstream.hostname and not upstream.username and not upstream.password
                 and not upstream.query and not upstream.fragment, "retained upstream RPC requires unauthenticated HTTPS")
+        mark_phase("construct-controller")
         configured = SimpleNamespace(**vars(args), stage=Path(saved["stage"]), state_root=STATE_ROOT,
             funder_keypair=Path("/home/ubuntu/.config/solana/id.json"), devnet_rpc=saved["devnet_rpc"],
             l1_rpc=saved["l1_rpc"], er_rpc=saved["er_rpc"], max_estimated_cost_lamports=10_000_000_000,
@@ -211,5 +255,6 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
+    except Exception as error:
+        print(json.dumps(failure_summary(error, CURRENT_PHASE)), flush=True)
         raise SystemExit("upload reconciliation failed; retained state requires operator review") from None
