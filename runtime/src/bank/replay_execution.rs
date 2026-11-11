@@ -153,7 +153,7 @@ fn execute_txn_inner(
     let bank_accounts = Accounts::new(Arc::new(AccountsDb::default_for_tests()));
     let ancestors = Ancestors::from(vec![(parent_slot, BankId::default())]);
     bank_accounts.store_accounts((parent_slot, accounts), BankId::default(), None, &ancestors);
-    bank_accounts.accounts_db.add_root(parent_slot);
+    bank_accounts.accounts_db.add_root(BankId::default());
     let bank_rc = BankRc::new(bank_accounts);
 
     // Dummy epoch stakes with the provided total stake at the current and next epoch.

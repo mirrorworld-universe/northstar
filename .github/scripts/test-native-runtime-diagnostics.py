@@ -84,7 +84,7 @@ class DiagnosticTests(unittest.TestCase):
     def collect(self):
         return diagnostics.collect_report(self.run_command, self.state_root, self.dropin, self.lock)
 
-    def install_upgrade(self, stderr=False, event_source=None):
+    def install_upgrade(self, stderr=False, event_source=None, retained_l1_revision=None):
         revision = "b" * 40
         namespace = self.state_root / "upgrades" / revision
         control, runtime = namespace / "control", namespace / "runtime"
@@ -108,7 +108,8 @@ class DiagnosticTests(unittest.TestCase):
         arguments[0] = str(binary)
         if stderr:
             arguments[arguments.index("--log") + 1] = "-"
-        ledger = runtime / "l1/ledger"
+        ledger_runtime = self.state_root / "upgrades" / retained_l1_revision / "runtime" if retained_l1_revision else runtime
+        ledger = ledger_runtime / "l1/ledger"
         ledger.mkdir(parents=True)
         arguments[arguments.index("--ledger") + 1] = str(ledger)
         desired = {"arguments": arguments, "binary_sha256": file_hash(binary),
@@ -136,6 +137,17 @@ class DiagnosticTests(unittest.TestCase):
         before = retained_fingerprint([self.root])
         result = self.collect()
         self.assertTrue(result["managed_records"]["upgrade_record"]["runtime_binding_matches"])
+        self.assertEqual(before, retained_fingerprint([self.root]))
+        self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_active_upgrade_binding_ignores_retained_l1_namespace(self):
+        self.install_upgrade(event_source="l1", retained_l1_revision="c" * 40)
+        before = retained_fingerprint([self.root])
+        result = self.collect()
+        records = result["managed_records"]
+        self.assertEqual(records["status"], "inspected")
+        self.assertEqual(records["upgrade_revisions"], ["b" * 40])
+        self.assertTrue(records["upgrade_record"]["runtime_binding_matches"])
         self.assertEqual(before, retained_fingerprint([self.root]))
         self.assertNotIn(SECRET, json.dumps(result))
 

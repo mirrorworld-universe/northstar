@@ -1,11 +1,8 @@
-//! Keep Circom Poseidon constants and encodings stable across Arkworks versions.
+//! Circom Poseidon constants and encodings shared by replay and proof circuits.
 pub use light_poseidon::PoseidonError;
 use {
     ark_bn254::Fr,
-    ark_ff::{BigInteger, PrimeField},
     light_poseidon::{Poseidon, PoseidonHasher},
-    poseidon_ark_bn254::Fr as LegacyFr,
-    poseidon_ark_ff::{BigInteger as _, PrimeField as _},
 };
 
 pub struct PoseidonParameters {
@@ -16,19 +13,11 @@ pub struct PoseidonParameters {
     pub width: usize,
 }
 
-fn from_legacy(value: LegacyFr) -> Fr {
-    Fr::from_be_bytes_mod_order(&value.into_bigint().to_bytes_be())
-}
-
 pub fn parameters(width: u8) -> Result<PoseidonParameters, PoseidonError> {
-    let params = light_poseidon::parameters::bn254_x5::get_poseidon_parameters::<LegacyFr>(width)?;
+    let params = light_poseidon::parameters::bn254_x5::get_poseidon_parameters::<Fr>(width)?;
     Ok(PoseidonParameters {
-        ark: params.ark.into_iter().map(from_legacy).collect(),
-        mds: params
-            .mds
-            .into_iter()
-            .map(|row| row.into_iter().map(from_legacy).collect())
-            .collect(),
+        ark: params.ark,
+        mds: params.mds,
         full_rounds: params.full_rounds,
         partial_rounds: params.partial_rounds,
         width: params.width,
@@ -36,32 +25,39 @@ pub fn parameters(width: u8) -> Result<PoseidonParameters, PoseidonError> {
 }
 
 pub fn hash(inputs: &[Fr]) -> Result<Fr, PoseidonError> {
-    let inputs = inputs
-        .iter()
-        .map(|value| LegacyFr::from_be_bytes_mod_order(&value.into_bigint().to_bytes_be()))
-        .collect::<Vec<_>>();
-    Poseidon::<LegacyFr>::new_circom(inputs.len())?
-        .hash(&inputs)
-        .map(from_legacy)
+    Poseidon::<Fr>::new_circom(inputs.len())?.hash(inputs)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use {
+        super::*,
+        ark_ff::{BigInteger, PrimeField},
+    };
 
     #[test]
-    fn field_bridge_preserves_modulus_boundaries_and_poseidon_outputs() {
+    fn circom_hash_preserves_pre_upgrade_vector() {
+        let inputs = [
+            Fr::from_be_bytes_mod_order(&[1; 32]),
+            Fr::from_be_bytes_mod_order(&[2; 32]),
+        ];
+        assert_eq!(
+            hash(&inputs).unwrap().into_bigint().to_bytes_be(),
+            [
+                13, 84, 225, 147, 143, 138, 140, 28, 125, 235, 94, 3, 85, 242, 99, 25, 32, 123,
+                132, 254, 156, 162, 206, 27, 38, 231, 53, 200, 41, 130, 25, 144,
+            ]
+        );
+    }
+
+    #[test]
+    fn hash_preserves_modulus_boundaries() {
         for value in [Fr::from(0u64), Fr::from(1u64), -Fr::from(1u64)] {
-            let legacy = LegacyFr::from_be_bytes_mod_order(&value.into_bigint().to_bytes_be());
-            assert_eq!(from_legacy(legacy), value);
-            let expected = Poseidon::<LegacyFr>::new_circom(2)
+            let expected = Poseidon::<Fr>::new_circom(2)
                 .unwrap()
-                .hash(&[legacy, legacy])
+                .hash(&[value, value])
                 .unwrap();
-            assert_eq!(
-                hash(&[value, value]).unwrap().into_bigint().to_bytes_be(),
-                expected.into_bigint().to_bytes_be()
-            );
+            assert_eq!(hash(&[value, value]).unwrap(), expected);
         }
     }
 }

@@ -2,7 +2,7 @@
 use {
     crate::program_cache_entry::ProgramCacheEntry,
     qualifier_attr::qualifiers,
-    solana_account::{AccountSharedData, WritableAccount},
+    solana_account::{AccountSharedData, WritableAccount, state_traits::StateMutWincode as _},
     solana_epoch_schedule::EpochSchedule,
     solana_instruction::AccountMeta,
     solana_message::{LegacyMessage, Message, SanitizedMessage},
@@ -50,7 +50,7 @@ use {
     std::{
         alloc::Layout,
         borrow::Cow,
-        cell::{Cell, RefCell},
+        cell::RefCell,
         fmt::{self, Debug},
         ptr,
         rc::Rc,
@@ -110,7 +110,7 @@ macro_rules! declare_process_instruction {
 
                 let consumption_result = if $cu_to_consume > 0
                 {
-                    invoke_context.compute_meter.consume_checked($cu_to_consume)
+                    invoke_context.consume_checked($cu_to_consume)
                 } else {
                     Ok(())
                 };
@@ -128,16 +128,13 @@ macro_rules! declare_process_instruction {
 
 impl ContextObject for InvokeContext<'_, '_> {
     fn consume(&mut self, amount: u64) {
-        // 1 to 1 instruction to compute unit mapping
-        // ignore overflow, Ebpf will bail if exceeded
-        let compute_meter = self.compute_meter.0.get();
-        self.compute_meter
-            .0
-            .set(compute_meter.saturating_sub(amount));
+        self.transaction_context
+            .compute_meter
+            .consume_unchecked(amount);
     }
 
     fn get_remaining(&self) -> u64 {
-        self.compute_meter.0.get()
+        self.transaction_context.compute_meter.get_remaining()
     }
 
     fn active_mapping_ptr(&mut self) -> ptr::NonNull<MemoryMapping> {
@@ -221,29 +218,6 @@ impl<'a> EnvironmentConfig<'a> {
     }
 }
 
-pub struct ComputeMeter(Cell<u64>);
-
-impl ComputeMeter {
-    /// Consume compute units
-    pub fn consume_checked(&self, amount: u64) -> Result<(), Box<dyn std::error::Error>> {
-        let compute_meter = self.0.get();
-        let exceeded = compute_meter < amount;
-        self.0.set(compute_meter.saturating_sub(amount));
-        if exceeded {
-            return Err(Box::new(InstructionError::ComputationalBudgetExceeded));
-        }
-        Ok(())
-    }
-
-    /// Set compute units
-    ///
-    /// Only use for tests and benchmarks
-    #[cfg(feature = "dev-context-only-utils")]
-    pub fn mock_set_remaining(&self, remaining: u64) {
-        self.0.set(remaining);
-    }
-}
-
 /// Main pipeline from runtime to program execution.
 pub struct InvokeContext<'a, 'ix_data> {
     /// Information about the currently executing transaction.
@@ -256,9 +230,6 @@ pub struct InvokeContext<'a, 'ix_data> {
     compute_budget: SVMTransactionExecutionBudget,
     /// The compute cost for the current invocation.
     execution_cost: SVMTransactionExecutionCost,
-    /// Instruction compute meter, for tracking compute units consumed against
-    /// the designated compute budget during program execution.
-    pub compute_meter: ComputeMeter,
     log_collector: Option<Rc<RefCell<LogCollector>>>,
     /// Time spent so far executing nested program calls.
     pub total_nested_exec_time: Duration,
@@ -287,7 +258,6 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
             log_collector,
             compute_budget,
             execution_cost,
-            compute_meter: ComputeMeter(Cell::new(compute_budget.compute_unit_limit)),
             total_nested_exec_time: Duration::ZERO,
             timings: ExecuteDetailsTimings::default(),
             memory_contexts: MemoryContexts::new(),
@@ -787,6 +757,19 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
         result
     }
 
+    pub fn consume_checked(&self, amount: u64) -> Result<(), Box<dyn std::error::Error>> {
+        self.transaction_context
+            .compute_meter
+            .consume_checked(amount)
+    }
+
+    #[cfg(feature = "dev-context-only-utils")]
+    pub fn mock_set_remaining(&self, remaining: u64) {
+        self.transaction_context
+            .compute_meter
+            .mock_set_remaining(remaining)
+    }
+
     /// Get this invocation's LogCollector
     pub fn get_log_collector(&self) -> Option<Rc<RefCell<LogCollector>>> {
         self.log_collector.clone()
@@ -928,7 +911,9 @@ macro_rules! with_mock_invoke_context_with_feature_set {
             solana_svm_callback::InvokeContextCallback,
             solana_svm_log_collector::LogCollector,
             $crate::{
-                __private::{DropOnBailOut, Hash, ReadableAccount, Rent, TransactionContext},
+                __private::{
+                    ComputeMeter, DropOnBailOut, Hash, ReadableAccount, Rent, TransactionContext,
+                },
                 execution_budget::{SVMTransactionExecutionBudget, SVMTransactionExecutionCost},
                 invoke_context::{EnvironmentConfig, InvokeContext},
                 loaded_programs::{ProgramCacheForTxBatch, ProgramRuntimeEnvironments},
@@ -956,6 +941,7 @@ macro_rules! with_mock_invoke_context_with_feature_set {
             compute_budget.max_instruction_stack_depth,
             compute_budget.max_instruction_trace_length,
             $top_level_instructions,
+            ComputeMeter::new(compute_budget.compute_unit_limit),
             DropOnBailOut::Disabled,
         );
         let program_runtime_environments = ProgramRuntimeEnvironments::mock();
@@ -1102,8 +1088,13 @@ pub fn mock_process_instruction_with_feature_set<
         .iter()
         .any(|(key, _)| *key == sysvar::epoch_schedule::id())
     {
-        let mut account = AccountSharedData::new(1, solana_epoch_schedule::SIZE, &sysvar::id());
-        wincode::serialize_into(account.data_as_mut_slice(), &EpochSchedule::default()).unwrap();
+        let account = AccountSharedData::new_data_with_space(
+            1,
+            &EpochSchedule::default(),
+            solana_epoch_schedule::SIZE,
+            &sysvar::id(),
+        )
+        .unwrap();
         accounts.push((sysvar::epoch_schedule::id(), account));
     }
 
@@ -1209,7 +1200,7 @@ mod tests {
             ec::{EcGroup, EcKey},
             nid::Nid,
         },
-        solana_account::{Account, DUMMY_INHERITABLE_ACCOUNT_FIELDS, ReadableAccount},
+        solana_account::{Account, ReadableAccount},
         solana_ed25519_program::new_ed25519_instruction_with_signature,
         solana_keypair::{Address, Keypair},
         solana_message::AccountKeys,
@@ -1330,7 +1321,6 @@ mod tests {
                         desired_result,
                     } => {
                         invoke_context
-                            .compute_meter
                             .consume_checked(compute_units_to_consume)
                             .map_err(|_| InstructionError::ComputationalBudgetExceeded)?;
                         return desired_result;
@@ -1742,7 +1732,7 @@ mod tests {
 
     #[test]
     fn test_prepare_instruction_maximum_accounts() {
-        const MAX_ACCOUNTS_REFERENCED: usize = u16::MAX as usize;
+        const MAX_ACCOUNTS_REFERENCED: usize = MAX_ACCOUNTS_PER_INSTRUCTION;
         let mut transaction_accounts: Vec<KeyedAccountSharedData> =
             Vec::with_capacity(MAX_ACCOUNTS_PER_TRANSACTION);
         let mut account_metas: Vec<AccountMeta> = Vec::with_capacity(MAX_ACCOUNTS_REFERENCED);
@@ -1761,20 +1751,11 @@ mod tests {
         transaction_accounts.push((program_id, program_account));
         account_metas.push(AccountMeta::new_readonly(program_id, false));
 
-        for i in 2..MAX_ACCOUNTS_REFERENCED {
-            // Let's reference 256 unique accounts, and the rest is repeated.
-            if i < MAX_ACCOUNTS_PER_TRANSACTION {
-                let key = Pubkey::new_unique();
-                transaction_accounts
-                    .push((key, AccountSharedData::new(1, 1, &Pubkey::new_unique())));
-                account_metas.push(AccountMeta::new_readonly(key, false));
-            } else {
-                let repeated_key = transaction_accounts
-                    .get(i % MAX_ACCOUNTS_PER_TRANSACTION)
-                    .unwrap()
-                    .0;
-                account_metas.push(AccountMeta::new_readonly(repeated_key, false));
-            }
+        // Reference the maximum number of instruction accounts.
+        for _ in 2..MAX_ACCOUNTS_REFERENCED {
+            let key = Pubkey::new_unique();
+            transaction_accounts.push((key, AccountSharedData::new(1, 1, &Pubkey::new_unique())));
+            account_metas.push(AccountMeta::new_readonly(key, false));
         }
 
         with_mock_invoke_context!(invoke_context, transaction_context, 2, transaction_accounts);
@@ -1808,19 +1789,8 @@ mod tests {
                 let other_ix_index = instruction_context
                     .get_index_of_account_in_instruction(index_in_transaction)
                     .unwrap();
-                if (index_in_instruction as usize) < MAX_ACCOUNTS_PER_TRANSACTION {
-                    assert_eq!(index_in_instruction, index_in_transaction);
-                    assert_eq!(index_in_instruction, other_ix_index);
-                } else {
-                    assert_eq!(
-                        index_in_instruction as usize % MAX_ACCOUNTS_PER_TRANSACTION,
-                        index_in_transaction as usize
-                    );
-                    assert_eq!(
-                        index_in_instruction as usize % MAX_ACCOUNTS_PER_TRANSACTION,
-                        other_ix_index as usize
-                    );
-                }
+                assert_eq!(index_in_instruction, index_in_transaction);
+                assert_eq!(index_in_instruction, other_ix_index);
             }
         }
 
@@ -1841,17 +1811,8 @@ mod tests {
                     (MAX_ACCOUNTS_REFERENCED as u16)
                         .saturating_sub(index_in_instruction)
                         .saturating_sub(1)
-                        .overflowing_rem(MAX_ACCOUNTS_PER_TRANSACTION as u16)
-                        .0
                 );
-                if (index_in_instruction as usize) < MAX_ACCOUNTS_PER_TRANSACTION {
-                    assert_eq!(index_in_instruction, other_ix_index);
-                } else {
-                    assert_eq!(
-                        index_in_instruction as usize % MAX_ACCOUNTS_PER_TRANSACTION,
-                        other_ix_index as usize
-                    );
-                }
+                assert_eq!(index_in_instruction, other_ix_index);
             }
         }
 
@@ -2033,6 +1994,22 @@ mod tests {
         result
     }
 
+    #[test]
+    fn test_native_invoke_signed_instruction_account_limit() {
+        let instruction = Instruction::new_with_wincode(
+            TEST_CALLEE_PROGRAM_ID,
+            &MockInstruction::NoopSuccess,
+            vec![
+                AccountMeta::new_readonly(TEST_ACCOUNT_KEY, false);
+                MAX_ACCOUNTS_PER_INSTRUCTION + 1
+            ],
+        );
+        assert_eq!(
+            run_native_invoke_signed_test(TEST_ACCOUNT_KEY, false, instruction, &[]),
+            Err(InstructionError::MaxAccountsExceeded),
+        );
+    }
+
     // Valid PDA seeds grant signer privilege to the derived address.
     #[test]
     fn test_native_invoke_signed_with_valid_pda_signer() {
@@ -2160,18 +2137,48 @@ mod tests {
     impl InvokeContextCallback for MockCallback {}
 
     fn create_loadable_account_for_test(name: &str) -> AccountSharedData {
-        let (lamports, rent_epoch) = DUMMY_INHERITABLE_ACCOUNT_FIELDS;
         AccountSharedData::from(Account {
-            lamports,
+            lamports: 1,
             owner: native_loader::id(),
             data: name.as_bytes().to_vec(),
             executable: true,
-            rent_epoch,
+            rent_epoch: u64::MAX,
         })
     }
 
     fn new_sanitized_message(message: Message) -> SanitizedMessage {
         SanitizedMessage::try_from_legacy_message(message, &HashSet::new()).unwrap()
+    }
+
+    #[test]
+    fn test_reject_instruction_with_more_than_255_accounts() {
+        let payer = Pubkey::new_unique();
+        let other_account = Pubkey::new_unique();
+        let program_id = Pubkey::new_unique();
+        let mut instruction_accounts = vec![0; 256];
+        instruction_accounts.push(1);
+        let message = new_sanitized_message(Message::new_with_compiled_instructions(
+            1,
+            0,
+            2,
+            vec![payer, other_account, program_id],
+            Hash::default(),
+            vec![solana_message::compiled_instruction::CompiledInstruction {
+                program_id_index: 2,
+                accounts: instruction_accounts,
+                data: vec![],
+            }],
+        ));
+        let accounts = vec![
+            (payer, AccountSharedData::default()),
+            (other_account, AccountSharedData::default()),
+            (program_id, create_loadable_account_for_test("noop")),
+        ];
+        with_mock_invoke_context!(invoke_context, transaction_context, accounts);
+        assert_eq!(
+            invoke_context.prepare_top_level_instructions(&message),
+            Err((0, InstructionError::MaxAccountsExceeded)),
+        );
     }
 
     #[test]

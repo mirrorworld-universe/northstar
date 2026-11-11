@@ -177,7 +177,7 @@ class Deployment:
     def verify_sdk(self):
         require(self.execute(["git", "-C", self.args.sdk_checkout, "rev-parse", "HEAD"]).strip() == SDK_REVISION, "SDK revision differs")
         self.execute(["git", "-C", self.args.sdk_checkout, "diff", "--quiet", "HEAD"])
-        require(file_hash(self.args.sdk_checkout / "package-lock.json") == "c9c3eab30574777558d737d043060eadfec8c156b41ee4b313bbab2d05910ded", "SDK dependency lock differs")
+        require(file_hash(self.args.sdk_checkout / "package-lock.json") == "78697b65487a7c5932151165ec887b37246e25a3571af752b8c151cc636cd00c", "SDK dependency lock differs")
 
     def prepare(self):
         require(self.upstream.call("getGenesisHash") == DEVNET, "native rollout is devnet-only")

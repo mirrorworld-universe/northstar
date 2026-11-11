@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 
-here=$(dirname "$0")
+set -euo pipefail
 
-cargo --list | grep -q "^\s*build-sbf"
-found=$?
-if [[ $found -ne 0 ]]; then
-  cargo install cargo-build-sbf
+# Sonic: Cargo's colorized subcommand listing is not an executable-presence check.
+if ! command -v cargo-build-sbf >/dev/null 2>&1; then
+  cargo install cargo-build-sbf --version 4.5.0 --locked
 fi
 # Sonic: Keep Northstar's validated SBF ABI/compiler independent of CLI release defaults.
 exec cargo build-sbf --arch v0 --tools-version v1.56 "$@"

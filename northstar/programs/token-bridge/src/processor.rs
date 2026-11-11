@@ -645,9 +645,10 @@ fn process_settle_withdrawal(
     let token_program = next_account_info(account_info_iter)?;
 
     require_signer(validator)?;
-    if session.owner() != checkpoint.owner()
-        || session_bridge.owner() != session.owner()
-        || portal_program.address() != session.owner()
+    let portal_id = session.owner();
+    if portal_id != checkpoint.owner()
+        || session_bridge.owner() != portal_id
+        || portal_program.address() != &portal_id
     {
         return Err(ProgramError::InvalidAccountOwner);
     }
@@ -657,7 +658,7 @@ fn process_settle_withdrawal(
             session.address().as_ref(),
             &er_slot.to_le_bytes(),
         ],
-        session.owner(),
+        &portal_id,
     )
     .0;
     if expected_checkpoint != *checkpoint.address() {
@@ -708,7 +709,7 @@ fn process_settle_withdrawal(
             session.address().as_ref(),
             bridge.mint.as_ref(),
         ],
-        session.owner(),
+        &portal_id,
     )
     .0;
     if !bridge.is_valid()
@@ -768,7 +769,7 @@ fn process_settle_withdrawal(
     let portal_data =
         encode_portal_consume_token_withdrawal(er_slot, checksum, amount, withdrawn, decimals);
     let portal_instruction = Instruction {
-        program_id: session.owner(),
+        program_id: &portal_id,
         accounts: &portal_accounts,
         data: &portal_data,
     };
