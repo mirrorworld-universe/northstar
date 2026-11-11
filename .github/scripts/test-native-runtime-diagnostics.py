@@ -351,6 +351,14 @@ class DiagnosticTests(unittest.TestCase):
         self.assertNotIn(SECRET, json.dumps(report))
         self.assertEqual(retained_fingerprint([self.root]), before)
 
+    def test_pending_upload_classifies_the_native_uploader_terminal_retry_error(self):
+        revision, control = self.install_pending_upload()
+        (control / "operations.log").write_text("Error: Data writes to account failed: Max retries exceeded\n" + SECRET)
+        pending = self.collect_pending(revision)["pending_fresh_upload"]
+        self.assertEqual(pending["source_revision"], revision)
+        self.assertEqual(pending["operation_errors"]["markers"], {"upload_write_failure": 1, "retry_budget_exhausted": 1})
+        self.assertNotIn(SECRET, json.dumps(pending))
+
     def test_pending_upload_logs_are_suppressed_for_changed_plan_or_any_start(self):
         revision, control = self.install_pending_upload()
         plan = private_json(control / "plan.json")
