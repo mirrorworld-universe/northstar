@@ -306,7 +306,11 @@ class Deployment:
         return {"programdata": address, "deployment_slot": int.from_bytes(stored["raw"][4:12], "little"),
                 "sha256": hashlib.sha256(stored["raw"]).hexdigest()}
 
-    def deploy_programs(self):
+    def deploy_programs(self, *, resume_roles=frozenset(), submission_rpc=None, stop_worker=True):
+        require(set(resume_roles) <= {"portal", "token_bridge"}
+                and (not resume_roles or submission_rpc == self.args.l1_rpc and not stop_worker)
+                and (submission_rpc is None or submission_rpc == self.args.l1_rpc and not stop_worker)
+                and (stop_worker or submission_rpc == self.args.l1_rpc), "invalid retained upload submission scope")
         marker = self.control / "programs.json"
         state = private_json(marker) if marker.exists() else {"version": 2, "roles": {}}
         lengths = {role: (self.stage / ARTIFACTS[role]).stat().st_size for role in ("portal", "token_bridge")}
@@ -316,7 +320,10 @@ class Deployment:
             require(isinstance(entry, dict) and set(entry) == {"elf_sha256", "complete"}
                     and entry["elf_sha256"] == self.manifest["sha256"][role], "native upload record differs from frozen artifact")
             observed = self.program_view(role)
-            require(observed is not None, "retained upload is unresolved; inspect original buffer, never replace it automatically")
+            if observed is None:
+                require(role in resume_roles and entry["complete"] is None,
+                        "retained upload is unresolved; inspect original buffer, never replace it automatically")
+                continue
             if entry["complete"] is not None:
                 require(entry["complete"] == observed, "completed native upload observation changed")
             else:
@@ -331,21 +338,25 @@ class Deployment:
         buffers = {role: rent(size + 37) for role, size in lengths.items()}
         quote = 500_000_000 + sum(permanent.values()) + max(buffers.values())
         require(quote <= self.args.max_estimated_cost_lamports, "native deployment estimate exceeds approved quote limit")
-        missing = [role for role in lengths if role not in state["roles"]]
+        missing = [role for role in lengths if role not in state["roles"] or state["roles"][role]["complete"] is None]
         if missing:
             remaining = 500_000_000 + sum(permanent[role] for role in missing) + max(buffers[role] for role in missing)
             balance = self.upstream.call("getBalance", [self.plan["funder"], {"commitment": "finalized"}])["value"]
             print(json.dumps({"phase": "funding-quote", "address": self.plan["funder"], "available_lamports": balance,
                               "estimated_total_lamports": quote, "required_remaining_lamports": remaining}), flush=True)
             require(type(balance) is int and balance >= remaining, "native deployer requires additional devnet funding")
-        self.execute(["sudo", "-n", "python3", "-B", ROOT / ".github/scripts/stop-vrf-service.py"])
+        if stop_worker:
+            self.execute(["sudo", "-n", "python3", "-B", ROOT / ".github/scripts/stop-vrf-service.py"])
         for role, size in lengths.items():
-            if role in state["roles"]:
+            if role in state["roles"] and state["roles"][role]["complete"] is not None:
                 continue
             require(self.upstream.account(self.plan["programs"][role]) is None, "unrecorded native deployment exists")
             state["roles"][role] = {"elf_sha256": self.manifest["sha256"][role], "complete": None}
             atomic_json(marker, state)
-            self.execute([self.stage / ARTIFACTS["cli"], "--url", self.args.devnet_rpc,
+            if submission_rpc is not None:
+                require(self.l1.call("getHealth") == "ok" and self.l1.call("getGenesisHash") == DEVNET
+                        and self.l1.call("getIdentity")["identity"] == self.plan["validator"], "program submission L1 identity differs")
+            self.execute([self.stage / ARTIFACTS["cli"], "--url", submission_rpc or self.args.devnet_rpc,
                           "--keypair", self.args.funder_keypair, "program", "deploy", self.stage / ARTIFACTS[role],
                           "--program-id", self.control / "keys" / (role + ".json"), "--buffer", self.control / "keys" / (role + "-buffer.json"),
                           "--max-len", str(size), "--use-rpc"], timeout=900)
