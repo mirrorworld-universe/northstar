@@ -635,7 +635,8 @@ def upload_operation_errors(path, owner):
         finally:
             os.close(descriptor)
         text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", data.decode(errors="replace"))
-        patterns = {"http_rate_limit": r"\b429\b", "rpc_transport": r"connection reset|connection closed|timed? out|connection refused",
+        patterns = {"http_rate_limit": r"\b429\b", "rpc_transport": r"connection reset|connection closed|timed? out|connection refused|error sending request|transport error",
+                    "upload_write_failure": r"Data writes to account failed", "retry_budget_exhausted": r"Max retries exceeded",
                     "blockhash_expired": r"BlockhashNotFound|blockhash.*expired|block height exceeded",
                     "insufficient_funds": r"insufficient funds|InsufficientFunds",
                     "transaction_rejected": r"Transaction simulation failed|TransactionError",
@@ -703,7 +704,7 @@ def pending_fresh_upload(root, revision, specification):
                     or entry["elf_sha256"] != artifacts[role] or entry["complete"] is not None and not isinstance(entry["complete"], dict)):
                 return report
             uploads[role] = "unresolved" if entry["complete"] is None else "recorded-complete"
-        report.update(status="inspected", phase="prepared", previous_service_matches=True, native_start_recorded=False,
+        report.update(status="inspected", source_revision=revision, phase="prepared", previous_service_matches=True, native_start_recorded=False,
                       uploads=uploads, operation_errors=upload_operation_errors(control / "operations.log", owner))
     except (OSError, ValueError, TypeError, KeyError):
         pass
