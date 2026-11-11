@@ -110,6 +110,8 @@ test('retained upload reconciliation is explicit master-only and never starts na
   const step = job.steps.find(value => value.id === 'reconcile');
   expect(step.env.TARGET_REVISION).toBe('${{ inputs.revision }}');
   expect(step.env.REPLACE_CONTEXT).toBe('${{ inputs.replace_context }}');
+  expect(step.env.FAILED_RECORD_SHA256).toBe('${{ inputs.failed_record_sha256 }}');
+  expect(step.run).toContain('options+=(--failed-record-sha256 "$FAILED_RECORD_SHA256")');
   expect(step.run).toContain('continuity_upload_resume.py');
   expect(step.run).not.toMatch(/systemctl|build-continuity|continuity_devnet\.py|--stage|fund/);
   expect(job.steps.at(-1).with.path).toBe('${{ steps.reconcile.outputs.report_path }}');

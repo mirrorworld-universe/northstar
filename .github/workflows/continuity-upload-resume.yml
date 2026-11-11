@@ -11,6 +11,11 @@ on:
         description: Exact reviewed previous context
         required: true
         type: string
+      failed_record_sha256:
+        description: Explicit acknowledgement of the reviewed failed pass for one separately recorded reconciliation
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -43,14 +48,19 @@ jobs:
         env:
           TARGET_REVISION: ${{ inputs.revision }}
           REPLACE_CONTEXT: ${{ inputs.replace_context }}
+          FAILED_RECORD_SHA256: ${{ inputs.failed_record_sha256 }}
           CONTINUITY_SDK: ${{ steps.sdk.outputs.directory }}
         run: |
           set -euo pipefail
           umask 077
           export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+          options=()
+          if [[ -n "$FAILED_RECORD_SHA256" ]]; then
+            options+=(--failed-record-sha256 "$FAILED_RECORD_SHA256")
+          fi
           python3 -B .github/scripts/continuity_upload_resume.py \
             --revision "$TARGET_REVISION" --replace-context "$REPLACE_CONTEXT" \
-            --sdk-checkout "$CONTINUITY_SDK"
+            --sdk-checkout "$CONTINUITY_SDK" "${options[@]}"
       - name: Upload only the completed public upload report
         if: steps.reconcile.outputs.report_path != ''
         uses: actions/upload-artifact@v4

@@ -66,8 +66,13 @@ class UploadResumeTests(unittest.TestCase):
         value.upstream = SimpleNamespace(
             call=lambda method, *_: 1000 if method == "getMinimumBalanceForRentExemption" else {"value": 20_000_000_000},
             account=lambda key: self.accounts.get(key))
-        value.l1 = SimpleNamespace(call=lambda method, *_: {
-            "getGenesisHash": DEVNET, "getHealth": "ok", "getIdentity": {"identity": value.plan["validator"]}}[method])
+        def local_call(method, *_):
+            if method == "getMinimumBalanceForRentExemption":
+                return 1000
+            if method == "getBalance":
+                return {"value": 20_000_000_000}
+            return {"getGenesisHash": DEVNET, "getHealth": "ok", "getIdentity": {"identity": value.plan["validator"]}}[method]
+        value.l1 = SimpleNamespace(call=local_call, account=lambda key: self.accounts.get(key))
         value.program_view = Mock(side_effect=lambda role: self.views.get(role))
         self.commands = []
         self.pid = "123"
@@ -77,19 +82,34 @@ class UploadResumeTests(unittest.TestCase):
                 return self.pid
             if "program" not in arguments or "deploy" not in arguments:
                 raise AssertionError("only signed program submission is permitted")
-            record = private_json(value.control / "program-upload-reconcile.json")
+            retry = value.control / "program-upload-reconcile-retry.json"
+            record = private_json(retry if retry.exists() else value.control / "program-upload-reconcile.json")
             self.assertEqual(record["phase"], "attempted")
             self.assertEqual(record["plan_sha256"], digest(value.plan))
             self.assertTrue(value.flush.called)
             role = next(role for role in ("portal", "token_bridge") if str(value.stage / ARTIFACTS[role]) in map(str, arguments))
+            self.assertIn(role, record["submission_roles"])
             self.views[role] = {"programdata": role, "deployment_slot": 50, "sha256": checksums[role]}
             self.accounts.pop(value.plan["programs"][role + "-buffer"], None)
             return ""
         value.execute = execute
 
-    def run_resume(self):
+    def run_resume(self, failed_record_sha256=None):
+        options = {} if failed_record_sha256 is None else {"failed_record_sha256": failed_record_sha256}
         with redirect_stdout(io.StringIO()):
-            return resume_uploads(self.ops, "d" * 40)
+            return resume_uploads(self.ops, "d" * 40, **options)
+
+    def prior_failed_record(self):
+        record = {"version": 1, "kind": "retained-program-upload", "plan_sha256": digest(self.ops.plan),
+                  "controller_revision": "e83cadadd9ad4003a2d5303f395e92244ebb0362", "source_revision": self.ops.args.revision,
+                  "submission_rpc": self.ops.args.l1_rpc, "previous_service_sha256": digest(self.ops.fresh.previous["service"]),
+                  "pending_roles": ["portal"], "attempt_budget": 1, "phase": "failed", "operator_reconciliation_required": True}
+        atomic_json(self.ops.control / "program-upload-reconcile.json", record)
+        atomic_json(self.ops.control / "program-upload-reconcile-report.json", {
+            "version": 1, "result": "failed", "source_revision": self.ops.args.revision,
+            "controller_revision": record["controller_revision"], "native_cutover_performed": False,
+            "operator_reconciliation_required": True})
+        return digest(record)
 
     def signed_calls(self):
         return [call for call in self.commands if "deploy" in call]
@@ -119,6 +139,70 @@ class UploadResumeTests(unittest.TestCase):
         self.assertEqual(summary["errno"], 2)
         self.assertNotIn(secret, str(summary))
         self.assertFalse(summary["raw_error_included"])
+
+    def test_program_reads_and_submission_share_the_verified_recorded_l1(self):
+        from urllib.error import HTTPError
+        public_reads = Mock(side_effect=HTTPError("https://api.devnet.solana.com", 429, "private response", {}, None))
+        self.ops.upstream.call = public_reads
+        result = self.run_resume()
+        self.assertEqual(result["result"], "uploads-completed")
+        public_reads.assert_not_called()
+        self.assertEqual(len(self.signed_calls()), 2)
+
+    def test_acknowledged_failed_record_gets_a_separate_single_budget(self):
+        approved = self.prior_failed_record()
+        path = self.ops.control / "program-upload-reconcile.json"
+        before = path.read_bytes()
+        report_path = self.ops.control / "program-upload-reconcile-report.json"
+        report_before = report_path.read_bytes()
+        result = self.run_resume(approved)
+        self.assertEqual(result["result"], "uploads-completed")
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(report_path.read_bytes(), report_before)
+        retry = private_json(self.ops.control / "program-upload-reconcile-retry.json")
+        self.assertEqual(retry["previous_failed_record_sha256"], approved)
+        self.assertEqual(retry["read_rpc"], self.ops.args.l1_rpc)
+        self.assertEqual(retry["submission_roles"], ["portal", "token_bridge"])
+        with self.assertRaises(ValueError):
+            self.run_resume(approved)
+        self.assertEqual(len(self.signed_calls()), 2)
+
+    def test_acknowledgement_cannot_replace_failed_record_binding_or_reviewed_controller(self):
+        self.prior_failed_record()
+        with self.assertRaises(ValueError):
+            self.run_resume("e" * 64)
+        marker = self.ops.control / "program-upload-reconcile.json"
+        changed = private_json(marker)
+        changed["controller_revision"] = "b" * 40
+        atomic_json(marker, changed)
+        with self.assertRaises(ValueError):
+            self.run_resume(digest(changed))
+        self.assertEqual(self.signed_calls(), [])
+        self.assertFalse((self.ops.control / "program-upload-reconcile-retry.json").exists())
+
+    def test_failed_additional_pass_keeps_both_barriers_and_cannot_cascade(self):
+        approved = self.prior_failed_record()
+        primary = (self.ops.control / "program-upload-reconcile.json").read_bytes()
+        original = self.ops.execute
+        def fail(arguments, **kwargs):
+            if "deploy" in arguments:
+                raise ValueError("private command response")
+            return original(arguments, **kwargs)
+        self.ops.execute = fail
+        with self.assertRaises(ValueError):
+            self.run_resume(approved)
+        marker = private_json(self.ops.control / "program-upload-reconcile-retry.json")
+        self.assertEqual(marker["phase"], "failed")
+        self.assertEqual(marker["submission_roles"], ["portal"])
+        self.assertEqual((self.ops.control / "program-upload-reconcile.json").read_bytes(), primary)
+        with self.assertRaises(ValueError):
+            self.run_resume(approved)
+
+    def test_http_status_summary_never_exposes_url_or_response_text(self):
+        from urllib.error import HTTPError
+        summary = failure_summary(HTTPError("https://private.invalid/token", 429, "private response", {}, None), "submission")
+        self.assertEqual(summary["http_status"], 429)
+        self.assertNotIn("private", str(summary))
 
     def test_unknown_error_cannot_authorize_a_signed_retry(self):
         self.ops.log.write_text("unclassified private message")
