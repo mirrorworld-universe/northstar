@@ -303,6 +303,97 @@ class DiagnosticTests(unittest.TestCase):
         unbound = diagnostics.operational_details({}, self.state_root, {}, [])
         self.assertNotIn("rpc_account_indexes", unbound)
 
+    def install_pending_upload(self):
+        revision = "c" * 40
+        control = self.state_root / revision / "control"
+        control.mkdir(parents=True, mode=0o700)
+        old = private_json(self.control / "reservation.json")["original"]
+        activation = private_json(self.control / "activation.json")
+        service = {"arguments": activation["arguments"], "state_environment": activation["state_environment"],
+                   "binary_sha256": self.plan["artifacts"]["validator"], "uid": old["uid"], "gid": old["gid"]}
+        replacement = {"version": 1, "service": service, "snapshot": {"identity": {"context": "ab" * 32}}}
+        artifacts = self.plan["artifacts"] | {"geyser_events": "e" * 64}
+        programs = {role: public_text(bytes([index]) * 32) for index, role in
+                    enumerate(("portal", "token_bridge", "portal-buffer", "token_bridge-buffer"), 21)}
+        plan = {"version": 2, "mode": "fresh-stack", "source_revision": revision, "sdk_revision": diagnostics.SDK_REVISION,
+                "genesis": diagnostics.DEVNET, "artifacts": artifacts, "programs": programs,
+                "original_sha256": diagnostics.digest(service), "replacement_sha256": diagnostics.digest(replacement)}
+        plan["profile"] = diagnostics.digest({"version": 2, "source": revision, "artifacts": artifacts,
+                                             "sdk": diagnostics.SDK_REVISION, "proof_acceptance_qualified": False})
+        reservation = {"version": 2, "source_revision": revision, "sdk_revision": diagnostics.SDK_REVISION,
+                       "plan_sha256": diagnostics.digest(plan), "original": service, "replacement": replacement}
+        atomic_json(control / "plan.json", plan)
+        atomic_json(control / "reservation.json", reservation)
+        atomic_json(control / "fresh-progress.json", {"version": 1, "plan_sha256": diagnostics.digest(plan), "phase": "prepared"})
+        atomic_json(control / "programs.json", {"version": 2, "roles": {"portal": {"elf_sha256": artifacts["portal"], "complete": None}}})
+        (control / "operations.log").write_text("Error: 834 write transactions failed\nHTTP 429 Too Many Requests\n" + SECRET)
+        (control / "operations.log").chmod(0o600)
+        return revision, control
+
+    def collect_pending(self, revision):
+        def active_run(arguments):
+            result = self.run_command(arguments)
+            result.stdout = result.stdout.replace(b"ActiveState=inactive", b"ActiveState=active").replace(b"MainPID=0", b"MainPID=123")
+            return result
+        return diagnostics.collect_report(active_run, self.state_root, self.dropin, self.lock, pending_revision=revision)
+
+    def test_pending_upload_evidence_is_bound_read_only_and_redacted(self):
+        revision, control = self.install_pending_upload()
+        before = retained_fingerprint([self.root])
+        report = self.collect_pending(revision)
+        pending = report["pending_fresh_upload"]
+        self.assertEqual(pending["status"], "inspected")
+        self.assertEqual(pending["phase"], "prepared")
+        self.assertEqual(pending["uploads"], {"portal": "unresolved", "token_bridge": "not-recorded"})
+        self.assertEqual(pending["operation_errors"]["write_transactions_failed"], [834])
+        self.assertEqual(pending["operation_errors"]["markers"].get("http_rate_limit"), 1)
+        self.assertFalse(pending["onchain_state_checked"])
+        self.assertNotIn(SECRET, json.dumps(report))
+        self.assertEqual(retained_fingerprint([self.root]), before)
+
+    def test_pending_upload_logs_are_suppressed_for_changed_plan_or_any_start(self):
+        revision, control = self.install_pending_upload()
+        plan = private_json(control / "plan.json")
+        changed = dict(plan, profile="f" * 64)
+        atomic_json(control / "plan.json", changed)
+        self.assertNotIn("operation_errors", self.collect_pending(revision)["pending_fresh_upload"])
+        atomic_json(control / "plan.json", plan)
+        (control / "fresh-starts").mkdir(mode=0o700)
+        self.assertNotIn("operation_errors", self.collect_pending(revision)["pending_fresh_upload"])
+
+    def test_pending_upload_refuses_changed_previous_service_even_with_valid_hashes(self):
+        revision, control = self.install_pending_upload()
+        reservation = private_json(control / "reservation.json")
+        reservation["replacement"]["service"]["arguments"] = ["/unbound/validator", SECRET]
+        plan = private_json(control / "plan.json")
+        plan["replacement_sha256"] = diagnostics.digest(reservation["replacement"])
+        reservation["plan_sha256"] = diagnostics.digest(plan)
+        atomic_json(control / "plan.json", plan)
+        atomic_json(control / "reservation.json", reservation)
+        atomic_json(control / "fresh-progress.json", {"version": 1, "plan_sha256": diagnostics.digest(plan), "phase": "prepared"})
+        pending = self.collect_pending(revision)["pending_fresh_upload"]
+        self.assertNotIn("operation_errors", pending)
+        self.assertNotIn(SECRET, json.dumps(pending))
+
+    def test_pending_upload_requires_private_bounded_operation_log(self):
+        revision, control = self.install_pending_upload()
+        log = control / "operations.log"
+        log.chmod(0o644)
+        self.assertEqual(self.collect_pending(revision)["pending_fresh_upload"]["operation_errors"]["status"], "unavailable")
+        log.chmod(0o600)
+        with log.open("wb") as output:
+            output.truncate(65 * 1024 * 1024)
+        self.assertEqual(self.collect_pending(revision)["pending_fresh_upload"]["operation_errors"]["status"], "file_limit_exceeded")
+
+    def test_pending_upload_refuses_symlinked_operation_log(self):
+        revision, control = self.install_pending_upload()
+        log = control / "operations.log"
+        log.unlink()
+        log.symlink_to(self.logfile)
+        pending = self.collect_pending(revision)["pending_fresh_upload"]
+        self.assertNotIn("write_transactions_failed", pending.get("operation_errors", {}))
+        self.assertNotIn(SECRET, json.dumps(pending))
+
     def test_every_retained_byte_and_mode_is_unchanged(self):
         before = retained_fingerprint([self.root])
         self.collect()

@@ -14,7 +14,11 @@ use {
     solana_program_pack::Pack,
     solana_pubkey::Pubkey,
     solana_rpc_client::rpc_client::RpcClient,
-    solana_rpc_client_api::config::RpcSendTransactionConfig,
+    solana_rpc_client_api::{
+        client_error::{Error as RpcClientError, ErrorKind},
+        config::RpcSendTransactionConfig,
+        request::{RpcError, RpcResponseErrorData},
+    },
     solana_sdk_ids::system_program,
     solana_signer::Signer,
     solana_system_interface::instruction as system_instruction,
@@ -942,7 +946,119 @@ fn submit_tx(
             simulation.logs
         );
     }
-    rpc.send_transaction_with_config(&tx, config).unwrap()
+    let deadline = Instant::now() + Duration::from_secs(60);
+    retry_settlement_pending(
+        || rpc.send_transaction_with_config(&tx, config),
+        || {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            sleep(Duration::from_millis(100));
+            Instant::now() < deadline
+        },
+    )
+    .unwrap()
+}
+
+fn retry_settlement_pending(
+    mut send: impl FnMut() -> Result<solana_signature::Signature, RpcClientError>,
+    mut wait: impl FnMut() -> bool,
+) -> Result<solana_signature::Signature, RpcClientError> {
+    loop {
+        match send() {
+            Err(error)
+                if matches!(error.kind(), ErrorKind::RpcError(RpcError::RpcResponseError { code: -32600, message, .. })
+                    if message == "canonical checkpoint awaits settlement; retry after settlement")
+                    && wait() => {}
+            result => return result,
+        }
+    }
+}
+
+fn settlement_response(code: i64, message: &str) -> RpcClientError {
+    ErrorKind::RpcError(RpcError::RpcResponseError {
+        code,
+        message: message.to_owned(),
+        data: RpcResponseErrorData::Empty,
+    })
+    .into()
+}
+
+#[test]
+fn settlement_retry_reuses_the_signed_transaction() {
+    let payer = Keypair::new();
+    let tx = Transaction::new_signed_with_payer(
+        &[system_instruction::transfer(
+            &payer.pubkey(),
+            &Pubkey::new_unique(),
+            1,
+        )],
+        Some(&payer.pubkey()),
+        &[&payer],
+        solana_hash::Hash::new_unique(),
+    );
+    let mut submitted = Vec::new();
+    let mut waits = 0;
+    let signature = retry_settlement_pending(
+        || {
+            submitted.push(tx.clone());
+            if submitted.len() == 1 {
+                Err(settlement_response(
+                    -32600,
+                    "canonical checkpoint awaits settlement; retry after settlement",
+                ))
+            } else {
+                Ok(tx.signatures[0])
+            }
+        },
+        || {
+            waits += 1;
+            true
+        },
+    )
+    .unwrap();
+    assert_eq!(signature, tx.signatures[0]);
+    assert_eq!(submitted, vec![tx.clone(), tx]);
+    assert_eq!(waits, 1);
+}
+
+#[test]
+fn settlement_retry_stops_when_the_wait_budget_is_exhausted() {
+    let mut submitted = 0;
+    let result = retry_settlement_pending(
+        || {
+            submitted += 1;
+            Err(settlement_response(
+                -32600,
+                "canonical checkpoint awaits settlement; retry after settlement",
+            ))
+        },
+        || false,
+    );
+    assert!(result.is_err());
+    assert_eq!(submitted, 1);
+}
+
+#[test]
+fn settlement_retry_preserves_unrelated_errors_without_waiting() {
+    for (code, message) in [
+        (-32600, "other rejection"),
+        (
+            -32602,
+            "canonical checkpoint awaits settlement; retry after settlement",
+        ),
+    ] {
+        let mut submitted = 0;
+        let result = retry_settlement_pending(
+            || {
+                submitted += 1;
+                Err(settlement_response(code, message))
+            },
+            || panic!("unrelated errors must not be retried"),
+        );
+        assert!(result.is_err());
+        assert_eq!(submitted, 1);
+    }
 }
 
 fn wait_for_health(rpc: &RpcClient) {

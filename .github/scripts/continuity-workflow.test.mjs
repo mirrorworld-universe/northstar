@@ -91,6 +91,17 @@ test('failed L1 recovery is explicitly selected, scoped and regression tested', 
   expect(notification.run).toContain('Prior L1 data and all ER journals were preserved.');
 });
 
+test('pending upload diagnostics remain master-only and never invoke activation', async () => {
+  const diagnostic = Bun.YAML.parse(await Bun.file(new URL('../workflows/native-runtime-diagnostics.yml', import.meta.url)).text());
+  const job = diagnostic.jobs.inspect;
+  expect(job.if).toContain("github.ref == 'refs/heads/master'");
+  const collect = job.steps.find(step => step.id === 'diagnostics');
+  expect(collect.env.PENDING_REVISION).toBe('${{ inputs.pending_revision }}');
+  expect(collect.run).toContain('--pending-revision "$PENDING_REVISION"');
+  expect(collect.run).not.toMatch(/systemctl|program deploy|continuity_devnet\.py|install/);
+  expect(job.steps.map(step => step.uses).filter(Boolean)).toEqual(['actions/checkout@v4', 'actions/upload-artifact@v4']);
+});
+
 test('artifact upload selects only the verified public report', () => {
   const uploads = steps.filter(step => step.uses?.startsWith('actions/upload-artifact@'));
   expect(uploads).toHaveLength(1);

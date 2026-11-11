@@ -521,7 +521,7 @@ def recovery_directory_metadata(namespace, owner):
     return {"l1_directories": directories, "retry_records": {name: os.path.lexists(retry / filename) for name, filename in records.items()}}
 
 
-def managed_records(start, root, dropin, retained_start="", bound_arguments=None):
+def managed_records(start, root, dropin, retained_start="", bound_arguments=None, bound_specification=None):
     references = start + "\n" + retained_start
     original = sorted(set(re.findall(re.escape(str(root)) + r"/([0-9a-f]{40})/runtime/(?:bin/agave-validator|checkpoints|unsettled)", references)))
     # Retained L1 directories may belong to an older upgrade; only executables select a runtime.
@@ -575,6 +575,10 @@ def managed_records(start, root, dropin, retained_start="", bound_arguments=None
         if (identity_ok and report["managed_dropin_matches_original"] and report["original_binary_matches"]
                 and effective_arguments_match(start, text) and bound_arguments is not None):
             bound_arguments.extend(activation["arguments"])
+            if bound_specification is not None:
+                bound_specification.update(arguments=activation["arguments"], state_environment=expected_environment,
+                                           binary_sha256=artifacts["validator"], uid=reservation["original"]["uid"],
+                                           gid=reservation["original"]["gid"])
         report["journal_directories"] = {}
         for role in ("checkpoints", "unsettled"):
             directory = base / "runtime" / role
@@ -607,6 +611,9 @@ def managed_records(start, root, dropin, retained_start="", bound_arguments=None
                 report["upgrade_record"].update(recovery_directory_metadata(root / "upgrades" / upgraded[0], upgrade_plan["desired"]))
             if arguments and bound_arguments is not None:
                 bound_arguments[:] = arguments
+                if bound_specification is not None:
+                    bound_specification.clear()
+                    bound_specification.update(upgrade_plan["desired"])
     except FileNotFoundError:
         report["status"] = "missing_record_or_path"
     except (OSError, ValueError, TypeError, KeyError):
@@ -614,7 +621,96 @@ def managed_records(start, root, dropin, retained_start="", bound_arguments=None
     return report
 
 
-def collect_report(run=execute, root=STATE_ROOT, dropin=DROPIN, lock=LOCK):
+def upload_operation_errors(path, owner):
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_NOATIME", 0))
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != owner or info.st_mode & 0o077:
+                return {"status": "unavailable", "raw_messages_included": False}
+            if info.st_size > 64 * 1024 * 1024:
+                return {"status": "file_limit_exceeded", "raw_messages_included": False}
+            os.lseek(descriptor, max(0, info.st_size - 128 * 1024), os.SEEK_SET)
+            data = os.read(descriptor, 128 * 1024)
+        finally:
+            os.close(descriptor)
+        text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", data.decode(errors="replace"))
+        patterns = {"http_rate_limit": r"\b429\b", "rpc_transport": r"connection reset|connection closed|timed? out|connection refused",
+                    "blockhash_expired": r"BlockhashNotFound|blockhash.*expired|block height exceeded",
+                    "insufficient_funds": r"insufficient funds|InsufficientFunds",
+                    "transaction_rejected": r"Transaction simulation failed|TransactionError",
+                    "program_size": r"program.*too large|program.*larger than|account data too small",
+                    "elf_verification": r"ELF error|ELF verification|failed to verify.*program"}
+        counts = {name: len(re.findall(pattern, text, re.I)) for name, pattern in patterns.items()}
+        writes = sorted(set(int(value) for value in re.findall(r"\b([0-9]{1,6}) write transactions failed\b", text, re.I)))
+        codes = sorted(set(int(value) for value in re.findall(r"\bRPC (?:response )?error[: =]+(-[0-9]{4,5})\b", text, re.I)))
+        return {"status": "classified", "bytes_examined": len(data), "tail_only": info.st_size > len(data),
+                "markers": {name: count for name, count in counts.items() if count}, "write_transactions_failed": writes,
+                "rpc_error_codes": codes, "raw_messages_included": False, "markers_are_not_a_root_cause_diagnosis": True}
+    except (OSError, ValueError):
+        return {"status": "unavailable", "raw_messages_included": False}
+
+
+def pending_fresh_upload(root, revision, specification):
+    report = {"status": "unavailable", "onchain_state_checked": False, "recovery_performed": False}
+    if not re.fullmatch("[0-9a-f]{40}", revision) or not specification:
+        return report
+    try:
+        namespace = root / revision
+        control = namespace / "control"
+        allowed = {os.getuid()}
+        if os.getuid() == 0 and os.environ.get("SUDO_UID", "").isdigit():
+            allowed.add(int(os.environ["SUDO_UID"]))
+        for directory in (namespace, control):
+            info = directory.lstat()
+            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid not in allowed:
+                return report
+        owner = control.lstat().st_uid
+        if control.lstat().st_mode & 0o077:
+            return report
+        plan = private_json(control / "plan.json")
+        reservation = private_json(control / "reservation.json")
+        progress = private_json(control / "fresh-progress.json")
+        replacement = reservation["replacement"]
+        artifacts = plan["artifacts"]
+        sdk = plan.get("sdk_revision")
+        expected_profile = digest({"version": 2, "source": revision, "artifacts": artifacts, "sdk": sdk,
+                                   "proof_acceptance_qualified": False})
+        if (plan.get("version") != 2 or plan.get("mode") != "fresh-stack" or plan.get("genesis") != DEVNET
+                or reservation.get("version") != 2 or plan.get("source_revision") != reservation.get("source_revision")
+                or plan["source_revision"] != revision or not isinstance(sdk, str) or not re.fullmatch("[0-9a-f]{40}", sdk)
+                or reservation.get("sdk_revision") != sdk or reservation.get("plan_sha256") != digest(plan)
+                or plan.get("profile") != expected_profile or plan.get("original_sha256") != digest(reservation["original"])
+                or plan.get("replacement_sha256") != digest(replacement) or replacement.get("version") != 1
+                or replacement.get("service") != specification
+                or any(reservation["original"].get(key) != value for key, value in specification.items())
+                or set(artifacts) != set(ARTIFACTS)
+                or any(not isinstance(value, str) or not re.fullmatch("[0-9a-f]{64}", value) for value in artifacts.values())
+                or progress != {"version": 1, "plan_sha256": digest(plan), "phase": "prepared"}
+                or any(os.path.lexists(control / name) for name in ("fresh-starts", "activation.json", "activation-installed.json"))
+                or os.path.lexists(namespace / "runtime")):
+            return report
+        if set(plan["programs"]) != {"portal", "token_bridge", "portal-buffer", "token_bridge-buffer"}:
+            return report
+        for value in plan["programs"].values():
+            public_bytes(value)
+        state = private_json(control / "programs.json")
+        if state.get("version") != 2 or not isinstance(state.get("roles"), dict) or not set(state["roles"]) <= {"portal", "token_bridge"}:
+            return report
+        uploads = {"portal": "not-recorded", "token_bridge": "not-recorded"}
+        for role, entry in state["roles"].items():
+            if (not isinstance(entry, dict) or set(entry) != {"elf_sha256", "complete"}
+                    or entry["elf_sha256"] != artifacts[role] or entry["complete"] is not None and not isinstance(entry["complete"], dict)):
+                return report
+            uploads[role] = "unresolved" if entry["complete"] is None else "recorded-complete"
+        report.update(status="inspected", phase="prepared", previous_service_matches=True, native_start_recorded=False,
+                      uploads=uploads, operation_errors=upload_operation_errors(control / "operations.log", owner))
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
+    return report
+
+
+def collect_report(run=execute, root=STATE_ROOT, dropin=DROPIN, lock=LOCK, pending_revision=""):
     report = {"version": 1, "read_only": True, "service": SERVICE,
               "scope": "systemd and retained metadata only; no RPC qualification or recovery"}
     private_properties = ("ExecStart", "StandardOutput", "StandardOutputFile", "StandardError", "StandardErrorFile", "WorkingDirectory", "LogNamespace")
@@ -640,13 +736,16 @@ def collect_report(run=execute, root=STATE_ROOT, dropin=DROPIN, lock=LOCK):
         except (OSError, ValueError):
             retained_start = ""
             report["managed_dropin_readable"] = False
-        bound_arguments = []
-        report["managed_records"] = managed_records(values.get("ExecStart", ""), root, dropin, retained_start, bound_arguments)
+        bound_arguments, bound_specification = [], {}
+        report["managed_records"] = managed_records(values.get("ExecStart", ""), root, dropin, retained_start, bound_arguments, bound_specification)
         records = report["managed_records"]
         if (bound_arguments and any(values.get(name) in ("append", "file", "truncate") and not values.get(name + "File")
                                     for name in ("StandardOutput", "StandardError"))):
             values.update(unit_log_sinks(run, values))
         report["operational"] = operational_details(values, root, records, bound_arguments)
+        if pending_revision:
+            report["pending_fresh_upload"] = pending_fresh_upload(root, pending_revision,
+                bound_specification if values.get("ActiveState") == "active" else {})
         report["status"] = "snapshot_collected"
     except FileNotFoundError:
         report["status"] = "deployment_lock_missing"
@@ -661,8 +760,12 @@ def collect_report(run=execute, root=STATE_ROOT, dropin=DROPIN, lock=LOCK):
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Read-only native lifecycle and optional pending-upload evidence")
+    parser.add_argument("--pending-revision", default="")
+    args = parser.parse_args()
     try:
-        report = collect_report()
+        report = collect_report(pending_revision=args.pending_revision)
     except Exception:
         report = {"version": 1, "read_only": True, "status": "diagnostics_unavailable"}
     print(json.dumps(report, sort_keys=True))

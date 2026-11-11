@@ -2,6 +2,12 @@ name: Native runtime diagnostics (read-only)
 
 on:
   workflow_dispatch:
+    inputs:
+      pending_revision:
+        description: Pending fresh revision to classify without resolving uploads or changing services
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -21,11 +27,13 @@ jobs:
           persist-credentials: false
       - name: Collect public read-only diagnostics
         id: diagnostics
+        env:
+          PENDING_REVISION: ${{ inputs.pending_revision }}
         run: |
           set -euo pipefail
           umask 077
           REPORT="$RUNNER_TEMP/native-runtime-diagnostics-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
-          sudo -n python3 -B .github/scripts/native_runtime_diagnostics.py | tee "$REPORT"
+          sudo -n python3 -B .github/scripts/native_runtime_diagnostics.py --pending-revision "$PENDING_REVISION" | tee "$REPORT"
           printf 'report_path=%s\n' "$REPORT" >> "$GITHUB_OUTPUT"
       - name: Retain only the sanitized public report
         uses: actions/upload-artifact@v4
