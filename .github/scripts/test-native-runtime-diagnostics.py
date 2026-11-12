@@ -406,6 +406,39 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(summary["status"], "unavailable")
         self.assertNotIn(SECRET, json.dumps(summary))
 
+    def test_prepared_native_continuation_evidence_binds_plan_process_and_record_hash(self):
+        revision, control = self.install_pending_upload()
+        plan = private_json(control / "plan.json")
+        saved = private_json(control / "reservation.json")
+        saved["original"].update(pid=123, start_time="42")
+        saved["devnet_rpc"] = "https://api.devnet.solana.com"
+        plan["original_sha256"] = diagnostics.digest(saved["original"])
+        saved["plan_sha256"] = diagnostics.digest(plan)
+        atomic_json(control / "plan.json", plan)
+        atomic_json(control / "reservation.json", saved)
+        atomic_json(control / "fresh-progress.json", {"version": 1, "plan_sha256": diagnostics.digest(plan), "phase": "prepared"})
+        record = {"version": 1, "kind": "prepared-fresh-controller", "source_revision": revision,
+                  "controller_revision": "d" * 40, "plan_sha256": diagnostics.digest(plan),
+                  "programs_sha256": diagnostics.digest(private_json(control / "programs.json")),
+                  "previous_service_sha256": diagnostics.digest(saved["replacement"]["service"]),
+                  "previous_pid": 123, "previous_start_time": "42", "preflight_rpc": saved["l1_rpc"],
+                  "qualification_rpc": saved["devnet_rpc"], "phase": "failed", "operator_reconciliation_required": True}
+        atomic_json(control / "fresh-controller-continuation.json", record)
+        summary = self.collect_pending(revision)["pending_fresh_upload"]["fresh_continuation"]
+        self.assertEqual(summary["phase"], "failed")
+        self.assertEqual(summary["record_sha256"], diagnostics.digest(record))
+        self.assertEqual(summary["additional_pass"], {"status": "not-recorded", "attempt_barrier_present": False})
+        record["previous_pid"] = 124
+        atomic_json(control / "fresh-controller-continuation.json", record)
+        self.assertEqual(self.collect_pending(revision)["pending_fresh_upload"]["fresh_continuation"]["status"], "unavailable")
+
+    def test_orphan_native_continuation_retry_is_not_an_unused_budget(self):
+        revision, control = self.install_pending_upload()
+        atomic_json(control / "fresh-controller-continuation-retry.json", {"private": SECRET})
+        summary = self.collect_pending(revision)["pending_fresh_upload"]["fresh_continuation"]
+        self.assertEqual(summary["status"], "unavailable")
+        self.assertNotIn(SECRET, json.dumps(summary))
+
     def test_pending_upload_never_claims_absent_budget_when_a_report_remains(self):
         revision, control = self.install_pending_upload()
         atomic_json(control / "program-upload-reconcile-report.json", {"result": "failed", "private": SECRET})

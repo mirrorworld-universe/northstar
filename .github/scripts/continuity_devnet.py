@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
@@ -52,12 +53,40 @@ class Rpc:
     def __init__(self, url):
         self.url = url
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        parsed = urlsplit(url)
+        self.public_https = parsed.scheme == "https" and parsed.hostname not in ("localhost", "127.0.0.1", "::1")
+        self.next_public_read = 0.0
 
     def call(self, method, params=None):
         request = urllib.request.Request(self.url, data=canonical({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or []}),
                                          headers={"content-type": "application/json"})
-        with self.opener.open(request, timeout=20) as response:
-            raw = response.read(16 * 1024 * 1024 + 1)
+        retryable = self.public_https and method.startswith("get")
+        deadline = time.monotonic() + 45
+        for attempt in range(4 if retryable else 1):
+            if retryable:
+                delay = max(0.0, self.next_public_read - time.monotonic())
+                if delay:
+                    time.sleep(delay)
+                self.next_public_read = time.monotonic() + 1
+            remaining = deadline - time.monotonic()
+            require(remaining > 0, "RPC read retry deadline exceeded")
+            try:
+                with self.opener.open(request, timeout=min(20, remaining)) as response:
+                    raw = response.read(16 * 1024 * 1024 + 1)
+                break
+            except urllib.error.HTTPError as error:
+                header = error.headers.get("Retry-After") if error.headers else None
+                error.close()
+                if not retryable or error.code != 429 or attempt == 3:
+                    raise
+                delay = float(5 * 2 ** attempt)
+                if header is not None:
+                    if not re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3})?", header.strip()):
+                        raise
+                    delay = max(1.0, float(header))
+                if delay > 30 or delay >= deadline - time.monotonic():
+                    raise
+                time.sleep(delay)
         require(len(raw) <= 16 * 1024 * 1024, "RPC response exceeds bound")
         result = json.loads(raw)
         require(isinstance(result, dict) and result.get("error") is None and "result" in result, "RPC failed: " + method)

@@ -112,6 +112,7 @@ jobs:
           python3 -B .github/scripts/test-build-continuity-v2.py
           python3 -B .github/scripts/test-continuity-rollout-state.py
           python3 -B .github/scripts/test-continuity-devnet.py
+          python3 -B .github/scripts/test-continuity-rpc.py
           python3 -B .github/scripts/test-continuity-upload-resume.py
           python3 -B .github/scripts/test-continuity-devnet-model.py
           python3 -B .github/scripts/test-native-upgrade.py

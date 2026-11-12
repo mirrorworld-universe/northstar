@@ -21,6 +21,7 @@ class PreparedContinuationTests(unittest.TestCase):
         self.ops.inventory = Mock(return_value={**self.ops.original, "pid": 123, "start_time": "42"})
         saved = private_json(self.ops.control / "reservation.json")
         saved["original"] = self.ops.inventory()
+        saved["devnet_rpc"] = self.ops.args.devnet_rpc
         self.ops.plan["original_sha256"] = digest(saved["original"])
         self.ops.plan["replacement_sha256"] = digest(saved["replacement"])
         self.ops.plan["profile"] = "ef" * 32
@@ -33,10 +34,12 @@ class PreparedContinuationTests(unittest.TestCase):
         self.accounts.clear()
         atomic_json(self.ops.control / "programs.json", {"version": 2, "roles": {
             role: {"elf_sha256": self.ops.manifest["sha256"][role], "complete": view} for role, view in self.views.items()}})
+        self.ops.upstream.call = lambda method, *params: 100 if method == "getSlot" else self.ops.l1.call(method, *params)
         self.original_upstream = self.ops.upstream
         def activate():
             self.assertIs(self.ops.upstream, self.original_upstream)
-            intent = private_json(self.ops.control / "fresh-controller-continuation.json")
+            retry = self.ops.control / "fresh-controller-continuation-retry.json"
+            intent = private_json(retry if retry.exists() else self.ops.control / "fresh-controller-continuation.json")
             self.assertEqual(intent["phase"], "attempted")
             self.assertEqual(intent["plan_sha256"], digest(self.ops.plan))
             self.assertTrue(self.ops.flush.called)
@@ -52,9 +55,21 @@ class PreparedContinuationTests(unittest.TestCase):
     def signed_calls(self):
         return _fixtures["UploadResumeTests"].signed_calls(self)
 
-    def run_continuation(self, plan_hash=None):
+    def run_continuation(self, plan_hash=None, failed_continuation_sha256=None):
+        options = {} if failed_continuation_sha256 is None else {"failed_continuation_sha256": failed_continuation_sha256}
         with redirect_stdout(io.StringIO()):
-            return continue_prepared_fresh(self.ops, "d" * 40, plan_hash or digest(self.ops.plan))
+            return continue_prepared_fresh(self.ops, "d" * 40, plan_hash or digest(self.ops.plan), **options)
+
+    def prior_prestart_failure(self):
+        record = {"version": 1, "kind": "prepared-fresh-controller", "source_revision": self.ops.args.revision,
+                  "controller_revision": "c768a521eb968fdef2dbc84eb3bc7c78495ac760", "plan_sha256": digest(self.ops.plan),
+                  "programs_sha256": digest(private_json(self.ops.control / "programs.json")),
+                  "previous_service_sha256": digest(self.ops.fresh.previous["service"]), "previous_pid": 123,
+                  "previous_start_time": "42", "preflight_rpc": self.ops.args.l1_rpc,
+                  "qualification_rpc": self.ops.args.devnet_rpc, "phase": "failed", "operator_reconciliation_required": True}
+        atomic_json(self.ops.control / "fresh-controller-continuation.json", record)
+        return digest(record)
+
 
     def test_qualified_continuation_keeps_original_plan_keys_and_programs(self):
         before_plan = (self.ops.control / "plan.json").read_bytes()
@@ -69,6 +84,42 @@ class PreparedContinuationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.run_continuation()
         self.assertEqual(self.ops.run.call_count, 1)
+
+    def test_reviewed_prestart_failure_is_linked_without_overwriting_its_record(self):
+        approved = self.prior_prestart_failure()
+        old = (self.ops.control / "fresh-controller-continuation.json").read_bytes()
+        result = self.run_continuation(failed_continuation_sha256=approved)
+        self.assertEqual(result["qualification_kind"], "fresh-stack")
+        self.assertEqual((self.ops.control / "fresh-controller-continuation.json").read_bytes(), old)
+        retry = private_json(self.ops.control / "fresh-controller-continuation-retry.json")
+        self.assertEqual(retry["previous_failed_continuation_sha256"], approved)
+        self.assertEqual(retry["phase"], "qualified")
+        with self.assertRaises(ValueError):
+            self.run_continuation(failed_continuation_sha256=approved)
+        self.assertEqual(self.ops.run.call_count, 1)
+
+    def test_prestart_acknowledgement_rejects_changed_or_quarantined_records(self):
+        self.prior_prestart_failure()
+        with self.assertRaises(ValueError):
+            self.run_continuation(failed_continuation_sha256="e" * 64)
+        marker = self.ops.control / "fresh-controller-continuation.json"
+        record = private_json(marker)
+        record["quarantine_requested"] = True
+        atomic_json(marker, record)
+        with self.assertRaises(ValueError):
+            self.run_continuation(failed_continuation_sha256=digest(record))
+        self.ops.run.assert_not_called()
+
+    def test_independent_oracle_unavailable_does_not_record_an_additional_native_attempt(self):
+        from urllib.error import HTTPError
+        approved = self.prior_prestart_failure()
+        before = (self.ops.control / "fresh-controller-continuation.json").read_bytes()
+        self.ops.upstream.call = Mock(side_effect=HTTPError("https://private.invalid", 429, "private response", {}, None))
+        with self.assertRaises(HTTPError):
+            self.run_continuation(failed_continuation_sha256=approved)
+        self.assertFalse((self.ops.control / "fresh-controller-continuation-retry.json").exists())
+        self.assertEqual((self.ops.control / "fresh-controller-continuation.json").read_bytes(), before)
+        self.ops.run.assert_not_called()
 
     def test_missing_plan_never_enters_identity_preparation(self):
         (self.ops.control / "plan.json").unlink()

@@ -714,6 +714,64 @@ def upload_reconciliation_status(control, plan, reservation, specification):
     return summary
 
 
+def fresh_continuation_attempt(control, plan, reservation, specification, programs, prefix, previous_sha256=None):
+    marker = control / (prefix + ".json")
+    if not os.path.lexists(marker):
+        return {"status": "not-recorded", "attempt_barrier_present": False}
+    unavailable = {"status": "unavailable"}
+    try:
+        record = private_json(marker)
+        if not isinstance(record, dict):
+            return unavailable
+        version, phase = record.get("version"), record.get("phase")
+        keys = {"version", "kind", "source_revision", "controller_revision", "plan_sha256", "programs_sha256",
+                "previous_service_sha256", "previous_pid", "previous_start_time", "preflight_rpc", "qualification_rpc", "phase"}
+        if phase == "failed":
+            keys.add("operator_reconciliation_required")
+            for flag in ("quarantine_requested", "quarantine_verified"):
+                if flag in record:
+                    keys.add(flag)
+                    if type(record[flag]) is not bool:
+                        return unavailable
+        if previous_sha256 is not None:
+            keys.add("previous_failed_continuation_sha256")
+            if version != 2 or record.get("previous_failed_continuation_sha256") != previous_sha256:
+                return unavailable
+        elif version != 1:
+            return unavailable
+        if (set(record) != keys or type(version) is not int or record.get("kind") != "prepared-fresh-controller"
+                or record.get("source_revision") != plan["source_revision"] or record.get("plan_sha256") != digest(plan)
+                or record.get("programs_sha256") != digest(programs)
+                or record.get("previous_service_sha256") != digest(specification)
+                or type(record.get("previous_pid")) is not int or record["previous_pid"] != reservation["original"].get("pid")
+                or record.get("previous_start_time") != reservation["original"].get("start_time")
+                or record.get("preflight_rpc") != reservation.get("l1_rpc")
+                or record.get("qualification_rpc") != reservation.get("devnet_rpc")
+                or not isinstance(record.get("controller_revision"), str)
+                or not re.fullmatch("[0-9a-f]{40}", record["controller_revision"])
+                or phase not in ("attempted", "qualified", "failed")
+                or phase == "failed" and record.get("operator_reconciliation_required") is not True):
+            return unavailable
+        return {"status": "recorded", "attempt_barrier_present": True, "phase": phase,
+                "controller_revision": record["controller_revision"], "record_sha256": digest(record),
+                "quarantine_requested": record.get("quarantine_requested", False),
+                "operator_reconciliation_required": phase != "qualified"}
+    except (OSError, ValueError, TypeError, KeyError):
+        return unavailable
+
+
+def fresh_continuation_status(control, plan, reservation, specification, programs):
+    summary = fresh_continuation_attempt(control, plan, reservation, specification, programs, "fresh-controller-continuation")
+    extra = os.path.lexists(control / "fresh-controller-continuation-retry.json")
+    if summary["status"] == "not-recorded" and extra:
+        return {"status": "unavailable"}
+    if summary["status"] == "recorded":
+        summary["additional_pass"] = fresh_continuation_attempt(control, plan, reservation, specification, programs,
+            "fresh-controller-continuation-retry", summary["record_sha256"]) if summary["phase"] == "failed" else (
+                {"status": "unavailable"} if extra else {"status": "not-recorded", "attempt_barrier_present": False})
+    return summary
+
+
 def pending_fresh_upload(root, revision, specification):
     report = {"status": "unavailable", "onchain_state_checked": False, "recovery_performed": False}
     if not re.fullmatch("[0-9a-f]{40}", revision) or not specification:
@@ -768,7 +826,8 @@ def pending_fresh_upload(root, revision, specification):
             uploads[role] = "unresolved" if entry["complete"] is None else "recorded-complete"
         report.update(status="inspected", source_revision=revision, phase="prepared", previous_service_matches=True, native_start_recorded=False,
                       uploads=uploads, operation_errors=upload_operation_errors(control / "operations.log", owner),
-                      upload_reconciliation=upload_reconciliation_status(control, plan, reservation, specification))
+                      upload_reconciliation=upload_reconciliation_status(control, plan, reservation, specification),
+                      fresh_continuation=fresh_continuation_status(control, plan, reservation, specification, state))
     except (OSError, ValueError, TypeError, KeyError):
         pass
     return report
