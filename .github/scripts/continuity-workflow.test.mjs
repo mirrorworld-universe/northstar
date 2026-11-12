@@ -139,6 +139,20 @@ test('upload reconciliation exposes the installed Solana toolkit before controll
   }
 });
 
+test('prepared fresh continuation binds retained plan and publishes only qualified evidence', async () => {
+  const continuation = Bun.YAML.parse(await Bun.file(new URL('../workflows/fresh-prepared-continuation.yml', import.meta.url)).text());
+  const job = continuation.jobs.activate;
+  expect(job.if).toContain("github.ref == 'refs/heads/master'");
+  const activate = job.steps.find(step => step.id === 'activate');
+  expect(activate.env.PLAN_SHA256).toBe('${{ inputs.plan_sha256 }}');
+  expect(activate.run).toContain('fresh_prepared_continuation.py');
+  expect(activate.run).toContain('export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"');
+  expect(activate.run).not.toMatch(/systemctl|build-continuity|--stage|variable set/);
+  expect(job.steps.at(-1).if).toContain("steps.activate.conclusion == 'success'");
+  expect(job.steps.at(-1).with.path).toBe('${{ steps.activate.outputs.report_path }}');
+  expect(workflow.jobs.test.steps.map(step => step.run ?? '').join('\n')).toContain('test-fresh-prepared-continuation.py');
+});
+
 test('artifact upload selects only the verified public report', () => {
   const uploads = steps.filter(step => step.uses?.startsWith('actions/upload-artifact@'));
   expect(uploads).toHaveLength(1);
