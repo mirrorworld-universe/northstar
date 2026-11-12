@@ -1,14 +1,18 @@
-name: 'Ensure Rust toolchain'
-description: 'Ensures the Rust toolchain is installed and available on the PATH'
+name: Ensure Rust toolchain
+description: Install and verify the exact compiler declared by the checkout without resetting tool homes
 runs:
-  using: "composite"
+  using: composite
   steps:
     - name: Ensure Rust toolchain
       shell: bash
       run: |
-        if [ ! -f "$HOME/.cargo/bin/rustup" ]; then
-          echo "Rust missing, reinstalling..."
-          rm -rf $HOME/.cargo $HOME/.rustup
-          curl https://sh.rustup.rs -sSf | sh -s -- -y
+        set -euo pipefail
+        if [[ ! -x "$HOME/.cargo/bin/rustup" ]]; then
+          curl --fail --silent --show-error --retry 3 --connect-timeout 10 --max-time 120 https://sh.rustup.rs \
+            | sh -s -- -y --no-modify-path --default-toolchain none --profile minimal
         fi
-        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+        export PATH="$HOME/.cargo/bin:$PATH"
+        printf '%s\n' "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        channel=$(python3 -c 'import pathlib,re; text=pathlib.Path("rust-toolchain.toml").read_text(); values=re.findall(r"(?m)^\s*channel\s*=\s*\"([^\"]+)\"\s*$",text); assert len(values)==1 and re.fullmatch(r"(?:[0-9]+\.[0-9]+\.[0-9]+|stable|beta|nightly(?:-[0-9]{4}-[0-9]{2}-[0-9]{2})?)",values[0]), "invalid pinned Rust channel"; print(values[0])')
+        "$HOME/.cargo/bin/rustup" toolchain install "$channel" --profile minimal --no-self-update
+        "$HOME/.cargo/bin/rustup" run "$channel" rustc --version

@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
@@ -52,12 +53,40 @@ class Rpc:
     def __init__(self, url):
         self.url = url
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        parsed = urlsplit(url)
+        self.public_https = parsed.scheme == "https" and parsed.hostname not in ("localhost", "127.0.0.1", "::1")
+        self.next_public_read = 0.0
 
     def call(self, method, params=None):
         request = urllib.request.Request(self.url, data=canonical({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or []}),
                                          headers={"content-type": "application/json"})
-        with self.opener.open(request, timeout=20) as response:
-            raw = response.read(16 * 1024 * 1024 + 1)
+        retryable = self.public_https and method.startswith("get")
+        deadline = time.monotonic() + 45
+        for attempt in range(4 if retryable else 1):
+            if retryable:
+                delay = max(0.0, self.next_public_read - time.monotonic())
+                if delay:
+                    time.sleep(delay)
+                self.next_public_read = time.monotonic() + 1
+            remaining = deadline - time.monotonic()
+            require(remaining > 0, "RPC read retry deadline exceeded")
+            try:
+                with self.opener.open(request, timeout=min(20, remaining)) as response:
+                    raw = response.read(16 * 1024 * 1024 + 1)
+                break
+            except urllib.error.HTTPError as error:
+                header = error.headers.get("Retry-After") if error.headers else None
+                error.close()
+                if not retryable or error.code != 429 or attempt == 3:
+                    raise
+                delay = float(5 * 2 ** attempt)
+                if header is not None:
+                    if not re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3})?", header.strip()):
+                        raise
+                    delay = max(1.0, float(header))
+                if delay > 30 or delay >= deadline - time.monotonic():
+                    raise
+                time.sleep(delay)
         require(len(raw) <= 16 * 1024 * 1024, "RPC response exceeds bound")
         result = json.loads(raw)
         require(isinstance(result, dict) and result.get("error") is None and "result" in result, "RPC failed: " + method)
@@ -306,7 +335,11 @@ class Deployment:
         return {"programdata": address, "deployment_slot": int.from_bytes(stored["raw"][4:12], "little"),
                 "sha256": hashlib.sha256(stored["raw"]).hexdigest()}
 
-    def deploy_programs(self):
+    def deploy_programs(self, *, resume_roles=frozenset(), submission_rpc=None, stop_worker=True, before_submit=None):
+        require(set(resume_roles) <= {"portal", "token_bridge"}
+                and (not resume_roles or submission_rpc == self.args.l1_rpc and not stop_worker)
+                and (submission_rpc is None or submission_rpc == self.args.l1_rpc and not stop_worker)
+                and (stop_worker or submission_rpc == self.args.l1_rpc), "invalid retained upload submission scope")
         marker = self.control / "programs.json"
         state = private_json(marker) if marker.exists() else {"version": 2, "roles": {}}
         lengths = {role: (self.stage / ARTIFACTS[role]).stat().st_size for role in ("portal", "token_bridge")}
@@ -316,13 +349,18 @@ class Deployment:
             require(isinstance(entry, dict) and set(entry) == {"elf_sha256", "complete"}
                     and entry["elf_sha256"] == self.manifest["sha256"][role], "native upload record differs from frozen artifact")
             observed = self.program_view(role)
-            require(observed is not None, "retained upload is unresolved; inspect original buffer, never replace it automatically")
+            if observed is None:
+                require(role in resume_roles and entry["complete"] is None,
+                        "retained upload is unresolved; inspect original buffer, never replace it automatically")
+                continue
             if entry["complete"] is not None:
                 require(entry["complete"] == observed, "completed native upload observation changed")
             else:
                 entry["complete"] = observed
         if state["roles"]:
             atomic_json(marker, state)
+        if set(state["roles"]) == set(lengths) and all(entry["complete"] is not None for entry in state["roles"].values()):
+            return
         def rent(size):
             value = self.upstream.call("getMinimumBalanceForRentExemption", [size])
             require(type(value) is int and 0 < value < 1 << 64, "invalid native rent quote")
@@ -331,21 +369,27 @@ class Deployment:
         buffers = {role: rent(size + 37) for role, size in lengths.items()}
         quote = 500_000_000 + sum(permanent.values()) + max(buffers.values())
         require(quote <= self.args.max_estimated_cost_lamports, "native deployment estimate exceeds approved quote limit")
-        missing = [role for role in lengths if role not in state["roles"]]
+        missing = [role for role in lengths if role not in state["roles"] or state["roles"][role]["complete"] is None]
         if missing:
             remaining = 500_000_000 + sum(permanent[role] for role in missing) + max(buffers[role] for role in missing)
             balance = self.upstream.call("getBalance", [self.plan["funder"], {"commitment": "finalized"}])["value"]
             print(json.dumps({"phase": "funding-quote", "address": self.plan["funder"], "available_lamports": balance,
                               "estimated_total_lamports": quote, "required_remaining_lamports": remaining}), flush=True)
             require(type(balance) is int and balance >= remaining, "native deployer requires additional devnet funding")
-        self.execute(["sudo", "-n", "python3", "-B", ROOT / ".github/scripts/stop-vrf-service.py"])
+        if stop_worker:
+            self.execute(["sudo", "-n", "python3", "-B", ROOT / ".github/scripts/stop-vrf-service.py"])
         for role, size in lengths.items():
-            if role in state["roles"]:
+            if role in state["roles"] and state["roles"][role]["complete"] is not None:
                 continue
             require(self.upstream.account(self.plan["programs"][role]) is None, "unrecorded native deployment exists")
             state["roles"][role] = {"elf_sha256": self.manifest["sha256"][role], "complete": None}
             atomic_json(marker, state)
-            self.execute([self.stage / ARTIFACTS["cli"], "--url", self.args.devnet_rpc,
+            if submission_rpc is not None:
+                require(self.l1.call("getHealth") == "ok" and self.l1.call("getGenesisHash") == DEVNET
+                        and self.l1.call("getIdentity")["identity"] == self.plan["validator"], "program submission L1 identity differs")
+            if before_submit is not None:
+                before_submit(role)
+            self.execute([self.stage / ARTIFACTS["cli"], "--url", submission_rpc or self.args.devnet_rpc,
                           "--keypair", self.args.funder_keypair, "program", "deploy", self.stage / ARTIFACTS[role],
                           "--program-id", self.control / "keys" / (role + ".json"), "--buffer", self.control / "keys" / (role + "-buffer.json"),
                           "--max-len", str(size), "--use-rpc"], timeout=900)
@@ -516,7 +560,22 @@ class Deployment:
         require(observed["arguments"] == arguments and observed["state_environment"] == expected
                 and observed["binary_sha256"] == self.manifest["sha256"]["validator"], "running native service does not match isolated specification")
 
-    def smoke(self):
+    def smoke(self, *, resumed_phase=None):
+        if resumed_phase is not None:
+            require(resumed_phase == "resume-sol" and self.fresh is not None and self.fresh.phase() == "running",
+                    "reconciled smoke requires a running fresh resume")
+            record = private_json(self.control / "fresh-poststart-reconciliation.json")
+            ready = private_json(self.control / "fresh-reconciliation/ready.json")
+            require(record.get("version") == 1 and record.get("kind") == "fresh-poststart-reconciliation"
+                    and record.get("phase") == "running" and record.get("source_revision") == self.args.revision
+                    and record.get("plan_sha256") == hashlib.sha256(canonical(self.plan)).hexdigest()
+                    and record.get("extra_native_starts") == 1 and record.get("program_submissions") == 0
+                    and ready == private_json(self.control / "fresh-reconciliation/start-attempted.json")
+                    and ready.get("version") == 1 and ready.get("phase") == resumed_phase
+                    and ready.get("plan_sha256") == record["plan_sha256"]
+                    and ready.get("review_sha256") == record.get("review_sha256") and ready.get("context") == record.get("context")
+                    and not os.path.lexists(self.control / "sdk-smoke/resume-sol.json"), "reconciled smoke ready barrier differs")
+            self.fresh.verify_desired(running=True)
         er_genesis = self.er.call("getGenesisHash")
         public_bytes(er_genesis)
         config = self.plan | {"er_genesis": er_genesis, "l1_rpc": self.args.l1_rpc, "er_rpc": self.args.er_rpc,
@@ -528,7 +587,7 @@ class Deployment:
         atomic_json(config_path, config)
         phases = []
         for phase in ("bootstrap", "prepare-sol", "resume-sol", "prepare-spl", "resume-spl"):
-            if phase.startswith("resume-") and not (Path(config["smoke_directory"]) / (phase + ".json")).exists():
+            if phase.startswith("resume-") and phase != resumed_phase and not (Path(config["smoke_directory"]) / (phase + ".json")).exists():
                 self.stop()
                 self.start()
             print(json.dumps({"phase": phase, "status": "starting"}), flush=True)
@@ -586,6 +645,7 @@ def main():
     mode = subcommands.add_parser("mode")
     mode.add_argument("--recovery-slot", default="")
     mode.add_argument("--replace-context", default="")
+    mode.add_argument("--l1-rpc-profile", default="")
     for name in ("fingerprint", "inspect", "flush", "empty-l1"):
         inspector = subcommands.add_parser(name)
         inspector.add_argument("--input", type=Path, required=True)
@@ -600,6 +660,7 @@ def main():
     run.add_argument("--er-rpc", default="http://127.0.0.1:8910")
     run.add_argument("--max-estimated-cost-lamports", type=int, default=10_000_000_000)
     run.add_argument("--upgrade-existing", action="store_true", help="Permit a guarded native-only upgrade of a known managed v2 activation.")
+    run.add_argument("--l1-rpc-profile", choices=("full",), help="Bind unrestricted program, token-owner, and token-mint indexes to a native-only L1 upgrade.")
     run.add_argument("--replace-context", help="Exact reviewed SessionV2 context to abandon during a guarded fresh devnet cutover.")
     run.add_argument("--abandon-previous-state", action="store_true", help="Explicitly leave old on-chain state unused while retaining its local files.")
     run.add_argument("--event-source", choices=("l1", "er"), help="Select the managed SSE source. New plans default to L1; established plans retain their recorded source.")
@@ -608,7 +669,7 @@ def main():
     run.add_argument("--reconcile-stopped-at", help="Exact reviewed systemd ExecMainExitTimestamp; required for explicit reconciliation.")
     args = parser.parse_args()
     if args.operation == "mode":
-        print(" ".join(release_mode_arguments(args.recovery_slot, args.replace_context)))
+        print(" ".join(release_mode_arguments(args.recovery_slot, args.replace_context, args.l1_rpc_profile)))
     elif args.operation == "inventory":
         print(json.dumps(inventory_service()))
     elif args.operation == "empty-l1":
@@ -621,6 +682,9 @@ def main():
         require(args.state_root.is_absolute() and not any(character.isspace() for character in str(args.state_root))
                 and re.fullmatch("[0-9a-f]{40}", args.revision)
                 and 0 < args.max_estimated_cost_lamports <= 50_000_000_000, "invalid rollout root, revision or funding estimate limit")
+        require(not args.l1_rpc_profile or args.upgrade_existing and args.event_source in (None, "l1")
+                and args.recover_failed_l1_slot is None and args.replace_context is None,
+                "L1 RPC profile requires an ordinary L1 native upgrade")
         if args.reconcile_failed_l1:
             require(args.stage is None and args.upgrade_existing and args.recover_failed_l1_slot is not None
                     and args.reconcile_stopped_at is not None, "reconciliation requires retained artifacts and explicit stopped-state evidence")

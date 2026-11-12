@@ -1,4 +1,5 @@
 """Sonic: Public, read-only diagnostics; never expose command lines or journal text."""
+import base64
 import errno
 import fcntl
 import gzip
@@ -17,7 +18,7 @@ from continuity_devnet import DROPIN, SERVICE, public_bytes
 from native_l1_recovery import STATE_PATHS
 from continuity_rollout_state import (
     ARTIFACTS, DEVNET, SDK_REVISION, canonical, file_hash, flag_value, geyser_event_source,
-    geyser_events_config, private_json, service_dropin, upgrade_arguments,
+    geyser_events_config, l1_rpc_arguments, private_json, service_dropin, upgrade_arguments,
 )
 
 STATE_ROOT = Path("/solana/northstar/continuity-v2")
@@ -295,6 +296,39 @@ def gzip_log_summary(path, *, max_compressed_bytes=4 * 1024 ** 3, max_decoded_by
             os.close(descriptor)
 
 
+def rpc_index_configuration(arguments):
+    allowed = {"program-id", "spl-token-owner", "spl-token-mint"}
+    configured, filters = set(), set()
+    if not isinstance(arguments, list) or len(arguments) > 4096 or not all(isinstance(value, str) for value in arguments):
+        return {"status": "ambiguous"}
+    try:
+        for index, argument in enumerate(arguments):
+            flag, separator, inline = argument.partition("=")
+            if flag not in ("--account-index", "--account-index-include-key", "--account-index-exclude-key"):
+                continue
+            selected = [inline] if separator else []
+            for value in arguments[index + 1:]:
+                if value.startswith("-"):
+                    break
+                selected.append(value)
+            selected = [part for value in selected for part in value.split(",")]
+            if not selected or any(not value for value in selected):
+                return {"status": "ambiguous"}
+            if flag == "--account-index":
+                if not set(selected) <= allowed:
+                    return {"status": "ambiguous"}
+                configured.update(selected)
+            else:
+                for value in selected:
+                    public_bytes(value)
+                filters.add("include-only" if flag == "--account-index-include-key" else "exclude-list")
+        if len(filters) > 1:
+            return {"status": "ambiguous"}
+        return {"status": "observed", "configured": sorted(configured), "key_filter": next(iter(filters), "unrestricted")}
+    except (TypeError, ValueError):
+        return {"status": "ambiguous"}
+
+
 def operational_details(values, root, records, bound_arguments=None):
     report = {"filesystems": {"state_root": disk_summary(root)}, "file_logs": []}
     if bound_arguments is not None:
@@ -306,6 +340,7 @@ def operational_details(values, root, records, bound_arguments=None):
     try:
         arguments = bound_arguments if bound_arguments is not None else private_json(
             root / records["original_revisions"][0] / "control/activation.json")["arguments"]
+        report["rpc_account_indexes"] = rpc_index_configuration(arguments)
         working = Path(values.get("WorkingDirectory", ""))
         try:
             ledger = Path(flag_value(arguments, "--ledger"))
@@ -424,6 +459,7 @@ def upgrade_runtime_arguments(start, root, dropin, revision, plan, base_plan, re
                 or set(artifacts) != set(ARTIFACTS)
                 or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value) for value in artifacts.values())
                 or arguments[0] != str(runtime / ARTIFACTS["validator"])
+                or l1_rpc_arguments(arguments, plan.get("l1_rpc_profile")) != arguments
                 or desired["state_environment"] != environment or plan["before"]["state_environment"] != environment
                 or any(desired[key] != reservation["original"][key] for key in ("uid", "gid"))
                 or flag_value(arguments, "--portal") != base_plan["programs"]["portal"]
@@ -486,7 +522,7 @@ def recovery_directory_metadata(namespace, owner):
     return {"l1_directories": directories, "retry_records": {name: os.path.lexists(retry / filename) for name, filename in records.items()}}
 
 
-def managed_records(start, root, dropin, retained_start="", bound_arguments=None):
+def managed_records(start, root, dropin, retained_start="", bound_arguments=None, bound_specification=None):
     references = start + "\n" + retained_start
     original = sorted(set(re.findall(re.escape(str(root)) + r"/([0-9a-f]{40})/runtime/(?:bin/agave-validator|checkpoints|unsettled)", references)))
     # Retained L1 directories may belong to an older upgrade; only executables select a runtime.
@@ -540,6 +576,10 @@ def managed_records(start, root, dropin, retained_start="", bound_arguments=None
         if (identity_ok and report["managed_dropin_matches_original"] and report["original_binary_matches"]
                 and effective_arguments_match(start, text) and bound_arguments is not None):
             bound_arguments.extend(activation["arguments"])
+            if bound_specification is not None:
+                bound_specification.update(arguments=activation["arguments"], state_environment=expected_environment,
+                                           binary_sha256=artifacts["validator"], uid=reservation["original"]["uid"],
+                                           gid=reservation["original"]["gid"])
         report["journal_directories"] = {}
         for role in ("checkpoints", "unsettled"):
             directory = base / "runtime" / role
@@ -572,6 +612,9 @@ def managed_records(start, root, dropin, retained_start="", bound_arguments=None
                 report["upgrade_record"].update(recovery_directory_metadata(root / "upgrades" / upgraded[0], upgrade_plan["desired"]))
             if arguments and bound_arguments is not None:
                 bound_arguments[:] = arguments
+                if bound_specification is not None:
+                    bound_specification.clear()
+                    bound_specification.update(upgrade_plan["desired"])
     except FileNotFoundError:
         report["status"] = "missing_record_or_path"
     except (OSError, ValueError, TypeError, KeyError):
@@ -579,7 +622,388 @@ def managed_records(start, root, dropin, retained_start="", bound_arguments=None
     return report
 
 
-def collect_report(run=execute, root=STATE_ROOT, dropin=DROPIN, lock=LOCK):
+def upload_operation_errors(path, owner):
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_NOATIME", 0))
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != owner or info.st_mode & 0o077:
+                return {"status": "unavailable", "raw_messages_included": False}
+            if info.st_size > 64 * 1024 * 1024:
+                return {"status": "file_limit_exceeded", "raw_messages_included": False}
+            os.lseek(descriptor, max(0, info.st_size - 128 * 1024), os.SEEK_SET)
+            data = os.read(descriptor, 128 * 1024)
+        finally:
+            os.close(descriptor)
+        text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", data.decode(errors="replace"))
+        patterns = {"http_rate_limit": r"\b429\b", "rpc_transport": r"connection reset|connection closed|timed? out|connection refused|error sending request|transport error",
+                    "upload_write_failure": r"Data writes to account failed", "retry_budget_exhausted": r"Max retries exceeded",
+                    "blockhash_expired": r"BlockhashNotFound|blockhash.*expired|block height exceeded",
+                    "insufficient_funds": r"insufficient funds|InsufficientFunds",
+                    "transaction_rejected": r"Transaction simulation failed|TransactionError",
+                    "program_size": r"program.*too large|program.*larger than|account data too small",
+                    "elf_verification": r"ELF error|ELF verification|failed to verify.*program",
+                    "sol_restart_balance": r"SOL restart balance differs",
+                    "sol_receipt_owner": r"SOL receipt owner changed",
+                    "er_readiness_timeout": r"Bound ER session readiness timed out",
+                    "continuity_phase_timeout": r"Continuity phase timed out",
+                    "prior_credit_missing": r"Attempt to debit an account but found no record of a prior credit",
+                    "settlement_pending": r"canonical checkpoint awaits settlement",
+                    "lineage_recovery": r"checkpoint_lineage_recovery_failed|checkpoint_lineage_mismatch",
+                    "program_completion": r"Program failed to complete|ProgramFailedToComplete"}
+        counts = {name: len(re.findall(pattern, text, re.I)) for name, pattern in patterns.items()}
+        writes = sorted(set(int(value) for value in re.findall(r"\b([0-9]{1,6}) write transactions failed\b", text, re.I)))
+        codes = sorted(set(int(value) for value in re.findall(r"\bRPC (?:response )?error[: =]+(-[0-9]{4,5})\b", text, re.I)))
+        return {"status": "classified", "bytes_examined": len(data), "tail_only": info.st_size > len(data),
+                "markers": {name: count for name, count in counts.items() if count}, "write_transactions_failed": writes,
+                "rpc_error_codes": codes, "raw_messages_included": False, "markers_are_not_a_root_cause_diagnosis": True}
+    except (OSError, ValueError):
+        return {"status": "unavailable", "raw_messages_included": False}
+
+
+def upload_attempt_status(control, plan, reservation, specification, prefix, previous_sha256=None):
+    unavailable = {"status": "unavailable"}
+    marker = control / (prefix + ".json")
+    if not os.path.lexists(marker):
+        return unavailable if os.path.lexists(control / (prefix + "-report.json")) else {
+            "status": "not-recorded", "attempt_barrier_present": False}
+    try:
+        record = private_json(marker)
+        if not isinstance(record, dict):
+            return unavailable
+        version, phase = record.get("version"), record.get("phase")
+        keys = {"version", "kind", "plan_sha256", "controller_revision", "source_revision", "submission_rpc",
+                "previous_service_sha256", "pending_roles", "attempt_budget", "phase"}
+        if phase == "failed":
+            keys.add("operator_reconciliation_required")
+        if version == 2:
+            keys.update(("read_rpc", "submission_roles"))
+            submitted = record.get("submission_roles")
+            if (record.get("read_rpc") != reservation.get("l1_rpc") or not isinstance(submitted, list)
+                    or len(submitted) != len(set(submitted)) or not set(submitted) <= {"portal", "token_bridge"}):
+                return unavailable
+        if previous_sha256 is not None:
+            keys.add("previous_failed_record_sha256")
+            if version != 2 or record.get("previous_failed_record_sha256") != previous_sha256:
+                return unavailable
+        roles = record.get("pending_roles")
+        if (set(record) != keys or type(version) is not int or version not in (1, 2)
+                or record.get("kind") != "retained-program-upload"
+                or record.get("plan_sha256") != digest(plan) or record.get("source_revision") != plan["source_revision"]
+                or not isinstance(record.get("controller_revision"), str)
+                or not re.fullmatch("[0-9a-f]{40}", record["controller_revision"])
+                or record.get("submission_rpc") != reservation.get("l1_rpc")
+                or record.get("previous_service_sha256") != digest(specification)
+                or type(record.get("attempt_budget")) is not int or record["attempt_budget"] != 1
+                or phase not in ("attempted", "completed", "failed")
+                or phase == "failed" and record.get("operator_reconciliation_required") is not True
+                or not isinstance(roles, list) or not roles or len(roles) != len(set(roles))
+                or not set(roles) <= {"portal", "token_bridge"}):
+            return unavailable
+        summary = {"status": "recorded", "attempt_barrier_present": True, "phase": phase,
+                   "controller_revision": record["controller_revision"], "record_sha256": digest(record),
+                   "operator_reconciliation_required": phase != "completed"}
+        if version == 2:
+            summary["submission_roles"] = record["submission_roles"]
+        return summary
+    except (OSError, ValueError, TypeError, KeyError):
+        return unavailable
+
+
+def upload_reconciliation_status(control, plan, reservation, specification):
+    summary = upload_attempt_status(control, plan, reservation, specification, "program-upload-reconcile")
+    extra = any(os.path.lexists(control / name) for name in
+                ("program-upload-reconcile-retry.json", "program-upload-reconcile-retry-report.json"))
+    if summary["status"] == "not-recorded" and extra:
+        return {"status": "unavailable"}
+    if summary["status"] == "recorded":
+        summary["additional_pass"] = upload_attempt_status(control, plan, reservation, specification,
+            "program-upload-reconcile-retry", summary["record_sha256"]) if summary["phase"] == "failed" else (
+                {"status": "unavailable"} if extra else {"status": "not-recorded", "attempt_barrier_present": False})
+    return summary
+
+
+def fresh_continuation_attempt(control, plan, reservation, specification, programs, prefix, previous_sha256=None):
+    marker = control / (prefix + ".json")
+    if not os.path.lexists(marker):
+        return {"status": "not-recorded", "attempt_barrier_present": False}
+    unavailable = {"status": "unavailable"}
+    try:
+        record = private_json(marker)
+        if not isinstance(record, dict):
+            return unavailable
+        version, phase = record.get("version"), record.get("phase")
+        keys = {"version", "kind", "source_revision", "controller_revision", "plan_sha256", "programs_sha256",
+                "previous_service_sha256", "previous_pid", "previous_start_time", "preflight_rpc", "qualification_rpc", "phase"}
+        if phase == "failed":
+            keys.add("operator_reconciliation_required")
+            for flag in ("quarantine_requested", "quarantine_verified"):
+                if flag in record:
+                    keys.add(flag)
+                    if type(record[flag]) is not bool:
+                        return unavailable
+        if previous_sha256 is not None:
+            keys.add("previous_failed_continuation_sha256")
+            if version != 2 or record.get("previous_failed_continuation_sha256") != previous_sha256:
+                return unavailable
+        elif version != 1:
+            return unavailable
+        if (set(record) != keys or type(version) is not int or record.get("kind") != "prepared-fresh-controller"
+                or record.get("source_revision") != plan["source_revision"] or record.get("plan_sha256") != digest(plan)
+                or record.get("programs_sha256") != digest(programs)
+                or record.get("previous_service_sha256") != digest(specification)
+                or type(record.get("previous_pid")) is not int or record["previous_pid"] != reservation["original"].get("pid")
+                or record.get("previous_start_time") != reservation["original"].get("start_time")
+                or record.get("preflight_rpc") != reservation.get("l1_rpc")
+                or record.get("qualification_rpc") != reservation.get("devnet_rpc")
+                or not isinstance(record.get("controller_revision"), str)
+                or not re.fullmatch("[0-9a-f]{40}", record["controller_revision"])
+                or phase not in ("attempted", "qualified", "failed")
+                or phase == "failed" and record.get("operator_reconciliation_required") is not True):
+            return unavailable
+        return {"status": "recorded", "attempt_barrier_present": True, "phase": phase,
+                "controller_revision": record["controller_revision"], "record_sha256": digest(record),
+                "quarantine_requested": record.get("quarantine_requested", False),
+                "operator_reconciliation_required": phase != "qualified"}
+    except (OSError, ValueError, TypeError, KeyError):
+        return unavailable
+
+
+def fresh_continuation_status(control, plan, reservation, specification, programs):
+    summary = fresh_continuation_attempt(control, plan, reservation, specification, programs, "fresh-controller-continuation")
+    extra = os.path.lexists(control / "fresh-controller-continuation-retry.json")
+    if summary["status"] == "not-recorded" and extra:
+        return {"status": "unavailable"}
+    if summary["status"] == "recorded":
+        summary["additional_pass"] = fresh_continuation_attempt(control, plan, reservation, specification, programs,
+            "fresh-controller-continuation-retry", summary["record_sha256"]) if summary["phase"] == "failed" else (
+                {"status": "unavailable"} if extra else {"status": "not-recorded", "attempt_barrier_present": False})
+    return summary
+
+
+def pending_fresh_upload(root, revision, specification):
+    report = {"status": "unavailable", "onchain_state_checked": False, "recovery_performed": False}
+    if not re.fullmatch("[0-9a-f]{40}", revision) or not specification:
+        return report
+    try:
+        namespace = root / revision
+        control = namespace / "control"
+        allowed = {os.getuid()}
+        if os.getuid() == 0 and os.environ.get("SUDO_UID", "").isdigit():
+            allowed.add(int(os.environ["SUDO_UID"]))
+        for directory in (namespace, control):
+            info = directory.lstat()
+            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid not in allowed:
+                return report
+        owner = control.lstat().st_uid
+        if control.lstat().st_mode & 0o077:
+            return report
+        plan = private_json(control / "plan.json")
+        reservation = private_json(control / "reservation.json")
+        progress = private_json(control / "fresh-progress.json")
+        replacement = reservation["replacement"]
+        artifacts = plan["artifacts"]
+        sdk = plan.get("sdk_revision")
+        expected_profile = digest({"version": 2, "source": revision, "artifacts": artifacts, "sdk": sdk,
+                                   "proof_acceptance_qualified": False})
+        if (plan.get("version") != 2 or plan.get("mode") != "fresh-stack" or plan.get("genesis") != DEVNET
+                or reservation.get("version") != 2 or plan.get("source_revision") != reservation.get("source_revision")
+                or plan["source_revision"] != revision or not isinstance(sdk, str) or not re.fullmatch("[0-9a-f]{40}", sdk)
+                or reservation.get("sdk_revision") != sdk or reservation.get("plan_sha256") != digest(plan)
+                or plan.get("profile") != expected_profile or plan.get("original_sha256") != digest(reservation["original"])
+                or plan.get("replacement_sha256") != digest(replacement) or replacement.get("version") != 1
+                or replacement.get("service") != specification
+                or any(reservation["original"].get(key) != value for key, value in specification.items())
+                or set(artifacts) != set(ARTIFACTS)
+                or any(not isinstance(value, str) or not re.fullmatch("[0-9a-f]{64}", value) for value in artifacts.values())
+                or progress != {"version": 1, "plan_sha256": digest(plan), "phase": "prepared"}
+                or any(os.path.lexists(control / name) for name in ("fresh-starts", "activation.json", "activation-installed.json"))
+                or os.path.lexists(namespace / "runtime")):
+            return report
+        if set(plan["programs"]) != {"portal", "token_bridge", "portal-buffer", "token_bridge-buffer"}:
+            return report
+        for value in plan["programs"].values():
+            public_bytes(value)
+        state = private_json(control / "programs.json")
+        if state.get("version") != 2 or not isinstance(state.get("roles"), dict) or not set(state["roles"]) <= {"portal", "token_bridge"}:
+            return report
+        uploads = {"portal": "not-recorded", "token_bridge": "not-recorded"}
+        for role, entry in state["roles"].items():
+            if (not isinstance(entry, dict) or set(entry) != {"elf_sha256", "complete"}
+                    or entry["elf_sha256"] != artifacts[role] or entry["complete"] is not None and not isinstance(entry["complete"], dict)):
+                return report
+            uploads[role] = "unresolved" if entry["complete"] is None else "recorded-complete"
+        report.update(status="inspected", source_revision=revision, phase="prepared", previous_service_matches=True, native_start_recorded=False,
+                      uploads=uploads, operation_errors=upload_operation_errors(control / "operations.log", owner),
+                      upload_reconciliation=upload_reconciliation_status(control, plan, reservation, specification),
+                      fresh_continuation=fresh_continuation_status(control, plan, reservation, specification, state))
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
+    return report
+
+
+def failed_fresh_runtime(root, revision, specification, values):
+    unavailable = {"status": "unavailable", "onchain_state_checked": False, "recovery_performed": False}
+    if (not re.fullmatch("[0-9a-f]{40}", revision) or not specification
+            or values.get("ActiveState") not in ("inactive", "failed") or values.get("MainPID") != "0"
+            or values.get("Restart") != "no"):
+        return unavailable
+    try:
+        base, control = root / revision, root / revision / "control"
+        runtime, starts, smoke = base / "runtime", control / "fresh-starts", control / "sdk-smoke"
+        for directory in (base, control, runtime, starts, smoke):
+            info = directory.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                    or info.st_uid != specification["uid"] or directory != base and stat.S_IMODE(info.st_mode) != 0o700):
+                return unavailable
+        plan, saved = private_json(control / "plan.json"), private_json(control / "reservation.json")
+        activation, installed = private_json(control / "activation.json"), private_json(control / "activation-installed.json")
+        progress = private_json(control / "fresh-progress.json")
+        expected_environment = {"NORTHSTAR_CHECKPOINT_PLAN_DIR": str(runtime / "checkpoints"),
+                                "NORTHSTAR_UNSETTLED_STATE_DIR": str(runtime / "unsettled")}
+        expected_progress = {"version": 1, "plan_sha256": digest(plan), "phase": "failed", "quarantined": True,
+                             "operator_reconciliation_required": True}
+        text = service_dropin(activation["arguments"], *expected_environment.values())
+        if (plan.get("version") != 2 or plan.get("mode") != "fresh-stack" or plan.get("genesis") != DEVNET
+                or plan.get("source_revision") != revision or saved.get("source_revision") != revision
+                or saved.get("plan_sha256") != digest(plan) or progress != expected_progress
+                or activation.get("version") != 2 or activation.get("artifacts") != plan["artifacts"]
+                or activation["arguments"] != specification["arguments"]
+                or activation["arguments"][0] != str(runtime / ARTIFACTS["validator"])
+                or activation["state_environment"] != specification["state_environment"]
+                or activation["state_environment"] != expected_environment
+                or specification["binary_sha256"] != plan["artifacts"]["validator"]
+                or saved["original"]["uid"] != specification["uid"] or saved["original"]["gid"] != specification["gid"]
+                or installed != {"sha256": hashlib.sha256(text.encode()).hexdigest()}):
+            return unavailable
+        for role in ("validator", "geyser_events"):
+            if role not in plan["artifacts"]:
+                continue
+            target = runtime / ARTIFACTS[role]
+            info = target.lstat()
+            if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != specification["uid"]
+                    or stat.S_IMODE(info.st_mode) != 0o500 or file_hash(target) != plan["artifacts"][role]):
+                return unavailable
+        if "geyser_events" in plan["artifacts"]:
+            config = runtime / "geyser-events.json"
+            info = config.lstat()
+            if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != specification["uid"]
+                    or stat.S_IMODE(info.st_mode) != 0o400 or file_hash(config) != activation["geyser_config_sha256"]):
+                return unavailable
+        labels = ("activate", "resume-sol", "resume-spl")
+        if any(entry.name not in {label + suffix for label in labels for suffix in (".json", "-ready.json")}
+               for entry in starts.iterdir()):
+            return unavailable
+        native_starts = []
+        for label in labels:
+            attempted, ready = starts / (label + ".json"), starts / (label + "-ready.json")
+            if not os.path.lexists(attempted):
+                if os.path.lexists(ready):
+                    return unavailable
+                continue
+            intent = private_json(attempted)
+            if (set(intent) != {"version", "plan_sha256", "phase", "l1_floor"} or intent["version"] != 1
+                    or intent["plan_sha256"] != digest(plan) or intent["phase"] != label
+                    or type(intent["l1_floor"]) is not int or not 0 <= intent["l1_floor"] < 1 << 64
+                    or os.path.lexists(ready) and private_json(ready) != intent):
+                return unavailable
+            native_starts.append({"phase": label, "ready": os.path.lexists(ready)})
+        if not native_starts:
+            return unavailable
+        completed, context = [], None
+        for phase in ("bootstrap", "prepare-sol", "resume-sol", "prepare-spl", "resume-spl"):
+            receipt = smoke / (phase + ".json")
+            if not os.path.lexists(receipt):
+                continue
+            value = private_json(receipt)
+            if value.get("phase") != phase or not re.fullmatch("[0-9a-f]{64}", value.get("context", "")):
+                return unavailable
+            if context is not None and context != value["context"]:
+                return unavailable
+            context = value["context"]
+            completed.append(phase)
+        return {"status": "inspected", "source_revision": revision, "phase": "failed", "quarantined": True,
+                "native_starts": native_starts, "completed_sdk_phases": completed, "context": context,
+                "sol_withdrawal_intent_present": os.path.lexists(smoke / "controls/sol-withdraw/intent.json"),
+                "operation_errors": upload_operation_errors(control / "operations.log", specification["uid"]),
+                "onchain_state_checked": False, "recovery_performed": False}
+    except (OSError, ValueError, TypeError, KeyError):
+        return unavailable
+
+
+def fresh_resume_review(root, revision, specification, values):
+    unavailable = {"status": "unavailable", "recovery_performed": False}
+    report = failed_fresh_runtime(root, revision, specification, values)
+    if (report.get("status") != "inspected" or report["completed_sdk_phases"] != ["bootstrap", "prepare-sol"]
+            or report["native_starts"] != [{"phase": "activate", "ready": True}, {"phase": "resume-sol", "ready": True}]
+            or not report["sol_withdrawal_intent_present"] or not values.get("InactiveEnterTimestamp")):
+        return unavailable
+    try:
+        control = root / revision / "control"
+        if os.path.lexists(control / "fresh-poststart-reconciliation.json") or os.path.lexists(control / "fresh-reconciliation"):
+            return unavailable
+        names = ["plan.json", "reservation.json", "activation.json", "activation-installed.json", "fresh-progress.json",
+                 "programs.json", "sdk-config.json", "fresh-controller-continuation.json", "fresh-controller-continuation-retry.json",
+                 "fresh-starts/activate.json", "fresh-starts/activate-ready.json", "fresh-starts/resume-sol.json", "fresh-starts/resume-sol-ready.json",
+                 "sdk-smoke/bootstrap.json", "sdk-smoke/prepare-sol.json", "sdk-smoke/binding.json", "sdk-smoke/keys/index.json",
+                 "sdk-smoke/keys/sol-payer.json", "sdk-smoke/keys/sol-recipient.json", "sdk-smoke/controls/binding.json",
+                 "sdk-smoke/controls/sol-withdraw/operation.json", "sdk-smoke/controls/sol-withdraw/intent.json"]
+        records = {name: private_json(control / name) for name in names}
+        plan, saved, config = [records[name] for name in ("plan.json", "reservation.json", "sdk-config.json")]
+        binding, index = records["sdk-smoke/binding.json"], records["sdk-smoke/keys/index.json"]
+        continuation = fresh_continuation_status(control, plan, saved, saved["replacement"]["service"], records["programs.json"])
+        extra = records["fresh-controller-continuation-retry.json"]
+        if (continuation.get("status") != "recorded" or continuation.get("phase") != "failed"
+                or continuation.get("additional_pass", {}).get("status") != "recorded"
+                or extra.get("phase") != "failed" or extra.get("controller_revision") != "459ffdee99d087131feccabe9679c70736fd1082"
+                or extra.get("quarantine_requested") is not True or extra.get("quarantine_verified") is not True
+                or binding.get("context") != report["context"] or set(index) != {"sol-payer", "sol-recipient"}):
+            return unavailable
+        for key, expected in {"source_revision": revision, "sdk_revision": plan["sdk_revision"], "genesis": DEVNET,
+                              "portal": plan["programs"]["portal"], "token_bridge": plan["programs"]["token_bridge"],
+                              "validator": plan["validator"], "l1_rpc": saved["l1_rpc"], "er_rpc": saved["er_rpc"]}.items():
+            if config.get(key) != expected or binding.get(key) != expected:
+                return unavailable
+        if (config.get("version") != 2 or binding.get("version") != 2 or config.get("profile") != plan["profile"]
+                or config.get("er_genesis") != binding.get("er_genesis") or binding.get("authority") != plan["funder"]
+                or any(config.get(key) != expected or binding.get(key) != expected for key, expected in
+                       {"grid_id": "0", "ttl_slots": "78840000", "fee_cap": "1000000000", "settlement_interval_slots": "75"}.items())):
+            return unavailable
+        public_bytes(config["er_genesis"])
+        for name in ("sol-payer", "sol-recipient"):
+            public_bytes(index[name])
+            key = records["sdk-smoke/keys/" + name + ".json"]
+            if not isinstance(key, list) or len(key) != 64 or any(type(value) is not int or not 0 <= value <= 255 for value in key):
+                return unavailable
+        controls = records["sdk-smoke/controls/binding.json"]
+        operation = records["sdk-smoke/controls/sol-withdraw/operation.json"]
+        intent = records["sdk-smoke/controls/sol-withdraw/intent.json"]
+        if (controls != {"version": 2, "binding": digest(binding), "identity": binding}
+                or operation != {"version": 2, "binding": digest(binding), "label": "sol-withdraw", "layer": "er",
+                                  "request": {"amount": "1000000", "recipient": index["sol-recipient"]}}
+                or intent.get("version") != 2 or intent.get("binding") != digest(binding) or intent.get("layer") != "er"
+                or intent.get("operation_sha256") != digest(operation)
+                or type(intent.get("last_valid_block_height")) is not int or not 0 <= intent["last_valid_block_height"] <= 2 ** 53 - 1
+                or not re.fullmatch("[1-9A-HJ-NP-Za-km-z]{64,128}", intent.get("signature", ""))):
+            return unavailable
+        public_bytes(intent["blockhash"])
+        wire = base64.b64decode(intent["wire_base64"], validate=True)
+        if not 0 < len(wire) <= 1232 or base64.b64encode(wire).decode() != intent["wire_base64"] or hashlib.sha256(wire).hexdigest() != intent["wire_sha256"]:
+            return unavailable
+        if any(os.path.lexists(control / "sdk-smoke/controls/sol-withdraw" / name) for name in ("observed.json", "receipt.json", "fatal.json")):
+            return unavailable
+        markers = report["operation_errors"].get("markers", {})
+        if not markers.get("settlement_pending") or any(markers.get(key) for key in
+                ("sol_restart_balance", "sol_receipt_owner", "er_readiness_timeout", "prior_credit_missing", "lineage_recovery", "program_completion")):
+            return unavailable
+        evidence = {"version": 1, "records": {name: digest(value) for name, value in records.items()},
+                    "service_sha256": digest(specification), "stopped_at": values["InactiveEnterTimestamp"], "context": report["context"]}
+        return {"status": "reviewable", "review_sha256": digest(evidence), "context": report["context"], "recovery_performed": False}
+    except (OSError, ValueError, TypeError, KeyError):
+        return unavailable
+
+
+def collect_report(run=execute, root=STATE_ROOT, dropin=DROPIN, lock=LOCK, pending_revision=""):
     report = {"version": 1, "read_only": True, "service": SERVICE,
               "scope": "systemd and retained metadata only; no RPC qualification or recovery"}
     private_properties = ("ExecStart", "StandardOutput", "StandardOutputFile", "StandardError", "StandardErrorFile", "WorkingDirectory", "LogNamespace")
@@ -605,13 +1029,18 @@ def collect_report(run=execute, root=STATE_ROOT, dropin=DROPIN, lock=LOCK):
         except (OSError, ValueError):
             retained_start = ""
             report["managed_dropin_readable"] = False
-        bound_arguments = []
-        report["managed_records"] = managed_records(values.get("ExecStart", ""), root, dropin, retained_start, bound_arguments)
+        bound_arguments, bound_specification = [], {}
+        report["managed_records"] = managed_records(values.get("ExecStart", ""), root, dropin, retained_start, bound_arguments, bound_specification)
         records = report["managed_records"]
         if (bound_arguments and any(values.get(name) in ("append", "file", "truncate") and not values.get(name + "File")
                                     for name in ("StandardOutput", "StandardError"))):
             values.update(unit_log_sinks(run, values))
         report["operational"] = operational_details(values, root, records, bound_arguments)
+        if pending_revision:
+            report["pending_fresh_upload"] = pending_fresh_upload(root, pending_revision,
+                bound_specification if values.get("ActiveState") == "active" else {})
+            report["failed_fresh_runtime"] = failed_fresh_runtime(root, pending_revision, bound_specification, values)
+            report["fresh_resume_review"] = fresh_resume_review(root, pending_revision, bound_specification, values)
         report["status"] = "snapshot_collected"
     except FileNotFoundError:
         report["status"] = "deployment_lock_missing"
@@ -626,8 +1055,12 @@ def collect_report(run=execute, root=STATE_ROOT, dropin=DROPIN, lock=LOCK):
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Read-only native lifecycle and optional pending-upload evidence")
+    parser.add_argument("--pending-revision", default="")
+    args = parser.parse_args()
     try:
-        report = collect_report()
+        report = collect_report(pending_revision=args.pending_revision)
     except Exception:
         report = {"version": 1, "read_only": True, "status": "diagnostics_unavailable"}
     print(json.dumps(report, sort_keys=True))

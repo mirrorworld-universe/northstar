@@ -8,7 +8,7 @@ import unittest
 
 from continuity_rollout_state import (
     ARTIFACTS, append_private, atomic_json, checked_directory, file_hash, flag_value, geyser_events_config, immutable_json,
-    geyser_event_source, inspect_paths, private_json, release_mode_arguments, retained_fingerprint, service_arguments, service_dropin,
+    geyser_event_source, inspect_paths, l1_rpc_arguments, private_json, release_mode_arguments, retained_fingerprint, service_arguments, service_dropin,
     sync_paths, systemd_argument, upgrade_arguments, verify_artifacts,
 )
 
@@ -34,6 +34,25 @@ class StateTests(unittest.TestCase):
                 release_mode_arguments("", value)
         with self.assertRaises(ValueError):
             release_mode_arguments("519264000", context)
+
+    def test_l1_rpc_release_profile_is_explicit_and_excludes_fresh_or_recovery(self):
+        self.assertEqual(release_mode_arguments("", "", "full"), ["--upgrade-existing", "--l1-rpc-profile", "full"])
+        for recovery, context, profile in (("519264000", "", "full"), ("", "ab" * 32, "full"), ("", "", "other")):
+            with self.subTest(recovery=recovery, context=context, profile=profile), self.assertRaises(ValueError):
+                release_mode_arguments(recovery, context, profile)
+
+    def test_full_l1_rpc_indexes_preserve_unrelated_native_and_plugin_arguments(self):
+        original = ["/native", "--portal", "portal", "--geyser-plugin-config", "/plugin.json", "--rpc-port", "8899",
+                    "--expected-genesis-hash", "devnet", "--account-index=program-id", "--log", "-"]
+        expected = original[:9] + original[10:] + ["--account-index", "program-id", "spl-token-owner", "spl-token-mint"]
+        actual = l1_rpc_arguments(original, "full")
+        self.assertEqual(actual, expected)
+        self.assertEqual(l1_rpc_arguments(actual, "full"), actual)
+        self.assertEqual(l1_rpc_arguments(original), original)
+        for extra in (["--account-index"], ["--account-index", "other"],
+                      ["--account-index-include-key", "key"], ["--account-index-exclude-key=key"]):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                l1_rpc_arguments(["/native", *extra], "full")
 
     def test_metadata_is_immutable_and_private(self):
         filename = self.root / "plan.json"

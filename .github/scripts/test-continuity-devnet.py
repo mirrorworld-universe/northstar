@@ -46,6 +46,45 @@ class DeploymentTests(unittest.TestCase):
             account=Mock(return_value=None),
         )
 
+    def test_reconciled_smoke_cannot_skip_restart_without_a_ready_barrier(self):
+        value = self.deployment
+        value.fresh = SimpleNamespace(phase=Mock(return_value="running"), verify_desired=Mock())
+        value.execute = Mock()
+        with self.assertRaises((ValueError, OSError)):
+            value.smoke(resumed_phase="resume-sol")
+        value.execute.assert_not_called()
+
+    def test_reconciled_smoke_consumes_only_the_remaining_spl_restart(self):
+        value = self.deployment
+        value.args.sdk_checkout = self.root / "sdk"
+        value.plan.update(source_revision=value.args.revision, profile="e" * 64)
+        value.er = SimpleNamespace(call=Mock(return_value=rollout.public_text(bytes([9]) * 32)))
+        value.retention = Mock(return_value={})
+        atomic_json(value.control / "retained.json", {})
+        atomic_json(value.control / "activation.json", {"event_source": "l1"})
+        record = {"version": 1, "kind": "fresh-poststart-reconciliation", "source_revision": value.args.revision,
+            "controller_revision": "d" * 40, "plan_sha256": hashlib.sha256(rollout.canonical(value.plan)).hexdigest(),
+            "review_sha256": "f" * 64, "context": "e" * 64, "extra_native_starts": 1, "program_submissions": 0, "phase": "running"}
+        atomic_json(value.control / "fresh-poststart-reconciliation.json", record)
+        directory = value.control / "fresh-reconciliation"
+        directory.mkdir(mode=0o700)
+        ready = {"version": 1, "plan_sha256": record["plan_sha256"], "review_sha256": record["review_sha256"],
+            "context": record["context"], "l1_floor": 100, "phase": "resume-sol"}
+        atomic_json(directory / "start-attempted.json", ready)
+        atomic_json(directory / "ready.json", ready)
+        value.fresh = SimpleNamespace(phase=Mock(return_value="running"), verify_desired=Mock(), report=lambda report: report)
+        value.stop, value.start = Mock(), Mock()
+        phases = []
+        def execute(command, **_):
+            phases.append(command[-1])
+            return json.dumps({"phase": command[-1], "context": "e" * 64})
+        value.execute = Mock(side_effect=execute)
+        value.smoke(resumed_phase="resume-sol")
+        self.assertEqual(phases, ["bootstrap", "prepare-sol", "resume-sol", "prepare-spl", "resume-spl"])
+        value.stop.assert_called_once()
+        value.start.assert_called_once()
+        value.fresh.verify_desired.assert_called_with(running=True)
+
     def test_unresolved_program_upload_is_not_replanned_or_resubmitted(self):
         value = self.deployment
         atomic_json(value.control / "programs.json", {"version": 2, "roles": {"portal": {
@@ -56,6 +95,30 @@ class DeploymentTests(unittest.TestCase):
             value.deploy_programs()
         self.assertFalse(any("deploy" in call.args[0] for call in value.execute.call_args_list))
         self.assertIsNone(private_json(value.control / "programs.json")["roles"]["portal"]["complete"])
+
+    def test_partial_upload_scope_cannot_use_an_unrecorded_rpc_or_worker_stop(self):
+        value = self.deployment
+        value.execute = Mock()
+        for rpc, stop in (("https://unrecorded.invalid", False), (value.args.l1_rpc, True)):
+            with self.assertRaisesRegex(ValueError, "submission scope"):
+                value.deploy_programs(resume_roles={"portal"}, submission_rpc=rpc, stop_worker=stop)
+        value.execute.assert_not_called()
+
+    def test_completed_programs_do_not_require_rent_or_worker_or_submission_actions(self):
+        from urllib.error import HTTPError
+        value = self.deployment
+        views = {role: {"programdata": role, "deployment_slot": 50, "sha256": value.manifest["sha256"][role]}
+                 for role in ("portal", "token_bridge")}
+        atomic_json(value.control / "programs.json", {"version": 2, "roles": {
+            role: {"elf_sha256": value.manifest["sha256"][role], "complete": view} for role, view in views.items()}})
+        value.program_view = Mock(side_effect=lambda role: views[role])
+        value.upstream.call = Mock(side_effect=HTTPError("https://api.devnet.solana.com", 429, "rate limited", {}, None))
+        value.execute = Mock(side_effect=MutationBoundary)
+        value.deploy_programs()
+        value.upstream.call.assert_not_called()
+        value.execute.assert_not_called()
+        self.assertEqual(private_json(value.control / "programs.json")["roles"], {
+            role: {"elf_sha256": value.manifest["sha256"][role], "complete": view} for role, view in views.items()})
 
     def test_insufficient_balance_stops_before_service_or_chain_mutation(self):
         value = self.deployment

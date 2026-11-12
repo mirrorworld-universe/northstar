@@ -1,0 +1,71 @@
+name: Reconcile retained fresh program uploads
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Exact retained fresh source revision
+        required: true
+        type: string
+      replace_context:
+        description: Exact reviewed previous context
+        required: true
+        type: string
+      failed_record_sha256:
+        description: Explicit acknowledgement of the reviewed failed pass for one separately recorded reconciliation
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: retained-program-upload-reconciliation
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch'
+    runs-on: devnet
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.21.0"
+      - name: Prepare pinned public SDK without native artifacts
+        id: sdk
+        run: |
+          set -euo pipefail
+          SDK="$RUNNER_TEMP/northstar-upload-sdk-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          bash .github/scripts/prepare-continuity-sdk.sh "$SDK"
+          echo "directory=$SDK" >> "$GITHUB_OUTPUT"
+      - name: Reconcile one retained upload pass without native service actions
+        id: reconcile
+        env:
+          TARGET_REVISION: ${{ inputs.revision }}
+          REPLACE_CONTEXT: ${{ inputs.replace_context }}
+          FAILED_RECORD_SHA256: ${{ inputs.failed_record_sha256 }}
+          CONTINUITY_SDK: ${{ steps.sdk.outputs.directory }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+          options=()
+          if [[ -n "$FAILED_RECORD_SHA256" ]]; then
+            options+=(--failed-record-sha256 "$FAILED_RECORD_SHA256")
+          fi
+          python3 -B .github/scripts/continuity_upload_resume.py \
+            --revision "$TARGET_REVISION" --replace-context "$REPLACE_CONTEXT" \
+            --sdk-checkout "$CONTINUITY_SDK" "${options[@]}"
+      - name: Upload only the completed public upload report
+        if: steps.reconcile.outputs.report_path != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: retained-upload-reconciliation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.reconcile.outputs.report_path }}
+          if-no-files-found: error
+          retention-days: 7

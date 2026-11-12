@@ -2,6 +2,7 @@
 """Sonic: Diagnostics observe lifecycle/metadata without mutating or publishing private input."""
 import fcntl
 import gzip
+import base64
 import hashlib
 import json
 import os
@@ -279,6 +280,354 @@ class DiagnosticTests(unittest.TestCase):
         result = self.collect()["managed_records"]
         self.assertFalse(result["recorded_plan_identity_matches"])
         self.assertNotIn("profile", result)
+
+    def test_verified_service_reports_configured_rpc_indexes_without_private_arguments(self):
+        before = retained_fingerprint([self.root])
+        result = self.collect()
+        self.assertEqual(result["operational"]["rpc_account_indexes"],
+                         {"status": "observed", "configured": [], "key_filter": "unrestricted"})
+        self.assertNotIn(SECRET, json.dumps(result))
+        self.assertEqual(retained_fingerprint([self.root]), before)
+
+    def test_rpc_index_reporting_accepts_cli_forms_but_never_discloses_keys_or_unknown_values(self):
+        configured = ["validator", "--account-index", "program-id", "spl-token-owner",
+                      "--account-index=spl-token-mint", "--private-option", SECRET]
+        self.assertEqual(diagnostics.rpc_index_configuration(configured), {"status": "observed",
+                         "configured": ["program-id", "spl-token-mint", "spl-token-owner"], "key_filter": "unrestricted"})
+        filtered = configured + ["--account-index-include-key", public_text(bytes([13]) * 32)]
+        report = diagnostics.rpc_index_configuration(filtered)
+        self.assertEqual(report["key_filter"], "include-only")
+        self.assertNotIn(public_text(bytes([13]) * 32), json.dumps(report))
+        invalid = diagnostics.rpc_index_configuration(["validator", "--account-index", SECRET])
+        self.assertEqual(invalid, {"status": "ambiguous"})
+        self.assertNotIn(SECRET, json.dumps(invalid))
+        unbound = diagnostics.operational_details({}, self.state_root, {}, [])
+        self.assertNotIn("rpc_account_indexes", unbound)
+
+    def install_pending_upload(self):
+        revision = "c" * 40
+        control = self.state_root / revision / "control"
+        control.mkdir(parents=True, mode=0o700)
+        old = private_json(self.control / "reservation.json")["original"]
+        activation = private_json(self.control / "activation.json")
+        service = {"arguments": activation["arguments"], "state_environment": activation["state_environment"],
+                   "binary_sha256": self.plan["artifacts"]["validator"], "uid": old["uid"], "gid": old["gid"]}
+        replacement = {"version": 1, "service": service, "snapshot": {"identity": {"context": "ab" * 32}}}
+        artifacts = self.plan["artifacts"] | {"geyser_events": "e" * 64}
+        programs = {role: public_text(bytes([index]) * 32) for index, role in
+                    enumerate(("portal", "token_bridge", "portal-buffer", "token_bridge-buffer"), 21)}
+        plan = {"version": 2, "mode": "fresh-stack", "source_revision": revision, "sdk_revision": diagnostics.SDK_REVISION,
+                "genesis": diagnostics.DEVNET, "artifacts": artifacts, "programs": programs,
+                "original_sha256": diagnostics.digest(service), "replacement_sha256": diagnostics.digest(replacement)}
+        plan["profile"] = diagnostics.digest({"version": 2, "source": revision, "artifacts": artifacts,
+                                             "sdk": diagnostics.SDK_REVISION, "proof_acceptance_qualified": False})
+        reservation = {"version": 2, "source_revision": revision, "sdk_revision": diagnostics.SDK_REVISION,
+                       "plan_sha256": diagnostics.digest(plan), "original": service, "replacement": replacement,
+                       "l1_rpc": "http://127.0.0.1:8899"}
+        atomic_json(control / "plan.json", plan)
+        atomic_json(control / "reservation.json", reservation)
+        atomic_json(control / "fresh-progress.json", {"version": 1, "plan_sha256": diagnostics.digest(plan), "phase": "prepared"})
+        atomic_json(control / "programs.json", {"version": 2, "roles": {"portal": {"elf_sha256": artifacts["portal"], "complete": None}}})
+        (control / "operations.log").write_text("Error: 834 write transactions failed\nHTTP 429 Too Many Requests\n" + SECRET)
+        (control / "operations.log").chmod(0o600)
+        return revision, control
+
+    def collect_pending(self, revision):
+        def active_run(arguments):
+            result = self.run_command(arguments)
+            result.stdout = result.stdout.replace(b"ActiveState=inactive", b"ActiveState=active").replace(b"MainPID=0", b"MainPID=123")
+            return result
+        return diagnostics.collect_report(active_run, self.state_root, self.dropin, self.lock, pending_revision=revision)
+
+    def test_pending_upload_evidence_is_bound_read_only_and_redacted(self):
+        revision, control = self.install_pending_upload()
+        before = retained_fingerprint([self.root])
+        report = self.collect_pending(revision)
+        pending = report["pending_fresh_upload"]
+        self.assertEqual(pending["status"], "inspected")
+        self.assertEqual(pending["phase"], "prepared")
+        self.assertEqual(pending["uploads"], {"portal": "unresolved", "token_bridge": "not-recorded"})
+        self.assertEqual(pending["operation_errors"]["write_transactions_failed"], [834])
+        self.assertEqual(pending["operation_errors"]["markers"].get("http_rate_limit"), 1)
+        self.assertFalse(pending["onchain_state_checked"])
+        self.assertNotIn(SECRET, json.dumps(report))
+        self.assertEqual(retained_fingerprint([self.root]), before)
+
+    def test_pending_upload_classifies_the_native_uploader_terminal_retry_error(self):
+        revision, control = self.install_pending_upload()
+        (control / "operations.log").write_text("Error: Data writes to account failed: Max retries exceeded\n" + SECRET)
+        pending = self.collect_pending(revision)["pending_fresh_upload"]
+        self.assertEqual(pending["source_revision"], revision)
+        self.assertEqual(pending["operation_errors"]["markers"], {"upload_write_failure": 1, "retry_budget_exhausted": 1})
+        self.assertNotIn(SECRET, json.dumps(pending))
+
+    def test_pending_upload_reports_absent_or_bound_reconciliation_attempts(self):
+        revision, control = self.install_pending_upload()
+        pending = self.collect_pending(revision)["pending_fresh_upload"]
+        self.assertEqual(pending["upload_reconciliation"], {"status": "not-recorded", "attempt_barrier_present": False})
+        plan = private_json(control / "plan.json")
+        saved = private_json(control / "reservation.json")
+        marker = {"version": 1, "kind": "retained-program-upload", "plan_sha256": diagnostics.digest(plan),
+                  "controller_revision": "d" * 40, "source_revision": revision, "submission_rpc": saved["l1_rpc"],
+                  "previous_service_sha256": diagnostics.digest(saved["replacement"]["service"]),
+                  "pending_roles": ["portal"], "attempt_budget": 1, "phase": "attempted"}
+        atomic_json(control / "program-upload-reconcile.json", marker)
+        observed = self.collect_pending(revision)["pending_fresh_upload"]["upload_reconciliation"]
+        self.assertEqual(observed["phase"], "attempted")
+        self.assertTrue(observed["attempt_barrier_present"])
+        marker["plan_sha256"] = "e" * 64
+        atomic_json(control / "program-upload-reconcile.json", marker)
+        self.assertEqual(self.collect_pending(revision)["pending_fresh_upload"]["upload_reconciliation"]["status"], "unavailable")
+
+    def test_pending_upload_binds_additional_pass_to_the_unchanged_failed_record(self):
+        revision, control = self.install_pending_upload()
+        plan = private_json(control / "plan.json")
+        saved = private_json(control / "reservation.json")
+        primary = {"version": 1, "kind": "retained-program-upload", "plan_sha256": diagnostics.digest(plan),
+                   "controller_revision": "d" * 40, "source_revision": revision, "submission_rpc": saved["l1_rpc"],
+                   "previous_service_sha256": diagnostics.digest(saved["replacement"]["service"]),
+                   "pending_roles": ["portal"], "attempt_budget": 1, "phase": "failed", "operator_reconciliation_required": True}
+        atomic_json(control / "program-upload-reconcile.json", primary)
+        retry = {key: value for key, value in primary.items() if key != "operator_reconciliation_required"}
+        retry.update(version=2, phase="attempted", read_rpc=saved["l1_rpc"], submission_roles=["portal"],
+                     previous_failed_record_sha256=diagnostics.digest(primary))
+        atomic_json(control / "program-upload-reconcile-retry.json", retry)
+        summary = self.collect_pending(revision)["pending_fresh_upload"]["upload_reconciliation"]
+        self.assertEqual(summary["record_sha256"], diagnostics.digest(primary))
+        self.assertEqual(summary["additional_pass"]["phase"], "attempted")
+        self.assertEqual(summary["additional_pass"]["submission_roles"], ["portal"])
+        retry["previous_failed_record_sha256"] = "f" * 64
+        atomic_json(control / "program-upload-reconcile-retry.json", retry)
+        self.assertEqual(self.collect_pending(revision)["pending_fresh_upload"]["upload_reconciliation"]["additional_pass"]["status"], "unavailable")
+
+    def test_pending_upload_does_not_infer_unused_budget_from_an_orphan_additional_pass(self):
+        revision, control = self.install_pending_upload()
+        atomic_json(control / "program-upload-reconcile-retry.json", {"private": SECRET})
+        summary = self.collect_pending(revision)["pending_fresh_upload"]["upload_reconciliation"]
+        self.assertEqual(summary["status"], "unavailable")
+        self.assertNotIn(SECRET, json.dumps(summary))
+
+    def test_prepared_native_continuation_evidence_binds_plan_process_and_record_hash(self):
+        revision, control = self.install_pending_upload()
+        plan = private_json(control / "plan.json")
+        saved = private_json(control / "reservation.json")
+        saved["original"].update(pid=123, start_time="42")
+        saved["devnet_rpc"] = "https://api.devnet.solana.com"
+        plan["original_sha256"] = diagnostics.digest(saved["original"])
+        saved["plan_sha256"] = diagnostics.digest(plan)
+        atomic_json(control / "plan.json", plan)
+        atomic_json(control / "reservation.json", saved)
+        atomic_json(control / "fresh-progress.json", {"version": 1, "plan_sha256": diagnostics.digest(plan), "phase": "prepared"})
+        record = {"version": 1, "kind": "prepared-fresh-controller", "source_revision": revision,
+                  "controller_revision": "d" * 40, "plan_sha256": diagnostics.digest(plan),
+                  "programs_sha256": diagnostics.digest(private_json(control / "programs.json")),
+                  "previous_service_sha256": diagnostics.digest(saved["replacement"]["service"]),
+                  "previous_pid": 123, "previous_start_time": "42", "preflight_rpc": saved["l1_rpc"],
+                  "qualification_rpc": saved["devnet_rpc"], "phase": "failed", "operator_reconciliation_required": True}
+        atomic_json(control / "fresh-controller-continuation.json", record)
+        summary = self.collect_pending(revision)["pending_fresh_upload"]["fresh_continuation"]
+        self.assertEqual(summary["phase"], "failed")
+        self.assertEqual(summary["record_sha256"], diagnostics.digest(record))
+        self.assertEqual(summary["additional_pass"], {"status": "not-recorded", "attempt_barrier_present": False})
+        record["previous_pid"] = 124
+        atomic_json(control / "fresh-controller-continuation.json", record)
+        self.assertEqual(self.collect_pending(revision)["pending_fresh_upload"]["fresh_continuation"]["status"], "unavailable")
+
+    def test_orphan_native_continuation_retry_is_not_an_unused_budget(self):
+        revision, control = self.install_pending_upload()
+        atomic_json(control / "fresh-controller-continuation-retry.json", {"private": SECRET})
+        summary = self.collect_pending(revision)["pending_fresh_upload"]["fresh_continuation"]
+        self.assertEqual(summary["status"], "unavailable")
+        self.assertNotIn(SECRET, json.dumps(summary))
+
+    def install_failed_fresh_runtime(self):
+        self.runtime.chmod(0o700)
+        self.plan["mode"] = "fresh-stack"
+        saved = private_json(self.control / "reservation.json")
+        saved["plan_sha256"] = diagnostics.digest(self.plan)
+        atomic_json(self.control / "plan.json", self.plan)
+        atomic_json(self.control / "reservation.json", saved)
+        atomic_json(self.control / "fresh-progress.json", {"version": 1, "plan_sha256": diagnostics.digest(self.plan),
+            "phase": "failed", "quarantined": True, "operator_reconciliation_required": True})
+        starts = self.control / "fresh-starts"
+        starts.mkdir(mode=0o700)
+        for name in ("activate", "resume-sol"):
+            intent = {"version": 1, "plan_sha256": diagnostics.digest(self.plan), "phase": name, "l1_floor": 100}
+            atomic_json(starts / (name + ".json"), intent)
+            atomic_json(starts / (name + "-ready.json"), intent)
+        smoke = self.control / "sdk-smoke"
+        smoke.mkdir(mode=0o700)
+        for phase in ("bootstrap", "prepare-sol"):
+            atomic_json(smoke / (phase + ".json"), {"phase": phase, "context": "e" * 64, "private": SECRET})
+        operation = self.control / "operations.log"
+        operation.write_text(SECRET + "\nSOL restart balance differs\n")
+        operation.chmod(0o600)
+        activation = private_json(self.control / "activation.json")
+        self.failed_specification = {"arguments": activation["arguments"], "state_environment": activation["state_environment"],
+            "binary_sha256": self.plan["artifacts"]["validator"], "uid": os.getuid(), "gid": os.getgid()}
+        self.failed_values = {"ActiveState": "inactive", "MainPID": "0", "Restart": "no"}
+
+    def test_failed_fresh_runtime_only_classifies_bound_quarantined_evidence(self):
+        self.install_failed_fresh_runtime()
+        report = diagnostics.failed_fresh_runtime(self.state_root, self.base.name, self.failed_specification, self.failed_values)
+        self.assertEqual(report["status"], "inspected")
+        self.assertEqual(report["completed_sdk_phases"], ["bootstrap", "prepare-sol"])
+        self.assertEqual(report["native_starts"], [{"phase": "activate", "ready": True}, {"phase": "resume-sol", "ready": True}])
+        self.assertEqual(report["operation_errors"]["markers"]["sol_restart_balance"], 1)
+        self.assertNotIn(SECRET, json.dumps(report))
+        self.assertFalse(report["recovery_performed"])
+
+    def test_failed_fresh_runtime_binding_or_quarantine_change_suppresses_log_read(self):
+        self.install_failed_fresh_runtime()
+        for values in ({**self.failed_values, "MainPID": "123"}, {**self.failed_values, "Restart": "always"}):
+            report = diagnostics.failed_fresh_runtime(self.state_root, self.base.name, self.failed_specification, values)
+            self.assertEqual(report["status"], "unavailable")
+            self.assertNotIn("operation_errors", report)
+        progress = private_json(self.control / "fresh-progress.json")
+        progress["quarantined"] = False
+        atomic_json(self.control / "fresh-progress.json", progress)
+        self.assertEqual(diagnostics.failed_fresh_runtime(self.state_root, self.base.name, self.failed_specification,
+            self.failed_values)["status"], "unavailable")
+
+    def test_failed_fresh_runtime_changed_ready_barrier_suppresses_log_read(self):
+        self.install_failed_fresh_runtime()
+        path = self.control / "fresh-starts/resume-sol-ready.json"
+        ready = private_json(path)
+        ready["l1_floor"] += 1
+        atomic_json(path, ready)
+        self.assertEqual(diagnostics.failed_fresh_runtime(self.state_root, self.base.name, self.failed_specification,
+            self.failed_values)["status"], "unavailable")
+
+    def install_failed_resume_review(self):
+        self.install_failed_fresh_runtime()
+        self.failed_values["InactiveEnterTimestamp"] = "Thu 2026-11-12 01:29:58 UTC"
+        saved = private_json(self.control / "reservation.json")
+        saved.update(l1_rpc="http://127.0.0.1:8899", er_rpc="http://127.0.0.1:8900", devnet_rpc="https://api.devnet.solana.com")
+        saved["original"].update(pid=123, start_time="42")
+        saved["replacement"] = {"service": self.failed_specification}
+        self.plan["funder"] = public_text(bytes([6]) * 32)
+        self.plan["original_sha256"] = diagnostics.digest(saved["original"])
+        self.plan["replacement_sha256"] = diagnostics.digest(saved["replacement"])
+        saved["plan_sha256"] = diagnostics.digest(self.plan)
+        atomic_json(self.control / "plan.json", self.plan)
+        atomic_json(self.control / "reservation.json", saved)
+        progress = private_json(self.control / "fresh-progress.json")
+        progress["plan_sha256"] = diagnostics.digest(self.plan)
+        atomic_json(self.control / "fresh-progress.json", progress)
+        for name in ("activate", "activate-ready", "resume-sol", "resume-sol-ready"):
+            value = private_json(self.control / "fresh-starts" / (name + ".json"))
+            value["plan_sha256"] = diagnostics.digest(self.plan)
+            atomic_json(self.control / "fresh-starts" / (name + ".json"), value)
+        programs = {"version": 2, "roles": {role: {"elf_sha256": self.plan["artifacts"][role], "complete": {"deployment_slot": 100}}
+                    for role in ("portal", "token_bridge")}}
+        atomic_json(self.control / "programs.json", programs)
+        record = {"version": 1, "kind": "prepared-fresh-controller", "source_revision": self.base.name,
+            "controller_revision": "c768a521eb968fdef2dbc84eb3bc7c78495ac760", "plan_sha256": diagnostics.digest(self.plan),
+            "programs_sha256": diagnostics.digest(programs), "previous_service_sha256": diagnostics.digest(saved["replacement"]["service"]),
+            "previous_pid": 123, "previous_start_time": "42", "preflight_rpc": saved["l1_rpc"], "qualification_rpc": saved["devnet_rpc"],
+            "phase": "failed", "operator_reconciliation_required": True}
+        atomic_json(self.control / "fresh-controller-continuation.json", record)
+        extra = record | {"version": 2, "controller_revision": "459ffdee99d087131feccabe9679c70736fd1082",
+            "previous_failed_continuation_sha256": diagnostics.digest(record), "quarantine_requested": True, "quarantine_verified": True}
+        atomic_json(self.control / "fresh-controller-continuation-retry.json", extra)
+        smoke = self.control / "sdk-smoke"
+        binding = {"version": 2, "genesis": diagnostics.DEVNET, "er_genesis": public_text(bytes([9]) * 32),
+            "l1_rpc": saved["l1_rpc"], "er_rpc": saved["er_rpc"], "source_revision": self.base.name,
+            "sdk_revision": self.plan["sdk_revision"], "portal": self.plan["programs"]["portal"],
+            "token_bridge": self.plan["programs"]["token_bridge"], "validator": self.plan["validator"],
+            "authority": self.plan["funder"], "grid_id": "0", "ttl_slots": "78840000", "fee_cap": "1000000000",
+            "settlement_interval_slots": "75", "context": "e" * 64}
+        atomic_json(smoke / "binding.json", binding)
+        atomic_json(self.control / "sdk-config.json", self.plan | binding)
+        keys = smoke / "keys"
+        keys.mkdir(mode=0o700)
+        atomic_json(keys / "index.json", {"sol-payer": public_text(bytes([4]) * 32), "sol-recipient": public_text(bytes([5]) * 32)})
+        for name in ("sol-payer", "sol-recipient"):
+            atomic_json(keys / (name + ".json"), [0] * 64)
+        controls = smoke / "controls"
+        withdrawal = controls / "sol-withdraw"
+        withdrawal.mkdir(mode=0o700, parents=True)
+        operation = {"version": 2, "binding": diagnostics.digest(binding), "label": "sol-withdraw", "layer": "er",
+            "request": {"amount": "1000000", "recipient": public_text(bytes([5]) * 32)}}
+        atomic_json(controls / "binding.json", {"version": 2, "binding": diagnostics.digest(binding), "identity": binding})
+        atomic_json(withdrawal / "operation.json", operation)
+        wire = b"original signed bytes"
+        atomic_json(withdrawal / "intent.json", {"version": 2, "binding": diagnostics.digest(binding), "operation_sha256": diagnostics.digest(operation),
+            "layer": "er", "signature": "2" * 88, "blockhash": public_text(bytes([8]) * 32), "last_valid_block_height": 100,
+            "wire_sha256": hashlib.sha256(wire).hexdigest(), "wire_base64": base64.b64encode(wire).decode()})
+        (self.control / "operations.log").write_text(SECRET + "\nTransaction simulation failed: canonical checkpoint awaits settlement; retry after settlement\n")
+
+    def test_failed_resume_review_hash_binds_controls_intent_and_exact_stop(self):
+        self.install_failed_resume_review()
+        report = diagnostics.fresh_resume_review(self.state_root, self.base.name, self.failed_specification, self.failed_values)
+        self.assertEqual(report["status"], "reviewable")
+        self.assertRegex(report["review_sha256"], "^[0-9a-f]{64}$")
+        self.assertNotIn(SECRET, json.dumps(report))
+        changed = diagnostics.fresh_resume_review(self.state_root, self.base.name, self.failed_specification,
+            self.failed_values | {"InactiveEnterTimestamp": "Thu 2026-11-12 01:30:00 UTC"})
+        self.assertNotEqual(changed["review_sha256"], report["review_sha256"])
+        atomic_json(self.control / "sdk-smoke/controls/sol-withdraw/receipt.json", {"private": SECRET})
+        self.assertEqual(diagnostics.fresh_resume_review(self.state_root, self.base.name, self.failed_specification,
+            self.failed_values)["status"], "unavailable")
+
+    def test_failed_resume_review_rejects_changed_signed_intent(self):
+        self.install_failed_resume_review()
+        file = self.control / "sdk-smoke/controls/sol-withdraw/intent.json"
+        intent = private_json(file)
+        intent["wire_sha256"] = "f" * 64
+        atomic_json(file, intent)
+        self.assertEqual(diagnostics.fresh_resume_review(self.state_root, self.base.name, self.failed_specification,
+            self.failed_values)["status"], "unavailable")
+
+    def test_pending_upload_never_claims_absent_budget_when_a_report_remains(self):
+        revision, control = self.install_pending_upload()
+        atomic_json(control / "program-upload-reconcile-report.json", {"result": "failed", "private": SECRET})
+        observed = self.collect_pending(revision)["pending_fresh_upload"]["upload_reconciliation"]
+        self.assertEqual(observed["status"], "unavailable")
+        self.assertNotIn(SECRET, json.dumps(observed))
+
+    def test_pending_upload_logs_are_suppressed_for_changed_plan_or_any_start(self):
+        revision, control = self.install_pending_upload()
+        plan = private_json(control / "plan.json")
+        changed = dict(plan, profile="f" * 64)
+        atomic_json(control / "plan.json", changed)
+        self.assertNotIn("operation_errors", self.collect_pending(revision)["pending_fresh_upload"])
+        atomic_json(control / "plan.json", plan)
+        (control / "fresh-starts").mkdir(mode=0o700)
+        self.assertNotIn("operation_errors", self.collect_pending(revision)["pending_fresh_upload"])
+
+    def test_pending_upload_refuses_changed_previous_service_even_with_valid_hashes(self):
+        revision, control = self.install_pending_upload()
+        reservation = private_json(control / "reservation.json")
+        reservation["replacement"]["service"]["arguments"] = ["/unbound/validator", SECRET]
+        plan = private_json(control / "plan.json")
+        plan["replacement_sha256"] = diagnostics.digest(reservation["replacement"])
+        reservation["plan_sha256"] = diagnostics.digest(plan)
+        atomic_json(control / "plan.json", plan)
+        atomic_json(control / "reservation.json", reservation)
+        atomic_json(control / "fresh-progress.json", {"version": 1, "plan_sha256": diagnostics.digest(plan), "phase": "prepared"})
+        pending = self.collect_pending(revision)["pending_fresh_upload"]
+        self.assertNotIn("operation_errors", pending)
+        self.assertNotIn(SECRET, json.dumps(pending))
+
+    def test_pending_upload_requires_private_bounded_operation_log(self):
+        revision, control = self.install_pending_upload()
+        log = control / "operations.log"
+        log.chmod(0o644)
+        self.assertEqual(self.collect_pending(revision)["pending_fresh_upload"]["operation_errors"]["status"], "unavailable")
+        log.chmod(0o600)
+        with log.open("wb") as output:
+            output.truncate(65 * 1024 * 1024)
+        self.assertEqual(self.collect_pending(revision)["pending_fresh_upload"]["operation_errors"]["status"], "file_limit_exceeded")
+
+    def test_pending_upload_refuses_symlinked_operation_log(self):
+        revision, control = self.install_pending_upload()
+        log = control / "operations.log"
+        log.unlink()
+        log.symlink_to(self.logfile)
+        pending = self.collect_pending(revision)["pending_fresh_upload"]
+        self.assertNotIn("write_transactions_failed", pending.get("operation_errors", {}))
+        self.assertNotIn(SECRET, json.dumps(pending))
 
     def test_every_retained_byte_and_mode_is_unchanged(self):
         before = retained_fingerprint([self.root])
