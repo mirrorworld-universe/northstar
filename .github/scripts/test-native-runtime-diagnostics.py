@@ -441,7 +441,7 @@ class DiagnosticTests(unittest.TestCase):
 
     def install_failed_fresh_runtime(self):
         self.runtime.chmod(0o700)
-        self.plan["activation_mode"] = "fresh-stack"
+        self.plan["mode"] = "fresh-stack"
         saved = private_json(self.control / "reservation.json")
         saved["plan_sha256"] = diagnostics.digest(self.plan)
         atomic_json(self.control / "plan.json", self.plan)
