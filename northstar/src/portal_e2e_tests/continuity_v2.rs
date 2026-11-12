@@ -6,7 +6,64 @@ use {
     },
     borsh::BorshDeserialize,
     northstar_zk_types::continuity::IngressRecordV2,
+    solana_message::SanitizedMessage,
+    solana_transaction::{InstructionError, TransactionError},
 };
+
+/// V2 challenge entry has no qualified resolver, so Portal must refuse it
+/// before any checkpoint, challenge, or bond state changes. The challenger pays only
+/// the transaction fee.
+fn assert_v2_challenge_entry_rejected(
+    bank: &Bank,
+    program_id: Pubkey,
+    session: Pubkey,
+    er_slot: u64,
+    watched: &[Pubkey],
+) {
+    let challenger = Keypair::new();
+    bank.store_account(
+        &challenger.pubkey(),
+        &AccountSharedData::new(1_000_000_000, 0, &system_program::id()),
+    );
+    let instruction =
+        build_challenge_checkpoint_ix(program_id, challenger.pubkey(), session, er_slot);
+    let created: Vec<Pubkey> = instruction.accounts[3..5]
+        .iter()
+        .map(|meta| meta.pubkey)
+        .collect();
+    let transaction = Transaction::new_signed_with_payer(
+        &[instruction],
+        Some(&challenger.pubkey()),
+        &[&challenger],
+        bank.last_blockhash(),
+    );
+    let fee = bank
+        .get_fee_for_message(
+            &SanitizedMessage::try_from_legacy_message(
+                transaction.message.clone(),
+                &HashSet::new(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let before: Vec<_> = watched.iter().map(|key| bank.get_account(key)).collect();
+    let balance = bank.get_balance(&challenger.pubkey());
+    let result = bank.process_transaction(&transaction);
+    assert!(
+        matches!(
+            result,
+            Err(TransactionError::InstructionError(0, InstructionError::Custom(code)))
+                if code == northstar_portal::PortalError::StepProofVerifierUnavailable as u32
+        ),
+        "unexpected v2 challenge result: {result:?}"
+    );
+    let after: Vec<_> = watched.iter().map(|key| bank.get_account(key)).collect();
+    assert_eq!(before, after, "rejected v2 challenge changed Portal state");
+    for key in created {
+        assert!(bank.get_account(&key).is_none());
+    }
+    assert_eq!(bank.get_balance(&challenger.pubkey()), balance - fee);
+}
 
 #[test]
 fn regression_v2_portal_authenticates_prefix_and_commits_its_consumed_head() {
@@ -171,6 +228,19 @@ fn regression_v2_portal_authenticates_prefix_and_commits_its_consumed_head() {
         bank.last_blockhash(),
     ))
     .unwrap();
+    assert_v2_challenge_entry_rejected(
+        &bank,
+        program_id,
+        session,
+        er_slot,
+        &[
+            session, checkpoint, cursor, binding, prefix, receipt, fee_vault, epoch,
+        ],
+    );
+    let pending =
+        northstar_portal::Checkpoint::try_from_slice(bank.get_account(&checkpoint).unwrap().data())
+            .unwrap();
+    assert_eq!(pending.status, CheckpointStatus::Pending);
     bank.process_transaction(&Transaction::new_signed_with_payer(
         &[deposit(2, 5_000_000)],
         Some(&payer_key),
