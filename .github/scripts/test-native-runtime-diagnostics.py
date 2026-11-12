@@ -2,6 +2,7 @@
 """Sonic: Diagnostics observe lifecycle/metadata without mutating or publishing private input."""
 import fcntl
 import gzip
+import base64
 import hashlib
 import json
 import os
@@ -495,6 +496,87 @@ class DiagnosticTests(unittest.TestCase):
         ready["l1_floor"] += 1
         atomic_json(path, ready)
         self.assertEqual(diagnostics.failed_fresh_runtime(self.state_root, self.base.name, self.failed_specification,
+            self.failed_values)["status"], "unavailable")
+
+    def install_failed_resume_review(self):
+        self.install_failed_fresh_runtime()
+        self.failed_values["InactiveEnterTimestamp"] = "Thu 2026-11-12 01:29:58 UTC"
+        saved = private_json(self.control / "reservation.json")
+        saved.update(l1_rpc="http://127.0.0.1:8899", er_rpc="http://127.0.0.1:8900", devnet_rpc="https://api.devnet.solana.com")
+        saved["original"].update(pid=123, start_time="42")
+        saved["replacement"] = {"service": self.failed_specification}
+        self.plan["funder"] = public_text(bytes([6]) * 32)
+        self.plan["original_sha256"] = diagnostics.digest(saved["original"])
+        self.plan["replacement_sha256"] = diagnostics.digest(saved["replacement"])
+        saved["plan_sha256"] = diagnostics.digest(self.plan)
+        atomic_json(self.control / "plan.json", self.plan)
+        atomic_json(self.control / "reservation.json", saved)
+        progress = private_json(self.control / "fresh-progress.json")
+        progress["plan_sha256"] = diagnostics.digest(self.plan)
+        atomic_json(self.control / "fresh-progress.json", progress)
+        for name in ("activate", "activate-ready", "resume-sol", "resume-sol-ready"):
+            value = private_json(self.control / "fresh-starts" / (name + ".json"))
+            value["plan_sha256"] = diagnostics.digest(self.plan)
+            atomic_json(self.control / "fresh-starts" / (name + ".json"), value)
+        programs = {"version": 2, "roles": {role: {"elf_sha256": self.plan["artifacts"][role], "complete": {"deployment_slot": 100}}
+                    for role in ("portal", "token_bridge")}}
+        atomic_json(self.control / "programs.json", programs)
+        record = {"version": 1, "kind": "prepared-fresh-controller", "source_revision": self.base.name,
+            "controller_revision": "c768a521eb968fdef2dbc84eb3bc7c78495ac760", "plan_sha256": diagnostics.digest(self.plan),
+            "programs_sha256": diagnostics.digest(programs), "previous_service_sha256": diagnostics.digest(saved["replacement"]["service"]),
+            "previous_pid": 123, "previous_start_time": "42", "preflight_rpc": saved["l1_rpc"], "qualification_rpc": saved["devnet_rpc"],
+            "phase": "failed", "operator_reconciliation_required": True}
+        atomic_json(self.control / "fresh-controller-continuation.json", record)
+        extra = record | {"version": 2, "controller_revision": "459ffdee99d087131feccabe9679c70736fd1082",
+            "previous_failed_continuation_sha256": diagnostics.digest(record), "quarantine_requested": True, "quarantine_verified": True}
+        atomic_json(self.control / "fresh-controller-continuation-retry.json", extra)
+        smoke = self.control / "sdk-smoke"
+        binding = {"version": 2, "genesis": diagnostics.DEVNET, "er_genesis": public_text(bytes([9]) * 32),
+            "l1_rpc": saved["l1_rpc"], "er_rpc": saved["er_rpc"], "source_revision": self.base.name,
+            "sdk_revision": self.plan["sdk_revision"], "portal": self.plan["programs"]["portal"],
+            "token_bridge": self.plan["programs"]["token_bridge"], "validator": self.plan["validator"],
+            "authority": self.plan["funder"], "grid_id": "0", "ttl_slots": "78840000", "fee_cap": "1000000000",
+            "settlement_interval_slots": "75", "context": "e" * 64}
+        atomic_json(smoke / "binding.json", binding)
+        atomic_json(self.control / "sdk-config.json", self.plan | binding)
+        keys = smoke / "keys"
+        keys.mkdir(mode=0o700)
+        atomic_json(keys / "index.json", {"sol-payer": public_text(bytes([4]) * 32), "sol-recipient": public_text(bytes([5]) * 32)})
+        for name in ("sol-payer", "sol-recipient"):
+            atomic_json(keys / (name + ".json"), [0] * 64)
+        controls = smoke / "controls"
+        withdrawal = controls / "sol-withdraw"
+        withdrawal.mkdir(mode=0o700, parents=True)
+        operation = {"version": 2, "binding": diagnostics.digest(binding), "label": "sol-withdraw", "layer": "er",
+            "request": {"amount": "1000000", "recipient": public_text(bytes([5]) * 32)}}
+        atomic_json(controls / "binding.json", {"version": 2, "binding": diagnostics.digest(binding), "identity": binding})
+        atomic_json(withdrawal / "operation.json", operation)
+        wire = b"original signed bytes"
+        atomic_json(withdrawal / "intent.json", {"version": 2, "binding": diagnostics.digest(binding), "operation_sha256": diagnostics.digest(operation),
+            "layer": "er", "signature": "2" * 88, "blockhash": public_text(bytes([8]) * 32), "last_valid_block_height": 100,
+            "wire_sha256": hashlib.sha256(wire).hexdigest(), "wire_base64": base64.b64encode(wire).decode()})
+        (self.control / "operations.log").write_text(SECRET + "\nTransaction simulation failed: canonical checkpoint awaits settlement; retry after settlement\n")
+
+    def test_failed_resume_review_hash_binds_controls_intent_and_exact_stop(self):
+        self.install_failed_resume_review()
+        report = diagnostics.fresh_resume_review(self.state_root, self.base.name, self.failed_specification, self.failed_values)
+        self.assertEqual(report["status"], "reviewable")
+        self.assertRegex(report["review_sha256"], "^[0-9a-f]{64}$")
+        self.assertNotIn(SECRET, json.dumps(report))
+        changed = diagnostics.fresh_resume_review(self.state_root, self.base.name, self.failed_specification,
+            self.failed_values | {"InactiveEnterTimestamp": "Thu 2026-11-12 01:30:00 UTC"})
+        self.assertNotEqual(changed["review_sha256"], report["review_sha256"])
+        atomic_json(self.control / "sdk-smoke/controls/sol-withdraw/receipt.json", {"private": SECRET})
+        self.assertEqual(diagnostics.fresh_resume_review(self.state_root, self.base.name, self.failed_specification,
+            self.failed_values)["status"], "unavailable")
+
+    def test_failed_resume_review_rejects_changed_signed_intent(self):
+        self.install_failed_resume_review()
+        file = self.control / "sdk-smoke/controls/sol-withdraw/intent.json"
+        intent = private_json(file)
+        intent["wire_sha256"] = "f" * 64
+        atomic_json(file, intent)
+        self.assertEqual(diagnostics.fresh_resume_review(self.state_root, self.base.name, self.failed_specification,
             self.failed_values)["status"], "unavailable")
 
     def test_pending_upload_never_claims_absent_budget_when_a_report_remains(self):

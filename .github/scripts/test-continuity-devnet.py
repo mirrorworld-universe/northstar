@@ -46,6 +46,45 @@ class DeploymentTests(unittest.TestCase):
             account=Mock(return_value=None),
         )
 
+    def test_reconciled_smoke_cannot_skip_restart_without_a_ready_barrier(self):
+        value = self.deployment
+        value.fresh = SimpleNamespace(phase=Mock(return_value="running"), verify_desired=Mock())
+        value.execute = Mock()
+        with self.assertRaises((ValueError, OSError)):
+            value.smoke(resumed_phase="resume-sol")
+        value.execute.assert_not_called()
+
+    def test_reconciled_smoke_consumes_only_the_remaining_spl_restart(self):
+        value = self.deployment
+        value.args.sdk_checkout = self.root / "sdk"
+        value.plan.update(source_revision=value.args.revision, profile="e" * 64)
+        value.er = SimpleNamespace(call=Mock(return_value=rollout.public_text(bytes([9]) * 32)))
+        value.retention = Mock(return_value={})
+        atomic_json(value.control / "retained.json", {})
+        atomic_json(value.control / "activation.json", {"event_source": "l1"})
+        record = {"version": 1, "kind": "fresh-poststart-reconciliation", "source_revision": value.args.revision,
+            "controller_revision": "d" * 40, "plan_sha256": hashlib.sha256(rollout.canonical(value.plan)).hexdigest(),
+            "review_sha256": "f" * 64, "context": "e" * 64, "extra_native_starts": 1, "program_submissions": 0, "phase": "running"}
+        atomic_json(value.control / "fresh-poststart-reconciliation.json", record)
+        directory = value.control / "fresh-reconciliation"
+        directory.mkdir(mode=0o700)
+        ready = {"version": 1, "plan_sha256": record["plan_sha256"], "review_sha256": record["review_sha256"],
+            "context": record["context"], "l1_floor": 100, "phase": "resume-sol"}
+        atomic_json(directory / "start-attempted.json", ready)
+        atomic_json(directory / "ready.json", ready)
+        value.fresh = SimpleNamespace(phase=Mock(return_value="running"), verify_desired=Mock(), report=lambda report: report)
+        value.stop, value.start = Mock(), Mock()
+        phases = []
+        def execute(command, **_):
+            phases.append(command[-1])
+            return json.dumps({"phase": command[-1], "context": "e" * 64})
+        value.execute = Mock(side_effect=execute)
+        value.smoke(resumed_phase="resume-sol")
+        self.assertEqual(phases, ["bootstrap", "prepare-sol", "resume-sol", "prepare-spl", "resume-spl"])
+        value.stop.assert_called_once()
+        value.start.assert_called_once()
+        value.fresh.verify_desired.assert_called_with(running=True)
+
     def test_unresolved_program_upload_is_not_replanned_or_resubmitted(self):
         value = self.deployment
         atomic_json(value.control / "programs.json", {"version": 2, "roles": {"portal": {

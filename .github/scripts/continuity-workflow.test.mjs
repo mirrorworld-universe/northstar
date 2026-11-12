@@ -157,6 +157,20 @@ test('prepared fresh continuation binds retained plan and publishes only qualifi
   expect(checks).toContain('test-continuity-rpc.py');
 });
 
+test('poststart reconciliation is master-only and requires the exact read-only review', async () => {
+  const value = Bun.YAML.parse(await Bun.file(new URL('../workflows/fresh-poststart-reconciliation.yml', import.meta.url)).text());
+  const job = value.jobs.reconcile;
+  expect(job.if).toContain("github.ref == 'refs/heads/master'");
+  const step = job.steps.find(step => step.id === 'reconcile');
+  expect(step.env.REVIEW_SHA256).toBe('${{ inputs.review_sha256 }}');
+  expect(step.run).toContain('fresh_poststart_reconciliation.py');
+  expect(step.run).toContain('export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"');
+  expect(step.run).not.toMatch(/build-continuity|continuity_upload_resume|--stage|variable set|systemctl/);
+  expect(job.steps.at(-1).if).toContain("steps.reconcile.conclusion == 'success'");
+  expect(job.steps.at(-1).with.path).toBe('${{ steps.reconcile.outputs.report_path }}');
+  expect(workflow.jobs.test.steps.map(step => step.run ?? '').join('\n')).toContain('test-fresh-poststart-reconciliation.py');
+});
+
 test('artifact upload selects only the verified public report', () => {
   const uploads = steps.filter(step => step.uses?.startsWith('actions/upload-artifact@'));
   expect(uploads).toHaveLength(1);

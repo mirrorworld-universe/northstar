@@ -1,4 +1,5 @@
 """Sonic: Public, read-only diagnostics; never expose command lines or journal text."""
+import base64
 import errno
 import fcntl
 import gzip
@@ -930,6 +931,78 @@ def failed_fresh_runtime(root, revision, specification, values):
         return unavailable
 
 
+def fresh_resume_review(root, revision, specification, values):
+    unavailable = {"status": "unavailable", "recovery_performed": False}
+    report = failed_fresh_runtime(root, revision, specification, values)
+    if (report.get("status") != "inspected" or report["completed_sdk_phases"] != ["bootstrap", "prepare-sol"]
+            or report["native_starts"] != [{"phase": "activate", "ready": True}, {"phase": "resume-sol", "ready": True}]
+            or not report["sol_withdrawal_intent_present"] or not values.get("InactiveEnterTimestamp")):
+        return unavailable
+    try:
+        control = root / revision / "control"
+        if os.path.lexists(control / "fresh-poststart-reconciliation.json") or os.path.lexists(control / "fresh-reconciliation"):
+            return unavailable
+        names = ["plan.json", "reservation.json", "activation.json", "activation-installed.json", "fresh-progress.json",
+                 "programs.json", "sdk-config.json", "fresh-controller-continuation.json", "fresh-controller-continuation-retry.json",
+                 "fresh-starts/activate.json", "fresh-starts/activate-ready.json", "fresh-starts/resume-sol.json", "fresh-starts/resume-sol-ready.json",
+                 "sdk-smoke/bootstrap.json", "sdk-smoke/prepare-sol.json", "sdk-smoke/binding.json", "sdk-smoke/keys/index.json",
+                 "sdk-smoke/keys/sol-payer.json", "sdk-smoke/keys/sol-recipient.json", "sdk-smoke/controls/binding.json",
+                 "sdk-smoke/controls/sol-withdraw/operation.json", "sdk-smoke/controls/sol-withdraw/intent.json"]
+        records = {name: private_json(control / name) for name in names}
+        plan, saved, config = [records[name] for name in ("plan.json", "reservation.json", "sdk-config.json")]
+        binding, index = records["sdk-smoke/binding.json"], records["sdk-smoke/keys/index.json"]
+        continuation = fresh_continuation_status(control, plan, saved, saved["replacement"]["service"], records["programs.json"])
+        extra = records["fresh-controller-continuation-retry.json"]
+        if (continuation.get("status") != "recorded" or continuation.get("phase") != "failed"
+                or continuation.get("additional_pass", {}).get("status") != "recorded"
+                or extra.get("phase") != "failed" or extra.get("controller_revision") != "459ffdee99d087131feccabe9679c70736fd1082"
+                or extra.get("quarantine_requested") is not True or extra.get("quarantine_verified") is not True
+                or binding.get("context") != report["context"] or set(index) != {"sol-payer", "sol-recipient"}):
+            return unavailable
+        for key, expected in {"source_revision": revision, "sdk_revision": plan["sdk_revision"], "genesis": DEVNET,
+                              "portal": plan["programs"]["portal"], "token_bridge": plan["programs"]["token_bridge"],
+                              "validator": plan["validator"], "l1_rpc": saved["l1_rpc"], "er_rpc": saved["er_rpc"]}.items():
+            if config.get(key) != expected or binding.get(key) != expected:
+                return unavailable
+        if (config.get("version") != 2 or binding.get("version") != 2 or config.get("profile") != plan["profile"]
+                or config.get("er_genesis") != binding.get("er_genesis") or binding.get("authority") != plan["funder"]
+                or any(config.get(key) != expected or binding.get(key) != expected for key, expected in
+                       {"grid_id": "0", "ttl_slots": "78840000", "fee_cap": "1000000000", "settlement_interval_slots": "75"}.items())):
+            return unavailable
+        public_bytes(config["er_genesis"])
+        for name in ("sol-payer", "sol-recipient"):
+            public_bytes(index[name])
+            key = records["sdk-smoke/keys/" + name + ".json"]
+            if not isinstance(key, list) or len(key) != 64 or any(type(value) is not int or not 0 <= value <= 255 for value in key):
+                return unavailable
+        controls = records["sdk-smoke/controls/binding.json"]
+        operation = records["sdk-smoke/controls/sol-withdraw/operation.json"]
+        intent = records["sdk-smoke/controls/sol-withdraw/intent.json"]
+        if (controls != {"version": 2, "binding": digest(binding), "identity": binding}
+                or operation != {"version": 2, "binding": digest(binding), "label": "sol-withdraw", "layer": "er",
+                                  "request": {"amount": "1000000", "recipient": index["sol-recipient"]}}
+                or intent.get("version") != 2 or intent.get("binding") != digest(binding) or intent.get("layer") != "er"
+                or intent.get("operation_sha256") != digest(operation)
+                or type(intent.get("last_valid_block_height")) is not int or not 0 <= intent["last_valid_block_height"] <= 2 ** 53 - 1
+                or not re.fullmatch("[1-9A-HJ-NP-Za-km-z]{64,128}", intent.get("signature", ""))):
+            return unavailable
+        public_bytes(intent["blockhash"])
+        wire = base64.b64decode(intent["wire_base64"], validate=True)
+        if not 0 < len(wire) <= 1232 or base64.b64encode(wire).decode() != intent["wire_base64"] or hashlib.sha256(wire).hexdigest() != intent["wire_sha256"]:
+            return unavailable
+        if any(os.path.lexists(control / "sdk-smoke/controls/sol-withdraw" / name) for name in ("observed.json", "receipt.json", "fatal.json")):
+            return unavailable
+        markers = report["operation_errors"].get("markers", {})
+        if not markers.get("settlement_pending") or any(markers.get(key) for key in
+                ("sol_restart_balance", "sol_receipt_owner", "er_readiness_timeout", "prior_credit_missing", "lineage_recovery", "program_completion")):
+            return unavailable
+        evidence = {"version": 1, "records": {name: digest(value) for name, value in records.items()},
+                    "service_sha256": digest(specification), "stopped_at": values["InactiveEnterTimestamp"], "context": report["context"]}
+        return {"status": "reviewable", "review_sha256": digest(evidence), "context": report["context"], "recovery_performed": False}
+    except (OSError, ValueError, TypeError, KeyError):
+        return unavailable
+
+
 def collect_report(run=execute, root=STATE_ROOT, dropin=DROPIN, lock=LOCK, pending_revision=""):
     report = {"version": 1, "read_only": True, "service": SERVICE,
               "scope": "systemd and retained metadata only; no RPC qualification or recovery"}
@@ -967,6 +1040,7 @@ def collect_report(run=execute, root=STATE_ROOT, dropin=DROPIN, lock=LOCK, pendi
             report["pending_fresh_upload"] = pending_fresh_upload(root, pending_revision,
                 bound_specification if values.get("ActiveState") == "active" else {})
             report["failed_fresh_runtime"] = failed_fresh_runtime(root, pending_revision, bound_specification, values)
+            report["fresh_resume_review"] = fresh_resume_review(root, pending_revision, bound_specification, values)
         report["status"] = "snapshot_collected"
     except FileNotFoundError:
         report["status"] = "deployment_lock_missing"
