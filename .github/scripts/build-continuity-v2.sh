@@ -28,7 +28,7 @@ cargo build-sbf --tools-version v1.56 --arch v0 \
   --manifest-path northstar/programs/token-bridge/Cargo.toml \
   --features checkpoint-continuity-v2 --sbf-out-dir "$stage/programs" -- --locked
 cargo build --locked --release --target-dir "$target" --bin agave-validator \
-  --features northstar/checkpoint-continuity-v2
+  --features northstar/checkpoint-continuity-v2,solana-core/vrf-relay
 cargo build --locked --release --target-dir "$target" --package solana-cli --bin solana \
   --no-default-features --features checkpoint-continuity-v2
 cargo build --locked --release --target-dir "$target" --package northstar-geyser-events --lib

@@ -56,7 +56,7 @@ jobs:
           packages: protobuf-compiler libprotobuf-dev libudev-dev libclang-dev
       - run: cargo clippy --locked --all --tests -- -D warnings
       # Sonic: Check opt-in paths without enabling them in deployment builds.
-      - run: cargo clippy --locked --all --tests --features northstar/proof-coordinator-test-hooks,agave-validator/proof-coordinator-test-hooks,northstar-portal/zk-verifier-profile -- -D warnings
+      - run: cargo clippy --locked --all --tests --features northstar/proof-coordinator-test-hooks,agave-validator/proof-coordinator-test-hooks,northstar-portal/zk-verifier-profile,solana-core/vrf-relay -- -D warnings
       # Sonic: Continuity remains opt-in until its runtime and verifier are integrated.
       - run: cargo clippy --locked -p northstar -p northstar-portal -p solana-cli --tests --features checkpoint-continuity-v2 -- -D warnings
       # Sonic: Root workspace checks do not include the portable VRF probe.
@@ -116,6 +116,7 @@ jobs:
           python3 -B .github/scripts/test-continuity-upload-resume.py
           python3 -B .github/scripts/test-continuity-devnet-model.py
           python3 -B .github/scripts/test-native-upgrade.py
+          python3 -B .github/scripts/test_vrf_relay_profile.py
           python3 -B .github/scripts/test-fresh-devnet.py
           python3 -B .github/scripts/test-fresh-prepared-continuation.py
           python3 -B .github/scripts/test-fresh-poststart-reconciliation.py
@@ -242,6 +243,13 @@ jobs:
         run: cargo test --locked -p solana-svm northstar --no-fail-fast
       - name: Run Northstar core service tests
         run: cargo test --locked -p solana-core northstar_service --no-fail-fast
+      - name: Test remote-only Native VRF module
+        run: |
+          python3 -B .github/scripts/check_vrf_relay_snapshot.py
+          cargo test --locked -p northstar-vrf-protocol
+          cargo test --locked -p northstar-vrf-relay --doc
+          cargo test --locked -p northstar --features vrf-relay --lib vrf_commitment
+          cargo test --locked -p solana-core --features vrf-relay --lib northstar_service::vrf_relay
       # Sonic: Exercise extraction, replay, and the real ER Geyser shared library.
       - name: Test Geyser program events and ER history
         run: |
@@ -312,11 +320,12 @@ jobs:
           L1_RECOVERY_SLOT: ${{ vars.NORTHSTAR_L1_RECOVERY_SLOT }}
           FRESH_CONTEXT: ${{ vars.NORTHSTAR_FRESH_CONTEXT }}
           L1_RPC_PROFILE: ${{ vars.NORTHSTAR_L1_RPC_PROFILE }}
+          VRF_RELAY_PROFILE_SHA256: ${{ vars.NORTHSTAR_VRF_RELAY_PROFILE_SHA256 }}
         run: |
           set -euo pipefail
           mode=$(python3 -B .github/scripts/continuity_devnet.py mode \
             --recovery-slot "$L1_RECOVERY_SLOT" --replace-context "$FRESH_CONTEXT" \
-            --l1-rpc-profile "$L1_RPC_PROFILE")
+            --l1-rpc-profile "$L1_RPC_PROFILE" --vrf-relay-profile-sha256 "$VRF_RELAY_PROFILE_SHA256")
           printf 'arguments=%s\n' "$mode" >> "$GITHUB_OUTPUT"
 
       - name: Check for program changes

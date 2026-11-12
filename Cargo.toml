@@ -143,6 +143,8 @@ members = [
     "northstar/replay-harness",
     "northstar/zk-verifier-bench",
     "northstar/vrf-oracle",
+    "northstar/vrf-interface",
+    "northstar/vrf-relay",
     "northstar/vrf-sbpf-replay",
 ]
 
@@ -621,6 +623,8 @@ zstd = "0.14.3"
 
 # Sonic:
 northstar = { path = "northstar" }
+northstar-vrf-protocol = { path = "northstar/vrf-interface" }
+northstar-vrf-relay = { path = "northstar/vrf-relay", default-features = false }
 northstar-portal.path = "northstar/programs/portal"
 northstar-zk-prover.path = "northstar/zk-prover"
 northstar-transaction-proof.path = "northstar/transaction-proof"

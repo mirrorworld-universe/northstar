@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
+vrf-relay = ["checkpoint-continuity-v2", "dep:northstar-vrf-protocol"]
 checkpoint-continuity-v2 = ["northstar-portal/checkpoint-continuity-v2", "northstar-token-bridge/checkpoint-continuity-v2"]
 vrf-candidate-capture = ["dep:serde", "dep:serde_json", "solana-runtime/vrf-candidate-capture", "solana-svm/vrf-candidate-capture"]
 proof-coordinator-test-hooks = ["proof-coordinator"]
@@ -69,6 +70,7 @@ tokio.workspace = true
 
 northstar-portal.workspace = true
 northstar-zk-types.workspace = true
+northstar-vrf-protocol = { workspace = true, optional = true }
 northstar-token-bridge = { path = "programs/token-bridge", features = ["no-entrypoint"] }
 
 base64.workspace = true

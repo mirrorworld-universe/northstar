@@ -672,6 +672,9 @@ fn main() {
         .map(PathBuf::from)
         .collect();
 
+    // Sonic: The embedded relay uses only a transaction wallet and remote signer.
+    genesis.vrf_relay_config = matches.value_of("vrf_relay_config").map(PathBuf::from);
+
     if let Some(compute_unit_limit) = compute_unit_limit {
         genesis.compute_unit_limit(compute_unit_limit);
     }

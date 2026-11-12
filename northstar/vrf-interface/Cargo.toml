@@ -1,0 +1,13 @@
+[package]
+name = "northstar-vrf-protocol"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+sha2 = "=0.10.9"
+
+[dev-dependencies]
+hex = "=0.4.3"

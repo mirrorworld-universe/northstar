@@ -7,6 +7,7 @@ import re
 import time
 
 import native_l1_recovery as recovery
+import vrf_relay_profile as relay
 
 from continuity_rollout_state import (
     ARTIFACTS, DEVNET, SDK_REVISION, append_private, atomic_json, canonical, checked_directory,
@@ -167,6 +168,7 @@ class NativeUpgrade:
             artifacts = self.base_manifest["sha256"]
             self.previous_event_source = geyser_event_source(self.base_activation)
             self.previous_rpc_profile = self.base_activation.get("l1_rpc_profile")
+            self.previous_relay = self.base_activation.get("vrf_relay")
         else:
             previous = binary.parent.parent.parent
             require(previous.parent == self.parent and re.fullmatch("[0-9a-f]{40}", previous.name)
@@ -191,6 +193,7 @@ class NativeUpgrade:
             marker = private_json(previous / "control/installed.json")
             self.previous_event_source = geyser_event_source(saved)
             self.previous_rpc_profile = saved.get("l1_rpc_profile")
+            self.previous_relay = saved.get("vrf_relay")
         require(self.previous_rpc_profile in (None, "full"), "retained L1 RPC profile differs")
         require(before["binary_sha256"] == artifacts["validator"], "retained native manifest and executable differ")
         text = service_dropin(before["arguments"], *[before["state_environment"][key] for key in STATE_KEYS])
@@ -198,7 +201,17 @@ class NativeUpgrade:
         paths = [binary, *[Path(before["state_environment"][key]) for key in STATE_KEYS]]
         if config is not None:
             paths.extend([config, binary.parent.parent / ARTIFACTS["geyser_events"]])
+        previous_relay_config = flag_value(before["arguments"], relay.FLAG) if self.previous_relay is not None else None
+        require(self.previous_relay is not None or not any(value == relay.FLAG or value.startswith(relay.FLAG + "=") for value in before["arguments"]),
+                "unrecorded native relay configuration requires explicit review")
+        if previous_relay_config is not None:
+            require(previous_relay_config == str(binary.parent.parent / "vrf-relay.json"), "retained relay path differs")
+            paths.extend([Path(previous_relay_config), relay.JOURNAL])
         observed = self.inspect(paths)
+        if previous_relay_config is not None:
+            info = observed[previous_relay_config]
+            require(info.get("sha256") == relay.configuration_hash(self.previous_relay) and info.get("uid") == before["uid"]
+                    and info.get("mode") == 0o400, "retained relay configuration differs")
         require(observed[str(binary)].get("sha256") == before["binary_sha256"]
                 and observed[str(binary)].get("mode") == 0o500 and observed[str(binary)].get("uid") == before["uid"],
                 "retained native executable bytes or ownership differ")
@@ -215,7 +228,10 @@ class NativeUpgrade:
                     and observed[str(plugin)].get("sha256") == artifacts["geyser_events"]
                     and observed[str(plugin)].get("mode") == 0o500 and observed[str(plugin)].get("uid") == before["uid"],
                     "retained event plugin binding differs")
-        return {"dropin_sha256": marker["sha256"], "config": str(config) if config else None}
+        binding = {"dropin_sha256": marker["sha256"], "config": str(config) if config else None}
+        if previous_relay_config is not None:
+            binding["relay_config"] = previous_relay_config
+        return binding
 
     def prepare(self):
         require(re.fullmatch("[0-9a-f]{40}", self.args.revision), "full native source revision required")
@@ -270,6 +286,18 @@ class NativeUpgrade:
         config = self.runtime / "geyser-events.json"
         desired_arguments = l1_rpc_arguments(upgrade_arguments(before["arguments"], self.runtime / ARTIFACTS["validator"], config, binding["config"],
                                               previous_source=self.previous_event_source, event_source=self.event_source), self.rpc_profile)
+        requested_relay = getattr(self.args, "vrf_relay_profile", None)
+        requested_relay_sha = getattr(self.args, "vrf_relay_profile_sha256", None)
+        require(bool(requested_relay) == bool(requested_relay_sha), "relay source and digest must be supplied together")
+        loaded_relay = relay.read_profile(requested_relay, requested_relay_sha) if requested_relay else None
+        self.relay_profile = saved.get("vrf_relay") if saved else loaded_relay or self.previous_relay
+        require(loaded_relay is None or loaded_relay == self.relay_profile, "established relay profile differs")
+        if self.relay_profile is not None:
+            require(self.recovery_slot is None and self.event_source == "l1", "relay requires an ordinary retained native upgrade")
+            snapshot_relay = self.snapshot("online")
+            relay.validate(self.relay_profile, snapshot_relay["identity"], snapshot_relay["er_genesis"], self.args.l1_rpc, self.args.er_rpc)
+            relay.preflight(self, self.relay_profile)
+            desired_arguments = relay.arguments(desired_arguments, self.runtime / "vrf-relay.json", binding.get("relay_config"))
         if self.recovery_slot is not None:
             desired_arguments = recovery.arguments(desired_arguments, self.runtime)
         desired = {**service_spec(before), "arguments": desired_arguments,
@@ -294,6 +322,8 @@ class NativeUpgrade:
             retained = (set(before["retained_paths"]) - {str(self.dropin)}) | {str(self.base_control), before["arguments"][0], *before["state_environment"].values()}
             if binding["config"]:
                 retained.update([binding["config"], str(Path(binding["config"]).parent / ARTIFACTS["geyser_events"])])
+            if binding.get("relay_config"):
+                retained.update([binding["relay_config"], str(relay.JOURNAL)])
             retained = sorted(retained)
             self.plan = {"version": 1, "kind": "native-upgrade", "source_revision": self.args.revision, "stage": str(self.stage),
                          "event_source": self.event_source,
@@ -304,10 +334,12 @@ class NativeUpgrade:
                 self.plan["recovery_failed_slot"] = self.recovery_slot
             if self.rpc_profile:
                 self.plan["l1_rpc_profile"] = self.rpc_profile
+            if self.relay_profile is not None:
+                self.plan["vrf_relay"] = self.relay_profile
             immutable_json(self.record, self.plan)
             immutable_json(self.progress, {"version": 1, "plan_sha256": digest(self.plan), "phase": "prepared"})
         phase = self.phase()
-        if self.rpc_profile:
+        if self.rpc_profile or self.relay_profile is not None:
             base_report = private_json(self.base_control / "report.json")
             identity = self.plan["identity"]
             require(base_report.get("result") == "passed" and base_report.get("source_revision") == self.base.name
@@ -409,6 +441,7 @@ class NativeUpgrade:
         else:
             require(info.get("sha256") == hashlib.sha256(canonical(configuration) + b"\n").hexdigest()
                     and info.get("uid") == before["uid"] and info.get("mode") == 0o400, "native upgrade plugin configuration differs")
+        relay.install(self)
         source_dropin = self.control / "validator.conf"
         if os.path.lexists(source_dropin):
             require(file_hash(source_dropin) == dropin_digest and source_dropin.lstat().st_mode & 0o777 == 0o600,
@@ -458,6 +491,7 @@ class NativeUpgrade:
 
     def verify_running_files(self):
         self.native_files()
+        relay.verify(self)
         require(private_json(self.installed) == {"sha256": hashlib.sha256(service_dropin(self.plan["desired"]["arguments"],
                 *[self.plan["before"]["state_environment"][key] for key in STATE_KEYS]).encode()).hexdigest()}, "native installation marker differs")
         dropin = self.inspect([self.dropin])[str(self.dropin)]
@@ -526,6 +560,9 @@ class NativeUpgrade:
             report["event_source"] = self.event_source
         if self.rpc_profile:
             report["l1_rpc_profile"] = self.rpc_profile
+        if self.plan.get("vrf_relay") is not None:
+            report["vrf_relay_enabled"] = True
+            report["vrf_callback_qualified"] = False
         if self.recovery_slot is not None:
             report.update(recovery_failed_slot=self.recovery_slot, prior_l1_data_preserved=True)
         immutable_json(self.control / "report.json", report)
