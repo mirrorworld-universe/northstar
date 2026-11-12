@@ -185,9 +185,14 @@ export class ControlJournal {
         if (typeof valid?.value !== 'boolean') throw new Error('Invalid control blockhash response');
         if (!valid.value) throw new Error('Saved transaction expired without a receipt; no replacement is permitted');
         await this.beforeSend(operation.label, operation.layer, { submit: true });
-        const signature = await send(wire, { skipPreflight: false, maxRetries: 0 });
-        if (signature !== intent.signature) throw new Error('Rebroadcast signature differs');
-        rebroadcast = true;
+        try {
+          const signature = await send(wire, { skipPreflight: false, maxRetries: 0 });
+          if (signature !== intent.signature) throw new Error('Rebroadcast signature differs');
+          rebroadcast = true;
+        } catch (error) {
+          if (operation.layer !== 'er' || error?.constructor?.name !== 'SendTransactionError' || error.signature !== '' ||
+              error.transactionError?.message !== 'canonical checkpoint awaits settlement; retry after settlement') throw error;
+        }
       }
       await new Promise(resolve => setTimeout(resolve, this.pollMs));
     }
