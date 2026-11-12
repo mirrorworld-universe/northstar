@@ -1,0 +1,66 @@
+name: Continue prepared fresh native activation
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Exact retained fresh artifact source revision
+        required: true
+        type: string
+      replace_context:
+        description: Exact reviewed previous SessionV2 context
+        required: true
+        type: string
+      plan_sha256:
+        description: Exact reviewed retained fresh plan digest
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prepared-fresh-native-activation
+  cancel-in-progress: false
+
+jobs:
+  activate:
+    if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch'
+    runs-on: devnet
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.21.0"
+      - name: Prepare pinned public SDK without rebuilding retained native artifacts
+        id: sdk
+        run: |
+          set -euo pipefail
+          SDK="$RUNNER_TEMP/northstar-prepared-sdk-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          bash .github/scripts/prepare-continuity-sdk.sh "$SDK"
+          echo "directory=$SDK" >> "$GITHUB_OUTPUT"
+      - name: Continue only the reviewed prepared fresh plan
+        id: activate
+        env:
+          TARGET_REVISION: ${{ inputs.revision }}
+          REPLACE_CONTEXT: ${{ inputs.replace_context }}
+          PLAN_SHA256: ${{ inputs.plan_sha256 }}
+          CONTINUITY_SDK: ${{ steps.sdk.outputs.directory }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+          python3 -B .github/scripts/fresh_prepared_continuation.py \
+            --revision "$TARGET_REVISION" --replace-context "$REPLACE_CONTEXT" \
+            --plan-sha256 "$PLAN_SHA256" --sdk-checkout "$CONTINUITY_SDK"
+      - name: Upload only the qualified public fresh report
+        if: steps.activate.conclusion == 'success' && steps.activate.outputs.report_path != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: prepared-fresh-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.activate.outputs.report_path }}
+          if-no-files-found: error
+          retention-days: 7

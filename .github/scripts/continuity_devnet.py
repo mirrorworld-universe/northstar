@@ -330,6 +330,8 @@ class Deployment:
                 entry["complete"] = observed
         if state["roles"]:
             atomic_json(marker, state)
+        if set(state["roles"]) == set(lengths) and all(entry["complete"] is not None for entry in state["roles"].values()):
+            return
         def rent(size):
             value = self.upstream.call("getMinimumBalanceForRentExemption", [size])
             require(type(value) is int and 0 < value < 1 << 64, "invalid native rent quote")

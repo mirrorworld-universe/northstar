@@ -65,6 +65,22 @@ class DeploymentTests(unittest.TestCase):
                 value.deploy_programs(resume_roles={"portal"}, submission_rpc=rpc, stop_worker=stop)
         value.execute.assert_not_called()
 
+    def test_completed_programs_do_not_require_rent_or_worker_or_submission_actions(self):
+        from urllib.error import HTTPError
+        value = self.deployment
+        views = {role: {"programdata": role, "deployment_slot": 50, "sha256": value.manifest["sha256"][role]}
+                 for role in ("portal", "token_bridge")}
+        atomic_json(value.control / "programs.json", {"version": 2, "roles": {
+            role: {"elf_sha256": value.manifest["sha256"][role], "complete": view} for role, view in views.items()}})
+        value.program_view = Mock(side_effect=lambda role: views[role])
+        value.upstream.call = Mock(side_effect=HTTPError("https://api.devnet.solana.com", 429, "rate limited", {}, None))
+        value.execute = Mock(side_effect=MutationBoundary)
+        value.deploy_programs()
+        value.upstream.call.assert_not_called()
+        value.execute.assert_not_called()
+        self.assertEqual(private_json(value.control / "programs.json")["roles"], {
+            role: {"elf_sha256": value.manifest["sha256"][role], "complete": view} for role, view in views.items()})
+
     def test_insufficient_balance_stops_before_service_or_chain_mutation(self):
         value = self.deployment
         value.upstream.call = lambda method, *_: 1000 if method == "getMinimumBalanceForRentExemption" else {"value": 1}
