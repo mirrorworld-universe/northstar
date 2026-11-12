@@ -53,6 +53,8 @@ pub mod slot_advancer;
 pub mod unsettled_state;
 #[cfg(feature = "vrf-candidate-capture")]
 pub mod vrf_candidate_capture;
+#[cfg(feature = "vrf-relay")]
+pub mod vrf_commitment;
 
 pub use crate::{
     ephemeral_runtime::{EphemeralRuntime, ErStateDiff, ErStateDiffAccount},
@@ -494,6 +496,14 @@ impl Manager {
             .as_ref()
             .expect("ER runtime must be initialized before attaching history observer")
             .set_history_observer(observer);
+    }
+
+    #[cfg(feature = "vrf-relay")]
+    pub fn vrf_commitment_source(&self) -> Option<vrf_commitment::VrfCommitmentSource> {
+        let store = self.runtime.as_ref()?.lineage_store_v2()?;
+        Some(vrf_commitment::VrfCommitmentSource::new(Arc::downgrade(
+            &store,
+        )))
     }
 
     /// Sonic: Check if an ephemeral session is currently active (accepting transactions)

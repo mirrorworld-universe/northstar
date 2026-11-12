@@ -16,6 +16,7 @@ all-features = true
 rustdoc-args = ["--cfg=docsrs"]
 
 [features]
+vrf-relay = ["northstar/vrf-relay", "dep:northstar-vrf-relay", "dep:serde_json"]
 # Sonic: Explicit opt-in; default validators do not link the proof coordinator.
 proof-coordinator = ["northstar/proof-coordinator"]
 proof-coordinator-test-hooks = ["proof-coordinator", "northstar/proof-coordinator-test-hooks"]
@@ -188,6 +189,8 @@ trees = { workspace = true }
 wincode = { workspace = true }
 
 northstar = { workspace = true }
+northstar-vrf-relay = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 # Northstar: Portal state decoding for settlement retry/confirmation tracking.
 northstar-portal = { workspace = true }
 

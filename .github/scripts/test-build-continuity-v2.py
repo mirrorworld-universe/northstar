@@ -93,7 +93,10 @@ class BuildTests(unittest.TestCase):
                 self.assertNotIn("--features", arguments)
                 continue
             feature = arguments[arguments.index("--features") + 1]
-            self.assertTrue(feature.endswith("checkpoint-continuity-v2"))
+            features = feature.split(",")
+            self.assertTrue(any(value.endswith("checkpoint-continuity-v2") for value in features))
+            if "agave-validator" in arguments:
+                self.assertEqual(features, ["northstar/checkpoint-continuity-v2", "solana-core/vrf-relay"])
             if arguments[0] == "build-sbf":
                 self.assertEqual(arguments[arguments.index("--arch") + 1], "v0")
                 self.assertEqual(arguments[arguments.index("--tools-version") + 1], "v1.56")

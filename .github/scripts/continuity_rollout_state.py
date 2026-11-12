@@ -51,11 +51,13 @@ def l1_rpc_arguments(arguments, profile=None):
     return result + ["--account-index", *L1_RPC_INDEXES]
 
 
-def release_mode_arguments(recovery_slot="", replace_context="", l1_rpc_profile=""):
-    require(all(isinstance(value, str) for value in (recovery_slot, replace_context, l1_rpc_profile)), "native mode selectors must be strings")
+def release_mode_arguments(recovery_slot="", replace_context="", l1_rpc_profile="", vrf_relay_profile_sha256=""):
+    require(all(isinstance(value, str) for value in (recovery_slot, replace_context, l1_rpc_profile, vrf_relay_profile_sha256)), "native mode selectors must be strings")
     require(not (recovery_slot and replace_context), "fresh activation and L1 recovery selectors are mutually exclusive")
     require(l1_rpc_profile in ("", "full"), "unknown L1 RPC profile selector")
     require(not l1_rpc_profile or not (recovery_slot or replace_context), "L1 RPC profile requires an ordinary native upgrade")
+    require(not vrf_relay_profile_sha256 or not (recovery_slot or replace_context)
+            and re.fullmatch("[0-9a-f]{64}", vrf_relay_profile_sha256), "VRF relay profile requires an ordinary native upgrade and exact digest")
     if replace_context:
         require(re.fullmatch("[0-9a-f]{64}", replace_context), "invalid fresh context selector")
         return ["--replace-context", replace_context, "--abandon-previous-state"]
@@ -66,6 +68,9 @@ def release_mode_arguments(recovery_slot="", replace_context="", l1_rpc_profile=
         result.extend(["--recover-failed-l1-slot", recovery_slot])
     if l1_rpc_profile:
         result.extend(["--l1-rpc-profile", l1_rpc_profile])
+    if vrf_relay_profile_sha256:
+        from vrf_relay_profile import PROFILE
+        result.extend(["--vrf-relay-profile", str(PROFILE), "--vrf-relay-profile-sha256", vrf_relay_profile_sha256])
     return result
 
 
@@ -274,7 +279,11 @@ def service_dropin(arguments, checkpoint_directory, unsettled_directory):
         require(Path(directory).is_absolute() and not any(character.isspace() for character in str(directory)), "native state directory must be an absolute unambiguous path")
     command = ["/usr/bin/env", "NORTHSTAR_CHECKPOINT_PLAN_DIR=" + str(checkpoint_directory),
                "NORTHSTAR_UNSETTLED_STATE_DIR=" + str(unsettled_directory), *arguments]
-    return "[Service]\nExecStart=\nExecStart=" + " ".join(systemd_argument(value) for value in command) + "\n"
+    text = "[Service]\nExecStart=\nExecStart=" + " ".join(systemd_argument(value) for value in command) + "\n"
+    if any(value == "--vrf-relay-config" or value.startswith("--vrf-relay-config=") for value in arguments):
+        from vrf_relay_profile import hardening
+        text += hardening()
+    return text
 
 
 def inspect_paths(paths):

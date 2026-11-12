@@ -762,6 +762,15 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .help("Load a Geyser plugin for ER transactions and locally finalized ER slots."),
     )
     .arg(
+        // Sonic: The validator holds only the relay wallet, never the VRF seed.
+        Arg::with_name("vrf_relay_config")
+            .long("vrf-relay-config")
+            .value_name("FILE")
+            .takes_value(true)
+            .requires("portal")
+            .help("Enable the remote-only ER VRF relay using the pinned configuration."),
+    )
+    .arg(
         Arg::with_name("geyser_plugin_always_enabled")
             .long("geyser-plugin-always-enabled")
             .value_name("BOOLEAN")

@@ -178,6 +178,8 @@ pub struct TestValidatorGenesis {
     pub geyser_plugin_config_files: Option<Vec<PathBuf>>,
     // Sonic: Independent ER plugin configuration.
     pub er_geyser_plugin_config_files: Vec<PathBuf>,
+    // Sonic: Optional Native remote-signing relay.
+    pub vrf_relay_config: Option<PathBuf>,
     pub enable_scheduler_bindings: bool,
     deactivate_feature_set: HashSet<Pubkey>,
     compute_unit_limit: Option<u64>,
@@ -223,6 +225,7 @@ impl Default for TestValidatorGenesis {
             geyser_plugin_config_files: Option::<Vec<PathBuf>>::default(),
             // Sonic: ER plugin opt-in.
             er_geyser_plugin_config_files: Vec::new(),
+            vrf_relay_config: None,
             enable_scheduler_bindings: false,
             deactivate_feature_set: HashSet::default(),
             compute_unit_limit: Option::<u64>::default(),
@@ -1288,6 +1291,7 @@ impl TestValidator {
             on_start_geyser_plugin_config_files: config.geyser_plugin_config_files.clone(),
             // Sonic: Forward ER plugins independently from the L1 plugin manager.
             er_geyser_plugin_config_files: config.er_geyser_plugin_config_files.clone(),
+            vrf_relay_config: config.vrf_relay_config.clone(),
             rpc_addrs: Some((
                 SocketAddr::new(
                     IpAddr::V4(Ipv4Addr::UNSPECIFIED),
