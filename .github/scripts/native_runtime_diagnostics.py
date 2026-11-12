@@ -641,7 +641,15 @@ def upload_operation_errors(path, owner):
                     "insufficient_funds": r"insufficient funds|InsufficientFunds",
                     "transaction_rejected": r"Transaction simulation failed|TransactionError",
                     "program_size": r"program.*too large|program.*larger than|account data too small",
-                    "elf_verification": r"ELF error|ELF verification|failed to verify.*program"}
+                    "elf_verification": r"ELF error|ELF verification|failed to verify.*program",
+                    "sol_restart_balance": r"SOL restart balance differs",
+                    "sol_receipt_owner": r"SOL receipt owner changed",
+                    "er_readiness_timeout": r"Bound ER session readiness timed out",
+                    "continuity_phase_timeout": r"Continuity phase timed out",
+                    "prior_credit_missing": r"Attempt to debit an account but found no record of a prior credit",
+                    "settlement_pending": r"canonical checkpoint awaits settlement",
+                    "lineage_recovery": r"checkpoint_lineage_recovery_failed|checkpoint_lineage_mismatch",
+                    "program_completion": r"Program failed to complete|ProgramFailedToComplete"}
         counts = {name: len(re.findall(pattern, text, re.I)) for name, pattern in patterns.items()}
         writes = sorted(set(int(value) for value in re.findall(r"\b([0-9]{1,6}) write transactions failed\b", text, re.I)))
         codes = sorted(set(int(value) for value in re.findall(r"\bRPC (?:response )?error[: =]+(-[0-9]{4,5})\b", text, re.I)))
@@ -833,6 +841,95 @@ def pending_fresh_upload(root, revision, specification):
     return report
 
 
+def failed_fresh_runtime(root, revision, specification, values):
+    unavailable = {"status": "unavailable", "onchain_state_checked": False, "recovery_performed": False}
+    if (not re.fullmatch("[0-9a-f]{40}", revision) or not specification
+            or values.get("ActiveState") not in ("inactive", "failed") or values.get("MainPID") != "0"
+            or values.get("Restart") != "no"):
+        return unavailable
+    try:
+        base, control = root / revision, root / revision / "control"
+        runtime, starts, smoke = base / "runtime", control / "fresh-starts", control / "sdk-smoke"
+        for directory in (base, control, runtime, starts, smoke):
+            info = directory.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                    or info.st_uid != specification["uid"] or directory != base and stat.S_IMODE(info.st_mode) != 0o700):
+                return unavailable
+        plan, saved = private_json(control / "plan.json"), private_json(control / "reservation.json")
+        activation, installed = private_json(control / "activation.json"), private_json(control / "activation-installed.json")
+        progress = private_json(control / "fresh-progress.json")
+        expected_environment = {"NORTHSTAR_CHECKPOINT_PLAN_DIR": str(runtime / "checkpoints"),
+                                "NORTHSTAR_UNSETTLED_STATE_DIR": str(runtime / "unsettled")}
+        expected_progress = {"version": 1, "plan_sha256": digest(plan), "phase": "failed", "quarantined": True,
+                             "operator_reconciliation_required": True}
+        text = service_dropin(activation["arguments"], *expected_environment.values())
+        if (plan.get("version") != 2 or plan.get("activation_mode") != "fresh-stack" or plan.get("genesis") != DEVNET
+                or plan.get("source_revision") != revision or saved.get("source_revision") != revision
+                or saved.get("plan_sha256") != digest(plan) or progress != expected_progress
+                or activation.get("version") != 2 or activation.get("artifacts") != plan["artifacts"]
+                or activation["arguments"] != specification["arguments"]
+                or activation["arguments"][0] != str(runtime / ARTIFACTS["validator"])
+                or activation["state_environment"] != specification["state_environment"]
+                or activation["state_environment"] != expected_environment
+                or specification["binary_sha256"] != plan["artifacts"]["validator"]
+                or saved["original"]["uid"] != specification["uid"] or saved["original"]["gid"] != specification["gid"]
+                or installed != {"sha256": hashlib.sha256(text.encode()).hexdigest()}):
+            return unavailable
+        for role in ("validator", "geyser_events"):
+            if role not in plan["artifacts"]:
+                continue
+            target = runtime / ARTIFACTS[role]
+            info = target.lstat()
+            if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != specification["uid"]
+                    or stat.S_IMODE(info.st_mode) != 0o500 or file_hash(target) != plan["artifacts"][role]):
+                return unavailable
+        if "geyser_events" in plan["artifacts"]:
+            config = runtime / "geyser-events.json"
+            info = config.lstat()
+            if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != specification["uid"]
+                    or stat.S_IMODE(info.st_mode) != 0o400 or file_hash(config) != activation["geyser_config_sha256"]):
+                return unavailable
+        labels = ("activate", "resume-sol", "resume-spl")
+        if any(entry.name not in {label + suffix for label in labels for suffix in (".json", "-ready.json")}
+               for entry in starts.iterdir()):
+            return unavailable
+        native_starts = []
+        for label in labels:
+            attempted, ready = starts / (label + ".json"), starts / (label + "-ready.json")
+            if not os.path.lexists(attempted):
+                if os.path.lexists(ready):
+                    return unavailable
+                continue
+            intent = private_json(attempted)
+            if (set(intent) != {"version", "plan_sha256", "phase", "l1_floor"} or intent["version"] != 1
+                    or intent["plan_sha256"] != digest(plan) or intent["phase"] != label
+                    or type(intent["l1_floor"]) is not int or not 0 <= intent["l1_floor"] < 1 << 64
+                    or os.path.lexists(ready) and private_json(ready) != intent):
+                return unavailable
+            native_starts.append({"phase": label, "ready": os.path.lexists(ready)})
+        if not native_starts:
+            return unavailable
+        completed, context = [], None
+        for phase in ("bootstrap", "prepare-sol", "resume-sol", "prepare-spl", "resume-spl"):
+            receipt = smoke / (phase + ".json")
+            if not os.path.lexists(receipt):
+                continue
+            value = private_json(receipt)
+            if value.get("phase") != phase or not re.fullmatch("[0-9a-f]{64}", value.get("context", "")):
+                return unavailable
+            if context is not None and context != value["context"]:
+                return unavailable
+            context = value["context"]
+            completed.append(phase)
+        return {"status": "inspected", "source_revision": revision, "phase": "failed", "quarantined": True,
+                "native_starts": native_starts, "completed_sdk_phases": completed, "context": context,
+                "sol_withdrawal_intent_present": os.path.lexists(smoke / "controls/sol-withdraw/intent.json"),
+                "operation_errors": upload_operation_errors(control / "operations.log", specification["uid"]),
+                "onchain_state_checked": False, "recovery_performed": False}
+    except (OSError, ValueError, TypeError, KeyError):
+        return unavailable
+
+
 def collect_report(run=execute, root=STATE_ROOT, dropin=DROPIN, lock=LOCK, pending_revision=""):
     report = {"version": 1, "read_only": True, "service": SERVICE,
               "scope": "systemd and retained metadata only; no RPC qualification or recovery"}
@@ -869,6 +966,7 @@ def collect_report(run=execute, root=STATE_ROOT, dropin=DROPIN, lock=LOCK, pendi
         if pending_revision:
             report["pending_fresh_upload"] = pending_fresh_upload(root, pending_revision,
                 bound_specification if values.get("ActiveState") == "active" else {})
+            report["failed_fresh_runtime"] = failed_fresh_runtime(root, pending_revision, bound_specification, values)
         report["status"] = "snapshot_collected"
     except FileNotFoundError:
         report["status"] = "deployment_lock_missing"

@@ -439,6 +439,64 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(summary["status"], "unavailable")
         self.assertNotIn(SECRET, json.dumps(summary))
 
+    def install_failed_fresh_runtime(self):
+        self.runtime.chmod(0o700)
+        self.plan["activation_mode"] = "fresh-stack"
+        saved = private_json(self.control / "reservation.json")
+        saved["plan_sha256"] = diagnostics.digest(self.plan)
+        atomic_json(self.control / "plan.json", self.plan)
+        atomic_json(self.control / "reservation.json", saved)
+        atomic_json(self.control / "fresh-progress.json", {"version": 1, "plan_sha256": diagnostics.digest(self.plan),
+            "phase": "failed", "quarantined": True, "operator_reconciliation_required": True})
+        starts = self.control / "fresh-starts"
+        starts.mkdir(mode=0o700)
+        for name in ("activate", "resume-sol"):
+            intent = {"version": 1, "plan_sha256": diagnostics.digest(self.plan), "phase": name, "l1_floor": 100}
+            atomic_json(starts / (name + ".json"), intent)
+            atomic_json(starts / (name + "-ready.json"), intent)
+        smoke = self.control / "sdk-smoke"
+        smoke.mkdir(mode=0o700)
+        for phase in ("bootstrap", "prepare-sol"):
+            atomic_json(smoke / (phase + ".json"), {"phase": phase, "context": "e" * 64, "private": SECRET})
+        operation = self.control / "operations.log"
+        operation.write_text(SECRET + "\nSOL restart balance differs\n")
+        operation.chmod(0o600)
+        activation = private_json(self.control / "activation.json")
+        self.failed_specification = {"arguments": activation["arguments"], "state_environment": activation["state_environment"],
+            "binary_sha256": self.plan["artifacts"]["validator"], "uid": os.getuid(), "gid": os.getgid()}
+        self.failed_values = {"ActiveState": "inactive", "MainPID": "0", "Restart": "no"}
+
+    def test_failed_fresh_runtime_only_classifies_bound_quarantined_evidence(self):
+        self.install_failed_fresh_runtime()
+        report = diagnostics.failed_fresh_runtime(self.state_root, self.base.name, self.failed_specification, self.failed_values)
+        self.assertEqual(report["status"], "inspected")
+        self.assertEqual(report["completed_sdk_phases"], ["bootstrap", "prepare-sol"])
+        self.assertEqual(report["native_starts"], [{"phase": "activate", "ready": True}, {"phase": "resume-sol", "ready": True}])
+        self.assertEqual(report["operation_errors"]["markers"]["sol_restart_balance"], 1)
+        self.assertNotIn(SECRET, json.dumps(report))
+        self.assertFalse(report["recovery_performed"])
+
+    def test_failed_fresh_runtime_binding_or_quarantine_change_suppresses_log_read(self):
+        self.install_failed_fresh_runtime()
+        for values in ({**self.failed_values, "MainPID": "123"}, {**self.failed_values, "Restart": "always"}):
+            report = diagnostics.failed_fresh_runtime(self.state_root, self.base.name, self.failed_specification, values)
+            self.assertEqual(report["status"], "unavailable")
+            self.assertNotIn("operation_errors", report)
+        progress = private_json(self.control / "fresh-progress.json")
+        progress["quarantined"] = False
+        atomic_json(self.control / "fresh-progress.json", progress)
+        self.assertEqual(diagnostics.failed_fresh_runtime(self.state_root, self.base.name, self.failed_specification,
+            self.failed_values)["status"], "unavailable")
+
+    def test_failed_fresh_runtime_changed_ready_barrier_suppresses_log_read(self):
+        self.install_failed_fresh_runtime()
+        path = self.control / "fresh-starts/resume-sol-ready.json"
+        ready = private_json(path)
+        ready["l1_floor"] += 1
+        atomic_json(path, ready)
+        self.assertEqual(diagnostics.failed_fresh_runtime(self.state_root, self.base.name, self.failed_specification,
+            self.failed_values)["status"], "unavailable")
+
     def test_pending_upload_never_claims_absent_budget_when_a_report_remains(self):
         revision, control = self.install_pending_upload()
         atomic_json(control / "program-upload-reconcile-report.json", {"result": "failed", "private": SECRET})
