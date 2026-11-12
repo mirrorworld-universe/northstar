@@ -160,12 +160,23 @@ class ProgramUpgrade:
             self.base_plan=upgrade.base_plan
             self.before_programs={role:self.ops.program_view(role,stage=upgrade.base_stage,plan=self.base_plan) for role in ('portal','token_bridge')}
             uploads=private_json(upgrade.base_control/'programs.json')
-            require(all(uploads['roles'][role]['complete']==self.before_programs[role] for role in self.before_programs),
-                    'retained program upload observations differ')
+            require(uploads.get('version')==2 and set(uploads.get('roles',{}))=={'portal','token_bridge'}
+                    and all(uploads['roles'][role].get('complete')==self.before_programs[role]
+                            and uploads['roles'][role].get('elf_sha256')==upgrade.base_manifest['sha256'][role]
+                            for role in self.before_programs),'retained program upload observations differ')
             self.hashes={role:file_hash(self.args.stage/ARTIFACTS[role]) for role in ('portal','token_bridge')}
             require(self.hashes['token_bridge']==upgrade.base_manifest['sha256']['token_bridge']
                     and self.hashes['portal']!=upgrade.base_manifest['sha256']['portal'],'only reviewed Portal bytes may change')
             self.snapshot=upgrade.snapshot('online')
+            base_report=private_json(upgrade.base_control/'report.json')
+            require(base_report.get('result')=='passed' and base_report.get('source_revision')==upgrade.base.name
+                    and base_report.get('qualification_kind') in ('first-activation','fresh-stack')
+                    and all(base_report.get(name)==self.snapshot['identity'][name] for name in ('portal','token_bridge','validator','profile','context')),
+                    'retained Portal context is not qualified')
+            if 'replacement' in private_json(upgrade.base_control/'reservation.json'):
+                require(base_report.get('qualification_kind')=='fresh-stack' and base_report.get('fresh_plan_sha256')==digest(self.base_plan)
+                        and private_json(upgrade.base_control/'fresh-progress.json')=={'version':1,'plan_sha256':digest(self.base_plan),'phase':'qualified'},
+                        'retained fresh Portal context is not qualified')
             require(self.snapshot['identity']['context']==self.args.context,'reviewed Portal context differs')
             self.ensure_unblocked()
             self.cli=upgrade.base_stage/ARTIFACTS['cli']

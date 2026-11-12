@@ -93,6 +93,19 @@ class PortalProgramUpgradeTests(unittest.TestCase):
         self.assertEqual(self.world.patch_submissions,0)
         self.assertEqual(self.world.starts,self.starts)
 
+    def test_original_program_and_context_qualification_are_required_before_submission(self):
+        path=self.base/'control/programs.json';uploads=private_json(path)
+        changed=copy.deepcopy(uploads);changed['roles']['portal']['elf_sha256']='0'*64
+        atomic_json(path,changed)
+        operation=patch.ProgramUpgrade(self.host)
+        with self.assertRaisesRegex(ValueError,'upload observations'):operation.run(inspect_only=True)
+        atomic_json(path,uploads)
+        report_path=self.base/'control/report.json';report=private_json(report_path);report['result']='failed'
+        atomic_json(report_path,report)
+        with self.assertRaisesRegex(ValueError,'context is not qualified'):operation.run(inspect_only=True)
+        self.assertFalse(operation.root.exists())
+        self.assertEqual(self.world.patch_submissions,0)
+
     def test_existing_challenged_checkpoint_is_not_a_program_update_recovery(self):
         identity=self.world.session_identity
         cursor=bytearray(153);cursor[:8]=bytes([251,223,216,188,51,244,129,196]);cursor[8:40]=rollout.public_bytes(identity['session'])
