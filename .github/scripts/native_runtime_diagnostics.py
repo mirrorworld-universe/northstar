@@ -863,7 +863,7 @@ def failed_fresh_runtime(root, revision, specification, values):
         expected_progress = {"version": 1, "plan_sha256": digest(plan), "phase": "failed", "quarantined": True,
                              "operator_reconciliation_required": True}
         text = service_dropin(activation["arguments"], *expected_environment.values())
-        if (plan.get("version") != 2 or plan.get("activation_mode") != "fresh-stack" or plan.get("genesis") != DEVNET
+        if (plan.get("version") != 2 or plan.get("mode") != "fresh-stack" or plan.get("genesis") != DEVNET
                 or plan.get("source_revision") != revision or saved.get("source_revision") != revision
                 or saved.get("plan_sha256") != digest(plan) or progress != expected_progress
                 or activation.get("version") != 2 or activation.get("artifacts") != plan["artifacts"]
