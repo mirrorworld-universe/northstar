@@ -15,6 +15,11 @@ on:
         description: Exact reviewed retained fresh plan digest
         required: true
         type: string
+      failed_continuation_sha256:
+        description: Exact reviewed prestart failure digest for one separately recorded continuation
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -48,14 +53,19 @@ jobs:
           TARGET_REVISION: ${{ inputs.revision }}
           REPLACE_CONTEXT: ${{ inputs.replace_context }}
           PLAN_SHA256: ${{ inputs.plan_sha256 }}
+          FAILED_CONTINUATION_SHA256: ${{ inputs.failed_continuation_sha256 }}
           CONTINUITY_SDK: ${{ steps.sdk.outputs.directory }}
         run: |
           set -euo pipefail
           umask 077
           export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+          options=()
+          if [[ -n "$FAILED_CONTINUATION_SHA256" ]]; then
+            options+=(--failed-continuation-sha256 "$FAILED_CONTINUATION_SHA256")
+          fi
           python3 -B .github/scripts/fresh_prepared_continuation.py \
             --revision "$TARGET_REVISION" --replace-context "$REPLACE_CONTEXT" \
-            --plan-sha256 "$PLAN_SHA256" --sdk-checkout "$CONTINUITY_SDK"
+            --plan-sha256 "$PLAN_SHA256" --sdk-checkout "$CONTINUITY_SDK" "${options[@]}"
       - name: Upload only the qualified public fresh report
         if: steps.activate.conclusion == 'success' && steps.activate.outputs.report_path != ''
         uses: actions/upload-artifact@v4

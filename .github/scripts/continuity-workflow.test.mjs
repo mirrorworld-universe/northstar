@@ -145,12 +145,16 @@ test('prepared fresh continuation binds retained plan and publishes only qualifi
   expect(job.if).toContain("github.ref == 'refs/heads/master'");
   const activate = job.steps.find(step => step.id === 'activate');
   expect(activate.env.PLAN_SHA256).toBe('${{ inputs.plan_sha256 }}');
+  expect(activate.env.FAILED_CONTINUATION_SHA256).toBe('${{ inputs.failed_continuation_sha256 }}');
+  expect(activate.run).toContain('options+=(--failed-continuation-sha256 "$FAILED_CONTINUATION_SHA256")');
   expect(activate.run).toContain('fresh_prepared_continuation.py');
   expect(activate.run).toContain('export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"');
   expect(activate.run).not.toMatch(/systemctl|build-continuity|--stage|variable set/);
   expect(job.steps.at(-1).if).toContain("steps.activate.conclusion == 'success'");
   expect(job.steps.at(-1).with.path).toBe('${{ steps.activate.outputs.report_path }}');
-  expect(workflow.jobs.test.steps.map(step => step.run ?? '').join('\n')).toContain('test-fresh-prepared-continuation.py');
+  const checks = workflow.jobs.test.steps.map(step => step.run ?? '').join('\n');
+  expect(checks).toContain('test-fresh-prepared-continuation.py');
+  expect(checks).toContain('test-continuity-rpc.py');
 });
 
 test('artifact upload selects only the verified public report', () => {
