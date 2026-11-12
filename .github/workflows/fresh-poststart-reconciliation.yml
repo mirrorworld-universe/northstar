@@ -1,0 +1,66 @@
+name: Reconcile reviewed fresh settlement resume
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Exact original fresh artifact revision
+        required: true
+        type: string
+      context:
+        description: Exact retained new SessionV2 context
+        required: true
+        type: string
+      review_sha256:
+        description: Exact failed-resume evidence digest from read-only diagnostics
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fresh-poststart-reconciliation
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch'
+    runs-on: devnet
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.21.0"
+      - name: Prepare pinned SDK without rebuilding retained artifacts
+        id: sdk
+        run: |
+          set -euo pipefail
+          SDK="$RUNNER_TEMP/northstar-reconciliation-sdk-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          bash .github/scripts/prepare-continuity-sdk.sh "$SDK"
+          echo "directory=$SDK" >> "$GITHUB_OUTPUT"
+      - name: Reconcile only the reviewed quarantined fresh resume
+        id: reconcile
+        env:
+          TARGET_REVISION: ${{ inputs.revision }}
+          TARGET_CONTEXT: ${{ inputs.context }}
+          REVIEW_SHA256: ${{ inputs.review_sha256 }}
+          CONTINUITY_SDK: ${{ steps.sdk.outputs.directory }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+          python3 -B .github/scripts/fresh_poststart_reconciliation.py \
+            --revision "$TARGET_REVISION" --context "$TARGET_CONTEXT" \
+            --review-sha256 "$REVIEW_SHA256" --sdk-checkout "$CONTINUITY_SDK"
+      - name: Upload only qualified public reconciliation evidence
+        if: steps.reconcile.conclusion == 'success' && steps.reconcile.outputs.report_path != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: fresh-resume-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.reconcile.outputs.report_path }}
+          if-no-files-found: error
+          retention-days: 7

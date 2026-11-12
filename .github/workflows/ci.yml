@@ -118,6 +118,7 @@ jobs:
           python3 -B .github/scripts/test-native-upgrade.py
           python3 -B .github/scripts/test-fresh-devnet.py
           python3 -B .github/scripts/test-fresh-prepared-continuation.py
+          python3 -B .github/scripts/test-fresh-poststart-reconciliation.py
           python3 -B .github/scripts/test-native-l1-recovery.py
           python3 -B .github/scripts/test-native-runtime-diagnostics.py
           python3 -B .github/scripts/test-prepare-continuity-sdk.py

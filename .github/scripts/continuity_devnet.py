@@ -560,7 +560,22 @@ class Deployment:
         require(observed["arguments"] == arguments and observed["state_environment"] == expected
                 and observed["binary_sha256"] == self.manifest["sha256"]["validator"], "running native service does not match isolated specification")
 
-    def smoke(self):
+    def smoke(self, *, resumed_phase=None):
+        if resumed_phase is not None:
+            require(resumed_phase == "resume-sol" and self.fresh is not None and self.fresh.phase() == "running",
+                    "reconciled smoke requires a running fresh resume")
+            record = private_json(self.control / "fresh-poststart-reconciliation.json")
+            ready = private_json(self.control / "fresh-reconciliation/ready.json")
+            require(record.get("version") == 1 and record.get("kind") == "fresh-poststart-reconciliation"
+                    and record.get("phase") == "running" and record.get("source_revision") == self.args.revision
+                    and record.get("plan_sha256") == hashlib.sha256(canonical(self.plan)).hexdigest()
+                    and record.get("extra_native_starts") == 1 and record.get("program_submissions") == 0
+                    and ready == private_json(self.control / "fresh-reconciliation/start-attempted.json")
+                    and ready.get("version") == 1 and ready.get("phase") == resumed_phase
+                    and ready.get("plan_sha256") == record["plan_sha256"]
+                    and ready.get("review_sha256") == record.get("review_sha256") and ready.get("context") == record.get("context")
+                    and not os.path.lexists(self.control / "sdk-smoke/resume-sol.json"), "reconciled smoke ready barrier differs")
+            self.fresh.verify_desired(running=True)
         er_genesis = self.er.call("getGenesisHash")
         public_bytes(er_genesis)
         config = self.plan | {"er_genesis": er_genesis, "l1_rpc": self.args.l1_rpc, "er_rpc": self.args.er_rpc,
@@ -572,7 +587,7 @@ class Deployment:
         atomic_json(config_path, config)
         phases = []
         for phase in ("bootstrap", "prepare-sol", "resume-sol", "prepare-spl", "resume-spl"):
-            if phase.startswith("resume-") and not (Path(config["smoke_directory"]) / (phase + ".json")).exists():
+            if phase.startswith("resume-") and phase != resumed_phase and not (Path(config["smoke_directory"]) / (phase + ".json")).exists():
                 self.stop()
                 self.start()
             print(json.dumps({"phase": phase, "status": "starting"}), flush=True)
