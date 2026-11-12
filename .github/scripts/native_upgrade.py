@@ -459,6 +459,7 @@ class NativeUpgrade:
         require(self.inspect([self.dropin])[str(self.dropin)].get("sha256") == dropin_digest, "installed native upgrade drop-in differs")
         self.effective_start()
         self.native_files()
+        relay.verify(self)
         immutable_json(self.installed, {"sha256": dropin_digest})
         self.advance(("frozen", "installed"), "installed")
         self.ops.flush([*targets.values(), config, source_dropin, self.record, self.frozen, self.installed, self.progress, self.control,
