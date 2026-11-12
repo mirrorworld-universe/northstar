@@ -92,6 +92,68 @@ class UpgradeTests(unittest.TestCase):
         self.keys = self.world.key_generations
         self.starts = self.world.starts
 
+    def portal_patch(self):
+        import portal_program_upgrade as patch
+        host=UpgradeHost(self.world)
+        base_plan=private_json(self.base/'control/plan.json')
+        before={role:host.program_view(role,stage=Path(private_json(self.base/'control/reservation.json')['stage']),plan=base_plan) for role in ('portal','token_bridge')}
+        portal=self.world.args.stage/ARTIFACTS['portal']
+        portal.write_bytes(b'\x7fELFreviewed-portal-guard')
+        manifest=private_json(self.world.args.stage/'manifest.json')
+        old=manifest['sha256']['portal'];manifest['sha256']['portal']=file_hash(portal)
+        atomic_json(self.world.args.stage/'manifest.json',manifest)
+        account=self.world.accounts[before['portal']['programdata']]
+        account['raw']=account['raw'][:4]+(123).to_bytes(8,'little')+account['raw'][12:45]+portal.read_bytes()
+        after={role:host.program_view(role,stage=self.world.args.stage,plan=base_plan) for role in ('portal','token_bridge')}
+        receipt={'version':1,'kind':'portal-program-upgrade','result':'passed','source_revision':self.world.args.revision,
+            'reviewed_fix_commit':patch.FIX_COMMIT,'base_revision':self.base.name,'base_plan_sha256':digest(base_plan),
+            'native_before':{name:self.world.current[name] for name in ('arguments','binary_sha256','state_environment','uid','gid')},
+            'identity':self.world.session_identity,'er_genesis':'11111111111111111111111111111111',
+            'before_programs':before,'after_programs':after,'before_portal_elf_sha256':old,'portal_elf_sha256':file_hash(portal),
+            'token_bridge_elf_sha256':manifest['sha256']['token_bridge'],'transaction_signature':rollout.public_text(bytes([7])*64),
+            'peak_lamports':1000,'net_cost_lamports':0,'native_service_actions':0}
+        checksum=digest(receipt)
+        path=patch.receipt_path(self.world.args.state_root,checksum)
+        path.parent.mkdir(mode=0o700,parents=True)
+        atomic_json(path,receipt)
+        self.world.args.portal_upgrade_receipt_sha256=checksum
+        self.world.native_local_slot=200;self.world.native_upstream_slot=200
+        return receipt,path
+
+    def test_explicit_qualified_portal_receipt_preserves_context_and_native_only_submission(self):
+        receipt,_=self.portal_patch()
+        UpgradeHost(self.world).run()
+        plan=private_json(self.upgrade/'control/plan.json')
+        self.assertEqual(plan['portal_program_upgrade'],receipt)
+        self.assertEqual(self.world.uploads,self.uploads)
+        self.assertEqual(self.world.key_generations,self.keys)
+        self.assertEqual(self.world.current['state_environment'],self.state_environment)
+        self.world.args.portal_upgrade_receipt_sha256=None
+        UpgradeHost(self.world).run()
+        self.assertEqual(private_json(self.upgrade/'control/plan.json'),plan)
+
+    def test_next_ordinary_upgrade_carries_qualified_portal_receipt_without_selector(self):
+        receipt,_=self.portal_patch()
+        UpgradeHost(self.world).run()
+        stage=self.root/'third-stage';shutil.copytree(self.world.args.stage,stage)
+        binary=stage/ARTIFACTS['validator'];binary.chmod(0o700);binary.write_bytes(b'\x7fELFthird-native')
+        manifest=private_json(stage/'manifest.json');manifest['source_revision']='c'*40
+        manifest['sha256']={role:file_hash(stage/path) for role,path in ARTIFACTS.items()}
+        atomic_json(stage/'manifest.json',manifest)
+        self.world.args.stage=stage;self.world.args.revision='c'*40;self.world.args.portal_upgrade_receipt_sha256=None
+        UpgradeHost(self.world).run()
+        self.assertEqual(private_json(self.upgrade/'control/plan.json')['portal_program_upgrade'],receipt)
+        self.assertEqual(self.world.uploads,self.uploads)
+        self.assertEqual(self.world.key_generations,self.keys)
+
+    def test_changed_portal_receipt_or_wrong_state_is_rejected_before_native_stop(self):
+        receipt,path=self.portal_patch()
+        receipt['identity']['context']='ff'*32
+        atomic_json(path,receipt)
+        with self.assertRaises(ValueError):UpgradeHost(self.world).run()
+        self.assert_no_native_start()
+        self.assertTrue(self.world.active)
+
     def test_full_l1_rpc_profile_is_manifest_bound_without_program_or_session_changes(self):
         self.world.args.l1_rpc_profile = "full"
         UpgradeHost(self.world).run()

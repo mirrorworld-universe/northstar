@@ -41,6 +41,14 @@ class StateTests(unittest.TestCase):
             with self.subTest(recovery=recovery, context=context, profile=profile), self.assertRaises(ValueError):
                 release_mode_arguments(recovery, context, profile)
 
+    def test_portal_receipt_selector_is_frozen_only_for_ordinary_upgrade(self):
+        checksum='ab'*32
+        self.assertEqual(release_mode_arguments(portal_upgrade_receipt_sha256=checksum),
+            ['--upgrade-existing','--portal-upgrade-receipt-sha256',checksum])
+        for recovery,context,value in (('519264000','',checksum),('','cd'*32,checksum),('','','bad')):
+            with self.subTest(recovery=recovery,context=context),self.assertRaises(ValueError):
+                release_mode_arguments(recovery,context,portal_upgrade_receipt_sha256=value)
+
     def test_full_l1_rpc_indexes_preserve_unrelated_native_and_plugin_arguments(self):
         original = ["/native", "--portal", "portal", "--geyser-plugin-config", "/plugin.json", "--rpc-port", "8899",
                     "--expected-genesis-hash", "devnet", "--account-index=program-id", "--log", "-"]

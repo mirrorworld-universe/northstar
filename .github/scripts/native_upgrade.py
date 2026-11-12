@@ -8,6 +8,7 @@ import time
 
 import native_l1_recovery as recovery
 import vrf_relay_profile as relay
+import portal_program_upgrade as portal_patch
 
 from continuity_rollout_state import (
     ARTIFACTS, DEVNET, SDK_REVISION, append_private, atomic_json, canonical, checked_directory,
@@ -99,7 +100,8 @@ class NativeUpgrade:
 
     def programs(self):
         for role in ("portal", "token_bridge"):
-            require(self.base_manifest["sha256"][role] == self.manifest["sha256"][role],
+            require(role == "portal" and getattr(self, "portal_receipt", None) is not None
+                    or self.base_manifest["sha256"][role] == self.manifest["sha256"][role],
                     "native upgrade cannot change on-chain program artifacts")
         self.retained_programs()
 
@@ -110,15 +112,17 @@ class NativeUpgrade:
                 "retained program upload records are incomplete")
         for role in ("portal", "token_bridge"):
             entry = uploads["roles"][role]
-            observed = self.ops.program_view(role, stage=self.base_stage, plan=self.base_plan)
+            receipt = getattr(self, "portal_receipt", None)
+            observed = self.ops.program_view(role, stage=self.stage if receipt is not None and role == "portal" else self.base_stage, plan=self.base_plan)
+            expected = receipt["after_programs"][role] if receipt is not None else entry.get("complete")
             require(entry.get("elf_sha256") == self.base_manifest["sha256"][role]
-                    and observed is not None and entry.get("complete") == observed,
+                    and observed is not None and expected == observed
+                    and (receipt is None or entry.get("complete") == receipt["before_programs"][role]),
                     "retained on-chain program or upload binding differs")
             self.program_floor = max(self.program_floor, observed["deployment_slot"])
 
     def load_base(self, before):
         self.load_retained_base(before)
-        self.programs()
 
     def load_retained_base(self, before):
         environment = before["state_environment"]
@@ -169,6 +173,7 @@ class NativeUpgrade:
             self.previous_event_source = geyser_event_source(self.base_activation)
             self.previous_rpc_profile = self.base_activation.get("l1_rpc_profile")
             self.previous_relay = self.base_activation.get("vrf_relay")
+            self.previous_portal_receipt = None
         else:
             previous = binary.parent.parent.parent
             require(previous.parent == self.parent and re.fullmatch("[0-9a-f]{40}", previous.name)
@@ -194,6 +199,7 @@ class NativeUpgrade:
             self.previous_event_source = geyser_event_source(saved)
             self.previous_rpc_profile = saved.get("l1_rpc_profile")
             self.previous_relay = saved.get("vrf_relay")
+            self.previous_portal_receipt = saved.get("portal_program_upgrade")
         require(self.previous_rpc_profile in (None, "full"), "retained L1 RPC profile differs")
         require(before["binary_sha256"] == artifacts["validator"], "retained native manifest and executable differ")
         text = service_dropin(before["arguments"], *[before["state_environment"][key] for key in STATE_KEYS])
@@ -275,6 +281,13 @@ class NativeUpgrade:
             self.stage = self.args.stage
         self.load_base(before)
         binding = self.binding(before)
+        requested_receipt = getattr(self.args, "portal_upgrade_receipt_sha256", None)
+        loaded_receipt = portal_patch.read_receipt(self.args.state_root, requested_receipt) if requested_receipt else None
+        self.portal_receipt = saved.get("portal_program_upgrade") if saved else loaded_receipt or self.previous_portal_receipt
+        require(loaded_receipt is None or loaded_receipt == self.portal_receipt, "established Portal receipt differs")
+        if self.portal_receipt is not None:
+            portal_patch.admit(self, self.portal_receipt, before, self.portal_receipt == self.previous_portal_receipt)
+        self.programs()
         requested_profile = getattr(self.args, "l1_rpc_profile", None)
         self.rpc_profile = saved.get("l1_rpc_profile") if saved else requested_profile or self.previous_rpc_profile
         require(self.rpc_profile in (None, "full") and (requested_profile is None or requested_profile == self.rpc_profile),
@@ -336,9 +349,15 @@ class NativeUpgrade:
                 self.plan["l1_rpc_profile"] = self.rpc_profile
             if self.relay_profile is not None:
                 self.plan["vrf_relay"] = self.relay_profile
+            if self.portal_receipt is not None:
+                self.plan["portal_program_upgrade"] = self.portal_receipt
             immutable_json(self.record, self.plan)
             immutable_json(self.progress, {"version": 1, "plan_sha256": digest(self.plan), "phase": "prepared"})
         phase = self.phase()
+        require(self.plan.get("portal_program_upgrade") == self.portal_receipt, "retained Portal receipt changed")
+        if self.portal_receipt is not None:
+            require(self.plan["identity"] == self.portal_receipt["identity"] and self.plan["er_genesis"] == self.portal_receipt["er_genesis"],
+                    "Portal receipt and Native session snapshot differ")
         if self.rpc_profile or self.relay_profile is not None:
             base_report = private_json(self.base_control / "report.json")
             identity = self.plan["identity"]
@@ -564,6 +583,9 @@ class NativeUpgrade:
         if self.plan.get("vrf_relay") is not None:
             report["vrf_relay_enabled"] = True
             report["vrf_callback_qualified"] = False
+        if self.portal_receipt is not None:
+            report["portal_upgrade_receipt_sha256"] = portal_patch.digest(self.portal_receipt)
+            report["portal_program_upgrade_qualified_separately"] = True
         if self.recovery_slot is not None:
             report.update(recovery_failed_slot=self.recovery_slot, prior_l1_data_preserved=True)
         immutable_json(self.control / "report.json", report)
