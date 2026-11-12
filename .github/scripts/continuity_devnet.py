@@ -647,6 +647,7 @@ def main():
     mode.add_argument("--replace-context", default="")
     mode.add_argument("--l1-rpc-profile", default="")
     mode.add_argument("--vrf-relay-profile-sha256", default="")
+    mode.add_argument("--portal-upgrade-receipt-sha256", default="")
     for name in ("fingerprint", "inspect", "flush", "empty-l1"):
         inspector = subcommands.add_parser(name)
         inspector.add_argument("--input", type=Path, required=True)
@@ -663,6 +664,7 @@ def main():
     run.add_argument("--upgrade-existing", action="store_true", help="Permit a guarded native-only upgrade of a known managed v2 activation.")
     run.add_argument("--vrf-relay-profile", type=Path, help="Reviewed remote-only relay profile for an ordinary native upgrade.")
     run.add_argument("--vrf-relay-profile-sha256", help="Exact digest of the private relay profile handoff.")
+    run.add_argument("--portal-upgrade-receipt-sha256", help="Exact qualified same-ID Portal program update receipt.")
     run.add_argument("--l1-rpc-profile", choices=("full",), help="Bind unrestricted program, token-owner, and token-mint indexes to a native-only L1 upgrade.")
     run.add_argument("--replace-context", help="Exact reviewed SessionV2 context to abandon during a guarded fresh devnet cutover.")
     run.add_argument("--abandon-previous-state", action="store_true", help="Explicitly leave old on-chain state unused while retaining its local files.")
@@ -672,7 +674,7 @@ def main():
     run.add_argument("--reconcile-stopped-at", help="Exact reviewed systemd ExecMainExitTimestamp; required for explicit reconciliation.")
     args = parser.parse_args()
     if args.operation == "mode":
-        print(" ".join(release_mode_arguments(args.recovery_slot, args.replace_context, args.l1_rpc_profile, args.vrf_relay_profile_sha256)))
+        print(" ".join(release_mode_arguments(args.recovery_slot, args.replace_context, args.l1_rpc_profile, args.vrf_relay_profile_sha256, args.portal_upgrade_receipt_sha256)))
     elif args.operation == "inventory":
         print(json.dumps(inventory_service()))
     elif args.operation == "empty-l1":
@@ -691,6 +693,9 @@ def main():
         require(bool(args.vrf_relay_profile) == bool(args.vrf_relay_profile_sha256)
                 and (not args.vrf_relay_profile or args.upgrade_existing and args.recover_failed_l1_slot is None
                      and args.replace_context is None), "relay profile requires an ordinary retained native upgrade and exact digest")
+        require(not args.portal_upgrade_receipt_sha256 or args.upgrade_existing and args.recover_failed_l1_slot is None
+                and args.replace_context is None and re.fullmatch("[0-9a-f]{64}", args.portal_upgrade_receipt_sha256),
+                "Portal receipt requires an ordinary retained native upgrade")
         if args.reconcile_failed_l1:
             require(args.stage is None and args.upgrade_existing and args.recover_failed_l1_slot is not None
                     and args.reconcile_stopped_at is not None, "reconciliation requires retained artifacts and explicit stopped-state evidence")

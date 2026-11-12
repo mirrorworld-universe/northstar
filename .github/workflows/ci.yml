@@ -116,6 +116,7 @@ jobs:
           python3 -B .github/scripts/test-continuity-upload-resume.py
           python3 -B .github/scripts/test-continuity-devnet-model.py
           python3 -B .github/scripts/test-native-upgrade.py
+          python3 -B .github/scripts/test-portal-program-upgrade.py
           python3 -B .github/scripts/test_vrf_relay_profile.py
           python3 -B .github/scripts/test-fresh-devnet.py
           python3 -B .github/scripts/test-fresh-prepared-continuation.py
@@ -321,11 +322,13 @@ jobs:
           FRESH_CONTEXT: ${{ vars.NORTHSTAR_FRESH_CONTEXT }}
           L1_RPC_PROFILE: ${{ vars.NORTHSTAR_L1_RPC_PROFILE }}
           VRF_RELAY_PROFILE_SHA256: ${{ vars.NORTHSTAR_VRF_RELAY_PROFILE_SHA256 }}
+          PORTAL_UPGRADE_RECEIPT_SHA256: ${{ vars.NORTHSTAR_PORTAL_UPGRADE_RECEIPT_SHA256 }}
         run: |
           set -euo pipefail
           mode=$(python3 -B .github/scripts/continuity_devnet.py mode \
             --recovery-slot "$L1_RECOVERY_SLOT" --replace-context "$FRESH_CONTEXT" \
-            --l1-rpc-profile "$L1_RPC_PROFILE" --vrf-relay-profile-sha256 "$VRF_RELAY_PROFILE_SHA256")
+            --l1-rpc-profile "$L1_RPC_PROFILE" --vrf-relay-profile-sha256 "$VRF_RELAY_PROFILE_SHA256" \
+            --portal-upgrade-receipt-sha256 "$PORTAL_UPGRADE_RECEIPT_SHA256")
           printf 'arguments=%s\n' "$mode" >> "$GITHUB_OUTPUT"
 
       - name: Check for program changes
