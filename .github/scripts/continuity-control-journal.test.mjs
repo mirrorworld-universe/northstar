@@ -89,6 +89,70 @@ test('unknown submission rebroadcasts identical bytes without a replacement sign
   } finally { value.close(); }
 });
 
+class SendTransactionError extends Error {
+  constructor(message = 'canonical checkpoint awaits settlement; retry after settlement') {
+    super(message);
+    this.signature = '';
+    this.transactionError = { message };
+  }
+}
+
+function pendingSettlement(value, layer, acceptAfter = 3, timeoutMs = 150, error = () => new SendTransactionError()) {
+  let submissions = 0;
+  const rpc = { ...value.rpc,
+    sendRawTransaction: async data => {
+      value.calls.push(Buffer.from(data));
+      if (++submissions < acceptAfter) throw error();
+      return 'original-signature';
+    },
+    getSignatureStatuses: async () => ({ value: submissions >= acceptAfter
+      ? [{ slot: 10, err: null, confirmationStatus: layer === 'er' ? 'confirmed' : 'finalized' }] : [null] }),
+  };
+  const journal = new ControlJournal(path.join(value.temporary, 'pending'), binding, decode, async () => {}, { timeoutMs, pollMs: 1 });
+  journal.attach(layer, rpc);
+  return { journal, submit: () => journal.run('withdraw', layer, {}, async () => {
+    await rpc.getLatestBlockhash();
+    await rpc.sendRawTransaction(wire);
+  }) };
+}
+
+test('ER settlement admission waits boundedly and preserves the original signed bytes', async () => {
+  const value = fixture();
+  try {
+    const pending = pendingSettlement(value, 'er');
+    const result = await pending.submit();
+    expect(result.confirmation).toBe('confirmed');
+    expect(value.calls.length).toBe(3);
+    expect(value.calls.every(sent => sent.equals(wire))).toBe(true);
+  } finally { value.close(); }
+});
+
+test('settlement admission recovery never retries L1 or unrelated errors', async () => {
+  for (const [layer, error] of [
+    ['l1', () => new SendTransactionError()], ['er', () => new Error('unrelated')],
+    ['er', () => new SendTransactionError('different response')],
+    ['er', () => Object.assign(new SendTransactionError(), { signature: 'already-submitted' })],
+  ]) {
+    const value = fixture();
+    try {
+      await expect(pendingSettlement(value, layer, 3, 150, error).submit()).rejects.toThrow();
+      expect(value.calls.length).toBe(2);
+    } finally { value.close(); }
+  }
+});
+
+test('persistent ER settlement admission preserves intent and cannot pass receipt timeout', async () => {
+  const value = fixture();
+  try {
+    const pending = pendingSettlement(value, 'er', Infinity, 20);
+    await expect(pending.submit()).rejects.toThrow('Control receipt timeout');
+    const directory = path.join(value.temporary, 'pending/withdraw');
+    expect(fs.existsSync(path.join(directory, 'intent.json'))).toBe(true);
+    expect(fs.existsSync(path.join(directory, 'receipt.json'))).toBe(false);
+    expect(value.calls.every(sent => sent.equals(wire))).toBe(true);
+  } finally { value.close(); }
+});
+
 test('missing saved intent cannot be hidden by a completion receipt', async () => {
   const value = fixture();
   try {
