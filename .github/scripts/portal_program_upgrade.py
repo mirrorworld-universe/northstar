@@ -46,10 +46,14 @@ def read_receipt(root, checksum):
 
 
 def validate_receipt(value):
-    require(isinstance(value,dict) and set(value)==RECEIPT_FIELDS and value['version']==1
+    extra={'reconcile_controller_revision','reconcile_review_sha256'}
+    require(isinstance(value,dict) and set(value) in (RECEIPT_FIELDS,RECEIPT_FIELDS|extra) and value['version']==1
             and value['kind']=='portal-program-upgrade' and value['result']=='passed'
             and value['reviewed_fix_commit']==FIX_COMMIT and value['native_service_actions']==0,
             'Portal upgrade receipt schema or qualification differs')
+    if extra<=set(value):
+        require(re.fullmatch('[0-9a-f]{40}',value['reconcile_controller_revision'])
+                and re.fullmatch('[0-9a-f]{64}',value['reconcile_review_sha256']),'Portal reconciliation receipt differs')
     for field in ('source_revision','base_revision'):
         require(isinstance(value[field],str) and re.fullmatch('[0-9a-f]{40}',value[field]),'Portal source binding differs')
     for field in ('base_plan_sha256','before_portal_elf_sha256','portal_elf_sha256','token_bridge_elf_sha256'):
@@ -96,6 +100,47 @@ def admit(upgrade,receipt,before,carried):
         require(receipt['native_before']==service_spec(before),'Portal receipt original Native binding differs')
     upgrade.ops.execute(['git','merge-base','--is-ancestor',FIX_COMMIT,upgrade.args.revision])
     upgrade.ops.execute(['git','merge-base','--is-ancestor',receipt['source_revision'],upgrade.args.revision])
+    if receipt.get('reconcile_controller_revision'):
+        upgrade.ops.execute(['git','merge-base','--is-ancestor',receipt['reconcile_controller_revision'],upgrade.args.revision])
+
+
+def private_bytes(path,limit):
+    descriptor=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(descriptor,'rb') as stream:
+        info=os.fstat(stream.fileno())
+        require(stat.S_ISREG(info.st_mode) and info.st_uid==os.getuid() and not info.st_mode&0o077,'Portal evidence file differs')
+        raw=stream.read(limit+1)
+    require(len(raw)<=limit,'Portal evidence exceeds bound')
+    return raw
+
+
+def rejection_evidence(control,plan,before,snapshot,views,balance,buffer_exists):
+    from native_upgrade import service_spec
+    marker_raw=private_bytes(control/'submit-attempted.json',65536)
+    require(json.loads(marker_raw)=={'version':1,'plan_sha256':digest(plan)},'original Portal submission barrier differs')
+    require(plan['native_before']==service_spec(before) and snapshot==plan['snapshot']
+            and views==plan['before_programs'] and not buffer_exists,'Portal pre-network state changed')
+    source=plan['source_revision']
+    reviewed={'version':1,'source_revision':source,'base_revision':plan['base_revision'],'base_plan_sha256':plan['base_plan_sha256'],
+        'native_before':plan['native_before'],'native_pid':before['pid'],'native_start_time':before['start_time'],
+        'before_programs':views,'artifacts':plan['artifacts'],'snapshot':snapshot,
+        'funder':snapshot['identity']['authority'],'funding_balance':balance,'peak_lamports':plan['peak_lamports']}
+    require(digest(reviewed)==plan['review_sha256'],'original Portal balance or Native start evidence changed')
+    for name in ('qualified.json','reconcile-submit-attempted.json'):
+        require(not os.path.lexists(control/name),'Portal qualification or continuation already recorded')
+    key=(control/'keys/portal-upgrade-buffer.json').lstat()
+    require(stat.S_ISREG(key.st_mode) and key.st_uid==os.getuid() and not key.st_mode&0o077,'retained Portal buffer metadata differs')
+    log=private_bytes(control/'operations.log',16384)
+    require(b'--max-deploy-attempts' in log and any(value in log for value in (b"wasn't expected",b'unexpected argument',b'unrecognized',b'not expected')),
+            'terminal Portal CLI option rejection is unavailable')
+    value={'version':1,'scope':'read-only Portal option-rejection evidence; not upgrade qualification',
+        'source_revision':source,'original_review_sha256':plan['review_sha256'],'plan_sha256':digest(plan),
+        'submission_barrier_sha256':hashlib.sha256(marker_raw).hexdigest(),'operations_log_sha256':hashlib.sha256(log).hexdigest(),
+        'error_class':'unsupported-deployment-option','native_unchanged':True,'programs_unchanged':True,
+        'buffer_unfunded':True,'authority_balance_unchanged':True,'buffer':plan['buffer'],'funding_balance':balance,
+        'operator_reconciliation_required':True}
+    value['review_sha256']=digest(value)
+    return value
 
 
 def challenge_guard(cursor,checkpoint,portal,session):
@@ -124,7 +169,8 @@ def quote(buffer_rent,program_rent,current_lamports,cap):
 class ProgramUpgrade:
     def __init__(self,operations):
         self.ops,self.args=operations,operations.args
-        self.root=self.args.state_root/'portal-program-upgrades'/self.args.revision
+        self.original_revision=getattr(self.args,'reconcile_source_revision',None) or self.args.revision
+        self.root=self.args.state_root/'portal-program-upgrades'/self.original_revision
         self.control=self.root/'control'
 
     def unchanged(self):
@@ -143,12 +189,15 @@ class ProgramUpgrade:
     def run(self,inspect_only=False):
         from continuity_devnet import DROPIN,SERVICE
         from native_upgrade import NativeUpgrade,service_spec
-        require(not os.path.lexists(self.root),'existing Portal upgrade requires explicit reconciliation')
+        resuming=bool(getattr(self.args,'reconcile_source_revision',None))
+        require(not resuming and not os.path.lexists(self.root) or resuming and not inspect_only and self.control.is_dir(),
+                'existing Portal upgrade requires explicit reconciliation')
         require(self.ops.upstream.call('getGenesisHash')==self.ops.l1.call('getGenesisHash')==DEVNET,'Portal upgrade is devnet-only')
         self.ops.verify_sdk()
         require(self.ops.execute(['git','-C',ROOT,'rev-parse','HEAD']).strip()==self.args.revision,'Portal source checkout differs')
         self.ops.execute(['git','-C',ROOT,'diff','--quiet','HEAD'])
         self.ops.execute(['git','-C',ROOT,'merge-base','--is-ancestor',FIX_COMMIT,self.args.revision])
+        if resuming:self.ops.execute(['git','-C',ROOT,'merge-base','--is-ancestor',self.original_revision,self.args.revision])
         self.before=self.ops.inventory()
         upgrade=NativeUpgrade(self.ops,SERVICE,DROPIN)
         with tempfile.TemporaryDirectory(prefix='northstar-portal-preflight-') as temporary:
@@ -188,7 +237,7 @@ class ProgramUpgrade:
                        self.ops.l1.call('getMinimumBalanceForRentExemption',[45+length]),account['lamports'],self.args.max_estimated_cost_lamports)
             funding_balance=self.ops.upstream.call('getBalance',[funder,{'commitment':'finalized'}])['value']
             require(type(funding_balance) is int and funding_balance>=peak,'CI authority balance is below Portal peak quote')
-        reviewed={'version':1,'source_revision':self.args.revision,'base_revision':upgrade.base.name,
+        reviewed={'version':1,'source_revision':self.original_revision,'base_revision':upgrade.base.name,
             'base_plan_sha256':digest(self.base_plan),'native_before':service_spec(self.before),
             'native_pid':self.before['pid'],'native_start_time':self.before['start_time'],
             'before_programs':self.before_programs,'artifacts':self.hashes,'snapshot':self.snapshot,
@@ -199,26 +248,42 @@ class ProgramUpgrade:
                 'review':reviewed,'review_sha256':review_sha256}
             print(json.dumps(report),flush=True)
             return report
-        require(getattr(self.args,'review_sha256',None)==review_sha256,'Portal preflight review digest differs')
-        parent=self.root.parent
-        if not os.path.lexists(parent):parent.mkdir(mode=0o711)
-        checked_directory(parent)
-        self.root.mkdir(mode=0o711);self.control.mkdir(mode=0o700);(self.control/'keys').mkdir(mode=0o700)
-        self.ops.control=self.control;self.ops.log=self.control/'operations.log'
-        buffer=self.ops.key('portal-upgrade-buffer',False)
-        self.plan={'version':1,'source_revision':self.args.revision,'base_revision':upgrade.base.name,
-            'base_plan_sha256':digest(self.base_plan),'native_before':service_spec(self.before),'before_programs':self.before_programs,
-            'artifacts':self.hashes,'snapshot':self.snapshot,'buffer':buffer,'peak_lamports':peak,'review_sha256':review_sha256}
-        immutable_json(self.control/'plan.json',self.plan)
+        if resuming:
+            checked_directory(self.root);checked_directory(self.control,private=True)
+            self.plan=private_json(self.control/'plan.json')
+            expected={'version':1,'source_revision':self.original_revision,'base_revision':upgrade.base.name,
+                'base_plan_sha256':digest(self.base_plan),'native_before':service_spec(self.before),'before_programs':self.before_programs,
+                'artifacts':self.hashes,'snapshot':self.snapshot,'buffer':self.plan['buffer'],'peak_lamports':peak,'review_sha256':review_sha256}
+            require(self.plan==expected,'original Portal plan or preflight binding changed')
+            evidence=rejection_evidence(self.control,self.plan,self.before,self.snapshot,self.before_programs,funding_balance,
+                                        self.ops.upstream.account(self.plan['buffer']) is not None)
+            require(evidence['review_sha256']==self.args.reconcile_review_sha256,'Portal option-rejection review differs')
+            immutable_json(self.control/'reconcile-submit-attempted.json',{'version':1,'plan_sha256':digest(self.plan),
+                'review_sha256':evidence['review_sha256'],'controller_source_revision':self.args.revision})
+            self.ops.control=self.control;self.ops.log=self.control/'operations.log'
+            buffer=self.ops.key('portal-upgrade-buffer',True)
+            require(buffer==self.plan['buffer'],'retained Portal buffer identity changed')
+        else:
+            require(getattr(self.args,'review_sha256',None)==review_sha256,'Portal preflight review digest differs')
+            parent=self.root.parent
+            if not os.path.lexists(parent):parent.mkdir(mode=0o711)
+            checked_directory(parent)
+            self.root.mkdir(mode=0o711);self.control.mkdir(mode=0o700);(self.control/'keys').mkdir(mode=0o700)
+            self.ops.control=self.control;self.ops.log=self.control/'operations.log'
+            buffer=self.ops.key('portal-upgrade-buffer',False)
+            self.plan={'version':1,'source_revision':self.original_revision,'base_revision':upgrade.base.name,
+                'base_plan_sha256':digest(self.base_plan),'native_before':service_spec(self.before),'before_programs':self.before_programs,
+                'artifacts':self.hashes,'snapshot':self.snapshot,'buffer':buffer,'peak_lamports':peak,'review_sha256':review_sha256}
+            immutable_json(self.control/'plan.json',self.plan)
         self.unchanged()
         require(self.hashes=={role:file_hash(self.args.stage/ARTIFACTS[role]) for role in self.hashes},'reviewed program bytes changed before submission')
         require(self.ops.upstream.account(buffer) is None,'fresh Portal buffer address already exists')
-        immutable_json(self.control/'submit-attempted.json',{'version':1,'plan_sha256':digest(self.plan)})
+        if not resuming:immutable_json(self.control/'submit-attempted.json',{'version':1,'plan_sha256':digest(self.plan)})
         upgrade.control=self.control
         raw=self.ops.execute([self.cli,'--url',self.args.l1_rpc,'--commitment','finalized','--keypair',self.args.funder_keypair,
             '--output','json','program','deploy',self.args.stage/ARTIFACTS['portal'],'--program-id',self.base_plan['programs']['portal'],
             '--upgrade-authority',self.args.funder_keypair,'--buffer',self.control/'keys/portal-upgrade-buffer.json',
-            '--max-len',str((self.args.stage/ARTIFACTS['portal']).stat().st_size),'--use-rpc','--max-sign-attempts','1','--max-deploy-attempts','1'],timeout=900)
+            '--max-len',str((self.args.stage/ARTIFACTS['portal']).stat().st_size),'--use-rpc','--max-sign-attempts','1'],timeout=900)
         result=json.loads(raw)
         signature=result.get('signature')
         require(isinstance(signature,str),'Portal uploader did not return a transaction signature')
@@ -240,13 +305,15 @@ class ProgramUpgrade:
         self.ensure_unblocked()
         remaining=self.ops.upstream.call('getBalance',[funder,{'commitment':'finalized','minContextSlot':after['portal']['deployment_slot']}])['value']
         require(type(remaining) is int and 0<=funding_balance-remaining<=peak,'Portal net funding observation differs')
-        receipt={'version':1,'kind':'portal-program-upgrade','result':'passed','source_revision':self.args.revision,
+        receipt={'version':1,'kind':'portal-program-upgrade','result':'passed','source_revision':self.original_revision,
             'reviewed_fix_commit':FIX_COMMIT,'base_revision':upgrade.base.name,'base_plan_sha256':digest(self.base_plan),
             'native_before':service_spec(self.before),'identity':self.snapshot['identity'],'er_genesis':self.snapshot['er_genesis'],
             'before_programs':self.before_programs,'after_programs':after,
             'before_portal_elf_sha256':upgrade.base_manifest['sha256']['portal'],'portal_elf_sha256':self.hashes['portal'],
             'token_bridge_elf_sha256':self.hashes['token_bridge'],'transaction_signature':signature,'peak_lamports':peak,
             'net_cost_lamports':funding_balance-remaining,'native_service_actions':0}
+        if resuming:
+            receipt.update(reconcile_controller_revision=self.args.revision,reconcile_review_sha256=self.args.reconcile_review_sha256)
         validate_receipt(receipt)
         registry=receipt_path(self.args.state_root,digest(receipt))
         if not os.path.lexists(registry.parent):registry.parent.mkdir(mode=0o700)
@@ -271,6 +338,8 @@ def main():
     parser.add_argument('--context',required=True)
     parser.add_argument('--inspect-only',action='store_true')
     parser.add_argument('--review-sha256')
+    parser.add_argument('--reconcile-source-revision')
+    parser.add_argument('--reconcile-review-sha256')
     parser.add_argument('--state-root',type=Path,default=Path('/solana/northstar/continuity-v2'))
     parser.add_argument('--l1-rpc',default='http://127.0.0.1:8899')
     parser.add_argument('--er-rpc',default='http://127.0.0.1:8910')
@@ -283,8 +352,13 @@ def main():
     require(args.l1_rpc=='http://127.0.0.1:8899' and args.er_rpc=='http://127.0.0.1:8910'
             and args.devnet_rpc=='https://api.devnet.solana.com','Portal update requires the scoped devnet RPCs')
     require(0<args.max_estimated_cost_lamports<=LIMIT,'Portal funding cap exceeds approval')
-    require(args.inspect_only and args.review_sha256 is None or not args.inspect_only
-            and re.fullmatch('[0-9a-f]{64}',args.review_sha256 or ''),'Portal submission requires an exact preflight digest')
+    reconcile=bool(args.reconcile_source_revision or args.reconcile_review_sha256)
+    require(not reconcile and (args.inspect_only and args.review_sha256 is None or not args.inspect_only
+            and re.fullmatch('[0-9a-f]{64}',args.review_sha256 or ''))
+            or reconcile and not args.inspect_only and args.review_sha256 is None
+            and re.fullmatch('[0-9a-f]{40}',args.reconcile_source_revision or '')
+            and re.fullmatch('[0-9a-f]{64}',args.reconcile_review_sha256 or ''),
+            'Portal submission requires an exact preflight or pre-network reconciliation digest')
     key=private_json(args.funder_keypair)
     require(isinstance(key,list) and len(key)==64 and all(type(byte) is int and 0<=byte<=255 for byte in key),'CI authority credential format differs')
     def interrupted(_number,_frame):raise KeyboardInterrupt('Portal submission interrupted; retained state requires reconciliation')

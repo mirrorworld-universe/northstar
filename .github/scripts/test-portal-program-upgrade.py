@@ -22,6 +22,10 @@ class PatchHost(MODEL['UpgradeHost']):
             if 'new' in args:atomic_json(Path(args[-1]),[0]*64);return ''
             return rollout.public_text(bytes([19])*32)+'\n'
         if 'program' in args and 'deploy' in args:
+            if '--max-deploy-attempts' in args or getattr(self.world,'force_option_rejection',False):
+                from continuity_rollout_state import append_private
+                append_private(self.log,b"error: Found argument '--max-deploy-attempts' which wasn't expected\n")
+                raise ValueError('unsupported deployment option: --max-deploy-attempts')
             self.world.patch_submissions+=1
             plan=self.world.base_plan
             program=plan['programs']['portal']
@@ -92,6 +96,38 @@ class PortalProgramUpgradeTests(unittest.TestCase):
         self.assertFalse(operation.root.exists())
         self.assertEqual(self.world.patch_submissions,0)
         self.assertEqual(self.world.starts,self.starts)
+
+    def test_pre_network_rejection_has_exact_bounded_evidence(self):
+        self.world.force_option_rejection=True
+        operation=patch.ProgramUpgrade(self.host)
+        with self.assertRaisesRegex(ValueError,'unsupported deployment option'):operation.run()
+        plan=private_json(operation.control/'plan.json')
+        evidence=patch.rejection_evidence(operation.control,plan,self.world.current,plan['snapshot'],plan['before_programs'],20_000_000_000,False)
+        self.assertEqual(evidence['error_class'],'unsupported-deployment-option')
+        self.assertEqual(len(evidence['review_sha256']),64)
+        with self.assertRaises(ValueError):patch.rejection_evidence(operation.control,plan,self.world.current,plan['snapshot'],plan['before_programs'],19_000_000_000,False)
+
+    def test_reviewed_pre_network_continuation_reuses_original_buffer_and_barriers_once(self):
+        self.world.force_option_rejection=True
+        operation=patch.ProgramUpgrade(self.host)
+        with self.assertRaisesRegex(ValueError,'unsupported deployment option'):operation.run()
+        plan=private_json(operation.control/'plan.json')
+        evidence=patch.rejection_evidence(operation.control,plan,self.world.current,plan['snapshot'],plan['before_programs'],20_000_000_000,False)
+        preserved={name:(operation.control/name).read_bytes() for name in ('plan.json','submit-attempted.json','keys/portal-upgrade-buffer.json')}
+        self.world.force_option_rejection=False
+        self.world.args.reconcile_source_revision=self.world.args.revision
+        self.world.args.reconcile_review_sha256='0'*64;self.world.args.revision='c'*40;self.world.args.review_sha256=None
+        with self.assertRaisesRegex(ValueError,'review differs'):patch.ProgramUpgrade(self.host).run()
+        self.assertFalse((operation.control/'reconcile-submit-attempted.json').exists())
+        self.world.args.reconcile_review_sha256=evidence['review_sha256']
+        value=patch.ProgramUpgrade(self.host).run()
+        for name,raw in preserved.items():self.assertEqual((operation.control/name).read_bytes(),raw)
+        self.assertEqual(self.world.patch_submissions,1)
+        self.assertEqual(value['source_revision'],'b'*40)
+        self.assertEqual(value['reconcile_controller_revision'],'c'*40)
+        with self.assertRaises(ValueError):patch.ProgramUpgrade(self.host).run()
+        self.assertEqual(self.world.patch_submissions,1)
+        self.assertEqual(self.world.current,self.before)
 
     def test_original_program_and_context_qualification_are_required_before_submission(self):
         path=self.base/'control/programs.json';uploads=private_json(path)
