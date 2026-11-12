@@ -672,19 +672,15 @@ impl NorthStarService {
             }
         }
 
-        #[cfg(feature = "vrf-relay")]
-        let relay_service = relay_boot.map(|boot| {
-            let source = manager
-                .vrf_commitment_source()
-                .expect("VRF relay requires an active retained continuity session");
-            boot.start(source, portal_program_id, exit.clone())
-                .expect("VRF relay startup rejected")
-        });
         let settlement_sender = config.settlement_sender;
         let settlement_forward_sender = config.settlement_forward_sender;
         let thread_hdl = Builder::new()
             .name("solNorthStar".to_string())
             .spawn(move || {
+                #[cfg(feature = "vrf-relay")]
+                let mut relay_boot = relay_boot;
+                #[cfg(feature = "vrf-relay")]
+                let mut relay_service = None;
                 let mut pending_settlement: Option<PendingSettlementSubmission> = None;
                 let mut settlement_attempts: u64 = 0;
                 let mut last_warned_stuck_settlement: Option<(u64, [u8; 32], u64)> = None;
@@ -694,6 +690,24 @@ impl NorthStarService {
                         break;
                     }
 
+                    // Startup replay can restore SessionV2 after this service is constructed.
+                    #[cfg(feature = "vrf-relay")]
+                    if relay_boot.is_some() {
+                        match vrf_relay::Bootstrap::start_when_ready(
+                            &mut relay_boot,
+                            manager.vrf_commitment_source(),
+                            portal_program_id,
+                            exit.clone(),
+                        ) {
+                            Ok(Some(service)) => relay_service = Some(service),
+                            Ok(None) => {}
+                            Err(_) => {
+                                error!("VRF relay rejected the active continuity binding");
+                                exit.store(true, Ordering::Relaxed);
+                                break;
+                            }
+                        }
+                    }
                     let frozen_banks =
                         match recv_frozen_bank_batch(&receiver, Duration::from_millis(500)) {
                             Ok(banks) => banks,

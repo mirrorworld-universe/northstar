@@ -107,7 +107,22 @@ impl Bootstrap {
     pub(super) fn observer(&self) -> Arc<dyn ErHistoryObserver> {
         Arc::new(WakeObserver(self.wake.clone()))
     }
-    pub(super) fn start(
+    pub(super) fn start_when_ready(
+        pending: &mut Option<Self>,
+        source: Option<VrfCommitmentSource>,
+        portal: solana_pubkey::Pubkey,
+        exit: Arc<AtomicBool>,
+    ) -> Result<Option<Service>> {
+        let Some(source) = source else {
+            return Ok(None);
+        };
+        let Some(boot) = pending.take() else {
+            return Ok(None);
+        };
+        boot.start(source, portal, exit).map(Some)
+    }
+
+    fn start(
         self,
         source: VrfCommitmentSource,
         portal: solana_pubkey::Pubkey,
@@ -275,6 +290,24 @@ mod tests {
             "signer_file":"fulfiller.json","state_dir":"state","commitment":"confirmed",
             "allowed_consumers":[Pubkey::new_from_array([7;32]).to_string()],"allow_store":false,"poll_ms":2000,"max_attempts":2,"max_records":64
         },"signer":{"url":"http://127.0.0.1:19030","bearer_token_file":"bearer","policy_sha256":"44".repeat(32)}})).unwrap()
+    }
+
+    #[test]
+    fn regression_startup_waits_for_active_lineage_without_reading_credentials() {
+        let (wake, receiver) = crossbeam_channel::bounded(1);
+        let mut pending = Some(Bootstrap {
+            config: config(),
+            wake,
+            receiver,
+        });
+        let exit = Arc::new(AtomicBool::new(false));
+        assert!(
+            Bootstrap::start_when_ready(&mut pending, None, Pubkey::default(), exit.clone())
+                .unwrap()
+                .is_none()
+        );
+        assert!(pending.is_some());
+        assert!(!exit.load(Ordering::Relaxed));
     }
 
     #[test]
