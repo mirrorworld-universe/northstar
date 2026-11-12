@@ -959,6 +959,13 @@ pub fn process_open_challenge(
     if !challenger.is_signer() {
         return Err(PortalError::Unauthorized.into());
     }
+    // V2 has no qualified challenge resolver; reject before changing checkpoint or bond state.
+    if session
+        .try_borrow()?
+        .starts_with(&crate::SessionV2::DISCRIMINATOR)
+    {
+        return Err(PortalError::StepProofVerifierUnavailable.into());
+    }
 
     let session_state = load_session(program_id, session)?;
     let session_key = session.address();
