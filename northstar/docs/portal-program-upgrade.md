@@ -17,6 +17,8 @@ Run `.github/scripts/portal_program_upgrade.py --inspect-only` first. Inspection
 
 Submission requires that exact digest. It records the plan, original buffer key and submission barrier before invoking the retained manifest-bound CLI. An uncertain result preserves all records and permits no automatic resubmission, rollback or runtime restart.
 
+A terminal unsupported-option rejection can be reconciled once only after read-only evidence proves unchanged programs, Native binding/start time and CI authority balance, plus an unfunded retained buffer. Reconciliation requires the exact evidence digest, preserves the original plan/submission barrier and buffer key, and records the reviewed controller revision before reusing that key. Any funded buffer, changed program, uncertain network outcome or consumed continuation suppresses this path. The supported CLI uses `--max-sign-attempts`; it has no `--max-deploy-attempts` option.
+
 Qualification requires a finalized successful upload transaction at the new ProgramData deployment slot, exact target bytes, unchanged authority and bridge, a closed buffer, and an unchanged Native/session/ER snapshot. The receipt records the net CI-wallet cost so later VRF staging reserves that cost within the combined cap.
 
 The operator workflow remains in the private deployment repository; no credential, private signer implementation or deployment state is published here.
