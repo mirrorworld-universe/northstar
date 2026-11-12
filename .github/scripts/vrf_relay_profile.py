@@ -11,7 +11,7 @@ PROFILE = Path("/solana/northstar/vrf-isolated/profile.json")
 JOURNAL = Path("/solana/northstar/vrf-isolated/relay-journal")
 FULFILLER = Path("/etc/northstar-vrf-relay/fulfiller.json")
 BEARER = Path("/etc/northstar-vrf-relay/bearer")
-CREDENTIALS = "/run/credentials/northstar-validator.service/"
+CREDENTIALS = "/run/northstar-vrf-relay/"
 FLAG = "--vrf-relay-config"
 
 
@@ -81,7 +81,10 @@ def hardening():
     return ("NoNewPrivileges=yes\nCapabilityBoundingSet=\nAmbientCapabilities=\n"
             "LoadCredential=vrf-relay-fulfiller:"+str(FULFILLER)+"\n"
             "LoadCredential=vrf-relay-bearer:"+str(BEARER)+"\n"
-            "InaccessiblePaths=-/etc/northstar-vrf-request-signer -/run/credentials/northstar-vrf-request-signer.service "
+            "RuntimeDirectory=northstar-vrf-relay\nRuntimeDirectoryMode=0700\n"
+            "ExecStartPre=/usr/bin/install -m 0400 %d/vrf-relay-fulfiller %t/northstar-vrf-relay/vrf-relay-fulfiller\n"
+            "ExecStartPre=/usr/bin/install -m 0400 %d/vrf-relay-bearer %t/northstar-vrf-relay/vrf-relay-bearer\n"
+            "InaccessiblePaths=-/etc/northstar-vrf-request-signer -/run/credentials/northstar-vrf-request-signer.service -/run/northstar-vrf-request-signer "
             "-/var/lib/private/northstar-vrf-request-signer -/run/docker.sock -/run/podman/podman.sock -/nix/var/nix/daemon-socket\n")
 
 

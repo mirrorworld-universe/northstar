@@ -14,7 +14,7 @@ The validator receives only its dedicated fulfillment wallet and a transport bea
 
 ## Guarded activation
 
-The release selector `NORTHSTAR_VRF_RELAY_PROFILE_SHA256` freezes the exact private profile handoff before builds. It is allowed only for an ordinary retained native upgrade, not fresh-stack or failed-L1 recovery. The controller binds the generated configuration and service arguments to its immutable plan, checks the independent signer before stopping the old runtime, and carries the profile forward on later upgrades. Delivery credentials use distinct systemd credentials. The Native unit forbids privilege elevation and cannot access the signer credential directories.
+The release selector `NORTHSTAR_VRF_RELAY_PROFILE_SHA256` freezes the exact private profile handoff before builds. It is allowed only for an ordinary retained native upgrade, not fresh-stack or failed-L1 recovery. The controller binds the generated configuration and service arguments to its immutable plan, checks the independent signer before stopping the old runtime, and carries the profile forward on later upgrades. Delivery credentials use distinct systemd credentials, materialized as owner-only `0400` files in a private runtime directory before the relay starts. This preserves strict file checks even when systemd exposes delivered credentials with group-readable mode. The Native unit forbids privilege elevation and cannot access the signer credential directories.
 
 Native-upgrade readiness does **not** qualify a VRF callback. Its report explicitly leaves callback qualification false. A separate fresh request, valid on-chain proof verification, callback receipt and closed request are required. Program upload and funding are outside the Native upgrade controller.
 
