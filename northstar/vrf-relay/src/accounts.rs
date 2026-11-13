@@ -161,6 +161,9 @@ pub struct ProgramConfig {
     pub vrf_key: [u8; 32],
     pub suite: u8,
     pub fulfillers: Vec<Pubkey>,
+    pub default_deadline_slots: u16,
+    pub min_deadline_slots: u16,
+    pub max_deadline_slots: u16,
 }
 impl ProgramConfig {
     pub fn decode(program: &Pubkey, address: &Pubkey, owner: &Pubkey, data: &[u8]) -> Result<Self> {
@@ -193,7 +196,17 @@ impl ProgramConfig {
         let count = r.byte()? as usize;
         ensure!(count <= 4, "invalid fulfiller count");
         fulfillers.truncate(count);
-        r.take(8 + 2 + 2 + 2 + 4)?;
+        r.take(8)?;
+        let default_deadline_slots = u16::from_le_bytes(r.array()?);
+        let min_deadline_slots = u16::from_le_bytes(r.array()?);
+        let max_deadline_slots = u16::from_le_bytes(r.array()?);
+        ensure!(
+            2 <= min_deadline_slots
+                && min_deadline_slots <= default_deadline_slots
+                && default_deadline_slots <= max_deadline_slots,
+            "invalid Coordinator deadline limits"
+        );
+        r.take(4)?;
         let bump = r.byte()?;
         ensure!(
             config_address(program) == (*address, bump),
@@ -207,7 +220,18 @@ impl ProgramConfig {
             vrf_key,
             suite,
             fulfillers,
+            default_deadline_slots,
+            min_deadline_slots,
+            max_deadline_slots,
         })
+    }
+    pub fn request_deadline(&self, requested: Option<u16>) -> Result<u16> {
+        let deadline = requested.unwrap_or(self.default_deadline_slots);
+        ensure!(
+            (self.min_deadline_slots..=self.max_deadline_slots).contains(&deadline),
+            "requested deadline is outside the Coordinator limits"
+        );
+        Ok(deadline)
     }
 }
 struct Reader<'a>(&'a [u8]);

@@ -309,6 +309,7 @@ class NativeUpgrade:
             require(self.recovery_slot is None and self.event_source == "l1", "relay requires an ordinary retained native upgrade")
             snapshot_relay = self.snapshot("online")
             relay.validate(self.relay_profile, snapshot_relay["identity"], snapshot_relay["er_genesis"], self.args.l1_rpc, self.args.er_rpc)
+            relay.admit(self, self.relay_profile, self.previous_relay, before)
             relay.preflight(self, self.relay_profile)
             desired_arguments = relay.arguments(desired_arguments, self.runtime / "vrf-relay.json", binding.get("relay_config"))
         if self.recovery_slot is not None:

@@ -99,6 +99,7 @@ fn main() {
     fs::create_dir_all(protocol.join("tests")).unwrap();
     let files = [
         "accounts",
+        "archive",
         "credentials",
         "crypto",
         "discovery",

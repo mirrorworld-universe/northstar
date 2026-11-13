@@ -27,7 +27,7 @@ elif tool == 'git':
         directory.mkdir()
         (directory / 'package-lock.json').write_text('{}')
     elif 'rev-parse' in args:
-        print('beb895f5178bdb21fbfe13786981b19241d3d8c4')
+        print('ea732d51f71f62e6fe46c77eaf781b9474b00508')
 elif tool == 'sha256sum':
     assert args == ['--check', '--status']
     assert sys.stdin.read().startswith('78697b65487a7c5932151165ec887b37246e25a3571af752b8c151cc636cd00c  ')

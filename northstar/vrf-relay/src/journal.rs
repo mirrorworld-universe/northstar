@@ -1,4 +1,5 @@
 use {
+    crate::archive::{Archive, ArchiveHead},
     anyhow::{Context, Result, ensure},
     serde::{Deserialize, Serialize},
     solana_pubkey::Pubkey,
@@ -116,6 +117,8 @@ pub struct Snapshot {
     pub records: BTreeMap<String, Record>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub l1_discovery_established: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_head: Option<ArchiveHead>,
 }
 fn is_false(value: &bool) -> bool {
     !*value
@@ -126,6 +129,7 @@ pub struct Journal {
     directory: PathBuf,
     snapshot: Snapshot,
     max_records: usize,
+    archive: Archive,
     poisoned: bool,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -143,13 +147,29 @@ impl Journal {
     pub fn open(directory: &Path, binding: &str, max_records: usize) -> Result<Self> {
         Self::open_inner(directory, binding, max_records, |_| {})
     }
+    pub fn resume(directory: &Path, binding: &str, max_records: usize) -> Result<Self> {
+        Self::open_mode(directory, binding, max_records, true, |_| {})
+    }
     fn open_inner(
         directory: &Path,
         binding: &str,
         max_records: usize,
+        observe: impl FnMut(LockStep),
+    ) -> Result<Self> {
+        Self::open_mode(directory, binding, max_records, false, observe)
+    }
+    fn open_mode(
+        directory: &Path,
+        binding: &str,
+        max_records: usize,
+        require_existing: bool,
         mut observe: impl FnMut(LockStep),
     ) -> Result<Self> {
         if !directory.exists() {
+            ensure!(
+                !require_existing,
+                "retained relay state is missing; refusing initialization"
+            );
             fs::DirBuilder::new().mode(0o700).create(directory)?;
             let parent = directory
                 .parent()
@@ -166,24 +186,35 @@ impl Journal {
             .try_lock()
             .context("journal directory already locked or locking unsupported")?;
         let lock_path = directory.join("writer.lock");
-        let created = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&lock_path);
-        let (lock, new) = match created {
-            Ok(file) => (file, true),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (
+        let (lock, new) = if require_existing {
+            (
                 OpenOptions::new()
                     .read(true)
                     .write(true)
-                    .custom_flags(libc::O_NOFOLLOW)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
                     .open(&lock_path)?,
                 false,
-            ),
-            Err(error) => return Err(error.into()),
+            )
+        } else {
+            let created = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(&lock_path);
+            match created {
+                Ok(file) => (file, true),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (
+                    OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                        .open(&lock_path)?,
+                    false,
+                ),
+                Err(error) => return Err(error.into()),
+            }
         };
         ensure!(lock.metadata()?.is_file(), "invalid journal lock");
         observe(LockStep::Opened);
@@ -201,6 +232,7 @@ impl Journal {
                 binding: binding.to_owned(),
                 records: BTreeMap::new(),
                 l1_discovery_established: false,
+                archive_head: None,
             }
         } else {
             let file = OpenOptions::new()
@@ -221,12 +253,18 @@ impl Journal {
                 && snapshot.records.len() <= max_records,
             "incompatible journal binding or capacity"
         );
+        let archive = Archive::open(directory, binding, snapshot.archive_head.clone())?;
+        ensure!(
+            snapshot.records.keys().all(|id| !archive.contains(id)),
+            "delivery history overlaps hot records"
+        );
         let mut journal = Self {
             _lock: lock,
             _directory_lock: directory_lock,
             directory: directory.to_owned(),
             snapshot,
             max_records,
+            archive,
             poisoned: false,
         };
         if new {
@@ -267,6 +305,11 @@ impl Journal {
                 && snapshot.records.len() <= max_records,
             "incompatible journal binding or capacity"
         );
+        let archive = Archive::open(directory, binding, snapshot.archive_head.clone())?;
+        ensure!(
+            snapshot.records.keys().all(|id| !archive.contains(id)),
+            "delivery history overlaps hot records"
+        );
         if snapshot.l1_discovery_established {
             crate::discovery::DiscoveryState::inspect(directory, binding, max_records)?;
         }
@@ -275,10 +318,63 @@ impl Journal {
     pub fn snapshot(&self) -> &Snapshot {
         &self.snapshot
     }
+    pub(crate) fn contains(&self, id: &str) -> bool {
+        self.snapshot.records.contains_key(id) || self.archive.contains(id)
+    }
+    pub(crate) fn archived_count(&self) -> u64 {
+        self.archive.count()
+    }
+    pub(crate) fn validate_history(
+        &self,
+        mut validate: impl FnMut(&str, &Record) -> Result<()>,
+    ) -> Result<()> {
+        for id in self.archive.ids() {
+            let record: Record = self
+                .archive
+                .get(id)?
+                .context("retained delivery record missing")?;
+            ensure!(
+                !matches!(record.status, Status::Pending | Status::Retryable),
+                "active delivery record cannot be archived"
+            );
+            validate(id, &record)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn make_room(&mut self) -> Result<bool> {
+        ensure!(!self.poisoned, "journal is poisoned; reopen and reconcile");
+        if self.snapshot.records.len() < self.max_records {
+            return Ok(true);
+        }
+        let Some((id, record)) = self
+            .snapshot
+            .records
+            .iter()
+            .find(|(_, record)| !matches!(record.status, Status::Pending | Status::Retryable))
+        else {
+            return Ok(false);
+        };
+        let id = id.clone();
+        let head = self.archive.stage(&id, record)?;
+        let mut next = self.snapshot.clone();
+        next.records.remove(&id);
+        next.archive_head = Some(head.clone());
+        self.publish(next)?;
+        self.archive.commit(id, head);
+        Ok(true)
+    }
     pub fn change(&mut self, update: impl FnOnce(&mut Snapshot) -> Result<()>) -> Result<()> {
         ensure!(!self.poisoned, "journal is poisoned; reopen and reconcile");
         let mut next = self.snapshot.clone();
         update(&mut next)?;
+        ensure!(
+            next.archive_head == self.snapshot.archive_head,
+            "retained history head cannot be replaced"
+        );
+        self.publish(next)
+    }
+    fn publish(&mut self, next: Snapshot) -> Result<()> {
+        ensure!(!self.poisoned, "journal is poisoned; reopen and reconcile");
         ensure!(
             next.binding == self.snapshot.binding
                 && next.version == 1

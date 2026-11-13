@@ -68,7 +68,7 @@ pub fn store_request(
     seed: [u8; 32],
     deadline: u16,
 ) -> Result<Instruction> {
-    ensure!((2..=1000).contains(&deadline), "invalid deadline");
+    ensure!(deadline >= 2, "invalid deadline");
     let mut data = discriminator("global", "request_random").to_vec();
     data.extend(request_key);
     data.extend(seed);
