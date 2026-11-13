@@ -34,7 +34,8 @@ class RelayProfileTests(unittest.TestCase):
         profile,identity=self.fixture()
         for changes in ({"vrf_key_file":"/secret"},{"network":"devnet_l1"},{"coordinator":"9XHn4tU6H6gibio4omC9Xs2ZCXyqrhTzY3FRidsHuGgm"},
                         {"er_session_context":"55"*32},{"allow_store":True},{"allowed_consumers":[]},{"rpc_url":"https://leader.example"},
-                        {"signer_file":"/etc/northstar-vrf-request-signer/vrf.json"}):
+                        {"signer_file":"/etc/northstar-vrf-request-signer/vrf.json"},
+                        {"signer_file":"/run/credentials/northstar-validator.service/vrf-relay-fulfiller"}):
             altered=copy.deepcopy(profile); altered["configuration"]["worker"].update(changes)
             with self.subTest(changes=changes), self.assertRaises(ValueError):self.validate(altered,identity)
         del profile["configuration"]["worker"]["coordinator"]
@@ -59,6 +60,11 @@ class RelayProfileTests(unittest.TestCase):
         self.assertIn("NoNewPrivileges=yes",text)
         self.assertIn("LoadCredential=vrf-relay-fulfiller:",text)
         self.assertIn("LoadCredential=vrf-relay-bearer:",text)
+        self.assertIn("RuntimeDirectory=northstar-vrf-relay",text)
+        self.assertIn("RuntimeDirectoryMode=0700",text)
+        self.assertIn("ExecStartPre=/usr/bin/install -m 0400 %d/vrf-relay-fulfiller %t/northstar-vrf-relay/vrf-relay-fulfiller",text)
+        self.assertIn("ExecStartPre=/usr/bin/install -m 0400 %d/vrf-relay-bearer %t/northstar-vrf-relay/vrf-relay-bearer",text)
+        self.assertIn("-/run/northstar-vrf-request-signer",text)
         self.assertNotIn("LoadCredential=vrf.json",text)
         self.assertNotIn("NoNewPrivileges",service_dropin(["/validator","--portal","portal"],"/state/checkpoints","/state/journal"))
 
