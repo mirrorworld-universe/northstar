@@ -5,6 +5,8 @@ import hashlib
 import json
 import vrf_relay_profile as relay
 import copy
+from types import SimpleNamespace
+from unittest.mock import patch
 from continuity_devnet import public_text
 from continuity_rollout_state import service_dropin
 
@@ -41,6 +43,32 @@ class RelayProfileTests(unittest.TestCase):
         del profile["configuration"]["worker"]["coordinator"]
         with self.assertRaises(ValueError):self.validate(profile,identity)
 
+    def test_retained_code_handoff_preserves_the_original_binding(self):
+        previous,identity=self.fixture()
+        profile=copy.deepcopy(previous)
+        profile['configuration']['worker']['coordinator_programdata_sha256']='55'*32
+        profile['configuration']['signer'].update(policy_sha256='66'*32,retained_policy={
+            'policy_sha256':previous['configuration']['signer']['policy_sha256'],
+            'coordinator_programdata_sha256':previous['configuration']['worker']['coordinator_programdata_sha256']})
+        profile['retained_upgrade_receipt_sha256']='77'*32
+        self.assertEqual(self.validate(profile,identity),profile['configuration'])
+        self.assertFalse(relay.retained_transition(previous,profile))
+        self.assertTrue(relay.retained_transition(profile,profile))
+        with self.assertRaises(ValueError):relay.retained_transition(None,profile)
+        for changes in ({'max_attempts':1},{'max_records':127},{'allow_store':True}):
+            changed=copy.deepcopy(profile);changed['configuration']['worker'].update(changes)
+            with self.subTest(changes=changes),self.assertRaises(ValueError):relay.retained_transition(previous,changed)
+        changed=copy.deepcopy(profile);changed['configuration']['signer']['retained_policy']['policy_sha256']='88'*32
+        with self.assertRaises(ValueError):relay.retained_transition(previous,changed)
+        changed=copy.deepcopy(profile);del changed['retained_upgrade_receipt_sha256']
+        with self.assertRaises(ValueError):self.validate(changed,identity)
+
+    def test_active_profile_changes_require_an_explicit_retained_handoff(self):
+        previous,identity=self.fixture();changed=copy.deepcopy(previous)
+        changed['configuration']['worker']['coordinator_programdata_sha256']='55'*32
+        changed['configuration']['signer']['policy_sha256']='66'*32
+        with self.assertRaises(ValueError):relay.retained_transition(previous,changed)
+
     def test_callback_or_fulfiller_alias_is_rejected(self):
         profile,identity=self.fixture()
         worker=profile["configuration"]["worker"]
@@ -67,6 +95,19 @@ class RelayProfileTests(unittest.TestCase):
         self.assertIn("-/run/northstar-vrf-request-signer",text)
         self.assertNotIn("LoadCredential=vrf.json",text)
         self.assertNotIn("NoNewPrivileges",service_dropin(["/validator","--portal","portal"],"/state/checkpoints","/state/journal"))
+
+    def installed(self,uid=1000):
+        profile,_=self.fixture();runtime=Path('/runtime')
+        return SimpleNamespace(plan={'vrf_relay':profile,'before':{'uid':uid}},runtime=runtime,service='native.service',
+            inspect=lambda paths:{str(runtime/'vrf-relay.json'):{'sha256':relay.configuration_hash(profile),'mode':0o400,'uid':uid}},
+            ops=SimpleNamespace(execute=lambda arguments:'yes'))
+
+    def test_installed_profile_rechecks_signer_readiness_before_start(self):
+        with patch.object(relay,'preflight',side_effect=ValueError('signer is no longer ready')),self.assertRaises(ValueError):
+            relay.verify(self.installed())
+
+    def test_root_native_identity_cannot_read_the_isolated_signer_key(self):
+        with patch.object(relay,'preflight'),self.assertRaises(ValueError):relay.verify(self.installed(uid=0))
 
     def test_profile_reads_require_exact_digest_and_private_regular_file(self):
         with tempfile.TemporaryDirectory() as root:

@@ -113,6 +113,7 @@ class DiagnosticTests(unittest.TestCase):
         ledger_runtime = self.state_root / "upgrades" / retained_l1_revision / "runtime" if retained_l1_revision else runtime
         ledger = ledger_runtime / "l1/ledger"
         ledger.mkdir(parents=True)
+        ledger.chmod(0o755)
         arguments[arguments.index("--ledger") + 1] = str(ledger)
         desired = {"arguments": arguments, "binary_sha256": file_hash(binary),
                    "state_environment": activation["state_environment"], "uid": os.getuid(), "gid": os.getgid()}

@@ -24,7 +24,8 @@ def read_profile(path, expected):
         raw=stream.read(65537)
     require(len(raw)<=65536 and hashlib.sha256(raw).hexdigest()==expected,"relay source digest differs")
     value=json.loads(raw)
-    require(isinstance(value,dict) and set(value)=={"version","context","configuration"}
+    require(isinstance(value,dict) and set(value) in ({"version","context","configuration"},
+            {"version","context","configuration","retained_upgrade_receipt_sha256"})
             and type(value["version"]) is int and value["version"]==1,"relay source schema differs")
     return value
 
@@ -55,12 +56,51 @@ def validate(profile, identity, genesis, l1_rpc, er_rpc):
             and type(worker.get("poll_ms")) is int and 2000<=worker["poll_ms"]<=10000
             and type(worker.get("max_attempts")) is int and 1<=worker["max_attempts"]<=2
             and type(worker.get("max_records")) is int and 1<=worker["max_records"]<=128,"relay callback/delivery policy differs")
-    require(isinstance(signer,dict) and set(signer)=={"url","bearer_token_file","policy_sha256"}
+    signer_fields={"url","bearer_token_file","policy_sha256"}
+    require(isinstance(signer,dict) and signer_fields<=set(signer)<=signer_fields|{'retained_policy'}
             and signer["url"]=="http://127.0.0.1:9030" and signer["bearer_token_file"]==CREDENTIALS+"vrf-relay-bearer"
-            and re.fullmatch("[0-9a-f]{64}",signer["policy_sha256"] or ""),"isolated signer binding differs")
+            and isinstance(signer["policy_sha256"],str) and re.fullmatch("[0-9a-f]{64}",signer["policy_sha256"]),"isolated signer binding differs")
+    retained='retained_policy' in signer
+    require(set(profile)==({'version','context','configuration','retained_upgrade_receipt_sha256'} if retained
+                         else {'version','context','configuration'}),'retained relay receipt selection differs')
+    if retained:
+        binding=signer['retained_policy']
+        require(isinstance(binding,dict) and set(binding)=={'policy_sha256','coordinator_programdata_sha256'}
+                and all(isinstance(value,str) and re.fullmatch('[0-9a-f]{64}',value) for value in binding.values())
+                and binding['policy_sha256']!=signer['policy_sha256']
+                and binding['coordinator_programdata_sha256']!=worker['coordinator_programdata_sha256'],
+                'retained relay binding differs')
+        require(isinstance(profile['retained_upgrade_receipt_sha256'],str)
+                and re.fullmatch('[0-9a-f]{64}',profile['retained_upgrade_receipt_sha256']),'retained relay receipt digest differs')
     for name in ("coordinator_programdata_sha256","verifier_programdata_sha256"):
         require(re.fullmatch("[0-9a-f]{64}",worker.get(name,"")),"relay program digest differs")
     return config
+
+
+def retained_transition(previous,profile):
+    if previous==profile:return True
+    retained=profile['configuration']['signer'].get('retained_policy')
+    if previous is None:
+        require(retained is None,'retained relay requires a qualified previous profile')
+        return False
+    require(retained is not None and 'retained_policy' not in previous['configuration']['signer'],
+            'active relay changes require a supported retained handoff')
+    old=previous['configuration'];current=profile['configuration']
+    expected_binding={'policy_sha256':old['signer']['policy_sha256'],
+                      'coordinator_programdata_sha256':old['worker']['coordinator_programdata_sha256']}
+    expected={**previous,'retained_upgrade_receipt_sha256':profile.get('retained_upgrade_receipt_sha256'),
+        'configuration':{**old,'worker':{**old['worker'],'coordinator_programdata_sha256':current['worker']['coordinator_programdata_sha256']},
+            'signer':{**old['signer'],'policy_sha256':current['signer']['policy_sha256'],'retained_policy':expected_binding}}}
+    require(profile==expected and retained==expected_binding,'retained relay handoff changed delivery or authority scope')
+    return False
+
+
+def admit(upgrade,profile,previous,before):
+    require(type(before.get('uid')) is int and before['uid']>0,'Native relay must not run as the signer key owner')
+    carried=retained_transition(previous,profile)
+    if 'retained_policy' not in profile['configuration']['signer']:return
+    from vrf_relay_handoff import admit as admit_handoff
+    admit_handoff(upgrade,profile,previous,before,carried)
 
 
 def arguments(original, config, previous=None):
@@ -132,6 +172,12 @@ def install(upgrade):
 def verify(upgrade):
     profile=upgrade.plan.get("vrf_relay")
     if profile is None:return
+    require(type(upgrade.plan['before']['uid']) is int and upgrade.plan['before']['uid']>0,
+            'Native relay must not run as the signer key owner')
+    preflight(upgrade,profile)
+    if 'retained_policy' in profile['configuration']['signer']:
+        from vrf_relay_handoff import admit as admit_handoff
+        admit_handoff(upgrade,profile,None,upgrade.plan['before'],True)
     path=upgrade.runtime/"vrf-relay.json"
     value=upgrade.inspect([path])[str(path)]
     require(value.get("sha256")==configuration_hash(profile) and value.get("mode")==0o400
