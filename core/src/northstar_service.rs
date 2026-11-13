@@ -1,5 +1,7 @@
 // Sonic: Independent Geyser plugins for the ER slot namespace.
 mod geyser;
+#[cfg(feature = "vrf-relay")]
+mod vrf_relay;
 
 use {
     crate::banking_channels::BankingPacketSender,
@@ -587,8 +589,44 @@ impl NorthStarService {
         exit: Arc<AtomicBool>,
         er_geyser_config_files: &[std::path::PathBuf],
     ) -> Self {
+        Self::new_with_relay(
+            bank_forks,
+            receiver,
+            cfg,
+            cluster_info,
+            config,
+            exit,
+            er_geyser_config_files,
+            None,
+        )
+    }
+
+    // Sonic: Requested modules fail closed; default validators have no relay or credential reads.
+    pub fn new_with_relay(
+        bank_forks: Arc<std::sync::RwLock<BankForks>>,
+        receiver: BankNotificationReceiver,
+        cfg: northstar::ManagerConfig,
+        cluster_info: Arc<ClusterInfo>,
+        config: NorthStarServiceConfig,
+        exit: Arc<AtomicBool>,
+        er_geyser_config_files: &[std::path::PathBuf],
+        vrf_relay_config: Option<&std::path::Path>,
+    ) -> Self {
+        #[cfg(not(feature = "vrf-relay"))]
+        assert!(
+            vrf_relay_config.is_none(),
+            "VRF relay configuration requires the vrf-relay build feature"
+        );
+        #[cfg(feature = "vrf-relay")]
+        let relay_boot = vrf_relay::Bootstrap::load(vrf_relay_config, config.listen_addr)
+            .expect("VRF relay configuration rejected");
         let er_observer = geyser::ErGeyserObserver::load(er_geyser_config_files)
             .expect("failed to load ER Geyser plugins");
+        #[cfg(feature = "vrf-relay")]
+        let er_observer = vrf_relay::combined(
+            er_observer,
+            relay_boot.as_ref().map(vrf_relay::Bootstrap::observer),
+        );
         // Sonic: Initialize NorthStar manager with always-on ephemeral RPC
         let portal_program_id = cfg.portal_program_id;
         let mut manager = northstar::Manager::new(cfg);
@@ -639,17 +677,37 @@ impl NorthStarService {
         let thread_hdl = Builder::new()
             .name("solNorthStar".to_string())
             .spawn(move || {
+                #[cfg(feature = "vrf-relay")]
+                let mut relay_boot = relay_boot;
+                #[cfg(feature = "vrf-relay")]
+                let mut relay_service = None;
                 let mut pending_settlement: Option<PendingSettlementSubmission> = None;
                 let mut settlement_attempts: u64 = 0;
                 let mut last_warned_stuck_settlement: Option<(u64, [u8; 32], u64)> = None;
                 loop {
                     // Check for exit first
                     if exit.load(Ordering::Relaxed) {
-                        // Shutdown the always-on runtime
-                        manager.shutdown_runtime();
                         break;
                     }
 
+                    // Startup replay can restore SessionV2 after this service is constructed.
+                    #[cfg(feature = "vrf-relay")]
+                    if relay_boot.is_some() {
+                        match vrf_relay::Bootstrap::start_when_ready(
+                            &mut relay_boot,
+                            manager.vrf_commitment_source(),
+                            portal_program_id,
+                            exit.clone(),
+                        ) {
+                            Ok(Some(service)) => relay_service = Some(service),
+                            Ok(None) => {}
+                            Err(_) => {
+                                error!("VRF relay rejected the active continuity binding");
+                                exit.store(true, Ordering::Relaxed);
+                                break;
+                            }
+                        }
+                    }
                     let frozen_banks =
                         match recv_frozen_bank_batch(&receiver, Duration::from_millis(500)) {
                             Ok(banks) => banks,
@@ -848,7 +906,9 @@ impl NorthStarService {
                     manager.mark_synced_through(latest_bank.slot());
                 }
 
-                // Cleanup on exit
+                // Relay workers must release their journal before runtime shutdown/resume.
+                #[cfg(feature = "vrf-relay")]
+                drop(relay_service);
                 manager.shutdown_runtime();
 
                 debug!("NorthStar service shutting down");

@@ -517,6 +517,8 @@ pub fn execute(
             .flatten()
             .map(PathBuf::from)
             .collect(),
+        // Sonic: Keep the VRF credential outside the validator process.
+        vrf_relay_config: matches.value_of("vrf_relay_config").map(PathBuf::from),
         geyser_plugin_always_enabled: matches.is_present("geyser_plugin_always_enabled"),
         rpc_addrs: value_t!(matches, "rpc_port", u16).ok().map(|rpc_port| {
             (

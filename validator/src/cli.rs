@@ -912,6 +912,15 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
                 .help("Load a Geyser plugin for locally finalized ER transactions."),
         )
         .arg(
+            // Sonic: Remote-only Native VRF integration.
+            Arg::with_name("vrf_relay_config")
+                .long("vrf-relay-config")
+                .value_name("FILE")
+                .takes_value(true)
+                .requires("portal")
+                .help("Enable the remote-only ER VRF relay using the pinned configuration."),
+        )
+        .arg(
             Arg::with_name("enable_scheduler_bindings")
                 .long("enable-scheduler-bindings")
                 .takes_value(false)

@@ -300,7 +300,9 @@ class StopTests(unittest.TestCase):
         deploy = source[source.index("  deploy:") :]
         self.assertIn("github.ref == 'refs/heads/release'", deploy)
         self.assertIn("persist-credentials: false", deploy)
-        self.assertNotIn("NORTHSTAR_VRF_", deploy)
+        self.assertIn("vars.NORTHSTAR_VRF_RELAY_PROFILE_SHA256", deploy)
+        self.assertNotIn("vrf_key_file", deploy)
+        self.assertNotIn("NORTHSTAR_VRF_SEED", deploy)
         self.assertNotIn("Reconcile CI-owned VRF stack", deploy)
         self.assertNotIn("vrf-coordinator-program-library", deploy)
         self.assertNotIn("NORTHSTAR_VRF_FUNDER_KEYPAIR", deploy)

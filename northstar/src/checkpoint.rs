@@ -728,6 +728,10 @@ fn page_to_input(page: &DaStepPageV1) -> CheckpointStepInputV1 {
 pub fn state_root_v1(
     accounts: &[StateAccountValueV1],
 ) -> Result<CommitmentHash, CheckpointArtifactError> {
+    Ok(state_tree_v1(accounts)?.root())
+}
+
+fn state_tree_v1(accounts: &[StateAccountValueV1]) -> Result<MerkleTree, CheckpointArtifactError> {
     if accounts.windows(2).any(|pair| pair[0] >= pair[1])
         || accounts.iter().any(|account| account.data_hash == [0; 32])
     {
@@ -745,7 +749,34 @@ pub fn state_root_v1(
             ))
         })
         .collect::<Result<Vec<_>, CheckpointArtifactError>>()?;
-    Ok(MerkleTree::new(TreeKind::State, leaves)?.root())
+    MerkleTree::new(TreeKind::State, leaves)
+}
+
+#[cfg(feature = "vrf-relay")]
+pub(crate) fn state_membership_path_v1(
+    accounts: &[StateAccountValueV1],
+    index: usize,
+) -> Result<MerkleAuthenticationPathV1, CheckpointArtifactError> {
+    state_tree_v1(accounts)?.path(index)
+}
+
+#[cfg(feature = "vrf-relay")]
+pub(crate) fn verify_state_membership_v1(
+    account: &StateAccountValueV1,
+    path: &MerkleAuthenticationPathV1,
+    root: CommitmentHash,
+) -> bool {
+    let Ok(bytes) = encode(&StateAccountLeafV1 {
+        index: path.leaf_index,
+        account,
+    }) else {
+        return false;
+    };
+    path.verify(
+        TreeKind::State,
+        typed_hash(TreeKind::State, b"leaf", &bytes),
+        root,
+    )
 }
 
 #[derive(BorshSerialize)]

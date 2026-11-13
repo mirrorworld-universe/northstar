@@ -426,6 +426,8 @@ pub struct ValidatorConfig {
     pub er_history_max_retained_slots: usize,
     // Sonic: Plugins loaded against ER history rather than the L1 pipeline.
     pub er_geyser_plugin_config_files: Vec<PathBuf>,
+    // Sonic: Remote-only VRF discovery and fulfillment configuration.
+    pub vrf_relay_config: Option<PathBuf>,
 }
 
 impl ValidatorConfig {
@@ -519,6 +521,7 @@ impl ValidatorConfig {
             // Sonic: Default ER history retention
             er_history_max_retained_slots: solana_rpc::er_history::DEFAULT_MAX_RETAINED_SLOTS,
             er_geyser_plugin_config_files: Vec::new(),
+            vrf_relay_config: None,
         }
     }
 
@@ -1452,7 +1455,7 @@ impl Validator {
             // Sonic: Create NorthStar service if portal is provided
             let northstar_service_opt = config.portal.map(|portal_program_id| {
                 // Sonic: ER has an independent Geyser service and slot namespace.
-                crate::northstar_service::NorthStarService::new_with_geyser(
+                crate::northstar_service::NorthStarService::new_with_relay(
                     bank_forks.clone(),
                     bank_notifications_for_northstar_recv
                         .expect("northstar receiver must exist when portal is set"),
@@ -1479,6 +1482,7 @@ impl Validator {
                     },
                     exit.clone(),
                     &config.er_geyser_plugin_config_files,
+                    config.vrf_relay_config.as_deref(),
                 )
             });
 
