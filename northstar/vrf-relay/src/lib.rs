@@ -12,6 +12,7 @@
 #[cfg(not(feature = "local-prover"))]
 pub const LOCAL_PROVING_DISABLED: bool = true;
 pub mod accounts;
+pub mod archive;
 mod credentials;
 pub mod crypto;
 pub mod discovery;
