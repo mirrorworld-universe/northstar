@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -10,7 +11,7 @@ import test_vrf_relay_profile as profiles
 import vrf_relay_handoff as handoff
 import vrf_relay_profile as relay
 from continuity_devnet import LOADER, public_bytes, public_text
-from continuity_rollout_state import DEVNET
+from continuity_rollout_state import DEVNET, atomic_json
 from native_upgrade import STATE_KEYS
 
 
@@ -63,6 +64,30 @@ class HandoffTests(unittest.TestCase):
         upgrade=SimpleNamespace(base=Path('/contexts')/value['base_revision'],base_plan=plan,recovery_slot=None,program_floor=10,
             args=SimpleNamespace(revision='4'*40),ops=SimpleNamespace(upstream=SimpleNamespace(account=accounts.get),execute=execute),
             inspect=lambda paths:{str(path):files[str(path)] for path in paths})
+        temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
+        state=Path(temporary.name);control=state/'retained-upgrades'/value['source_revision'];control.mkdir(mode=0o700,parents=True)
+        selected=patch.object(handoff,'ROOT',state/'upgrade-receipts');selected.start();self.addCleanup(selected.stop)
+        review={'version':1,'kind':'retained-er-vrf-upgrade-review','source_revision':value['source_revision'],
+            'target_native_revision':value['target_native_revision'],'relay_source_revision':value['relay_source_revision'],
+            'context':identity['context'],'program_ids':{'coordinator':profile['configuration']['worker']['coordinator'],
+                'consumer':profile['configuration']['worker']['allowed_consumers'][0],'verifier':profile['configuration']['worker']['verifier'],
+                'portal':identity['portal']},'quote':{'peak_lamports':value['peak_lamports'],'funding_transactions':0}}
+        retained_plan={'version':1,'kind':'retained-er-vrf-upgrade','review_sha256':handoff.checksum(review),'review':review}
+        retained_sha=handoff.checksum(retained_plan)
+        atomic_json(control/'plan.json',retained_plan)
+        atomic_json(control/'progress.json',{'version':1,'plan_sha256':retained_sha,'phase':'handoff-qualified'})
+        atomic_json(state/'retained-upgrade.json',{'version':1,'plan_sha256':retained_sha,'source_revision':value['source_revision']})
+        barriers={'artifacts':{'sha256':{'signer':value['signer']['binary_sha256']},'original_policy_sha256':value['retained_policy']['policy_sha256']},
+            'stop-attempted':{},'frozen':{'audit':{'validation':{'input_snapshot_sha256':value['signer']['admissions_sha256']}}},
+            'upload-attempted':{},'uploaded':{'view':value['coordinator_after']},'configured':{'configuration':value['coordinator_config']},
+            'relay-frozen':{'state_sha256':value['relay_journal_sha256']},'install-attempted':{},
+            'installed':{**value['signer'],'source_revision':value['source_revision']},'start-attempted':{},
+            'ready':{'pid':value['signer']['pid'],'admissions_sha256':value['signer']['admissions_sha256'],
+                'info':{'policy_sha256':profile['configuration']['signer']['policy_sha256'],'public_key':profile['configuration']['worker']['vrf_public_key']}}}
+        for name,evidence in barriers.items():atomic_json(control/(name+'.json'),{'version':1,'plan_sha256':retained_sha,'evidence':evidence})
+        atomic_json(control/'handoff-report.json',{'result':'passed','receipt_sha256':profile['retained_upgrade_receipt_sha256'],
+            'native_service_actions':0,'callback_qualified':False})
+        self.control=control
         return value,profile,previous,before,upgrade,files,accounts,commands
 
     def test_receipt_requires_typed_scope_counts_and_retained_native_binding(self):
@@ -89,6 +114,22 @@ class HandoffTests(unittest.TestCase):
         files[str(handoff.ADMISSIONS)]['sha256']=value['signer']['admissions_sha256']
         accounts[value['coordinator_after']['programdata']]['raw']+=b'changed'
         with patch.object(handoff,'read_receipt',return_value=value),self.assertRaises(ValueError):
+            handoff.admit(upgrade,profile,previous,before,False)
+
+    def test_receipt_needs_qualified_plan_bound_install_start_and_report_evidence(self):
+        value,profile,previous,before,upgrade,*_=self.fixture()
+        progress=json.loads((self.control/'progress.json').read_text())
+        atomic_json(self.control/'progress.json',{**progress,'phase':'failed'})
+        with patch.object(handoff,'read_receipt',return_value=value),self.assertRaises((OSError,ValueError)):
+            handoff.admit(upgrade,profile,previous,before,False)
+        atomic_json(self.control/'progress.json',progress)
+        original=(self.control/'start-attempted.json').read_bytes();(self.control/'start-attempted.json').unlink()
+        with patch.object(handoff,'read_receipt',return_value=value),self.assertRaises((OSError,ValueError)):
+            handoff.admit(upgrade,profile,previous,before,False)
+        (self.control/'start-attempted.json').write_bytes(original);(self.control/'start-attempted.json').chmod(0o600)
+        marker=json.loads((self.control/'installed.json').read_text())
+        atomic_json(self.control/'installed.json',{**marker,'plan_sha256':'0'*64})
+        with patch.object(handoff,'read_receipt',return_value=value),self.assertRaises((OSError,ValueError)):
             handoff.admit(upgrade,profile,previous,before,False)
 
     def test_carried_receipt_allows_new_admissions_but_not_changed_signer_artifacts(self):

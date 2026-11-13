@@ -93,10 +93,57 @@ def read_receipt(digest):
     return value
 
 
+def verify_controls(value,profile):
+    state=ROOT.parent;control=state/'retained-upgrades'/value['source_revision']
+    checked_directory(control,private=True)
+    plan=private_json(control/'plan.json');plan_sha=checksum(plan)
+    require(isinstance(plan,dict) and set(plan)=={'version','kind','review_sha256','review'}
+            and plan['version']==1 and plan['kind']=='retained-er-vrf-upgrade'
+            and checksum(plan['review'])==plan['review_sha256'],'retained handoff plan binding differs')
+    progress=private_json(control/'progress.json')
+    require(progress in ({'version':1,'plan_sha256':plan_sha,'phase':'handoff-qualified'},
+                         {'version':1,'plan_sha256':plan_sha,'phase':'callback-qualified'})
+            and private_json(state/'retained-upgrade.json')=={'version':1,'plan_sha256':plan_sha,'source_revision':value['source_revision']},
+            'retained handoff progress is not qualified')
+    review=plan['review'];worker=profile['configuration']['worker']
+    require(all(review.get(name)==value[name] for name in ('source_revision','target_native_revision','relay_source_revision'))
+            and review.get('context')==value['identity']['context'] and review.get('program_ids')=={
+                'coordinator':worker['coordinator'],'consumer':worker['allowed_consumers'][0],
+                'verifier':worker['verifier'],'portal':value['identity']['portal']}
+            and review.get('quote',{}).get('peak_lamports')==value['peak_lamports']
+            and review.get('quote',{}).get('funding_transactions')==0,'retained handoff plan scope differs')
+    evidence={}
+    for name in ('artifacts','stop-attempted','frozen','upload-attempted','uploaded','configured','relay-frozen',
+                 'install-attempted','installed','start-attempted','ready'):
+        marker=private_json(control/(name+'.json'))
+        require(isinstance(marker,dict) and set(marker)=={'version','plan_sha256','evidence'} and marker['version']==1
+                and marker['plan_sha256']==plan_sha and isinstance(marker['evidence'],dict),'retained handoff durable barrier differs')
+        evidence[name]=marker['evidence']
+    require(evidence['uploaded'].get('view')==value['coordinator_after']
+            and evidence['configured'].get('configuration')==value['coordinator_config']
+            and evidence['relay-frozen'].get('state_sha256')==value['relay_journal_sha256']
+            and evidence['artifacts'].get('sha256',{}).get('signer')==value['signer']['binary_sha256']
+            and evidence['artifacts'].get('original_policy_sha256')==value['retained_policy']['policy_sha256'],
+            'retained handoff program or frozen artifact evidence differs')
+    installed=evidence['installed'];ready=evidence['ready']
+    require(installed.get('source_revision')==value['source_revision']
+            and all(installed.get(name)==value['signer'][name] for name in ('binary_sha256','configuration_sha256','unit_sha256'))
+            and ready.get('pid')==value['signer']['pid'] and ready.get('admissions_sha256')==value['signer']['admissions_sha256']
+            and ready.get('info',{}).get('policy_sha256')==profile['configuration']['signer']['policy_sha256']
+            and ready.get('info',{}).get('public_key')==worker['vrf_public_key']
+            and evidence['frozen'].get('audit',{}).get('validation',{}).get('input_snapshot_sha256')==value['signer']['admissions_sha256'],
+            'retained signer start or admission freeze evidence differs')
+    report=private_json(control/'handoff-report.json')
+    require(report.get('result')=='passed' and report.get('receipt_sha256')==profile['retained_upgrade_receipt_sha256']
+            and type(report.get('native_service_actions')) is int and report['native_service_actions']==0
+            and report.get('callback_qualified') is False,'retained handoff report differs')
+
+
 def admit(upgrade,profile,previous,before,carried):
     from native_upgrade import service_spec
     from vrf_relay_profile import JOURNAL, configuration_hash
     value=read_receipt(profile['retained_upgrade_receipt_sha256'])
+    verify_controls(value,profile)
     worker=profile['configuration']['worker'];signer=profile['configuration']['signer']
     require(upgrade.recovery_slot is None and value['identity']['context']==profile['context']
             and value['identity']['session']==worker['er_session']
