@@ -1,6 +1,8 @@
 """Sonic: Read-only admission of a qualified retained ER-VRF handoff."""
 import hashlib
 import json
+import os
+import stat
 from pathlib import Path
 import re
 import shlex
@@ -93,6 +95,74 @@ def read_receipt(digest):
     return value
 
 
+def verify_continuation(control,plan_sha,evidence,value,profile):
+    failure_path=control/'failure.json';root=control/'continuation';pointer=control/'continuation.json'
+    if not os.path.lexists(failure_path):
+        require(not os.path.lexists(root) and not os.path.lexists(pointer),'unexpected continuation without failed handoff')
+        return
+    failure=private_json(failure_path)
+    require(failure.get('version')==1 and failure.get('plan_sha256')==plan_sha
+            and failure.get('evidence',{}).get('phase')=='uploaded' and failure['evidence'].get('failure_type')=='ValueError'
+            and failure['evidence'].get('signer_quarantine_verified') is True
+            and failure['evidence'].get('automatic_rollback') is False,'failed retained handoff profile differs')
+    checked_directory(root,private=True)
+    plan=private_json(root/'plan.json');sha_plan=checksum(plan);review=plan['review']
+    require(plan.get('version')==1 and plan.get('kind')=='retained-er-vrf-post-upload-continuation'
+            and plan.get('review_sha256')==checksum(review) and review.get('version')==1
+            and review.get('kind')=='retained-er-vrf-post-upload-continuation-review'
+            and revision(review.get('source_revision')) and review.get('failed_source_revision')==value['source_revision']
+            and review.get('original_plan_sha256')==plan_sha and review.get('native_revision')==value['target_native_revision'],
+            'continued retained plan binding differs')
+    require(private_json(pointer)=={'version':1,'source_revision':review['source_revision'],'plan_sha256':sha_plan}
+            and private_json(root/'progress.json')=={'version':1,'plan_sha256':sha_plan,'phase':'qualified'},'continued handoff is not qualified')
+    require(review.get('managed_control_abi')=='devnet-control' and sha(review.get('managed_control_sha256'))
+            and type(review.get('remaining_signer_starts')) is int and review['remaining_signer_starts']==1
+            and all(type(review.get(name)) is int and review[name]==0 for name in ('additional_program_submission_passes','additional_funding_transactions')),
+            'continued handoff operation scope differs')
+    diagnostic=review['diagnostic'];markers=diagnostic.get('log',{}).get('markers',{})
+    require(revision(review.get('diagnostic_source_revision')) and checksum(diagnostic)==review.get('diagnostic_review_sha256')
+            and diagnostic.get('source_revision')==review['diagnostic_source_revision'] and diagnostic.get('result')=='passed'
+            and diagnostic.get('failed_source_revision')==value['source_revision'] and diagnostic.get('plan_sha256')==plan_sha
+            and diagnostic.get('coordinator')==value['coordinator_after']
+            and diagnostic.get('release_allowed') is False and diagnostic.get('retry_allowed') is False
+            and diagnostic.get('signer')=={'active_state':'inactive','pid':0,'boot':'disabled','original_binding_unchanged':True}
+            and all(diagnostic.get(name) is True for name in ('native_unchanged','admissions_unchanged','coordinator_configuration_unchanged',
+                'deadline_intent_absent','deadline_started_marker_absent','unrelated_configuration_unchanged'))
+            and markers.get('required_arguments')==1 and markers.get('er_control_usage',0)+markers.get('managed_control_usage',0)==1
+            and markers.get('required_session_context',0)>=1 and markers.get('required_session',0)>=1
+            and all(markers.get(name)==0 for name in ('rpc_send_failure','signed_event','signed_event_spaced','receipt_event','receipt_event_spaced')),
+            'continued handoff unsigned diagnostic differs')
+    continued={}
+    for name in ('authorized','control','configuration-attempted','configured','relay-frozen','install-attempted','installed','start-attempted','ready'):
+        marker=private_json(root/(name+'.json'))
+        require(marker.get('version')==1 and marker.get('plan_sha256')==sha_plan and isinstance(marker.get('evidence'),dict),
+                'continued handoff barrier binding differs')
+        continued[name]=marker['evidence']
+    require(continued['authorized']=={'review_sha256':plan['review_sha256'],'diagnostic_review_sha256':review['diagnostic_review_sha256'],
+                'additional_program_submission_passes':0,'additional_funding_transactions':0,'remaining_signer_starts':1}
+            and continued['control']=={'sha256':review['managed_control_sha256'],'abi':'devnet-control'}
+            and review['managed_control_sha256']!=evidence['artifacts'].get('sha256',{}).get('control')
+            and all(continued[name]==evidence[name] for name in ('configured','relay-frozen','install-attempted','installed','start-attempted','ready')),
+            'continued handoff artifact or remaining-step evidence differs')
+    descriptor=os.open(root/'control',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(descriptor,'rb') as stream:
+        metadata=os.fstat(stream.fileno())
+        require(stat.S_ISREG(metadata.st_mode) and metadata.st_nlink==1 and metadata.st_uid==os.getuid()
+                and not metadata.st_mode&0o022 and 0<metadata.st_size<=128*1024*1024,'continued managed control file differs')
+        raw=stream.read(128*1024*1024+1);after=os.fstat(stream.fileno())
+    require(raw.startswith(b'\x7fELF') and len(raw)==metadata.st_size and after.st_mtime_ns==metadata.st_mtime_ns
+            and hashlib.sha256(raw).hexdigest()==review['managed_control_sha256'],'continued managed control artifact changed')
+    report=private_json(root/'report.json')
+    require(report.get('version')==1 and report.get('kind')=='retained-er-vrf-post-upload-continuation-report'
+            and report.get('result')=='passed' and report.get('plan_sha256')==sha_plan and report.get('original_plan_sha256')==plan_sha
+            and report.get('source_revision')==review['source_revision'] and report.get('failed_source_revision')==value['source_revision']
+            and report.get('diagnostic_review_sha256')==review['diagnostic_review_sha256']
+            and type(report.get('signer_starts')) is int and report['signer_starts']==1
+            and all(type(report.get(name)) is int and report[name]==0 for name in ('additional_program_submission_passes','additional_funding_transactions','native_service_actions'))
+            and report.get('handoff_receipt_sha256')==profile['retained_upgrade_receipt_sha256'] and report.get('callback_qualified') is False,
+            'continued handoff qualified report differs')
+
+
 def verify_controls(value,profile):
     state=ROOT.parent;control=state/'retained-upgrades'/value['source_revision']
     checked_directory(control,private=True)
@@ -137,6 +207,7 @@ def verify_controls(value,profile):
     require(report.get('result')=='passed' and report.get('receipt_sha256')==profile['retained_upgrade_receipt_sha256']
             and type(report.get('native_service_actions')) is int and report['native_service_actions']==0
             and report.get('callback_qualified') is False,'retained handoff report differs')
+    verify_continuation(control,plan_sha,evidence,value,profile)
 
 
 def admit(upgrade,profile,previous,before,carried):

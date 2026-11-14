@@ -90,6 +90,51 @@ class HandoffTests(unittest.TestCase):
         self.control=control
         return value,profile,previous,before,upgrade,files,accounts,commands
 
+    def continued_fixture(self):
+        value,profile,previous,before,upgrade,*_=self.fixture();control=self.control
+        original_sha=handoff.checksum(json.loads((control/'plan.json').read_text()))
+        atomic_json(control/'failure.json',{'version':1,'plan_sha256':original_sha,'evidence':{'phase':'uploaded','failure_type':'ValueError',
+            'operator_reconciliation_required':True,'automatic_rollback':False,'signer_quarantine_verified':True}})
+        root=control/'continuation';root.mkdir(mode=0o700);binary=b'\x7fELFmanaged-control'
+        (root/'control').write_bytes(binary);(root/'control').chmod(0o500);binary_sha=hashlib.sha256(binary).hexdigest()
+        diagnostic={'result':'passed','source_revision':'5'*40,'failed_source_revision':value['source_revision'],'plan_sha256':original_sha,
+            'coordinator':value['coordinator_after'],'native_unchanged':True,'admissions_unchanged':True,'coordinator_configuration_unchanged':True,
+            'deadline_intent_absent':True,'deadline_started_marker_absent':True,'unrelated_configuration_unchanged':True,
+            'signer':{'active_state':'inactive','pid':0,'boot':'disabled','original_binding_unchanged':True},'release_allowed':False,'retry_allowed':False,
+            'log':{'markers':{'required_arguments':1,'managed_control_usage':1,'er_control_usage':0,'required_session_context':2,'required_session':2,
+                'rpc_send_failure':0,'signed_event':0,'signed_event_spaced':0,'receipt_event':0,'receipt_event_spaced':0}}}
+        review={'version':1,'kind':'retained-er-vrf-post-upload-continuation-review','source_revision':'6'*40,
+            'failed_source_revision':value['source_revision'],'original_plan_sha256':original_sha,'native_revision':value['target_native_revision'],
+            'diagnostic_source_revision':'5'*40,'diagnostic_review_sha256':handoff.checksum(diagnostic),'diagnostic':diagnostic,
+            'managed_control_sha256':binary_sha,'managed_control_abi':'devnet-control','remaining_signer_starts':1,
+            'additional_program_submission_passes':0,'additional_funding_transactions':0}
+        plan={'version':1,'kind':'retained-er-vrf-post-upload-continuation','review_sha256':handoff.checksum(review),'review':review};sha=handoff.checksum(plan)
+        atomic_json(root/'plan.json',plan);atomic_json(root/'progress.json',{'version':1,'plan_sha256':sha,'phase':'qualified'})
+        atomic_json(control/'continuation.json',{'version':1,'source_revision':review['source_revision'],'plan_sha256':sha})
+        extra={'authorized':{'review_sha256':plan['review_sha256'],'diagnostic_review_sha256':review['diagnostic_review_sha256'],
+            'additional_program_submission_passes':0,'additional_funding_transactions':0,'remaining_signer_starts':1},
+            'control':{'sha256':binary_sha,'abi':'devnet-control'},'configuration-attempted':{}}
+        for name in ('configured','relay-frozen','install-attempted','installed','start-attempted','ready'):
+            extra[name]=json.loads((control/(name+'.json')).read_text())['evidence']
+        for name,evidence in extra.items():atomic_json(root/(name+'.json'),{'version':1,'plan_sha256':sha,'evidence':evidence})
+        atomic_json(root/'report.json',{'version':1,'kind':'retained-er-vrf-post-upload-continuation-report','result':'passed',
+            'plan_sha256':sha,'original_plan_sha256':original_sha,'source_revision':review['source_revision'],'failed_source_revision':value['source_revision'],
+            'diagnostic_review_sha256':review['diagnostic_review_sha256'],'signer_starts':1,'additional_program_submission_passes':0,
+            'additional_funding_transactions':0,'native_service_actions':0,'handoff_receipt_sha256':profile['retained_upgrade_receipt_sha256'],'callback_qualified':False})
+        return value,profile,previous,before,upgrade,root
+
+    def test_qualified_continuation_preserves_original_receipt_and_rejects_extra_actions(self):
+        value,profile,previous,before,upgrade,root=self.continued_fixture()
+        with patch.object(handoff,'read_receipt',return_value=value):handoff.admit(upgrade,profile,previous,before,False)
+        original=json.loads((root/'report.json').read_text())
+        for name in ('additional_program_submission_passes','additional_funding_transactions','signer_starts'):
+            atomic_json(root/'report.json',{**original,name:2})
+            with self.subTest(name=name),patch.object(handoff,'read_receipt',return_value=value),self.assertRaises(ValueError):
+                handoff.admit(upgrade,profile,previous,before,False)
+        atomic_json(root/'report.json',original);marker=json.loads((root/'start-attempted.json').read_text())
+        atomic_json(root/'start-attempted.json',{**marker,'plan_sha256':'0'*64})
+        with patch.object(handoff,'read_receipt',return_value=value),self.assertRaises(ValueError):handoff.admit(upgrade,profile,previous,before,False)
+
     def test_receipt_requires_typed_scope_counts_and_retained_native_binding(self):
         value,*_=self.fixture();handoff.validate_receipt(value)
         for name,replacement in (('native_service_actions',1),('funding_transactions',1),('program_submission_passes',2),
@@ -129,6 +174,14 @@ class HandoffTests(unittest.TestCase):
         (self.control/'start-attempted.json').write_bytes(original);(self.control/'start-attempted.json').chmod(0o600)
         marker=json.loads((self.control/'installed.json').read_text())
         atomic_json(self.control/'installed.json',{**marker,'plan_sha256':'0'*64})
+        with patch.object(handoff,'read_receipt',return_value=value),self.assertRaises((OSError,ValueError)):
+            handoff.admit(upgrade,profile,previous,before,False)
+
+    def test_failed_handoff_cannot_be_qualified_without_a_bound_continuation(self):
+        value,profile,previous,before,upgrade,*_=self.fixture()
+        sha=handoff.checksum(json.loads((self.control/'plan.json').read_text()))
+        atomic_json(self.control/'failure.json',{'version':1,'plan_sha256':sha,'evidence':{'phase':'uploaded','failure_type':'ValueError',
+            'operator_reconciliation_required':True,'automatic_rollback':False,'signer_quarantine_verified':True}})
         with patch.object(handoff,'read_receipt',return_value=value),self.assertRaises((OSError,ValueError)):
             handoff.admit(upgrade,profile,previous,before,False)
 
