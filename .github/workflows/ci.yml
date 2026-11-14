@@ -118,6 +118,7 @@ jobs:
           python3 -B .github/scripts/test-native-upgrade.py
           python3 -B .github/scripts/test-portal-program-upgrade.py
           python3 -B .github/scripts/test_vrf_relay_profile.py
+          python3 -B .github/scripts/test_vrf_relay_handoff.py
           python3 -B .github/scripts/test-fresh-devnet.py
           python3 -B .github/scripts/test-fresh-prepared-continuation.py
           python3 -B .github/scripts/test-fresh-poststart-reconciliation.py

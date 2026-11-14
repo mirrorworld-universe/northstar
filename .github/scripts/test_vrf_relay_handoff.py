@@ -1,0 +1,252 @@
+import copy
+import hashlib
+import json
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+import test_vrf_relay_profile as profiles
+import vrf_relay_handoff as handoff
+import vrf_relay_profile as relay
+from continuity_devnet import LOADER, public_bytes, public_text
+from continuity_rollout_state import DEVNET, atomic_json
+from native_upgrade import STATE_KEYS
+
+
+class HandoffTests(unittest.TestCase):
+    def fixture(self):
+        previous,identity=profiles.RelayProfileTests().fixture()
+        profile=copy.deepcopy(previous)
+        data_address=public_text(bytes([12])*32)
+        raw=(3).to_bytes(4,'little')+(50).to_bytes(8,'little')+b'\x01'+bytes([11])*32+b'\x7fELFretained'
+        after={'programdata':data_address,'deployment_slot':50,'sha256':hashlib.sha256(raw).hexdigest()}
+        retained={'policy_sha256':'44'*32,'coordinator_programdata_sha256':'22'*32}
+        profile['configuration']['worker']['coordinator_programdata_sha256']=after['sha256']
+        profile['configuration']['signer'].update(policy_sha256='66'*32,retained_policy=retained)
+        profile['retained_upgrade_receipt_sha256']='77'*32
+        identity.update(version=2,genesis=DEVNET,portal=public_text(bytes([7])*32),token_bridge=public_text(bytes([8])*32),
+                        validator=public_text(bytes([9])*32),profile='99'*32)
+        plan={'programs':{name:identity[name] for name in ('portal','token_bridge')},'validator':identity['validator'],'profile':identity['profile']}
+        before={'arguments':['/old/runtime/bin/agave-validator'],'binary_sha256':'aa'*32,'uid':1000,'gid':100,
+                'state_environment':{name:'/retained/'+str(index) for index,name in enumerate(STATE_KEYS)}}
+        config=bytearray(360);config[:8]=hashlib.sha256(b'account:ProgramConfigAccount').digest()[:8];config[8]=1
+        config[253:263]=(24_000).to_bytes(2,'little')*2+(65_535).to_bytes(2,'little')+(400_000).to_bytes(4,'little')
+        config_address=public_text(bytes([13])*32)
+        source=json.loads((Path(__file__).resolve().parents[2]/'northstar/vrf-relay/source-lock.json').read_text())['revision']
+        value={'version':1,'kind':'retained-er-vrf-handoff','result':'passed','source_revision':'3'*40,
+            'relay_source_revision':source,'target_native_revision':'2'*40,'base_revision':'1'*40,
+            'base_plan_sha256':handoff.checksum(plan),'native_before':before,'identity':identity,'er_genesis':'11111111111111111111111111111111',
+            'old_configuration_sha256':relay.configuration_hash(previous),'new_configuration_sha256':relay.configuration_hash(profile),
+            'coordinator_before':{'programdata':data_address,'deployment_slot':40,'sha256':'22'*32},'coordinator_after':after,
+            'coordinator_elf_sha256':'bb'*32,'coordinator_config':{'address':config_address,'sha256':hashlib.sha256(config).hexdigest(),
+                'default_deadline_slots':24_000,'min_deadline_slots':24_000,'max_deadline_slots':65_535,'max_callback_compute':400_000},
+            'signer':{'binary_sha256':'cc'*32,'configuration_sha256':'dd'*32,'unit_sha256':'ee'*32,'admissions_sha256':'88'*32,'pid':9},
+            'relay_journal_sha256':'ff'*32,'retained_policy':retained,'peak_lamports':5_000_000_000,
+            'native_service_actions':0,'funding_transactions':0,'program_submission_passes':1,'signer_starts':1}
+        accounts={profile['configuration']['worker']['coordinator']:{'owner':LOADER,'executable':True,'raw':(2).to_bytes(4,'little')+public_bytes(data_address)},
+                  data_address:{'owner':LOADER,'executable':False,'raw':raw},
+                  config_address:{'owner':profile['configuration']['worker']['coordinator'],'executable':False,'raw':bytes(config)}}
+        binary=handoff.SIGNER_CURRENT.parent/value['source_revision']/'vrf-request-signer'
+        files={str(binary):{'uid':0,'mode':0o555,'sha256':value['signer']['binary_sha256']},
+            str(handoff.SIGNER_CONFIG):{'uid':0,'mode':0o644,'sha256':value['signer']['configuration_sha256']},
+            str(handoff.SIGNER_UNIT):{'uid':0,'mode':0o644,'sha256':value['signer']['unit_sha256']},
+            str(handoff.ADMISSIONS):{'uid':65000,'mode':0o600,'sha256':value['signer']['admissions_sha256']},
+            str(relay.JOURNAL/'public-state.json'):{'uid':1000,'mode':0o600,'sha256':value['relay_journal_sha256']}}
+        commands=[]
+        def execute(command):
+            commands.append(list(map(str,command)))
+            if command[0]=='readlink':return str(binary.parent)+'\n'
+            if command[0]=='systemctl':return ('MainPID=9\nFragmentPath='+str(handoff.SIGNER_UNIT)+'\nDropInPaths=\nExecStart={ argv[]='
+                +str(handoff.SIGNER_CURRENT/'vrf-request-signer')+' --config '+str(handoff.SIGNER_CONFIG)+' ; }\n')
+            return ''
+        upgrade=SimpleNamespace(base=Path('/contexts')/value['base_revision'],base_plan=plan,recovery_slot=None,program_floor=10,
+            args=SimpleNamespace(revision='4'*40),ops=SimpleNamespace(upstream=SimpleNamespace(account=accounts.get),execute=execute),
+            inspect=lambda paths:{str(path):files[str(path)] for path in paths})
+        temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
+        state=Path(temporary.name);control=state/'retained-upgrades'/value['source_revision'];control.mkdir(mode=0o700,parents=True)
+        selected=patch.object(handoff,'ROOT',state/'upgrade-receipts');selected.start();self.addCleanup(selected.stop)
+        review={'version':1,'kind':'retained-er-vrf-upgrade-review','source_revision':value['source_revision'],
+            'target_native_revision':value['target_native_revision'],'relay_source_revision':value['relay_source_revision'],
+            'context':identity['context'],'program_ids':{'coordinator':profile['configuration']['worker']['coordinator'],
+                'consumer':profile['configuration']['worker']['allowed_consumers'][0],'verifier':profile['configuration']['worker']['verifier'],
+                'portal':identity['portal']},'quote':{'peak_lamports':value['peak_lamports'],'funding_transactions':0},
+            'native':{'revision':'7'*40,'plan_sha256':'8'*64,'identity':{'context':identity['context']},'pid':1386853}}
+        retained_plan={'version':1,'kind':'retained-er-vrf-upgrade','review_sha256':handoff.checksum(review),'review':review}
+        retained_sha=handoff.checksum(retained_plan)
+        atomic_json(control/'plan.json',retained_plan)
+        atomic_json(control/'progress.json',{'version':1,'plan_sha256':retained_sha,'phase':'handoff-qualified'})
+        atomic_json(state/'retained-upgrade.json',{'version':1,'plan_sha256':retained_sha,'source_revision':value['source_revision']})
+        barriers={'artifacts':{'sha256':{'signer':value['signer']['binary_sha256']},'original_policy_sha256':value['retained_policy']['policy_sha256']},
+            'stop-attempted':{},'frozen':{'audit':{'validation':{'input_snapshot_sha256':value['signer']['admissions_sha256']}}},
+            'upload-attempted':{},'uploaded':{'view':value['coordinator_after']},'configured':{'configuration':value['coordinator_config']},
+            'relay-frozen':{'state_sha256':value['relay_journal_sha256']},'install-attempted':{},
+            'installed':{**value['signer'],'source_revision':value['source_revision']},'start-attempted':{},
+            'ready':{'pid':value['signer']['pid'],'admissions_sha256':value['signer']['admissions_sha256'],
+                'info':{'policy_sha256':profile['configuration']['signer']['policy_sha256'],'public_key':profile['configuration']['worker']['vrf_public_key']}}}
+        for name,evidence in barriers.items():atomic_json(control/(name+'.json'),{'version':1,'plan_sha256':retained_sha,'evidence':evidence})
+        atomic_json(control/'handoff-report.json',{'result':'passed','receipt_sha256':profile['retained_upgrade_receipt_sha256'],
+            'native_service_actions':0,'callback_qualified':False})
+        self.control=control
+        return value,profile,previous,before,upgrade,files,accounts,commands
+
+    def continued_fixture(self):
+        value,profile,previous,before,upgrade,*_=self.fixture();control=self.control
+        original_sha=handoff.checksum(json.loads((control/'plan.json').read_text()))
+        atomic_json(control/'failure.json',{'version':1,'plan_sha256':original_sha,'evidence':{'phase':'uploaded','failure_type':'ValueError',
+            'operator_reconciliation_required':True,'automatic_rollback':False,'signer_quarantine_verified':True}})
+        root=control/'continuation';root.mkdir(mode=0o700);binary=b'\x7fELFmanaged-control'
+        (root/'control').write_bytes(binary);(root/'control').chmod(0o500);binary_sha=hashlib.sha256(binary).hexdigest()
+        diagnostic={'result':'passed','source_revision':'5'*40,'failed_source_revision':value['source_revision'],'plan_sha256':original_sha,
+            'coordinator':value['coordinator_after'],'native_unchanged':True,'admissions_unchanged':True,'coordinator_configuration_unchanged':True,
+            'deadline_intent_absent':True,'deadline_started_marker_absent':True,'unrelated_configuration_unchanged':True,
+            'signer':{'active_state':'inactive','pid':0,'boot':'disabled','original_binding_unchanged':True},'release_allowed':False,'retry_allowed':False,
+            'log':{'markers':{'required_arguments':1,'managed_control_usage':1,'er_control_usage':0,'required_session_context':2,'required_session':2,
+                'rpc_send_failure':0,'signed_event':0,'signed_event_spaced':0,'receipt_event':0,'receipt_event_spaced':0}}}
+        review={'version':1,'kind':'retained-er-vrf-post-upload-continuation-review','source_revision':'6'*40,
+            'failed_source_revision':value['source_revision'],'original_plan_sha256':original_sha,'native_revision':value['target_native_revision'],
+            'diagnostic_source_revision':'5'*40,'diagnostic_review_sha256':handoff.checksum(diagnostic),'diagnostic':diagnostic,
+            'managed_control_sha256':binary_sha,'managed_control_abi':'devnet-control','remaining_signer_starts':1,
+            'additional_program_submission_passes':0,'additional_funding_transactions':0}
+        plan={'version':1,'kind':'retained-er-vrf-post-upload-continuation','review_sha256':handoff.checksum(review),'review':review};sha=handoff.checksum(plan)
+        atomic_json(root/'plan.json',plan);atomic_json(root/'progress.json',{'version':1,'plan_sha256':sha,'phase':'qualified'})
+        atomic_json(control/'continuation.json',{'version':1,'source_revision':review['source_revision'],'plan_sha256':sha})
+        extra={'authorized':{'review_sha256':plan['review_sha256'],'diagnostic_review_sha256':review['diagnostic_review_sha256'],
+            'additional_program_submission_passes':0,'additional_funding_transactions':0,'remaining_signer_starts':1},
+            'control':{'sha256':binary_sha,'abi':'devnet-control'},'configuration-attempted':{}}
+        for name in ('configured','relay-frozen','install-attempted','installed','start-attempted','ready'):
+            extra[name]=json.loads((control/(name+'.json')).read_text())['evidence']
+        for name,evidence in extra.items():atomic_json(root/(name+'.json'),{'version':1,'plan_sha256':sha,'evidence':evidence})
+        atomic_json(root/'report.json',{'version':1,'kind':'retained-er-vrf-post-upload-continuation-report','result':'passed',
+            'plan_sha256':sha,'original_plan_sha256':original_sha,'source_revision':review['source_revision'],'failed_source_revision':value['source_revision'],
+            'diagnostic_review_sha256':review['diagnostic_review_sha256'],'signer_starts':1,'additional_program_submission_passes':0,
+            'additional_funding_transactions':0,'native_service_actions':0,'handoff_receipt_sha256':profile['retained_upgrade_receipt_sha256'],'callback_qualified':False})
+        return value,profile,previous,before,upgrade,root
+
+    def reconciled_fixture(self):
+        value,profile,previous,before,upgrade,root=self.continued_fixture()
+        plan=json.loads((root/'plan.json').read_text());review=plan['review'];historical=review['diagnostic']
+        original=json.loads((self.control/'plan.json').read_text())['review']['native'];current={**original,'pid':2236901}
+        diagnostic={**historical,'source_revision':review['source_revision'],'native_unchanged':False,'native_binding':current,'native_original_binding':original}
+        boot='746ebda9-5e03-413d-a7e3-253221d35ad0'
+        evidence={'version':1,'kind':'native-restart-evidence','read_only':True,'service':'northstar-validator.service',
+            'systemd':{'MainPID':'2236901','ActiveState':'active','SubState':'running','Restart':'no','NRestarts':'0','UnitFileState':'enabled',
+                'ExecMainStartTimestamp':'Sat 2026-11-14 06:18:55 UTC','InvocationID':'9'*32},'boot':{'id':boot},
+            'journals':{'unit':{'status':'classified','entry_limit_reached':False,'event_output_limited':False,
+                'events':[{'event':name,'time':'2026-11-14T06:18:'+str(second)+'.000000+00:00','boot_id':boot.replace('-','')}
+                    for name,second in (('stopping',32),('deactivated',53),('stopped',54),('starting',54),('started',55))]},
+                'kernel':{'status':'classified','entry_limit_reached':False,'marker_counts':{}}},
+            'package_history':{'unattended_dpkg':{'status':'classified','tail_limited':False,'record_output_limited':False,'records':[
+                {'started':'2026-11-14T06:18:25','finished':'2026-11-14T06:18:55','package_families':['libc6'],
+                    'needrestart_reference':True,'native_unit_reference':True,'native_restart_command_reference':True}]}},
+            'raw_messages_included':False,'continuation_allowed':False,'baseline_refresh_allowed':False}
+        reconciliation={'version':1,'kind':'retained-er-native-pid-reconciliation','source_revision':review['source_revision'],
+            'original_plan_sha256':review['original_plan_sha256'],'original_native':original,'current_native':current,
+            'historical_diagnostic_sha256':handoff.checksum(historical),'current_diagnostic':diagnostic,'current_diagnostic_sha256':handoff.checksum(diagnostic),
+            'restart_evidence':evidence,'restart_evidence_sha256':handoff.checksum(evidence),'changed_native_fields':['pid'],
+            'native_service_actions':0,'maintenance_policy_changed':False}
+        review['native_pid_reconciliation']=reconciliation;plan['review_sha256']=handoff.checksum(review);sha=handoff.checksum(plan);digest=handoff.checksum(reconciliation)
+        atomic_json(root/'plan.json',plan);atomic_json(root/'progress.json',{'version':1,'plan_sha256':sha,'phase':'qualified'})
+        atomic_json(self.control/'continuation.json',{'version':1,'source_revision':review['source_revision'],'plan_sha256':sha})
+        for name in ('authorized','control','configuration-attempted','configured','relay-frozen','install-attempted','installed','start-attempted','ready'):
+            marker=json.loads((root/(name+'.json')).read_text());marker['plan_sha256']=sha
+            if name=='authorized':marker['evidence'].update(review_sha256=plan['review_sha256'],native_pid_reconciliation_sha256=digest)
+            atomic_json(root/(name+'.json'),marker)
+        atomic_json(root/'native-reconciled.json',{'version':1,'plan_sha256':sha,'evidence':reconciliation})
+        report=json.loads((root/'report.json').read_text());report.update(plan_sha256=sha,native_pid_reconciliation_sha256=digest);atomic_json(root/'report.json',report)
+        return value,profile,previous,before,upgrade,root
+
+    def test_reconciled_pid_requires_explicit_plan_bound_evidence(self):
+        value,profile,previous,before,upgrade,root=self.reconciled_fixture();original=(self.control/'plan.json').read_bytes()
+        with patch.object(handoff,'read_receipt',return_value=value):handoff.admit(upgrade,profile,previous,before,False)
+        self.assertEqual((self.control/'plan.json').read_bytes(),original)
+        (root/'native-reconciled.json').unlink()
+        with patch.object(handoff,'read_receipt',return_value=value),self.assertRaises((OSError,ValueError)):
+            handoff.admit(upgrade,profile,previous,before,False)
+
+    def test_pid_reconciliation_rejects_other_changes_and_incomplete_maintenance_proof(self):
+        for mode in ('other_binding','unchanged_claim','missing_restart_command'):
+            with self.subTest(mode=mode):
+                *_,root=self.reconciled_fixture();plan=json.loads((root/'plan.json').read_text());review=plan['review'];value=review['native_pid_reconciliation']
+                if mode=='other_binding':
+                    value['current_native']['revision']='0'*40;value['current_diagnostic']['native_binding']['revision']='0'*40
+                elif mode=='unchanged_claim':value['current_diagnostic']['native_unchanged']=True
+                else:value['restart_evidence']['package_history']['unattended_dpkg']['records'][0]['native_restart_command_reference']=False
+                value['current_diagnostic_sha256']=handoff.checksum(value['current_diagnostic']);value['restart_evidence_sha256']=handoff.checksum(value['restart_evidence'])
+                original=json.loads((self.control/'plan.json').read_text())
+                with self.assertRaises(ValueError):handoff.validate_pid_reconciliation(review,original)
+
+    def test_qualified_continuation_preserves_original_receipt_and_rejects_extra_actions(self):
+        value,profile,previous,before,upgrade,root=self.continued_fixture()
+        with patch.object(handoff,'read_receipt',return_value=value):handoff.admit(upgrade,profile,previous,before,False)
+        original=json.loads((root/'report.json').read_text())
+        for name in ('additional_program_submission_passes','additional_funding_transactions','signer_starts'):
+            atomic_json(root/'report.json',{**original,name:2})
+            with self.subTest(name=name),patch.object(handoff,'read_receipt',return_value=value),self.assertRaises(ValueError):
+                handoff.admit(upgrade,profile,previous,before,False)
+        atomic_json(root/'report.json',original);marker=json.loads((root/'start-attempted.json').read_text())
+        atomic_json(root/'start-attempted.json',{**marker,'plan_sha256':'0'*64})
+        with patch.object(handoff,'read_receipt',return_value=value),self.assertRaises(ValueError):handoff.admit(upgrade,profile,previous,before,False)
+
+    def test_receipt_requires_typed_scope_counts_and_retained_native_binding(self):
+        value,*_=self.fixture();handoff.validate_receipt(value)
+        for name,replacement in (('native_service_actions',1),('funding_transactions',1),('program_submission_passes',2),
+                                 ('signer_starts',True),('peak_lamports',handoff.LIMIT+1),('native_before',None)):
+            changed=copy.deepcopy(value);changed[name]=replacement
+            with self.subTest(name=name),self.assertRaises(ValueError):handoff.validate_receipt(changed)
+        for name in ('programdata','deployment_slot','sha256'):
+            changed=copy.deepcopy(value);changed['coordinator_after'][name]=changed['coordinator_before'][name]
+            if name=='programdata':changed['coordinator_after'][name]=public_text(bytes([14])*32)
+            with self.subTest(name=name),self.assertRaises(ValueError):handoff.validate_receipt(changed)
+        changed=copy.deepcopy(value);changed['coordinator_config']['max_deadline_slots']=1000
+        with self.assertRaises(ValueError):handoff.validate_receipt(changed)
+
+    def test_new_handoff_checks_finalized_code_frozen_journals_and_signer_without_mutation(self):
+        value,profile,previous,before,upgrade,files,accounts,commands=self.fixture()
+        with patch.object(handoff,'read_receipt',return_value=value):handoff.admit(upgrade,profile,previous,before,False)
+        self.assertEqual(upgrade.program_floor,50)
+        self.assertTrue(all(command[0] in ('git','readlink','systemctl') for command in commands))
+        files[str(handoff.ADMISSIONS)]['sha256']='00'*32
+        with patch.object(handoff,'read_receipt',return_value=value),self.assertRaises(ValueError):
+            handoff.admit(upgrade,profile,previous,before,False)
+        files[str(handoff.ADMISSIONS)]['sha256']=value['signer']['admissions_sha256']
+        accounts[value['coordinator_after']['programdata']]['raw']+=b'changed'
+        with patch.object(handoff,'read_receipt',return_value=value),self.assertRaises(ValueError):
+            handoff.admit(upgrade,profile,previous,before,False)
+
+    def test_receipt_needs_qualified_plan_bound_install_start_and_report_evidence(self):
+        value,profile,previous,before,upgrade,*_=self.fixture()
+        progress=json.loads((self.control/'progress.json').read_text())
+        atomic_json(self.control/'progress.json',{**progress,'phase':'failed'})
+        with patch.object(handoff,'read_receipt',return_value=value),self.assertRaises((OSError,ValueError)):
+            handoff.admit(upgrade,profile,previous,before,False)
+        atomic_json(self.control/'progress.json',progress)
+        original=(self.control/'start-attempted.json').read_bytes();(self.control/'start-attempted.json').unlink()
+        with patch.object(handoff,'read_receipt',return_value=value),self.assertRaises((OSError,ValueError)):
+            handoff.admit(upgrade,profile,previous,before,False)
+        (self.control/'start-attempted.json').write_bytes(original);(self.control/'start-attempted.json').chmod(0o600)
+        marker=json.loads((self.control/'installed.json').read_text())
+        atomic_json(self.control/'installed.json',{**marker,'plan_sha256':'0'*64})
+        with patch.object(handoff,'read_receipt',return_value=value),self.assertRaises((OSError,ValueError)):
+            handoff.admit(upgrade,profile,previous,before,False)
+
+    def test_failed_handoff_cannot_be_qualified_without_a_bound_continuation(self):
+        value,profile,previous,before,upgrade,*_=self.fixture()
+        sha=handoff.checksum(json.loads((self.control/'plan.json').read_text()))
+        atomic_json(self.control/'failure.json',{'version':1,'plan_sha256':sha,'evidence':{'phase':'uploaded','failure_type':'ValueError',
+            'operator_reconciliation_required':True,'automatic_rollback':False,'signer_quarantine_verified':True}})
+        with patch.object(handoff,'read_receipt',return_value=value),self.assertRaises((OSError,ValueError)):
+            handoff.admit(upgrade,profile,previous,before,False)
+
+    def test_carried_receipt_allows_new_admissions_but_not_changed_signer_artifacts(self):
+        value,profile,previous,before,upgrade,files,*_=self.fixture()
+        files[str(handoff.ADMISSIONS)]['sha256']='00'*32
+        files[str(relay.JOURNAL/'public-state.json')]['sha256']='00'*32
+        with patch.object(handoff,'read_receipt',return_value=value):handoff.admit(upgrade,profile,profile,before,True)
+        files[str(handoff.SIGNER_CONFIG)]['sha256']='00'*32
+        with patch.object(handoff,'read_receipt',return_value=value),self.assertRaises(ValueError):
+            handoff.admit(upgrade,profile,profile,before,True)
+
+
+if __name__=='__main__':unittest.main()

@@ -29,7 +29,12 @@ pub(crate) struct ProvedRequest {
 }
 pub(crate) trait RequestProver: Send {
     fn public_key(&self) -> [u8; 32];
-    fn binding_suffix(&self) -> Option<String>;
+    fn journal_binding(&self, settings: &Settings) -> Result<String> {
+        settings.binding()
+    }
+    fn requires_retained_journal(&self) -> bool {
+        false
+    }
     fn candidates(&self) -> Option<Result<Vec<Pubkey>>> {
         None
     }
@@ -278,20 +283,21 @@ impl Worker {
             prover.public_key() == settings.vrf_public_key.to_bytes(),
             "proof provider key differs"
         );
-        let base = settings.binding()?;
-        let binding = prover.binding_suffix().map_or_else(
-            || base.clone(),
-            |suffix| {
-                hex::encode(Sha256::digest(format!(
-                    "northstar-vrf-relay-journal-v1:{base}:{suffix}"
-                )))
-            },
-        );
-        let mut journal = Journal::open(&settings.state_dir, &binding, settings.max_records)?;
+        let binding = prover.journal_binding(&settings)?;
+        let open_journal = if prover.requires_retained_journal() {
+            Journal::resume
+        } else {
+            Journal::open
+        };
+        let mut journal = open_journal(&settings.state_dir, &binding, settings.max_records)?;
         for (id, record) in &journal.snapshot().records {
             validate_record(&settings, &binding, id, record)?;
             prover.validate_receipt(record)?;
         }
+        journal.validate_history(|id, record| {
+            validate_record(&settings, &binding, id, record)?;
+            prover.validate_receipt(record)
+        })?;
         ensure!(
             !journal.snapshot().l1_discovery_established || settings.ws_url.is_some(),
             "established L1 subscription discovery cannot be disabled"
@@ -557,13 +563,12 @@ impl Worker {
                 continue;
             }
             let id = request_id(&self.binding, &address, &request);
-            if self.journal.snapshot().records.contains_key(&id) {
+            if self.journal.contains(&id) {
                 continue;
             }
-            ensure!(
-                self.journal.snapshot().records.len() < self.settings.max_records,
-                "journal full; no records were evicted"
-            );
+            if !self.journal.make_room()? {
+                break;
+            }
             let (account_slot, current) = self.rpc.account_at(&address, context_slot)?;
             if !current.is_some_and(|a| {
                 a.owner == observed.owner && a.data == observed.data && !a.executable
@@ -622,10 +627,11 @@ impl Worker {
     }
     pub fn summary(&self) -> Value {
         json!(
-            { "records" : self.journal.snapshot().records.iter().map(| (id, r) | json!({
-            "id" : id, "request" : r.address.to_string(), "status" : r.status, "attempts"
-            : r.attempts, "signature" : r.attempt.signature, "output_hex" : r.output_hex
-            })).collect::< Vec < _ >> () }
+            { "archived_records" : self.journal.archived_count(), "records" : self
+            .journal.snapshot().records.iter().map(| (id, r) | json!({ "id" : id,
+            "request" : r.address.to_string(), "status" : r.status, "attempts" : r
+            .attempts, "signature" : r.attempt.signature, "output_hex" : r.output_hex }))
+            .collect::< Vec < _ >> () }
         )
     }
 }

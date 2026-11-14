@@ -26,7 +26,7 @@ Staging itself performs no activation. Build-generated program keypairs are neve
 deployment signing identities.
 
 `prepare-continuity-sdk.sh` checks out public NorthStarSDK revision
-`beb895f5178bdb21fbfe13786981b19241d3d8c4`, checks its dependency-lock hash,
+`ea732d51f71f62e6fe46c77eaf781b9474b00508`, checks its dependency-lock hash,
 installs frozen dependencies without lifecycle scripts and builds the bindings.
 No private-source credential is needed for this SDK checkout. Both CI validation
 and deployment pin Node 24.21.0/npm 11; the helper rejects npm 10 before checkout
@@ -191,6 +191,21 @@ review execution and persistence compatibility before enabling this path.
 The public report/Slack scope is `native-upgrade`: read-only readiness and retained
 identity, **not fresh SOL/SPL payout, oracle, SP1 or proof-acceptance qualification**.
 It does not start, stop or reconfigure an existing oracle.
+
+## Retained ER-VRF Coordinator handoff
+
+An active relay profile can change its Coordinator ProgramData binding only through
+an exact `retained_upgrade_receipt_sha256` in the selected private profile. The
+separate devnet handoff must qualify the same-ID Coordinator update, finalized
+24,000-slot minimum/default deadline configuration, and isolated signer readiness
+before Native admission. Other worker, consumer, key, session and policy scope
+must remain unchanged; fresh/recovery activation and missing journals are rejected.
+
+The runtime retains the original journal binding and accepts old policy receipts
+only for already journaled records. A retained receipt carries forward unchanged
+on later ordinary upgrades. Native install/start barriers recheck the signer and
+immutable artifacts; neither Native readiness nor the handoff receipt qualifies a
+fresh VRF callback. Further policy transitions require separate reconciliation.
 
 ## Native L1 account indexes
 
