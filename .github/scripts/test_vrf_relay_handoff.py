@@ -71,7 +71,8 @@ class HandoffTests(unittest.TestCase):
             'target_native_revision':value['target_native_revision'],'relay_source_revision':value['relay_source_revision'],
             'context':identity['context'],'program_ids':{'coordinator':profile['configuration']['worker']['coordinator'],
                 'consumer':profile['configuration']['worker']['allowed_consumers'][0],'verifier':profile['configuration']['worker']['verifier'],
-                'portal':identity['portal']},'quote':{'peak_lamports':value['peak_lamports'],'funding_transactions':0}}
+                'portal':identity['portal']},'quote':{'peak_lamports':value['peak_lamports'],'funding_transactions':0},
+            'native':{'revision':'7'*40,'plan_sha256':'8'*64,'identity':{'context':identity['context']},'pid':1386853}}
         retained_plan={'version':1,'kind':'retained-er-vrf-upgrade','review_sha256':handoff.checksum(review),'review':review}
         retained_sha=handoff.checksum(retained_plan)
         atomic_json(control/'plan.json',retained_plan)
@@ -122,6 +123,59 @@ class HandoffTests(unittest.TestCase):
             'diagnostic_review_sha256':review['diagnostic_review_sha256'],'signer_starts':1,'additional_program_submission_passes':0,
             'additional_funding_transactions':0,'native_service_actions':0,'handoff_receipt_sha256':profile['retained_upgrade_receipt_sha256'],'callback_qualified':False})
         return value,profile,previous,before,upgrade,root
+
+    def reconciled_fixture(self):
+        value,profile,previous,before,upgrade,root=self.continued_fixture()
+        plan=json.loads((root/'plan.json').read_text());review=plan['review'];historical=review['diagnostic']
+        original=json.loads((self.control/'plan.json').read_text())['review']['native'];current={**original,'pid':2236901}
+        diagnostic={**historical,'source_revision':review['source_revision'],'native_unchanged':False,'native_binding':current,'native_original_binding':original}
+        boot='746ebda9-5e03-413d-a7e3-253221d35ad0'
+        evidence={'version':1,'kind':'native-restart-evidence','read_only':True,'service':'northstar-validator.service',
+            'systemd':{'MainPID':'2236901','ActiveState':'active','SubState':'running','Restart':'no','NRestarts':'0','UnitFileState':'enabled',
+                'ExecMainStartTimestamp':'Sat 2026-11-14 06:18:55 UTC','InvocationID':'9'*32},'boot':{'id':boot},
+            'journals':{'unit':{'status':'classified','entry_limit_reached':False,'event_output_limited':False,
+                'events':[{'event':name,'time':'2026-11-14T06:18:'+str(second)+'.000000+00:00','boot_id':boot.replace('-','')}
+                    for name,second in (('stopping',32),('deactivated',53),('stopped',54),('starting',54),('started',55))]},
+                'kernel':{'status':'classified','entry_limit_reached':False,'marker_counts':{}}},
+            'package_history':{'unattended_dpkg':{'status':'classified','tail_limited':False,'record_output_limited':False,'records':[
+                {'started':'2026-11-14T06:18:25','finished':'2026-11-14T06:18:55','package_families':['libc6'],
+                    'needrestart_reference':True,'native_unit_reference':True,'native_restart_command_reference':True}]}},
+            'raw_messages_included':False,'continuation_allowed':False,'baseline_refresh_allowed':False}
+        reconciliation={'version':1,'kind':'retained-er-native-pid-reconciliation','source_revision':review['source_revision'],
+            'original_plan_sha256':review['original_plan_sha256'],'original_native':original,'current_native':current,
+            'historical_diagnostic_sha256':handoff.checksum(historical),'current_diagnostic':diagnostic,'current_diagnostic_sha256':handoff.checksum(diagnostic),
+            'restart_evidence':evidence,'restart_evidence_sha256':handoff.checksum(evidence),'changed_native_fields':['pid'],
+            'native_service_actions':0,'maintenance_policy_changed':False}
+        review['native_pid_reconciliation']=reconciliation;plan['review_sha256']=handoff.checksum(review);sha=handoff.checksum(plan);digest=handoff.checksum(reconciliation)
+        atomic_json(root/'plan.json',plan);atomic_json(root/'progress.json',{'version':1,'plan_sha256':sha,'phase':'qualified'})
+        atomic_json(self.control/'continuation.json',{'version':1,'source_revision':review['source_revision'],'plan_sha256':sha})
+        for name in ('authorized','control','configuration-attempted','configured','relay-frozen','install-attempted','installed','start-attempted','ready'):
+            marker=json.loads((root/(name+'.json')).read_text());marker['plan_sha256']=sha
+            if name=='authorized':marker['evidence'].update(review_sha256=plan['review_sha256'],native_pid_reconciliation_sha256=digest)
+            atomic_json(root/(name+'.json'),marker)
+        atomic_json(root/'native-reconciled.json',{'version':1,'plan_sha256':sha,'evidence':reconciliation})
+        report=json.loads((root/'report.json').read_text());report.update(plan_sha256=sha,native_pid_reconciliation_sha256=digest);atomic_json(root/'report.json',report)
+        return value,profile,previous,before,upgrade,root
+
+    def test_reconciled_pid_requires_explicit_plan_bound_evidence(self):
+        value,profile,previous,before,upgrade,root=self.reconciled_fixture();original=(self.control/'plan.json').read_bytes()
+        with patch.object(handoff,'read_receipt',return_value=value):handoff.admit(upgrade,profile,previous,before,False)
+        self.assertEqual((self.control/'plan.json').read_bytes(),original)
+        (root/'native-reconciled.json').unlink()
+        with patch.object(handoff,'read_receipt',return_value=value),self.assertRaises((OSError,ValueError)):
+            handoff.admit(upgrade,profile,previous,before,False)
+
+    def test_pid_reconciliation_rejects_other_changes_and_incomplete_maintenance_proof(self):
+        for mode in ('other_binding','unchanged_claim','missing_restart_command'):
+            with self.subTest(mode=mode):
+                *_,root=self.reconciled_fixture();plan=json.loads((root/'plan.json').read_text());review=plan['review'];value=review['native_pid_reconciliation']
+                if mode=='other_binding':
+                    value['current_native']['revision']='0'*40;value['current_diagnostic']['native_binding']['revision']='0'*40
+                elif mode=='unchanged_claim':value['current_diagnostic']['native_unchanged']=True
+                else:value['restart_evidence']['package_history']['unattended_dpkg']['records'][0]['native_restart_command_reference']=False
+                value['current_diagnostic_sha256']=handoff.checksum(value['current_diagnostic']);value['restart_evidence_sha256']=handoff.checksum(value['restart_evidence'])
+                original=json.loads((self.control/'plan.json').read_text())
+                with self.assertRaises(ValueError):handoff.validate_pid_reconciliation(review,original)
 
     def test_qualified_continuation_preserves_original_receipt_and_rejects_extra_actions(self):
         value,profile,previous,before,upgrade,root=self.continued_fixture()

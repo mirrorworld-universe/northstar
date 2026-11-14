@@ -1,5 +1,6 @@
 """Sonic: Read-only admission of a qualified retained ER-VRF handoff."""
 import hashlib
+from datetime import datetime,timezone
 import json
 import os
 import stat
@@ -95,7 +96,59 @@ def read_receipt(digest):
     return value
 
 
-def verify_continuation(control,plan_sha,evidence,value,profile):
+def validate_pid_reconciliation(review,original_plan):
+    if 'native_pid_reconciliation' not in review:return None
+    value=review['native_pid_reconciliation'];old=value['original_native'];current=value['current_native'];historical=review['diagnostic']
+    require(value.get('version')==1 and value.get('kind')=='retained-er-native-pid-reconciliation'
+            and value.get('source_revision')==review['source_revision'] and value.get('original_plan_sha256')==checksum(original_plan)
+            and old==original_plan['review']['native'] and value.get('changed_native_fields')==['pid']
+            and type(value.get('native_service_actions')) is int and value['native_service_actions']==0
+            and value.get('maintenance_policy_changed') is False,'Native PID reconciliation scope differs')
+    require(isinstance(old,dict) and isinstance(current,dict) and set(old)==set(current)=={'revision','plan_sha256','identity','pid'}
+            and type(old['pid']) is int and old['pid']==1386853 and type(current['pid']) is int and current['pid']==2236901
+            and revision(old['revision']) and sha(old['plan_sha256']) and isinstance(old['identity'],dict)
+            and {key:item for key,item in old.items() if key!='pid'}=={key:item for key,item in current.items() if key!='pid'},
+            'Native reconciliation changed more than the reviewed PID')
+    actual=value['current_diagnostic']
+    require(value.get('historical_diagnostic_sha256')==checksum(historical) and value.get('current_diagnostic_sha256')==checksum(actual)
+            and actual.get('source_revision')==review['source_revision'] and actual.get('native_unchanged') is False
+            and actual.get('native_binding')==current and actual.get('native_original_binding')==old,
+            'Native reconciliation must retain truthful before/after diagnostics')
+    retained=dict(actual);retained.pop('native_binding');retained.pop('native_original_binding')
+    retained.update(source_revision=historical['source_revision'],native_unchanged=True)
+    require(retained==historical,'retained state differs outside the reviewed Native PID')
+    proof=value['restart_evidence'];process=proof.get('systemd',{});boot=proof.get('boot',{}).get('id','')
+    require(value.get('restart_evidence_sha256')==checksum(proof) and proof.get('version')==1
+            and proof.get('kind')=='native-restart-evidence' and proof.get('read_only') is True
+            and proof.get('service')=='northstar-validator.service' and proof.get('raw_messages_included') is False
+            and proof.get('baseline_refresh_allowed') is False and proof.get('continuation_allowed') is False
+            and process.get('MainPID')==str(current['pid']) and process.get('ActiveState')=='active' and process.get('SubState')=='running'
+            and process.get('Restart')=='no' and process.get('NRestarts')=='0' and process.get('UnitFileState')=='enabled'
+            and process.get('ExecMainStartTimestamp')=='Sat 2026-11-14 06:18:55 UTC'
+            and isinstance(process.get('InvocationID'),str) and re.fullmatch('[0-9a-f]{32}',process['InvocationID'])
+            and isinstance(boot,str) and re.fullmatch('[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',boot),
+            'Native maintenance restart process evidence differs')
+    lifecycle=proof['journals']['unit'];events=lifecycle.get('events',[]);kernel=proof['journals']['kernel']
+    require(lifecycle.get('status')=='classified' and lifecycle.get('entry_limit_reached') is False and lifecycle.get('event_output_limited') is False
+            and [event.get('event') for event in events]==['stopping','deactivated','stopped','starting','started']
+            and all(event.get('boot_id')==boot.replace('-','') for event in events)
+            and kernel.get('status')=='classified' and kernel.get('entry_limit_reached') is False and kernel.get('marker_counts')=={},
+            'Native maintenance lifecycle coverage differs')
+    times=[datetime.fromisoformat(event['time']) for event in events]
+    require(times==sorted(times) and times[-1].replace(microsecond=0)==datetime(2026,11,14,6,18,55,tzinfo=timezone.utc),
+            'Native maintenance lifecycle time differs')
+    package=proof['package_history']['unattended_dpkg']
+    require(package.get('status')=='classified' and package.get('tail_limited') is False and package.get('record_output_limited') is False,
+            'Native package maintenance evidence coverage differs')
+    matching=[entry for entry in package.get('records',[]) if entry.get('needrestart_reference') is True
+        and entry.get('native_unit_reference') is True and entry.get('native_restart_command_reference') is True and 'libc6' in entry.get('package_families',[])
+        and datetime.fromisoformat(entry['started']).replace(tzinfo=timezone.utc)<=times[0]
+        and datetime.fromisoformat(entry['finished']).replace(tzinfo=timezone.utc)>=times[-1].replace(microsecond=0)]
+    require(len(matching)==1,'Native maintenance record does not bind the explicit restart')
+    return checksum(value)
+
+
+def verify_continuation(control,plan_sha,evidence,value,profile,original_plan):
     failure_path=control/'failure.json';root=control/'continuation';pointer=control/'continuation.json'
     if not os.path.lexists(failure_path):
         require(not os.path.lexists(root) and not os.path.lexists(pointer),'unexpected continuation without failed handoff')
@@ -138,8 +191,11 @@ def verify_continuation(control,plan_sha,evidence,value,profile):
         require(marker.get('version')==1 and marker.get('plan_sha256')==sha_plan and isinstance(marker.get('evidence'),dict),
                 'continued handoff barrier binding differs')
         continued[name]=marker['evidence']
-    require(continued['authorized']=={'review_sha256':plan['review_sha256'],'diagnostic_review_sha256':review['diagnostic_review_sha256'],
-                'additional_program_submission_passes':0,'additional_funding_transactions':0,'remaining_signer_starts':1}
+    reconciled=validate_pid_reconciliation(review,original_plan)
+    authorization={'review_sha256':plan['review_sha256'],'diagnostic_review_sha256':review['diagnostic_review_sha256'],
+        'additional_program_submission_passes':0,'additional_funding_transactions':0,'remaining_signer_starts':1}
+    if reconciled is not None:authorization['native_pid_reconciliation_sha256']=reconciled
+    require(continued['authorized']==authorization
             and continued['control']=={'sha256':review['managed_control_sha256'],'abi':'devnet-control'}
             and review['managed_control_sha256']!=evidence['artifacts'].get('sha256',{}).get('control')
             and all(continued[name]==evidence[name] for name in ('configured','relay-frozen','install-attempted','installed','start-attempted','ready')),
@@ -161,6 +217,11 @@ def verify_continuation(control,plan_sha,evidence,value,profile):
             and all(type(report.get(name)) is int and report[name]==0 for name in ('additional_program_submission_passes','additional_funding_transactions','native_service_actions'))
             and report.get('handoff_receipt_sha256')==profile['retained_upgrade_receipt_sha256'] and report.get('callback_qualified') is False,
             'continued handoff qualified report differs')
+    if reconciled is not None:
+        require(private_json(root/'native-reconciled.json')=={'version':1,'plan_sha256':sha_plan,'evidence':review['native_pid_reconciliation']}
+                and report.get('native_pid_reconciliation_sha256')==reconciled,'qualified Native reconciliation barrier differs')
+    else:require(not os.path.lexists(root/'native-reconciled.json') and 'native_pid_reconciliation_sha256' not in report,
+            'unreviewed Native reconciliation evidence is present')
 
 
 def verify_controls(value,profile):
@@ -207,7 +268,7 @@ def verify_controls(value,profile):
     require(report.get('result')=='passed' and report.get('receipt_sha256')==profile['retained_upgrade_receipt_sha256']
             and type(report.get('native_service_actions')) is int and report['native_service_actions']==0
             and report.get('callback_qualified') is False,'retained handoff report differs')
-    verify_continuation(control,plan_sha,evidence,value,profile)
+    verify_continuation(control,plan_sha,evidence,value,profile,plan)
 
 
 def admit(upgrade,profile,previous,before,carried):
