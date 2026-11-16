@@ -241,8 +241,13 @@ fn publish_status(config: &RelaySettings, worker: Option<&Worker>, phase: &str) 
     let records = summary
         .as_ref()
         .and_then(|value| value["records"].as_array());
+    let rejected = summary
+        .as_ref()
+        .and_then(|value| value["simulation_rejected_requests"].as_array())
+        .cloned()
+        .unwrap_or_default();
     let bytes = serde_json::to_vec(
-        &serde_json::json!({"version":1,"phase":phase,"proof_mode":"remote-only",
+        &serde_json::json!({"version":1,"phase":phase,"proof_mode":"remote-only", "simulation_rejected_requests":rejected,
         "session":settings.er_session.map(|key|key.to_string()),"session_context":settings.er_session_context,
         "fulfiller":settings.fulfiller.to_string(),"coordinator":settings.coordinator.to_string(),
         "signer_policy_sha256":config.signer.policy_sha256,

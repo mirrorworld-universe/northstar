@@ -63,6 +63,7 @@ impl Serialize for RelayWorkerSettings {
         fields.serialize(serializer)
     }
 }
+pub const MAX_HISTORICAL_POLICIES: usize = 16;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteSignerConfig {
@@ -71,6 +72,9 @@ pub struct RemoteSignerConfig {
     pub policy_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retained_policy: Option<RetainedPolicyBinding>,
+    /// Only already-journaled receipts may use these policies, never fresh signing responses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub historical_policy_sha256: Vec<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -79,6 +83,18 @@ pub struct RetainedPolicyBinding {
     pub coordinator_programdata_sha256: String,
 }
 impl RemoteSignerConfig {
+    fn accepts_policy(&self, policy: &str, historical: bool) -> bool {
+        policy == self.policy_sha256
+            || historical
+                && (self
+                    .retained_policy
+                    .as_ref()
+                    .is_some_and(|retained| policy == retained.policy_sha256)
+                    || self
+                        .historical_policy_sha256
+                        .iter()
+                        .any(|value| policy == value))
+    }
     pub fn validate(&self) -> Result<()> {
         let url = reqwest::Url::parse(&self.url)
             .map_err(|_| anyhow::anyhow!("invalid remote signer URL"))?;
@@ -102,6 +118,26 @@ impl RemoteSignerConfig {
                 &retained.coordinator_programdata_sha256,
             ]);
         }
+        ensure!(
+            self.historical_policy_sha256.len() <= MAX_HISTORICAL_POLICIES
+                && (self.historical_policy_sha256.is_empty() || self.retained_policy.is_some())
+                && self
+                    .historical_policy_sha256
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    == self.historical_policy_sha256.len()
+                && self
+                    .historical_policy_sha256
+                    .iter()
+                    .all(|value| value != &self.policy_sha256
+                        && self
+                            .retained_policy
+                            .as_ref()
+                            .is_none_or(|retained| value != &retained.policy_sha256)),
+            "historical signer policy scope is invalid"
+        );
+        digests.extend(self.historical_policy_sha256.iter());
         for digest in digests {
             ensure!(
                 digest.len() == 64
@@ -187,7 +223,9 @@ pub(crate) struct RemoteProver {
     coordinator: Pubkey,
     source: Arc<dyn CommitmentSource>,
     backpressure_until: Option<Instant>,
+    discovery_after: Option<Pubkey>,
     rejected: BTreeMap<[u8; 32], Instant>,
+    completed: BTreeMap<[u8; 32], (SigningReceipt, Instant)>,
 }
 impl RemoteProver {
     pub fn open(
@@ -222,7 +260,9 @@ impl RemoteProver {
             coordinator: settings.coordinator,
             source,
             backpressure_until: None,
+            discovery_after: None,
             rejected: BTreeMap::new(),
+            completed: BTreeMap::new(),
         })
     }
     fn validate(
@@ -248,15 +288,9 @@ impl RemoteProver {
         );
         ensure!(
             response.version == 1
-                && (response.policy_sha256 == self.config.policy_sha256
-                    || historical
-                        && self
-                            .config
-                            .retained_policy
-                            .as_ref()
-                            .is_some_and(
-                                |retained| response.policy_sha256 == retained.policy_sha256
-                            ))
+                && self
+                    .config
+                    .accepts_policy(&response.policy_sha256, historical)
                 && response.public_key == Pubkey::new_from_array(self.public_key).to_string()
                 && response.alpha_hex == hex::encode(request.alpha)
                 && response.checkpoint_er_slot == witness.er_slot
@@ -301,7 +335,21 @@ impl RequestProver for RemoteProver {
         self.config.retained_policy.is_some()
     }
     fn candidates(&self) -> Option<Result<Vec<Pubkey>>> {
-        Some(self.source.candidates())
+        Some(self.source.candidates().and_then(|mut candidates| {
+            ensure!(
+                candidates.len() <= northstar_vrf_protocol::MAX_STATE_ACCOUNTS,
+                "native candidate list exceeds bounds"
+            );
+            candidates.sort_unstable();
+            if let Some(after) = self.discovery_after {
+                let next = candidates
+                    .iter()
+                    .position(|address| *address > after)
+                    .unwrap_or(0);
+                candidates.rotate_left(next);
+            }
+            Ok(candidates)
+        }))
     }
     fn validate_receipt(&self, record: &Record) -> Result<()> {
         let receipt = record
@@ -325,12 +373,6 @@ impl RequestProver for RemoteProver {
         account: &Account,
         request: &Request,
     ) -> Result<Option<ProvedRequest>> {
-        if self
-            .backpressure_until
-            .is_some_and(|until| Instant::now() < until)
-        {
-            return Ok(None);
-        }
         let Some(witness) = self.source.witness(address)? else {
             return Ok(None);
         };
@@ -341,14 +383,42 @@ impl RequestProver for RemoteProver {
                 && !account.executable,
             "checkpoint witness differs from current request"
         );
+        let root = witness
+            .opening
+            .commitment()
+            .context("invalid request opening")?;
+        ensure!(
+            witness.verify(&self.session_context, &root),
+            "current request witness membership differs"
+        );
+        if witness.er_slot < request.request_slot || witness.er_slot >= request.deadline_slot {
+            return Ok(None);
+        }
+        let input = hash(&[
+            b"relay-completed-proof-cache-v1",
+            address.as_ref(),
+            &account.data,
+        ]);
+        if let Some((receipt, used)) = self.completed.get_mut(&input) {
+            *used = Instant::now();
+            let receipt = receipt.clone();
+            let result = self.validate(&receipt, address, &account.data, request, false)?;
+            return Ok(Some(ProvedRequest {
+                result,
+                receipt: Some(receipt),
+            }));
+        }
+        if self
+            .backpressure_until
+            .is_some_and(|until| Instant::now() < until)
+        {
+            return Ok(None);
+        }
         let fingerprint = hash(&[
             address.as_ref(),
             &account.data,
             &witness.er_slot.to_le_bytes(),
-            &witness
-                .opening
-                .commitment()
-                .context("invalid request opening")?,
+            &root,
         ]);
         let now = Instant::now();
         self.rejected
@@ -380,6 +450,7 @@ impl RequestProver for RemoteProver {
             return Ok(None);
         }
         if response.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+            self.discovery_after = Some(*address);
             if self.rejected.len() >= 1024
                 && let Some(oldest) = self
                     .rejected
@@ -411,9 +482,48 @@ impl RequestProver for RemoteProver {
             serde_json::from_slice(&bytes).context("invalid remote signing response")?;
         let receipt = SigningReceipt { witness, response };
         let result = self.validate(&receipt, address, &account.data, request, false)?;
+        self.discovery_after = Some(*address);
+        if self.completed.len() >= northstar_vrf_protocol::MAX_STATE_ACCOUNTS
+            && let Some(oldest) = self
+                .completed
+                .iter()
+                .min_by_key(|(_, (_, used))| *used)
+                .map(|(key, _)| *key)
+        {
+            self.completed.remove(&oldest);
+        }
+        self.completed
+            .insert(input, (receipt.clone(), Instant::now()));
         Ok(Some(ProvedRequest {
             result,
             receipt: Some(receipt),
         }))
+    }
+}
+#[cfg(test)]
+mod policy_history_tests {
+    use super::*;
+    #[test]
+    fn historical_receipt_policies_never_admit_a_fresh_signing_response() {
+        let current = "11".repeat(32);
+        let origin = "22".repeat(32);
+        let previous = "44".repeat(32);
+        let config: RemoteSignerConfig = serde_json::from_value(serde_json::json!(
+            { "url" : "http://127.0.0.1:9030", "bearer_token_file" :
+            "unused-test-credential", "policy_sha256" : current,
+            "retained_policy" : { "policy_sha256" : origin,
+            "coordinator_programdata_sha256" : "33".repeat(32) },
+            "historical_policy_sha256" : [previous] }
+        ))
+        .unwrap();
+        config.validate().unwrap();
+        for historical in [false, true] {
+            assert!(config.accepts_policy(&current, historical));
+        }
+        for policy in [&origin, &previous] {
+            assert!(config.accepts_policy(policy, true));
+            assert!(!config.accepts_policy(policy, false));
+        }
+        assert!(!config.accepts_policy(&"55".repeat(32), true));
     }
 }

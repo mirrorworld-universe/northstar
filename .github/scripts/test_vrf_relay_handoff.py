@@ -91,6 +91,74 @@ class HandoffTests(unittest.TestCase):
         self.control=control
         return value,profile,previous,before,upgrade,files,accounts,commands
 
+    def chained_fixture(self):
+        parent,parent_profile,_,before,upgrade,files,accounts,commands=self.fixture()
+        parent_control=self.control;state=handoff.ROOT.parent
+        parent_sha=handoff.checksum(parent);parent_profile['retained_upgrade_receipt_sha256']=parent_sha
+        handoff.ROOT.mkdir(mode=0o700)
+        atomic_json(handoff.ROOT/(parent_sha+'.json'),parent)
+        report=json.loads((parent_control/'handoff-report.json').read_text());report['receipt_sha256']=parent_sha
+        atomic_json(parent_control/'handoff-report.json',report)
+        parent_plan=json.loads((parent_control/'plan.json').read_text())
+        parent_plan_sha=handoff.checksum(parent_plan)
+        atomic_json(parent_control/'progress.json',{'version':1,'plan_sha256':parent_plan_sha,'phase':'callback-qualified'})
+        qualification={'version':1,'result':'passed','plan_sha256':parent_plan_sha,'profile_sha256':'ab'*32,'receipt_sha256':parent_sha,
+            'context':parent['identity']['context'],'session':parent['identity']['session'],'program_ids':parent_plan['review']['program_ids'],
+            'fresh_pda':True,'request_closed':True,'verifier_cpi':True,'callback_output_matches':True,
+            'native_service_actions':0,'program_submission_passes':0,'funding_transactions':0}
+        atomic_json(parent_control/'callback-report.json',qualification)
+        profile=copy.deepcopy(parent_profile);signer=profile['configuration']['signer']
+        data_address=parent['coordinator_after']['programdata']
+        updated=(3).to_bytes(4,'little')+(60).to_bytes(8,'little')+b'\x01'+bytes([11])*32+b'\x7fELFretained-next'
+        updated_sha=hashlib.sha256(updated).hexdigest()
+        accounts[data_address]['raw']=updated
+        profile['configuration']['worker']['coordinator_programdata_sha256']=updated_sha
+        signer.update(policy_sha256='99'*32,historical_policy_sha256=[parent_profile['configuration']['signer']['policy_sha256']])
+        value=copy.deepcopy(parent)
+        value.update(version=2,source_revision='5'*40,target_native_revision='6'*40,generation=2,
+            parent_receipt_sha256=parent_sha,parent_profile_sha256=handoff.checksum(parent_profile),
+            historical_policy_sha256=signer['historical_policy_sha256'],coordinator_elf_sha256=hashlib.sha256(updated[45:]).hexdigest(),
+            old_configuration_sha256=relay.configuration_hash(parent_profile),new_configuration_sha256=relay.configuration_hash(profile),
+            coordinator_before=parent['coordinator_after'],coordinator_after={**parent['coordinator_after'],'deployment_slot':60,'sha256':updated_sha})
+        selected=handoff.checksum(value);profile['retained_upgrade_receipt_sha256']=selected
+        atomic_json(handoff.ROOT/(selected+'.json'),value)
+        round_root=state/'retained-upgrade-rounds'/'2'
+        for path in (round_root.parent,round_root,round_root/'retained-upgrades',round_root/'retained-upgrades'/value['source_revision']):
+            path.mkdir(mode=0o700)
+        control=round_root/'retained-upgrades'/value['source_revision']
+        review=copy.deepcopy(parent_plan['review']);review.update(source_revision=value['source_revision'],target_native_revision=value['target_native_revision'])
+        review['original_profile_sha256']='ab'*32;review['parent_callback_report_sha256']=handoff.checksum(qualification)
+        review['target_program_manifest']={'programs':{'vrf_coordinator.so':value['coordinator_elf_sha256']},'coordinator_features':['er']}
+        review['handoff_chain']={'generation':2,'parent_generation':1,'parent_receipt_sha256':parent_sha,
+            'parent_profile_sha256':handoff.checksum(parent_profile),'parent_plan_sha256':handoff.checksum(parent_plan),'parent_profile':parent_profile}
+        plan={'version':1,'kind':'retained-er-vrf-upgrade','review_sha256':handoff.checksum(review),'review':review};plan_sha=handoff.checksum(plan)
+        atomic_json(control/'plan.json',plan);atomic_json(control/'old-profile.json',parent_profile)
+        atomic_json(control/'progress.json',{'version':1,'plan_sha256':plan_sha,'phase':'handoff-qualified'})
+        atomic_json(round_root/'retained-upgrade.json',{'version':1,'plan_sha256':plan_sha,'source_revision':value['source_revision']})
+        previous=plan_sha
+        names=('artifacts','stop-attempted','frozen','upload-attempted','uploaded','configured','relay-frozen','install-attempted','installed','start-attempted','ready')
+        for sequence,name in enumerate(names,1):
+            evidence=json.loads((parent_control/(name+'.json')).read_text())['evidence']
+            if name=='artifacts':evidence['sha256']['coordinator']=value['coordinator_elf_sha256']
+            if name=='uploaded':evidence={'view':value['coordinator_after']}
+            if name=='installed':evidence={**evidence,'source_revision':value['source_revision']}
+            if name=='ready':evidence['info']['policy_sha256']=signer['policy_sha256']
+            marker={'version':2,'plan_sha256':plan_sha,'sequence':sequence,'previous_sha256':previous,'evidence':evidence}
+            atomic_json(control/(name+'.json'),marker);previous=handoff.checksum(marker)
+        atomic_json(control/'handoff-report.json',{'result':'passed','receipt_sha256':selected,'native_service_actions':0,'callback_qualified':False})
+        (control/'artifacts').mkdir(mode=0o700)
+        (control/'artifacts/coordinator').write_bytes(updated[45:]);(control/'artifacts/coordinator').chmod(0o600)
+        self.control=control;self.parent_control=parent_control
+        binary=handoff.SIGNER_CURRENT.parent/value['source_revision']/'vrf-request-signer'
+        files[str(binary)]={'uid':0,'mode':0o555,'sha256':value['signer']['binary_sha256']}
+        execute=upgrade.ops.execute
+        def current(command):
+            if command[0]=='readlink':
+                commands.append(list(map(str,command)));return str(binary.parent)+'\n'
+            return execute(command)
+        upgrade.ops.execute=current
+        return value,profile,parent_profile,before,upgrade,commands
+
     def continued_fixture(self):
         value,profile,previous,before,upgrade,*_=self.fixture();control=self.control
         original_sha=handoff.checksum(json.loads((control/'plan.json').read_text()))
@@ -156,6 +224,61 @@ class HandoffTests(unittest.TestCase):
         atomic_json(root/'native-reconciled.json',{'version':1,'plan_sha256':sha,'evidence':reconciliation})
         report=json.loads((root/'report.json').read_text());report.update(plan_sha256=sha,native_pid_reconciliation_sha256=digest);atomic_json(root/'report.json',report)
         return value,profile,previous,before,upgrade,root
+
+    def test_chained_handoff_requires_qualified_parent_and_ordered_barrier_hashes(self):
+        value,profile,_,_,_,commands=self.chained_fixture()
+        handoff.validate_receipt(value);handoff.verify_controls(value,profile)
+        self.assertEqual(commands,[])
+        for name,field in (('uploaded','previous_sha256'),('start-attempted','sequence')):
+            path=self.control/(name+'.json');saved=json.loads(path.read_text());changed=copy.deepcopy(saved)
+            changed[field]='0'*64 if field=='previous_sha256' else 99
+            atomic_json(path,changed)
+            with self.subTest(name=name),self.assertRaises(ValueError):handoff.verify_controls(value,profile)
+            atomic_json(path,saved)
+        progress=self.parent_control/'progress.json';saved=json.loads(progress.read_text())
+        atomic_json(progress,{**saved,'phase':'failed'})
+        with self.assertRaises(ValueError):handoff.verify_controls(value,profile)
+        self.assertEqual(commands,[])
+
+    def test_chained_live_admission_rechecks_current_code_and_signer_without_service_actions(self):
+        value,profile,previous,before,upgrade,commands=self.chained_fixture()
+        handoff.admit(upgrade,profile,previous,before,False)
+        self.assertEqual(upgrade.program_floor,value['coordinator_after']['deployment_slot'])
+        self.assertTrue(all(command[0] in ('git','readlink','systemctl') for command in commands))
+        self.assertTrue(all(command[:2]==['systemctl','show'] for command in commands if command[0]=='systemctl'))
+
+    def test_chained_handoff_requires_truthful_parent_callback_qualification(self):
+        value,profile,_,_,_,commands=self.chained_fixture()
+        path=self.parent_control/'callback-report.json';saved=json.loads(path.read_text())
+        for field,changed in (('request_closed',False),('verifier_cpi',False),('native_service_actions',1),('receipt_sha256','0'*64)):
+            atomic_json(path,{**saved,field:changed})
+            with self.subTest(field=field),self.assertRaises(ValueError):handoff.verify_controls(value,profile)
+        atomic_json(path,saved);path.unlink()
+        with self.assertRaises((ValueError,FileNotFoundError)):handoff.verify_controls(value,profile)
+        self.assertEqual(commands,[])
+
+    def test_chained_frozen_coordinator_rejects_changed_bytes_modes_and_symlinks(self):
+        value,_,_,_,_,_=self.chained_fixture()
+        path=self.control/'artifacts/coordinator';saved=path.read_bytes()
+        self.assertEqual(handoff.frozen_coordinator(self.control,value['coordinator_elf_sha256']),saved)
+        path.chmod(0o644)
+        with self.assertRaises(ValueError):handoff.frozen_coordinator(self.control,value['coordinator_elf_sha256'])
+        path.chmod(0o600);path.write_bytes(saved+b'changed')
+        with self.assertRaises(ValueError):handoff.frozen_coordinator(self.control,value['coordinator_elf_sha256'])
+        target=path.with_name('retained');path.rename(target);path.symlink_to(target)
+        with self.assertRaises(OSError):handoff.frozen_coordinator(self.control,value['coordinator_elf_sha256'])
+
+    def test_chained_handoff_rejects_changed_origin_history_or_parent_profile(self):
+        value,profile,_,_,_,_=self.chained_fixture()
+        for change in ({'generation':3},{'parent_receipt_sha256':'0'*64},
+                       {'historical_policy_sha256':[]},{'historical_policy_sha256':['66'*32,'66'*32]}):
+            changed=copy.deepcopy(value);changed.update(change)
+            with self.subTest(change=change),self.assertRaises(ValueError):handoff.validate_receipt(changed)
+        changed=copy.deepcopy(profile);changed['configuration']['signer']['retained_policy']['policy_sha256']='88'*32
+        with self.assertRaises(ValueError):handoff.verify_controls(value,changed)
+        path=self.control/'old-profile.json';saved=json.loads(path.read_text());saved['configuration']['worker']['max_records']=127
+        atomic_json(path,saved)
+        with self.assertRaises(ValueError):handoff.verify_controls(value,profile)
 
     def test_reconciled_pid_requires_explicit_plan_bound_evidence(self):
         value,profile,previous,before,upgrade,root=self.reconciled_fixture();original=(self.control/'plan.json').read_bytes()

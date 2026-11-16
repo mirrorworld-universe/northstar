@@ -26,7 +26,7 @@ Staging itself performs no activation. Build-generated program keypairs are neve
 deployment signing identities.
 
 `prepare-continuity-sdk.sh` checks out public NorthStarSDK revision
-`ea732d51f71f62e6fe46c77eaf781b9474b00508`, checks its dependency-lock hash,
+`92296fe0166a7cbe8a8221055e43caec11fa5545`, checks its dependency-lock hash,
 installs frozen dependencies without lifecycle scripts and builds the bindings.
 No private-source credential is needed for this SDK checkout. Both CI validation
 and deployment pin Node 24.21.0/npm 11; the helper rejects npm 10 before checkout
