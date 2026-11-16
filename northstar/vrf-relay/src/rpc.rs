@@ -59,6 +59,10 @@ impl Confirmation {
         )
     }
 }
+pub struct Simulation {
+    pub slot: u64,
+    pub error: Option<TransactionError>,
+}
 #[derive(Deserialize)]
 pub struct Receipt {
     pub slot: u64,
@@ -223,6 +227,27 @@ impl Rpc {
             "invalid program data"
         );
         Ok(hex::encode(Sha256::digest(&data.data)))
+    }
+    pub fn simulate(&self, wire: &[u8], min_slot: u64) -> Result<Simulation> {
+        ensure!(wire.len() <= 1232, "transaction exceeds packet limit");
+        let value = self.call(
+            "simulateTransaction",
+            json!(
+                [STANDARD.encode(wire), { "encoding" : "base64", "commitment" : self
+                .commitment, "sigVerify" : true, "replaceRecentBlockhash" : false,
+                "minContextSlot" : min_slot }]
+            ),
+        )?;
+        let slot = number(&value["context"]["slot"])?;
+        ensure!(slot >= min_slot, "stale simulation context");
+        let error = value
+            .get("value")
+            .and_then(|value| value.get("err"))
+            .context("simulation lacks err field")?;
+        Ok(Simulation {
+            slot,
+            error: serde_json::from_value(error.clone()).context("malformed simulation error")?,
+        })
     }
     pub fn send(&self, wire: &[u8], expected_signature: &str) -> Result<()> {
         ensure!(wire.len() <= 1232, "transaction exceeds packet limit");

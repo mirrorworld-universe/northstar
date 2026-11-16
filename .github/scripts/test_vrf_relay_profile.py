@@ -63,6 +63,29 @@ class RelayProfileTests(unittest.TestCase):
         changed=copy.deepcopy(profile);del changed['retained_upgrade_receipt_sha256']
         with self.assertRaises(ValueError):self.validate(changed,identity)
 
+    def test_second_retained_handoff_preserves_origin_and_exact_prior_receipt_policies(self):
+        original,identity=self.fixture();previous=copy.deepcopy(original)
+        previous['configuration']['worker']['coordinator_programdata_sha256']='55'*32
+        previous['configuration']['signer'].update(policy_sha256='66'*32,retained_policy={
+            'policy_sha256':original['configuration']['signer']['policy_sha256'],
+            'coordinator_programdata_sha256':original['configuration']['worker']['coordinator_programdata_sha256']})
+        previous['retained_upgrade_receipt_sha256']='77'*32
+        current=copy.deepcopy(previous)
+        current['configuration']['worker']['coordinator_programdata_sha256']='88'*32
+        current['configuration']['signer'].update(policy_sha256='99'*32,historical_policy_sha256=['66'*32])
+        current['retained_upgrade_receipt_sha256']='aa'*32
+        self.assertFalse(relay.retained_transition(previous,current))
+        self.assertEqual(self.validate(current,identity),current['configuration'])
+        self.assertEqual(current['configuration']['signer']['retained_policy'],previous['configuration']['signer']['retained_policy'])
+        for history in ([],['bb'*32],['66'*32,'66'*32],['44'*32],['99'*32]):
+            changed=copy.deepcopy(current);changed['configuration']['signer']['historical_policy_sha256']=history
+            with self.subTest(history=history),self.assertRaises(ValueError):relay.retained_transition(previous,changed)
+        changed=copy.deepcopy(current);changed['configuration']['worker']['max_records']=127
+        with self.assertRaises(ValueError):relay.retained_transition(previous,changed)
+        for history in ([],['00'*32],['gg'*32],['66'*32,'66'*32],['44'*32],['99'*32],[f'{index:064x}' for index in range(1,18)]):
+            changed=copy.deepcopy(current);changed['configuration']['signer']['historical_policy_sha256']=history
+            with self.subTest(history=history),self.assertRaises(ValueError):self.validate(changed,identity)
+
     def test_active_profile_changes_require_an_explicit_retained_handoff(self):
         previous,identity=self.fixture();changed=copy.deepcopy(previous)
         changed['configuration']['worker']['coordinator_programdata_sha256']='55'*32

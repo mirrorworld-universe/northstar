@@ -54,6 +54,7 @@ pub struct Worker {
     binding: String,
     journal: Journal,
     discovery: Option<L1Discovery>,
+    simulation_rejected_requests: Vec<Pubkey>,
 }
 pub fn check_programs(settings: &Settings, rpc: &Rpc) -> Result<()> {
     checked_programs(settings, rpc).map(|_| ())
@@ -315,6 +316,7 @@ impl Worker {
             binding,
             journal,
             discovery,
+            simulation_rejected_requests: Vec::new(),
         })
     }
     fn mark(&mut self, id: &str, status: Status, slot: Option<u64>) -> Result<()> {
@@ -330,6 +332,42 @@ impl Worker {
             : slot })
         );
         Ok(())
+    }
+    fn preflight(
+        &mut self,
+        address: &Pubkey,
+        attempt: &Attempt,
+        minimum: u64,
+        deadline: u64,
+    ) -> Result<bool> {
+        let wire = STANDARD.decode(&attempt.wire_base64)?;
+        let simulated = match self.rpc.simulate(&wire, minimum) {
+            Ok(value) => value,
+            Err(_) => {
+                eprintln!(
+                    "{}",
+                    json!({ "event" : "simulation_unavailable", "request" : address
+                    .to_string() })
+                );
+                return Ok(false);
+            }
+        };
+        if simulated.error.is_some() || simulated.slot > deadline {
+            if simulated.error.is_some()
+                && self.simulation_rejected_requests.len() < 128
+                && !self.simulation_rejected_requests.contains(address)
+            {
+                self.simulation_rejected_requests.push(*address);
+            }
+            eprintln!(
+                "{}",
+                json!({ "event" : "simulation_rejected", "request" : address
+                .to_string(), "slot" : simulated.slot, "error" : simulated.error,
+                "expired" : simulated.slot > deadline })
+            );
+            return Ok(false);
+        }
+        Ok(true)
     }
     fn dispatch(&self, record: &Record) -> Result<()> {
         if self
@@ -429,6 +467,7 @@ impl Worker {
         self.tick_until(|| false)
     }
     pub fn tick_until(&mut self, stop: impl Fn() -> bool) -> Result<()> {
+        self.simulation_rejected_requests.clear();
         if stop() {
             return Ok(());
         }
@@ -515,6 +554,15 @@ impl Worker {
                 };
                 if attempt.signature == record.attempt.signature {
                     continue;
+                }
+                if stop() {
+                    return Ok(());
+                }
+                if !self.preflight(&record.address, &attempt, slot, request.deadline_slot)? {
+                    continue;
+                }
+                if stop() {
+                    return Ok(());
                 }
                 let mut next = record;
                 next.attempts += 1;
@@ -613,6 +661,15 @@ impl Worker {
             else {
                 continue;
             };
+            if stop() {
+                return Ok(());
+            }
+            if !self.preflight(&address, &attempt, account_slot, request.deadline_slot)? {
+                continue;
+            }
+            if stop() {
+                return Ok(());
+            }
             record.attempt = attempt;
             self.journal.change(|s| {
                 s.records.insert(id, record.clone());
@@ -627,11 +684,13 @@ impl Worker {
     }
     pub fn summary(&self) -> Value {
         json!(
-            { "archived_records" : self.journal.archived_count(), "records" : self
-            .journal.snapshot().records.iter().map(| (id, r) | json!({ "id" : id,
-            "request" : r.address.to_string(), "status" : r.status, "attempts" : r
-            .attempts, "signature" : r.attempt.signature, "output_hex" : r.output_hex }))
-            .collect::< Vec < _ >> () }
+            { "archived_records" : self.journal.archived_count(),
+            "simulation_rejected_requests" : self.simulation_rejected_requests.iter()
+            .map(ToString::to_string).collect::< Vec < _ >> (), "records" : self.journal
+            .snapshot().records.iter().map(| (id, r) | json!({ "id" : id, "request" : r
+            .address.to_string(), "status" : r.status, "attempts" : r.attempts,
+            "signature" : r.attempt.signature, "output_hex" : r.output_hex })).collect::<
+            Vec < _ >> () }
         )
     }
 }
