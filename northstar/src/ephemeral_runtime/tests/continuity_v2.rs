@@ -148,6 +148,196 @@ impl Fixture {
 }
 
 #[test]
+fn regression_v2_closed_system_account_recreates_after_restart_with_checkpoint_continuity() {
+    let fixture = Fixture::new();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("lineage");
+    let account = Keypair::new();
+    let mut runtime = fixture.runtime(&path, StartupModeV2::InitializeNew);
+    runtime.process_l1_ingress_v2(&fixture.parent).unwrap();
+    fixture.transfer(&runtime, account.pubkey(), 1_000_000);
+    assert_eq!(runtime.bank().get_balance(&account.pubkey()), 1_000_000);
+    let close = Transaction::new_signed_with_payer(
+        &[transfer(
+            &account.pubkey(),
+            &fixture.payer.pubkey(),
+            1_000_000,
+        )],
+        Some(&fixture.payer.pubkey()),
+        &[&fixture.payer, &account],
+        runtime.bank().last_blockhash(),
+    );
+    TransactionClient::send_transactions_in_batch(
+        &runtime._tx_client,
+        vec![bincode::serialize(&VersionedTransaction::from(close)).unwrap()],
+        &SendTransactionServiceStats::default(),
+    );
+    assert!(runtime.bank().get_account(&account.pubkey()).is_none());
+    let closed = runtime
+        ._tx_client
+        .lineage_store_v2()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .working_state()
+        .unwrap();
+    let tombstone = closed.accounts().get(&account.pubkey().to_bytes()).unwrap();
+    assert_eq!(tombstone.lamports, 0);
+    assert_eq!(tombstone.rent_epoch, u64::MAX);
+    let before_root = closed.root().unwrap();
+    runtime.shutdown();
+    drop(runtime);
+    let mut runtime = fixture.runtime(&path, StartupModeV2::Resume);
+    assert_eq!(
+        runtime
+            ._tx_client
+            .lineage_store_v2()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .working_state()
+            .unwrap()
+            .root()
+            .unwrap(),
+        before_root
+    );
+    let recreate = Transaction::new_signed_with_payer(
+        &[solana_system_interface::instruction::create_account(
+            &fixture.payer.pubkey(),
+            &account.pubkey(),
+            2_000_000,
+            0,
+            &system_program::id(),
+        )],
+        Some(&fixture.payer.pubkey()),
+        &[&fixture.payer, &account],
+        runtime.bank().last_blockhash(),
+    );
+    TransactionClient::send_transactions_in_batch(
+        &runtime._tx_client,
+        vec![bincode::serialize(&VersionedTransaction::from(recreate)).unwrap()],
+        &SendTransactionServiceStats::default(),
+    );
+    let balance = runtime.bank().get_balance(&account.pubkey());
+    let payer_balance = runtime.bank().get_balance(&fixture.payer.pubkey());
+    let sealed = runtime.seal_checkpoint_if_nonempty();
+    let artifact = runtime.checkpoint_artifact_v2();
+    runtime.shutdown();
+    assert_eq!(
+        balance, 2_000_000,
+        "closed account recreation must not be cancelled by tombstone metadata"
+    );
+    assert_eq!(payer_balance, 98_000_000);
+    assert!(sealed);
+    artifact.unwrap().validate().unwrap();
+}
+
+#[test]
+fn regression_v2_capacity_backpressure_preserves_signed_retry_across_settlement() {
+    use solana_rpc::rpc::{ErTxError, ErTxExecutor};
+    let fixture = Fixture::new();
+    let mut root = fixture.parent.clone();
+    let directory = tempfile::tempdir().unwrap();
+    let mut manager = crate::Manager::new(crate::ManagerConfig {
+        portal_program_id: PORTAL_PROGRAM_ID,
+        manager_account: fixture.manager.clone(),
+        checkpoint_plan_dir: Some(directory.path().join("plans")),
+    });
+    let result = (|| -> std::result::Result<(), String> {
+        manager
+            .init_runtime(
+                root.clone(),
+                create_test_cluster_info(),
+                find_free_addr(),
+                find_free_addr(),
+                find_free_addr(),
+            )
+            .map_err(|error| error.to_string())?;
+        manager.activate_session(root.clone(), fixture.session, 0, 10_000, 1_000);
+        manager.process_finalized_l1_inputs(&root);
+        let recipient = Pubkey::new_unique();
+        let wire = {
+            let runtime = manager.runtime.as_ref().ok_or("runtime missing")?;
+            let initial = runtime
+                ._tx_client
+                .lineage_store_v2()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .unsealed()
+                .len();
+            assert_eq!(initial, 1);
+            for _ in initial..crate::checkpoint_v2::MAX_CHECKPOINT_TRANSITIONS_V2 {
+                fixture.transfer(runtime, Pubkey::new_unique(), 1_000_000);
+            }
+            let transaction = VersionedTransaction::from(Transaction::new_signed_with_payer(
+                &[transfer(&fixture.payer.pubkey(), &recipient, 1_000_000)],
+                Some(&fixture.payer.pubkey()),
+                &[&fixture.payer],
+                runtime.bank().last_blockhash(),
+            ));
+            let wire = bincode::serialize(&transaction).unwrap();
+            let before = runtime
+                ._tx_client
+                .lineage_store_v2()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .working_state()
+                .unwrap();
+            let balance = runtime.bank().get_balance(&fixture.payer.pubkey());
+            for _ in 0..2 {
+                assert!(
+                    matches!(runtime._tx_client.prepare_preflight(&transaction), Err(ErTxError::Rejected(message)) if message == "canonical checkpoint awaits settlement; retry after settlement")
+                );
+                assert!(
+                    matches!(runtime._tx_client.execute_wire(wire.clone()), Err(ErTxError::Rejected(message)) if message == "canonical checkpoint awaits settlement; retry after settlement")
+                );
+                assert_eq!(runtime.bank().get_balance(&recipient), 0);
+                assert_eq!(runtime.bank().get_balance(&fixture.payer.pubkey()), balance);
+                assert_eq!(
+                    runtime
+                        ._tx_client
+                        .lineage_store_v2()
+                        .unwrap()
+                        .lock()
+                        .unwrap()
+                        .working_state()
+                        .unwrap(),
+                    before
+                );
+            }
+            wire
+        };
+        let wire_hash = hash_parts(&[&wire]);
+        let artifact = super::token_settlement_v2::settle_checkpoint_without_restart(
+            &mut manager,
+            &mut root,
+            |_| Ok(true),
+        )?;
+        assert_eq!(
+            artifact.checkpoint.step_count as usize,
+            crate::checkpoint_v2::MAX_CHECKPOINT_TRANSITIONS_V2
+        );
+        artifact.validate().map_err(|error| error.to_string())?;
+        let runtime = manager.runtime.as_ref().ok_or("resumed runtime missing")?;
+        runtime
+            ._tx_client
+            .execute_wire(wire.clone())
+            .map_err(|error| format!("identical signed retry: {error:?}"))?;
+        assert_eq!(hash_parts(&[&wire]), wire_hash);
+        assert_eq!(runtime.bank().get_balance(&recipient), 1_000_000);
+        assert!(
+            matches!(runtime._tx_client.execute_wire(wire), Err(ErTxError::Rejected(message)) if message == "transaction already processed")
+        );
+        assert_eq!(runtime.bank().get_balance(&recipient), 1_000_000);
+        Ok(())
+    })();
+    manager.shutdown_runtime();
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[test]
 fn regression_v2_sol_payout_chains_after_restart_and_later_topup() {
     let fixture = Fixture::new();
     let mut root = fixture.parent.clone();
