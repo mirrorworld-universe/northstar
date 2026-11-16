@@ -397,6 +397,113 @@ def verify_native_base(upgrade,value):
             'chained VRF Native base qualification differs')
 
 
+def recovery_artifact_sha(path):
+    descriptor=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(descriptor,'rb') as stream:
+        metadata=os.fstat(stream.fileno())
+        require(stat.S_ISREG(metadata.st_mode) and metadata.st_nlink==1 and metadata.st_uid==os.getuid()
+                and stat.S_IMODE(metadata.st_mode)==0o500 and 0<metadata.st_size<=128*1024*1024,
+                'qualified recovery control artifact namespace differs')
+        raw=stream.read(128*1024*1024+1);after=os.fstat(stream.fileno())
+    require(len(raw)==metadata.st_size==after.st_size and after.st_mtime_ns==metadata.st_mtime_ns
+            and after.st_ctime_ns==metadata.st_ctime_ns and raw.startswith(b'\x7fELF'),
+            'qualified recovery control artifact changed')
+    return hashlib.sha256(raw).hexdigest()
+
+
+def qualified_recovery_signer_pid(upgrade,value,profile,checked,carried):
+    control=checked['control'];pointer=control/'qualification-recovery.json'
+    if not carried or not os.path.lexists(pointer):return value['signer']['pid']
+    require(value['version']==2 and private_json(control/'progress.json')=={
+                'version':1,'plan_sha256':checked['plan_sha256'],'phase':'callback-qualified'},
+            'carried signer recovery requires completed callback qualification')
+    report=private_json(control/'callback-report.json')
+    names=['fresh-callback','callback-preflight-isolation','unrelated-healthy-progress','expiry-and-close']
+    require(type(report.get('version')) is int and report['version']==2
+            and report.get('result')=='passed' and report.get('plan_sha256')==checked['plan_sha256']
+            and report.get('receipt_sha256')==profile['retained_upgrade_receipt_sha256'] and sha(report.get('profile_sha256'))
+            and report.get('context')==value['identity']['context'] and report.get('session')==value['identity']['session']
+            and report.get('program_ids')==checked['plan']['review']['program_ids']
+            and all(report.get(key) is True for key in ('fresh_pda','request_closed','verifier_cpi','callback_output_matches'))
+            and all(type(report.get(key)) is int and report[key]==0 for key in ('native_service_actions','program_submission_passes','funding_transactions'))
+            and type(report.get('signer_recovery_starts')) is int and report['signer_recovery_starts']==1
+            and isinstance(report.get('cases'),list) and [case.get('name') for case in report['cases']]==names,
+            'carried signer recovery callback scope differs')
+    cases=report['cases']
+    require(all(cases[index].get(key) is True for index in (0,2)
+                for key in ('fresh_pda','request_closed','verifier_cpi','callback_output_matches'))
+            and cases[1].get('consumer_unchanged') is True and cases[3].get('request_closed') is True
+            and all(type(cases[index].get('pending_intents')) is int and cases[index]['pending_intents']==0 for index in (1,3)),
+            'carried signer recovery did not complete isolation, progress and expiry')
+    root=control/'qualification-recovery';parent=None
+    for depth in range(2):
+        checked_directory(root,private=True)
+        selected=private_json(pointer);plan=private_json(root/'plan.json');review=plan.get('review',{});sha_plan=checksum(plan)
+        require(type(plan.get('version')) is int and plan['version']==1 and plan.get('kind')=='chained-er-pre-request-qualification-recovery'
+                and type(review.get('version')) is int and review['version']==1
+                and type(selected.get('version')) is int and selected['version']==1
+                and plan.get('review_sha256')==checksum(review) and revision(review.get('source_revision'))
+                and selected=={'version':1,'plan_sha256':sha_plan,'source_revision':review['source_revision']}
+                and review.get('failed_source_revision')==value['source_revision']
+                and review.get('original_plan_sha256')==checked['plan_sha256']
+                and review.get('original_review_sha256')==checked['plan']['review_sha256']
+                and review.get('receipt_sha256')==profile['retained_upgrade_receipt_sha256']
+                and review.get('profile_sha256')==report['profile_sha256'] and review.get('new_control_abi')=='devnet-control'
+                and sha(review.get('new_control_sha256')) and recovery_artifact_sha(root/'control')==review['new_control_sha256']
+                and type(review.get('remaining_signer_starts')) is int and review['remaining_signer_starts']==1
+                and all(type(review.get(key)) is int and review[key]==0 for key in ('prior_callback_requests',
+                    'additional_native_service_actions','additional_program_submission_passes','additional_funding_transactions')),
+                'carried signer recovery plan or private control binding differs')
+        progress=private_json(root/'progress.json')
+        require(type(progress.get('version')) is int and progress['version']==1
+                and progress.get('plan_sha256')==sha_plan,'carried signer recovery progress differs')
+        if parent is not None:
+            require(isinstance(review.get('continuation'),dict) and review['continuation'].get('plan_sha256')==parent[0]
+                    and review['continuation'].get('source_revision')==parent[1], 'carried signer recovery parent binding differs')
+        if progress.get('phase')=='qualified':break
+        require(depth==0 and progress.get('phase')=='failed' and private_json(root/'failure.json')=={
+                    'version':1,'plan_sha256':sha_plan,'failure_type':'FileNotFoundError','operator_reconciliation_required':True,
+                    'automatic_rollback':False,'signer_quarantine_verified':True}
+                and not os.path.lexists(root/'callback-report.json'), 'carried signer recovery has no qualified continuation')
+        parent=(sha_plan,review['source_revision']);pointer=root/'continuation.json';root=root/'continuation'
+    else:raise ValueError('carried signer recovery exceeds the bounded continuation chain')
+    require(report.get('qualification_recovery_plan_sha256')==sha_plan
+            and report.get('qualification_controller_source_revision')==review['source_revision']
+            and private_json(root/'callback-report.json')==report,'carried signer recovery report differs')
+    evidence={};previous_sha=sha_plan
+    for sequence,name in enumerate(('control','start-attempted','ready','callbacks-attempted','qualified'),1):
+        marker=private_json(root/(name+'.json'))
+        require(set(marker)=={'version','plan_sha256','sequence','previous_sha256','evidence'}
+                and type(marker['version']) is int and marker['version']==1
+                and marker['plan_sha256']==sha_plan and type(marker['sequence']) is int and marker['sequence']==sequence
+                and marker['previous_sha256']==previous_sha and isinstance(marker['evidence'],dict),
+                'carried signer recovery start/readiness barrier chain differs')
+        previous_sha=checksum(marker);evidence[name]=marker['evidence']
+    require(all(type(evidence['start-attempted'].get(key)) is int for key in ('remaining_signer_starts',
+                'native_service_actions','program_submission_passes','funding_transactions'))
+            and evidence['control']=={'sha256':review['new_control_sha256'],'abi':'devnet-control',
+                'control_index_sha256':checksum({'version':1,'pending_programs':[],'records':{}})}
+            and evidence['start-attempted']=={'remaining_signer_starts':1,'native_service_actions':0,'program_submission_passes':0,'funding_transactions':0}
+            and evidence['callbacks-attempted']=={'original_plan_sha256':checked['plan_sha256'],'cases':names}
+            and evidence['qualified']=={'callback_report_sha256':checksum(report)},'carried signer recovery completed barriers differ')
+    ready=evidence['ready'];info=ready.get('info',{})
+    require(type(ready.get('pid')) is int and ready['pid']>0
+            and info.get('public_key')==profile['configuration']['worker']['vrf_public_key']
+            and info.get('policy_sha256')==profile['configuration']['signer']['policy_sha256']
+            and info.get('commitment')=='finalized_portal_checkpoint_membership' and info.get('arbitrary_alpha') is False,
+            'carried signer recovery authenticated readiness differs')
+    native=review.get('native',{})
+    require(revision(native.get('revision')) and sha(native.get('plan_sha256')) and native.get('identity')==value['identity']
+            and type(native.get('pid')) is int and native['pid']>0,'carried signer recovery Native identity differs')
+    checked_directory(upgrade.parent,private=True)
+    checked_directory(upgrade.parent/native['revision'],private=True)
+    checked_directory(upgrade.parent/native['revision']/'control',private=True)
+    saved=private_json(upgrade.parent/native['revision']/'control/plan.json')
+    verify_native_base(upgrade,{'version':2,'base_revision':native['revision'],'base_plan_sha256':native['plan_sha256'],
+                              'native_before':saved['desired'],'identity':native['identity']})
+    return ready['pid']
+
+
 def admit(upgrade,profile,previous,before,carried):
     from native_upgrade import service_spec
     from vrf_relay_profile import JOURNAL, configuration_hash
@@ -462,7 +569,8 @@ def admit(upgrade,profile,previous,before,carried):
     raw=upgrade.ops.execute(['systemctl','show','--property=MainPID,ExecStart,FragmentPath,DropInPaths',SIGNER])
     properties=dict(line.split('=',1) for line in raw.splitlines() if '=' in line)
     commands=re.findall(r'argv\[\]=([^;]*);',properties.get('ExecStart',''))
-    require(properties.get('MainPID')==str(value['signer']['pid']) and properties.get('FragmentPath')==str(SIGNER_UNIT)
+    expected_pid=qualified_recovery_signer_pid(upgrade,value,profile,checked,carried)
+    require(properties.get('MainPID')==str(expected_pid) and properties.get('FragmentPath')==str(SIGNER_UNIT)
             and properties.get('DropInPaths')=='' and len(commands)==1
             and shlex.split(commands[0])==[str(SIGNER_CURRENT/'vrf-request-signer'),'--config',str(SIGNER_CONFIG)],
             'retained signer effective service differs')
