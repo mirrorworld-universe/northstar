@@ -371,6 +371,21 @@ class HandoffTests(unittest.TestCase):
                 handoff.admit(upgrade,profile,profile,before,True)
                 self.assertTrue(all(command[0] in ('git','readlink','systemctl') for command in commands))
 
+    def test_carried_recovery_accepts_traversal_ancestors_but_keeps_controls_private(self):
+        value,profile,_,before,upgrade,_,root=self.recovered_callback_fixture(True)
+        plan=json.loads((root/'plan.json').read_text());revision=plan['review']['native']['revision']
+        ancestors=(upgrade.parent,upgrade.parent/revision)
+        for directory in ancestors:directory.chmod(0o711)
+        handoff.admit(upgrade,profile,profile,before,True)
+        for directory in ancestors:
+            for mode in (0o755,0o701,0o770):
+                directory.chmod(mode)
+                with self.subTest(directory=directory.name,mode=mode),self.assertRaises(ValueError):
+                    handoff.admit(upgrade,profile,profile,before,True)
+            directory.chmod(0o711)
+        control=upgrade.parent/revision/'control';control.chmod(0o711)
+        with self.assertRaises(ValueError):handoff.admit(upgrade,profile,profile,before,True)
+
     def test_signer_recovery_never_relaxes_new_handoff_or_control_artifact_binding(self):
         value,profile,_,before,upgrade,_,root=self.recovered_callback_fixture(True)
         with self.assertRaises(ValueError):handoff.admit(upgrade,profile,profile,before,False)
