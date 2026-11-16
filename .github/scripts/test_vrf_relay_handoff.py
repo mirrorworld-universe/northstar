@@ -11,7 +11,7 @@ import test_vrf_relay_profile as profiles
 import vrf_relay_handoff as handoff
 import vrf_relay_profile as relay
 from continuity_devnet import LOADER, public_bytes, public_text
-from continuity_rollout_state import DEVNET, atomic_json
+from continuity_rollout_state import DEVNET, atomic_json, service_dropin
 from native_upgrade import STATE_KEYS
 
 
@@ -246,6 +246,63 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(upgrade.program_floor,value['coordinator_after']['deployment_slot'])
         self.assertTrue(all(command[0] in ('git','readlink','systemctl') for command in commands))
         self.assertTrue(all(command[:2]==['systemctl','show'] for command in commands if command[0]=='systemctl'))
+
+    def upgraded_native_base_fixture(self):
+        value,profile,previous,before,upgrade,commands=self.chained_fixture()
+        upgrade.parent=handoff.ROOT.parent/'native-upgrades';upgrade.parent.mkdir(mode=0o700)
+        root=upgrade.parent/('7'*40);root.mkdir(mode=0o700);control=root/'control';control.mkdir(mode=0o700)
+        before['arguments'][0]=str(root/'runtime/bin/agave-validator');value['native_before']=copy.deepcopy(before)
+        plan={'version':1,'kind':'native-upgrade','source_revision':root.name,'base_revision':upgrade.base.name,
+            'base_plan_sha256':handoff.checksum(upgrade.base_plan),'identity':value['identity'],'desired':copy.deepcopy(before),'l1_floor':40}
+        sha=handoff.checksum(plan);value.update(base_revision=root.name,base_plan_sha256=sha)
+        atomic_json(control/'plan.json',plan)
+        atomic_json(control/'progress.json',{'version':1,'plan_sha256':sha,'phase':'qualified'})
+        atomic_json(control/'start-attempted.json',{'plan_sha256':sha,'l1_floor':50})
+        atomic_json(control/'frozen.json',{'plan_sha256':sha})
+        text=service_dropin(plan['desired']['arguments'],*[plan['desired']['state_environment'][key] for key in STATE_KEYS])
+        atomic_json(control/'installed.json',{'sha256':hashlib.sha256(text.encode()).hexdigest()})
+        atomic_json(control/'report.json',{'result':'passed','upgrade_plan_sha256':sha})
+        selected=handoff.checksum(value);profile['retained_upgrade_receipt_sha256']=selected
+        atomic_json(handoff.ROOT/(selected+'.json'),value)
+        report=json.loads((self.control/'handoff-report.json').read_text());report['receipt_sha256']=selected
+        atomic_json(self.control/'handoff-report.json',report)
+        return value,profile,previous,before,upgrade,commands,control
+
+    def test_chained_handoff_binds_a_qualified_native_upgrade_without_replacing_the_activation_base(self):
+        value,profile,previous,before,upgrade,commands,control=self.upgraded_native_base_fixture()
+        activation=copy.deepcopy(upgrade.base_plan)
+        handoff.admit(upgrade,profile,previous,before,False)
+        self.assertEqual(upgrade.base_plan,activation);self.assertNotEqual(value['base_revision'],upgrade.base.name)
+        self.assertTrue(all(command[0] in ('git','readlink','systemctl') for command in commands))
+        commands.clear()
+        handoff.admit(upgrade,profile,profile,before,True)
+        self.assertTrue(all(command[0] in ('git','readlink','systemctl') for command in commands))
+
+    def test_chained_native_base_rejects_changed_activation_identity_service_or_private_namespace(self):
+        value,_,_,_,upgrade,commands,control=self.upgraded_native_base_fixture()
+        saved=json.loads((control/'plan.json').read_text())
+        for field,changed in (('base_revision','9'*40),('base_plan_sha256','0'*64),
+                              ('identity',{**saved['identity'],'session':'changed'}),
+                              ('desired',{**saved['desired'],'uid':0})):
+            plan={**saved,field:changed};atomic_json(control/'plan.json',plan)
+            selected={**value,'base_plan_sha256':handoff.checksum(plan)}
+            with self.subTest(field=field),self.assertRaises(ValueError):handoff.verify_native_base(upgrade,selected)
+        atomic_json(control/'plan.json',saved)
+        target=control.with_name('original-control');control.rename(target);control.symlink_to(target,target_is_directory=True)
+        with self.assertRaises(ValueError):handoff.verify_native_base(upgrade,value)
+        self.assertEqual(commands,[])
+
+    def test_chained_native_base_requires_qualified_frozen_installed_and_started_evidence(self):
+        value,profile,previous,before,upgrade,commands,control=self.upgraded_native_base_fixture()
+        for name,changed in (('progress',{'version':1,'plan_sha256':value['base_plan_sha256'],'phase':'start-attempted'}),
+                             ('start-attempted',{'plan_sha256':value['base_plan_sha256'],'l1_floor':0}),
+                             ('frozen',{'plan_sha256':'0'*64}),('installed',{'sha256':'0'*64}),
+                             ('report',{'result':'passed','upgrade_plan_sha256':'0'*64})):
+            path=control/(name+'.json');saved=json.loads(path.read_text());atomic_json(path,changed)
+            with self.subTest(name=name),self.assertRaises(ValueError):
+                handoff.admit(upgrade,profile,previous,before,False)
+            atomic_json(path,saved)
+        self.assertEqual(commands,[])
 
     def test_chained_handoff_requires_truthful_parent_callback_qualification(self):
         value,profile,_,_,_,commands=self.chained_fixture()
