@@ -369,15 +369,43 @@ def frozen_coordinator(control,expected):
     return raw
 
 
+def verify_native_base(upgrade,value):
+    if value['base_revision']==upgrade.base.name:
+        require(value['base_plan_sha256']==checksum(upgrade.base_plan),'retained VRF activation base differs')
+        return
+    from native_upgrade import STATE_KEYS,start_floor
+    from continuity_rollout_state import service_dropin
+    require(value['version']==2,'legacy retained VRF receipt cannot replace its activation base')
+    previous=upgrade.parent/value['base_revision'];checked_directory(previous)
+    control=previous/'control';checked_directory(control,private=True)
+    plan=private_json(control/'plan.json');sha256=checksum(plan)
+    require(plan.get('version')==1 and plan.get('kind')=='native-upgrade'
+            and plan.get('source_revision')==previous.name and plan.get('base_revision')==upgrade.base.name
+            and plan.get('base_plan_sha256')==checksum(upgrade.base_plan) and value['base_plan_sha256']==sha256
+            and plan.get('desired')==value['native_before'] and plan.get('identity')==value['identity']
+            and type(plan.get('l1_floor')) is int and plan['l1_floor']>=0,
+            'chained VRF qualified Native base or retained activation lineage differs')
+    require(private_json(control/'progress.json')=={'version':1,'plan_sha256':sha256,'phase':'qualified'}
+            and private_json(control/'frozen.json').get('plan_sha256')==sha256,
+            'chained VRF Native base lacks qualified freeze evidence')
+    start_floor(control/'start-attempted.json',plan)
+    desired=plan['desired'];text=service_dropin(desired['arguments'],*[desired['state_environment'][key] for key in STATE_KEYS])
+    require(private_json(control/'installed.json')=={'sha256':hashlib.sha256(text.encode()).hexdigest()},
+            'chained VRF Native base installation differs')
+    report=private_json(control/'report.json')
+    require(report.get('result')=='passed' and report.get('upgrade_plan_sha256')==sha256,
+            'chained VRF Native base qualification differs')
+
+
 def admit(upgrade,profile,previous,before,carried):
     from native_upgrade import service_spec
     from vrf_relay_profile import JOURNAL, configuration_hash
     value=read_receipt(profile['retained_upgrade_receipt_sha256'])
     checked=verify_controls(value,profile)
+    verify_native_base(upgrade,value)
     worker=profile['configuration']['worker'];signer=profile['configuration']['signer']
     require(upgrade.recovery_slot is None and value['identity']['context']==profile['context']
             and value['identity']['session']==worker['er_session']
-            and value['base_revision']==upgrade.base.name and value['base_plan_sha256']==checksum(upgrade.base_plan)
             and value['new_configuration_sha256']==configuration_hash(profile)
             and value['coordinator_after']['sha256']==worker['coordinator_programdata_sha256']
             and value['retained_policy']==signer['retained_policy'],'retained VRF receipt does not bind this upgrade')
