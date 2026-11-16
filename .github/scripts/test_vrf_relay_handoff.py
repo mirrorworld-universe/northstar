@@ -304,6 +304,95 @@ class HandoffTests(unittest.TestCase):
             atomic_json(path,saved)
         self.assertEqual(commands,[])
 
+    def recovered_callback_fixture(self, continued=False):
+        value,profile,previous,before,upgrade,commands,native_control=self.upgraded_native_base_fixture()
+        checked=handoff.verify_controls(value,profile); root=self.control/'qualification-recovery';root.mkdir(mode=0o700)
+        control=b'\x7fELFqualification-control';control_sha=hashlib.sha256(control).hexdigest()
+        native_plan=json.loads((native_control/'plan.json').read_text())
+        native={'revision':native_plan['source_revision'],'plan_sha256':handoff.checksum(native_plan),'identity':value['identity'],'pid':19}
+        review={'version':1,'kind':'chained-er-pre-request-qualification-recovery','source_revision':'9'*40,
+            'failed_source_revision':value['source_revision'],'original_plan_sha256':checked['plan_sha256'],
+            'original_review_sha256':checked['plan']['review_sha256'],'profile_sha256':'ab'*32,
+            'receipt_sha256':profile['retained_upgrade_receipt_sha256'],'new_control_abi':'devnet-control','new_control_sha256':control_sha,
+            'native':native,'remaining_signer_starts':1,'prior_callback_requests':0,'additional_native_service_actions':0,
+            'additional_program_submission_passes':0,'additional_funding_transactions':0,
+            'continuation':None}
+        if continued:
+            parent_review={**review,'source_revision':'8'*40}
+            parent={'version':1,'kind':review['kind'],'review_sha256':handoff.checksum(parent_review),'review':parent_review}
+            parent_sha=handoff.checksum(parent)
+            atomic_json(root/'plan.json',parent)
+            atomic_json(root/'progress.json',{'version':1,'plan_sha256':parent_sha,'phase':'failed'})
+            atomic_json(root/'failure.json',{'version':1,'plan_sha256':parent_sha,'failure_type':'FileNotFoundError',
+                        'operator_reconciliation_required':True,'automatic_rollback':False,'signer_quarantine_verified':True})
+            atomic_json(self.control/'qualification-recovery.json',{'version':1,'plan_sha256':parent_sha,'source_revision':'8'*40})
+            (root/'control').write_bytes(control);(root/'control').chmod(0o500)
+            review['continuation']={'plan_sha256':parent_sha,'source_revision':'8'*40}
+            root=root/'continuation';root.mkdir(mode=0o700)
+        plan={'version':1,'kind':review['kind'],'review_sha256':handoff.checksum(review),'review':review};sha=handoff.checksum(plan)
+        atomic_json(root/'plan.json',plan)
+        pointer=(root.parent/'continuation.json') if continued else (self.control/'qualification-recovery.json')
+        atomic_json(pointer,{'version':1,'plan_sha256':sha,'source_revision':review['source_revision']})
+        atomic_json(root/'progress.json',{'version':1,'plan_sha256':sha,'phase':'qualified'})
+        (root/'control').write_bytes(control);(root/'control').chmod(0o500)
+        normal=lambda name:{'name':name,'fresh_pda':True,'request_closed':True,'verifier_cpi':True,'callback_output_matches':True}
+        report={'version':2,'result':'passed','plan_sha256':checked['plan_sha256'],'profile_sha256':'ab'*32,
+            'receipt_sha256':profile['retained_upgrade_receipt_sha256'],'context':value['identity']['context'],
+            'session':value['identity']['session'],'program_ids':checked['plan']['review']['program_ids'],
+            'fresh_pda':True,'request_closed':True,'verifier_cpi':True,'callback_output_matches':True,
+            'native_service_actions':0,'program_submission_passes':0,'funding_transactions':0,
+            'signer_recovery_starts':1,'qualification_controller_source_revision':review['source_revision'],
+            'qualification_recovery_plan_sha256':sha,'cases':[normal('fresh-callback'),
+                {'name':'callback-preflight-isolation','pending_intents':0,'consumer_unchanged':True},normal('unrelated-healthy-progress'),
+                {'name':'expiry-and-close','request_closed':True,'pending_intents':0}]}
+        atomic_json(root/'callback-report.json',report);atomic_json(self.control/'callback-report.json',report)
+        atomic_json(self.control/'progress.json',{'version':1,'plan_sha256':checked['plan_sha256'],'phase':'callback-qualified'})
+        evidence={'control':{'sha256':control_sha,'abi':'devnet-control','control_index_sha256':handoff.checksum({'version':1,'pending_programs':[],'records':{}})},
+            'start-attempted':{'remaining_signer_starts':1,'native_service_actions':0,'program_submission_passes':0,'funding_transactions':0},
+            'ready':{'pid':43,'info':{'public_key':profile['configuration']['worker']['vrf_public_key'],
+                'policy_sha256':profile['configuration']['signer']['policy_sha256'],'commitment':'finalized_portal_checkpoint_membership','arbitrary_alpha':False}},
+            'callbacks-attempted':{'original_plan_sha256':checked['plan_sha256'],'cases':[x['name'] for x in report['cases']]},
+            'qualified':{'callback_report_sha256':handoff.checksum(report)}}
+        previous_sha=sha
+        for sequence,name in enumerate(('control','start-attempted','ready','callbacks-attempted','qualified'),1):
+            marker={'version':1,'plan_sha256':sha,'sequence':sequence,'previous_sha256':previous_sha,'evidence':evidence[name]}
+            atomic_json(root/(name+'.json'),marker);previous_sha=handoff.checksum(marker)
+        execute=upgrade.ops.execute
+        def current(command):
+            result=execute(command)
+            return result.replace('MainPID=9\n','MainPID=43\n') if command[0]=='systemctl' else result
+        upgrade.ops.execute=current
+        return value,profile,previous,before,upgrade,commands,root
+
+    def test_carried_profile_requires_qualified_callback_recovery_before_accepting_its_new_signer_pid(self):
+        for continued in (False,True):
+            with self.subTest(continued=continued):
+                value,profile,_,before,upgrade,commands,_=self.recovered_callback_fixture(continued)
+                handoff.admit(upgrade,profile,profile,before,True)
+                self.assertTrue(all(command[0] in ('git','readlink','systemctl') for command in commands))
+
+    def test_signer_recovery_never_relaxes_new_handoff_or_control_artifact_binding(self):
+        value,profile,_,before,upgrade,_,root=self.recovered_callback_fixture(True)
+        with self.assertRaises(ValueError):handoff.admit(upgrade,profile,profile,before,False)
+        path=root/'control';path.chmod(0o700)
+        with self.assertRaises(ValueError):handoff.admit(upgrade,profile,profile,before,True)
+        path.chmod(0o500)
+        marker=root/'ready.json';saved=json.loads(marker.read_text());atomic_json(marker,saved|{'version':True})
+        with self.assertRaises(ValueError):handoff.admit(upgrade,profile,profile,before,True)
+        atomic_json(marker,saved)
+        path.chmod(0o700);path.write_bytes(b'\x7fELFchanged');path.chmod(0o500)
+        with self.assertRaises(ValueError):handoff.admit(upgrade,profile,profile,before,True)
+
+    def test_carried_recovery_rejects_changed_scope_or_missing_qualification_barriers(self):
+        value,profile,_,before,upgrade,_,root=self.recovered_callback_fixture(True)
+        for name in ('ready','start-attempted','qualified','progress'):
+            path=root/(name+'.json');saved=json.loads(path.read_text());atomic_json(path,saved|{'plan_sha256':'0'*64})
+            with self.subTest(name=name),self.assertRaises(ValueError):handoff.admit(upgrade,profile,profile,before,True)
+            atomic_json(path,saved)
+        report=json.loads((self.control/'callback-report.json').read_text())
+        atomic_json(self.control/'callback-report.json',{**report,'funding_transactions':1})
+        with self.assertRaises(ValueError):handoff.admit(upgrade,profile,profile,before,True)
+
     def test_chained_handoff_requires_truthful_parent_callback_qualification(self):
         value,profile,_,_,_,commands=self.chained_fixture()
         path=self.parent_control/'callback-report.json';saved=json.loads(path.read_text())
