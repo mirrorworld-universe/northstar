@@ -82,6 +82,29 @@ pub(super) fn settle_checkpoint<F>(
 where
     F: Fn(&Bank) -> TestResult<bool>,
 {
+    settle_checkpoint_inner(manager, root, asset_complete, true)
+}
+
+pub(super) fn settle_checkpoint_without_restart<F>(
+    manager: &mut crate::Manager,
+    root: &mut Arc<Bank>,
+    asset_complete: F,
+) -> TestResult<CheckpointArtifactV2>
+where
+    F: Fn(&Bank) -> TestResult<bool>,
+{
+    settle_checkpoint_inner(manager, root, asset_complete, false)
+}
+
+fn settle_checkpoint_inner<F>(
+    manager: &mut crate::Manager,
+    root: &mut Arc<Bank>,
+    asset_complete: F,
+    restart_after_partial: bool,
+) -> TestResult<CheckpointArtifactV2>
+where
+    F: Fn(&Bank) -> TestResult<bool>,
+{
     let runtime = manager.runtime.as_ref().ok_or("runtime missing")?;
     if !runtime.seal_checkpoint_if_nonempty() {
         return Err("checkpoint did not seal".into());
@@ -141,7 +164,7 @@ where
         }
         bank.freeze();
         *root = Arc::new(bank);
-        if phase == 2 {
+        if phase == 2 && restart_after_partial {
             let config = manager.config.clone();
             manager.shutdown_runtime();
             *manager = crate::Manager::new(config);

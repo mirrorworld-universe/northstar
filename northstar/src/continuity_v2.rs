@@ -64,6 +64,12 @@ impl CommittedAccountV2 {
         }
     }
 
+    fn matches_bank_prestate(&self, before: &Self) -> bool {
+        // AccountsDb omits zero-lamport accounts. Keep historical tombstone bytes
+        // committed while accepting only the bank's canonical absent-account view.
+        self == before || self.lamports == 0 && *before == Self::empty()
+    }
+
     fn state_value(&self, account: Hash32) -> StateAccountValueV1 {
         StateAccountValueV1 {
             account: Pubkey::new_from_array(account),
@@ -476,11 +482,11 @@ impl CommittedStateV2 {
             if next.frozen.contains_key(key) {
                 return Err(StateErrorV2::Frozen);
             }
-            if next
+            if !next
                 .accounts
                 .get(key)
                 .unwrap_or(&CommittedAccountV2::empty())
-                != before
+                .matches_bank_prestate(before)
             {
                 return Err(StateErrorV2::InvalidPrestate);
             }
@@ -660,6 +666,165 @@ mod tests {
                 cumulative_deposited: total,
             },
         )
+    }
+
+    fn closed_account_fixture() -> (CommittedStateV2, CommittedStateV2, RecordedTransitionV2) {
+        let mut state = CommittedStateV2::new(identity()).unwrap();
+        let deposit = credit(&state, 100_000_000, 100_000_000);
+        state.apply_ingress(&deposit, &[]).unwrap();
+        let payer = state.accounts[&[20; 32]].clone();
+        let created = CommittedAccountV2 {
+            owner: [31; 32],
+            lamports: 1_000_000,
+            data: vec![1, 2, 3],
+            executable: false,
+            rent_epoch: u64::MAX,
+        };
+        let spent = CommittedAccountV2 {
+            lamports: payer.lamports - created.lamports,
+            ..payer.clone()
+        };
+        state
+            .apply_execution(
+                &[
+                    ([20; 32], payer.clone()),
+                    ([30; 32], CommittedAccountV2::empty()),
+                ],
+                &[([20; 32], spent.clone()), ([30; 32], created.clone())],
+            )
+            .unwrap();
+        let base = state.clone();
+        let pre = vec![([20; 32], spent), ([30; 32], created)];
+        let post = vec![
+            ([20; 32], payer),
+            (
+                [30; 32],
+                CommittedAccountV2 {
+                    rent_epoch: u64::MAX,
+                    ..CommittedAccountV2::empty()
+                },
+            ),
+        ];
+        state.apply_execution(&pre, &post).unwrap();
+        let transition = RecordedTransitionV2 {
+            er_slot: 1,
+            before: base.opening().unwrap(),
+            after: state.opening().unwrap(),
+            payload: TransitionPayloadV2::Execution {
+                transaction: vec![1],
+                pre,
+                post,
+                execution_result: vec![],
+                replay: vec![],
+            },
+            readonly_l1_values: vec![],
+            settlement_effects: vec![],
+        };
+        (base, state, transition)
+    }
+
+    #[test]
+    fn regression_v2_closed_account_recreation_preserves_old_roots_and_checkpoint_replay() {
+        let (base, closed, close_transition) = closed_account_fixture();
+        assert_eq!(closed.accounts[&[30; 32]].rent_epoch, u64::MAX);
+        let archived_root = closed.root().unwrap();
+        let mut restored: CommittedStateV2 =
+            borsh::from_slice(&borsh::to_vec(&closed).unwrap()).unwrap();
+        assert_eq!(restored.root().unwrap(), archived_root);
+        let payer = restored.accounts[&[20; 32]].clone();
+        let pre = vec![
+            ([20; 32], payer.clone()),
+            ([30; 32], CommittedAccountV2::empty()),
+        ];
+        let post = vec![
+            (
+                [20; 32],
+                CommittedAccountV2 {
+                    lamports: payer.lamports - 2_000_000,
+                    ..payer
+                },
+            ),
+            (
+                [30; 32],
+                CommittedAccountV2 {
+                    owner: [32; 32],
+                    lamports: 2_000_000,
+                    data: vec![4, 5],
+                    executable: false,
+                    rent_epoch: u64::MAX,
+                },
+            ),
+        ];
+        restored.apply_execution(&pre, &post).unwrap();
+        assert_eq!(closed.root().unwrap(), archived_root);
+        assert_eq!(restored.origins[&[30; 32]], AccountOriginV2::ErCreated);
+        let recreated = RecordedTransitionV2 {
+            er_slot: 2,
+            before: closed.opening().unwrap(),
+            after: restored.opening().unwrap(),
+            payload: TransitionPayloadV2::Execution {
+                transaction: vec![2],
+                pre,
+                post,
+                execution_result: vec![],
+                replay: vec![],
+            },
+            readonly_l1_values: vec![],
+            settlement_effects: vec![],
+        };
+        let artifact = crate::checkpoint_v2::build_checkpoint_artifact_v2(
+            &base,
+            2,
+            &[close_transition, recreated.clone()],
+        )
+        .unwrap();
+        artifact.validate().unwrap();
+        let mut replay = closed.clone();
+        recreated.apply(&mut replay).unwrap();
+        assert_eq!(replay, restored);
+    }
+
+    #[test]
+    fn regression_v2_empty_bank_prestate_does_not_hide_live_accounts_or_changed_metadata() {
+        let (_, closed, _) = closed_account_fixture();
+        for before in [
+            CommittedAccountV2 {
+                owner: [9; 32],
+                ..CommittedAccountV2::empty()
+            },
+            CommittedAccountV2 {
+                data: vec![1],
+                ..CommittedAccountV2::empty()
+            },
+            CommittedAccountV2 {
+                executable: true,
+                ..CommittedAccountV2::empty()
+            },
+            CommittedAccountV2 {
+                rent_epoch: 1,
+                ..CommittedAccountV2::empty()
+            },
+            CommittedAccountV2 {
+                lamports: 1,
+                ..CommittedAccountV2::empty()
+            },
+        ] {
+            let mut state = closed.clone();
+            assert_eq!(
+                state.apply_execution(&[([30; 32], before.clone())], &[([30; 32], before)]),
+                Err(StateErrorV2::InvalidPrestate)
+            );
+            assert_eq!(state, closed);
+        }
+        let mut state = closed.clone();
+        assert_eq!(
+            state.apply_execution(
+                &[([20; 32], CommittedAccountV2::empty())],
+                &[([20; 32], CommittedAccountV2::empty())]
+            ),
+            Err(StateErrorV2::InvalidPrestate)
+        );
+        assert_eq!(state, closed);
     }
 
     #[test]
