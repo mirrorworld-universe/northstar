@@ -12,7 +12,7 @@ if [[ ! $npm_version =~ ^11\. ]]; then
   echo "Pinned continuity SDK requires npm 11 (validated with Node 24.21.0); found $npm_version" >&2
   exit 2
 fi
-revision=ea732d51f71f62e6fe46c77eaf781b9474b00508
+revision=92296fe0166a7cbe8a8221055e43caec11fa5545
 lock=78697b65487a7c5932151165ec887b37246e25a3571af752b8c151cc636cd00c
 checkout=$1
 git init --quiet "$checkout"

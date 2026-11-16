@@ -10,7 +10,7 @@ import { ControlJournal, atomicPrivateJson, readPrivateJson } from './continuity
 
 const DEVNET = 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG';
 const MAINNET = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d';
-const SDK_REVISION = 'ea732d51f71f62e6fe46c77eaf781b9474b00508';
+const SDK_REVISION = '92296fe0166a7cbe8a8221055e43caec11fa5545';
 export const sameMetadata = isDeepStrictEqual;
 function requireValue(condition, message) { if (!condition) throw new Error(message); }
 function hex(value) { return Buffer.from(value).toString('hex'); }

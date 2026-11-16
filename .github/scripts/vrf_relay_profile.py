@@ -57,7 +57,7 @@ def validate(profile, identity, genesis, l1_rpc, er_rpc):
             and type(worker.get("max_attempts")) is int and 1<=worker["max_attempts"]<=2
             and type(worker.get("max_records")) is int and 1<=worker["max_records"]<=128,"relay callback/delivery policy differs")
     signer_fields={"url","bearer_token_file","policy_sha256"}
-    require(isinstance(signer,dict) and signer_fields<=set(signer)<=signer_fields|{'retained_policy'}
+    require(isinstance(signer,dict) and signer_fields<=set(signer)<=signer_fields|{'retained_policy','historical_policy_sha256'}
             and signer["url"]=="http://127.0.0.1:9030" and signer["bearer_token_file"]==CREDENTIALS+"vrf-relay-bearer"
             and isinstance(signer["policy_sha256"],str) and re.fullmatch("[0-9a-f]{64}",signer["policy_sha256"]),"isolated signer binding differs")
     retained='retained_policy' in signer
@@ -72,6 +72,12 @@ def validate(profile, identity, genesis, l1_rpc, er_rpc):
                 'retained relay binding differs')
         require(isinstance(profile['retained_upgrade_receipt_sha256'],str)
                 and re.fullmatch('[0-9a-f]{64}',profile['retained_upgrade_receipt_sha256']),'retained relay receipt digest differs')
+    if 'historical_policy_sha256' in signer:
+        history=signer['historical_policy_sha256']
+        require(retained and isinstance(history,list) and 1<=len(history)<=16
+                and all(isinstance(value,str) and re.fullmatch('[0-9a-f]{64}',value) and value!='0'*64 for value in history)
+                and len(set(history))==len(history) and signer['policy_sha256'] not in history
+                and signer['retained_policy']['policy_sha256'] not in history,'historical receipt policy scope differs')
     for name in ("coordinator_programdata_sha256","verifier_programdata_sha256"):
         require(re.fullmatch("[0-9a-f]{64}",worker.get(name,"")),"relay program digest differs")
     return config
@@ -83,14 +89,24 @@ def retained_transition(previous,profile):
     if previous is None:
         require(retained is None,'retained relay requires a qualified previous profile')
         return False
-    require(retained is not None and 'retained_policy' not in previous['configuration']['signer'],
-            'active relay changes require a supported retained handoff')
+    require(retained is not None,'active relay changes require a supported retained handoff')
     old=previous['configuration'];current=profile['configuration']
-    expected_binding={'policy_sha256':old['signer']['policy_sha256'],
-                      'coordinator_programdata_sha256':old['worker']['coordinator_programdata_sha256']}
+    expected_binding=old['signer'].get('retained_policy') or {
+        'policy_sha256':old['signer']['policy_sha256'],
+        'coordinator_programdata_sha256':old['worker']['coordinator_programdata_sha256']}
+    history=old['signer'].get('historical_policy_sha256',[])
+    require(isinstance(history,list),'prior historical receipt policy schema differs')
+    history=list(history)
+    if old['signer']['policy_sha256']!=expected_binding['policy_sha256']:history.append(old['signer']['policy_sha256'])
+    require(len(history)<=16 and len(set(history))==len(history)
+            and current['signer']['policy_sha256'] not in [expected_binding['policy_sha256'],*history]
+            and current['worker']['coordinator_programdata_sha256']!=old['worker']['coordinator_programdata_sha256'],
+            'retained handoff cannot repeat or restore a previous policy')
+    signer={**old['signer'],'policy_sha256':current['signer']['policy_sha256'],'retained_policy':expected_binding}
+    if history:signer['historical_policy_sha256']=history
     expected={**previous,'retained_upgrade_receipt_sha256':profile.get('retained_upgrade_receipt_sha256'),
         'configuration':{**old,'worker':{**old['worker'],'coordinator_programdata_sha256':current['worker']['coordinator_programdata_sha256']},
-            'signer':{**old['signer'],'policy_sha256':current['signer']['policy_sha256'],'retained_policy':expected_binding}}}
+            'signer':signer}}
     require(profile==expected and retained==expected_binding,'retained relay handoff changed delivery or authority scope')
     return False
 

@@ -26,6 +26,10 @@ FIELDS = {
     'native_service_actions','funding_transactions','program_submission_passes','signer_starts',
 }
 
+CHAIN_FIELDS = {'generation','parent_receipt_sha256','parent_profile_sha256','historical_policy_sha256'}
+BARRIERS = ('artifacts','stop-attempted','frozen','upload-attempted','uploaded','configured','relay-frozen',
+            'install-attempted','installed','start-attempted','ready')
+
 
 def checksum(value):
     return hashlib.sha256(canonical(value)).hexdigest()
@@ -40,8 +44,16 @@ def revision(value):
 
 
 def validate_receipt(value):
-    require(isinstance(value,dict) and set(value)==FIELDS and type(value['version']) is int and value['version']==1
+    require(isinstance(value,dict) and type(value.get('version')) is int and value['version'] in (1,2)
+            and set(value)==(FIELDS|CHAIN_FIELDS if value['version']==2 else FIELDS)
             and value['kind']=='retained-er-vrf-handoff' and value['result']=='passed','retained VRF handoff schema differs')
+    if value['version']==2:
+        history=value['historical_policy_sha256'];generation=value['generation']
+        require(type(generation) is int and 2<=generation<=17
+                and all(sha(value[name]) and value[name]!='0'*64 for name in ('parent_receipt_sha256','parent_profile_sha256'))
+                and isinstance(history,list) and len(history)==generation-1
+                and all(sha(item) and item!='0'*64 for item in history) and len(set(history))==len(history),
+                'retained handoff parent or bounded history differs')
     for name in ('source_revision','relay_source_revision','target_native_revision','base_revision'):
         require(revision(value[name]),'retained VRF source binding differs')
     for name in ('base_plan_sha256','old_configuration_sha256','new_configuration_sha256','coordinator_elf_sha256','relay_journal_sha256'):
@@ -75,7 +87,10 @@ def validate_receipt(value):
             and 0<=config['max_callback_compute']<=1_200_000,'retained Coordinator deadline budget differs')
     retained=value['retained_policy']
     require(isinstance(retained,dict) and set(retained)=={'policy_sha256','coordinator_programdata_sha256'}
-            and all(sha(digest) for digest in retained.values()) and retained['coordinator_programdata_sha256']==before['sha256'],
+            and all(sha(digest) for digest in retained.values())
+            and (retained['coordinator_programdata_sha256']==before['sha256'] if value['version']==1 else
+                 retained['coordinator_programdata_sha256'] not in (before['sha256'],after['sha256'])
+                 and retained['policy_sha256'] not in value['historical_policy_sha256']),
             'retained policy root differs')
     identity=value['identity']
     require(isinstance(identity,dict) and identity.get('version')==2 and identity.get('genesis')==DEVNET
@@ -224,8 +239,16 @@ def verify_continuation(control,plan_sha,evidence,value,profile,original_plan):
             'unreviewed Native reconciliation evidence is present')
 
 
-def verify_controls(value,profile):
-    state=ROOT.parent;control=state/'retained-upgrades'/value['source_revision']
+def verify_controls(value,profile,ancestry=()):
+    validate_receipt(value)
+    current_sha=checksum(value)
+    require(current_sha not in ancestry and len(ancestry)<17,'retained handoff ancestry is cyclic or exceeds bounds')
+    state=ROOT.parent
+    chained=value['version']==2
+    if chained:
+        state=state/'retained-upgrade-rounds'/str(value['generation'])
+        checked_directory(state.parent,private=True);checked_directory(state,private=True)
+    control=state/'retained-upgrades'/value['source_revision']
     checked_directory(control,private=True)
     plan=private_json(control/'plan.json');plan_sha=checksum(plan)
     require(isinstance(plan,dict) and set(plan)=={'version','kind','review_sha256','review'}
@@ -243,12 +266,16 @@ def verify_controls(value,profile):
                 'verifier':worker['verifier'],'portal':value['identity']['portal']}
             and review.get('quote',{}).get('peak_lamports')==value['peak_lamports']
             and review.get('quote',{}).get('funding_transactions')==0,'retained handoff plan scope differs')
-    evidence={}
-    for name in ('artifacts','stop-attempted','frozen','upload-attempted','uploaded','configured','relay-frozen',
-                 'install-attempted','installed','start-attempted','ready'):
+    evidence={};previous_sha=plan_sha
+    for sequence,name in enumerate(BARRIERS,1):
         marker=private_json(control/(name+'.json'))
-        require(isinstance(marker,dict) and set(marker)=={'version','plan_sha256','evidence'} and marker['version']==1
+        fields={'version','plan_sha256','evidence'}|({'sequence','previous_sha256'} if chained else set())
+        require(isinstance(marker,dict) and set(marker)==fields and marker['version']==(2 if chained else 1)
                 and marker['plan_sha256']==plan_sha and isinstance(marker['evidence'],dict),'retained handoff durable barrier differs')
+        if chained:
+            require(type(marker['sequence']) is int and marker['sequence']==sequence
+                    and marker['previous_sha256']==previous_sha,'retained handoff barrier hash chain differs')
+            previous_sha=checksum(marker)
         evidence[name]=marker['evidence']
     require(evidence['uploaded'].get('view')==value['coordinator_after']
             and evidence['configured'].get('configuration')==value['coordinator_config']
@@ -256,6 +283,11 @@ def verify_controls(value,profile):
             and evidence['artifacts'].get('sha256',{}).get('signer')==value['signer']['binary_sha256']
             and evidence['artifacts'].get('original_policy_sha256')==value['retained_policy']['policy_sha256'],
             'retained handoff program or frozen artifact evidence differs')
+    if chained:
+        require(evidence['artifacts'].get('sha256',{}).get('coordinator')==value['coordinator_elf_sha256']
+                ==review.get('target_program_manifest',{}).get('programs',{}).get('vrf_coordinator.so')
+                and review.get('target_program_manifest',{}).get('coordinator_features')==['er'],
+                'chained handoff lacks the frozen explicit-ER Coordinator artifact binding')
     installed=evidence['installed'];ready=evidence['ready']
     require(installed.get('source_revision')==value['source_revision']
             and all(installed.get(name)==value['signer'][name] for name in ('binary_sha256','configuration_sha256','unit_sha256'))
@@ -268,14 +300,80 @@ def verify_controls(value,profile):
     require(report.get('result')=='passed' and report.get('receipt_sha256')==profile['retained_upgrade_receipt_sha256']
             and type(report.get('native_service_actions')) is int and report['native_service_actions']==0
             and report.get('callback_qualified') is False,'retained handoff report differs')
-    verify_continuation(control,plan_sha,evidence,value,profile,plan)
+    if chained:
+        require(not os.path.lexists(control/'failure.json') and not os.path.lexists(control/'continuation.json'),
+                'failed chained handoff requires separate operator reconciliation')
+        verify_chain_parent(value,profile,control,plan,(*ancestry,current_sha))
+    else:
+        verify_continuation(control,plan_sha,evidence,value,profile,plan)
+    return {'plan':plan,'plan_sha256':plan_sha,'evidence':evidence,'report':report,'control':control}
+
+
+def verify_chain_parent(value,profile,control,plan,ancestry):
+    from vrf_relay_profile import configuration_hash,retained_transition
+    chain=plan['review'].get('handoff_chain')
+    fields={'generation','parent_generation','parent_receipt_sha256','parent_profile_sha256','parent_plan_sha256','parent_profile'}
+    require(isinstance(chain,dict) and set(chain)==fields and chain['generation']==value['generation']
+            and type(chain['parent_generation']) is int and chain['parent_generation']==value['generation']-1
+            and chain['parent_receipt_sha256']==value['parent_receipt_sha256']
+            and chain['parent_profile_sha256']==value['parent_profile_sha256']
+            and sha(chain['parent_plan_sha256']),'retained handoff parent plan binding differs')
+    old=private_json(control/'old-profile.json')
+    require(old==chain['parent_profile'] and checksum(old)==value['parent_profile_sha256']
+            and old.get('retained_upgrade_receipt_sha256')==value['parent_receipt_sha256'],
+            'retained handoff staged parent profile differs')
+    parent=read_receipt(value['parent_receipt_sha256'])
+    require(parent.get('generation',1)==chain['parent_generation'] and parent['identity']==value['identity']
+            and parent['er_genesis']==value['er_genesis'] and parent['retained_policy']==value['retained_policy']
+            and parent['coordinator_after']==value['coordinator_before']
+            and parent['new_configuration_sha256']==value['old_configuration_sha256']==configuration_hash(old)
+            and configuration_hash(profile)==value['new_configuration_sha256']
+            and profile['configuration']['signer'].get('retained_policy')==value['retained_policy']
+            and profile['configuration']['signer'].get('historical_policy_sha256')==value['historical_policy_sha256'],
+            'retained handoff changed origin, context, or prior code binding')
+    require(retained_transition(old,profile) is False,'retained handoff does not extend the exact prior policy')
+    checked=verify_controls(parent,old,ancestry)
+    require(checked['plan_sha256']==chain['parent_plan_sha256'],'qualified parent control plan differs')
+    qualification=qualified_parent(parent,old,checked,plan['review'].get('original_profile_sha256'))
+    require(checksum(qualification)==plan['review'].get('parent_callback_report_sha256'),
+            'qualified parent callback evidence changed')
+
+
+def qualified_parent(value,profile,checked,profile_sha256):
+    require(sha(profile_sha256),'qualified parent profile artifact digest required')
+    control=checked['control'];plan_sha=checked['plan_sha256']
+    require(private_json(control/'progress.json')=={'version':1,'plan_sha256':plan_sha,'phase':'callback-qualified'},
+            'parent callback qualification is absent')
+    report=private_json(control/'callback-report.json')
+    require(report.get('result')=='passed' and report.get('plan_sha256')==plan_sha
+            and report.get('profile_sha256')==profile_sha256
+            and report.get('receipt_sha256')==profile.get('retained_upgrade_receipt_sha256')
+            and report.get('context')==value['identity']['context'] and report.get('session')==value['identity']['session']
+            and report.get('program_ids')==checked['plan']['review']['program_ids']
+            and all(report.get(name) is True for name in ('fresh_pda','request_closed','verifier_cpi','callback_output_matches'))
+            and all(type(report.get(name)) is int and report[name]==0 for name in ('native_service_actions','program_submission_passes','funding_transactions')),
+            'parent fresh-callback qualification does not bind retained state')
+    return report
+
+
+def frozen_coordinator(control,expected):
+    descriptor=os.open(control/'artifacts/coordinator',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(descriptor,'rb') as stream:
+        metadata=os.fstat(stream.fileno())
+        require(stat.S_ISREG(metadata.st_mode) and metadata.st_uid==os.getuid()
+                and stat.S_IMODE(metadata.st_mode)==0o600 and 0<metadata.st_size<=2*1024*1024,
+                'frozen Coordinator artifact namespace differs')
+        raw=stream.read(2*1024*1024+1)
+    require(len(raw)==metadata.st_size and raw.startswith(b'\x7fELF')
+            and hashlib.sha256(raw).hexdigest()==expected,'frozen Coordinator artifact content differs')
+    return raw
 
 
 def admit(upgrade,profile,previous,before,carried):
     from native_upgrade import service_spec
     from vrf_relay_profile import JOURNAL, configuration_hash
     value=read_receipt(profile['retained_upgrade_receipt_sha256'])
-    verify_controls(value,profile)
+    checked=verify_controls(value,profile)
     worker=profile['configuration']['worker'];signer=profile['configuration']['signer']
     require(upgrade.recovery_slot is None and value['identity']['context']==profile['context']
             and value['identity']['session']==worker['er_session']
@@ -302,6 +400,10 @@ def admit(upgrade,profile,previous,before,carried):
     require(data is not None and data['owner']==LOADER and not data['executable'] and len(data['raw'])>45
             and data['raw'][:4]==(3).to_bytes(4,'little') and int.from_bytes(data['raw'][4:12],'little')==view['deployment_slot']
             and hashlib.sha256(data['raw']).hexdigest()==view['sha256'],'retained Coordinator finalized code differs')
+    if value['version']==2:
+        image=frozen_coordinator(checked['control'],value['coordinator_elf_sha256'])
+        require(data['raw'][45:45+len(image)]==image and not any(data['raw'][45+len(image):]),
+                'finalized Coordinator does not match the frozen reviewed ELF')
     config=value['coordinator_config'];account=upgrade.ops.upstream.account(config['address'])
     require(account is not None and account['owner']==worker['coordinator'] and not account['executable']
             and len(account['raw'])==360 and hashlib.sha256(account['raw']).hexdigest()==config['sha256'],
