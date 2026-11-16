@@ -495,8 +495,10 @@ def qualified_recovery_signer_pid(upgrade,value,profile,checked,carried):
     native=review.get('native',{})
     require(revision(native.get('revision')) and sha(native.get('plan_sha256')) and native.get('identity')==value['identity']
             and type(native.get('pid')) is int and native['pid']>0,'carried signer recovery Native identity differs')
-    checked_directory(upgrade.parent,private=True)
-    checked_directory(upgrade.parent/native['revision'],private=True)
+    for directory in (upgrade.parent,upgrade.parent/native['revision']):
+        checked_directory(directory)
+        require(stat.S_IMODE(directory.lstat().st_mode) in (0o700,0o711),
+                'qualified Native upgrade ancestor is not private or traversal-only')
     checked_directory(upgrade.parent/native['revision']/'control',private=True)
     saved=private_json(upgrade.parent/native['revision']/'control/plan.json')
     verify_native_base(upgrade,{'version':2,'base_revision':native['revision'],'base_plan_sha256':native['plan_sha256'],
