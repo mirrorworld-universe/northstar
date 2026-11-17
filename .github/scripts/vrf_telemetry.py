@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import pwd
 import re
 import selectors
 import shlex
@@ -26,6 +25,9 @@ MAX_LOG_BYTES = 8 * 1024 * 1024
 MAX_LOG_ENTRIES = 8192
 MAX_EVENTS = 128
 MAX_U64 = (1 << 64) - 1
+FAILURE_CODES = {'stderr_namespace', 'stderr_file_deleted', 'stderr_file_identity', 'stderr_file_writable', 'stderr_inode_mismatch',
+                 'stderr_changed_during_sample', 'qualified_native_record', 'native_binary_namespace', 'native_binary_digest',
+                 'effective_native_command', 'installed_relay_configuration', 'public_binding_schema'}
 
 
 def require(condition, reason):
@@ -174,25 +176,23 @@ def journal_events(start, end, prefix='', after_cursor=None, namespace=''):
 def effective_stderr(binding):
     proc = '/proc/' + str(binding['validator_pid']) + '/fd/2'; metadata = os.stat(proc)
     if not stat.S_ISREG(metadata.st_mode): return None
-    path = Path(os.readlink(proc)); owner = binding['native_owner_uid']; group = binding['native_owner_gid']
-    home = Path(pwd.getpwuid(owner).pw_dir)
-    require(home.is_absolute() and home.is_relative_to('/home'), 'native_home_namespace')
-    require(path.is_absolute() and len(str(path)) <= 4096 and not str(path).endswith(' (deleted)')
-            and all(part not in ('.', '..') and not any(ord(char) < 32 for char in part) for part in path.parts)
-            and any(path.is_relative_to(root) for root in (Path('/solana'), Path('/var/log'), home)), 'stderr_namespace')
+    path = Path(os.readlink(proc)); owner = binding['native_owner_uid']
+    require(not str(path).endswith(' (deleted)'), 'stderr_file_deleted')
+    require(path.is_absolute() and len(path.parts) > 1 and len(str(path)) <= 4096
+            and path.parts[1] not in ('proc', 'sys', 'dev', 'etc', 'run')
+            and all(part not in ('.', '..') and not any(ord(char) < 32 for char in part) for part in path.parts), 'stderr_namespace')
     parent = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         for component in path.parts[1:-1]:
             child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
-            os.close(parent); parent = child; info = os.fstat(parent)
-            require(info.st_uid in (0, owner) and not info.st_mode & 0o002
-                    and (not info.st_mode & 0o020 or info.st_gid in (0, group)), 'stderr_parent_namespace')
+            os.close(parent); parent = child
         descriptor = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
     finally: os.close(parent)
     try:
         info = os.fstat(descriptor)
-        require(stat.S_ISREG(info.st_mode) and info.st_uid in (0, owner) and info.st_nlink == 1 and not info.st_mode & 0o022
-                and (info.st_dev, info.st_ino) == (metadata.st_dev, metadata.st_ino), 'effective_stderr_binding')
+        require(stat.S_ISREG(info.st_mode) and info.st_uid in (0, owner) and info.st_nlink == 1, 'stderr_file_identity')
+        require(not info.st_mode & 0o022, 'stderr_file_writable')
+        require((info.st_dev, info.st_ino) == (metadata.st_dev, metadata.st_ino), 'stderr_inode_mismatch')
         return descriptor, checksum({'path': str(path), 'device': info.st_dev, 'inode': info.st_ino})
     except BaseException:
         os.close(descriptor); raise
@@ -442,8 +442,11 @@ def main():
     try:
         result = sample(args.native_revision, args.profile_sha256, args.since, args.until, args.request_prefix, args.after_cursor,
                         args.full_hash, args.stderr_cursor, args.initialize_stderr)
-    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
-        print(json.dumps({'version': 1, 'read_only': True, 'status': 'unavailable', 'reason': 'binding_or_namespace', 'raw_messages_included': False}))
+    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as error:
+        reason = str(error) if isinstance(error, ValueError) and str(error) in FAILURE_CODES else 'binding_or_namespace'
+        print(json.dumps({'version': 1, 'read_only': True, 'status': 'unavailable', 'reason': reason,
+                          'error_type': type(error).__name__, 'errno': error.errno if isinstance(error, OSError) else None,
+                          'raw_messages_included': False}))
         return 1
     print(json.dumps(result, separators=(',', ':')))
     return 0

@@ -21,6 +21,11 @@ qualification workflow accepts only a tooling-only Native tree difference.
 The effective stderr FD is inspected, rather than assuming that systemd's sink mode
 matches a logger's later FD redirection. A regular file is read only through validated,
 no-follow namespace components and an inode matching the running process's FD 2.
+File ownership, non-writable group/other mode, link count, and the effective descriptor
+provide the binding; shared storage parents need not themselves be private. Directory
+symlinks remain rejected. Pseudo-filesystem and runtime-credential roots are excluded.
+Failures expose only allowlisted reason codes, exception class, and numeric errno, never
+raw exception text or paths.
 
 The output contains public request addresses, event kind, observed slot, timestamp,
 expiry flag, and whether the simulation returned an error. It never contains the raw

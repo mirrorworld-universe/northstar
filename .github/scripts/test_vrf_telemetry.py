@@ -1,7 +1,10 @@
 import hashlib
+import io
 import json
 import os
 import shlex
+import sys
+from contextlib import redirect_stdout
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import tempfile
@@ -196,6 +199,20 @@ class FileStreamCursor(unittest.TestCase):
         start, end = telemetry.parse_window('2026-11-17T11:33:06.953001Z', '2026-11-17T11:33:06.953002Z')
         self.assertEqual(end - start, 1); self.assertEqual(start % 1_000_000, 953001)
 
+    def test_effective_inode_binding_supports_an_append_file_under_a_shared_parent(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            root = Path(directory); root.chmod(0o777)
+            path = root / 'stderr'; path.write_bytes(b'event\n'); path.chmod(0o600)
+            source = path.stat(); real_stat = os.stat
+            def observed(name, *args, **kwargs): return source if str(name) == '/proc/123/fd/2' else real_stat(name, *args, **kwargs)
+            binding = {'validator_pid': 123, 'native_owner_uid': os.getuid(), 'native_owner_gid': os.getgid()}
+            with patch.object(telemetry.os, 'stat', side_effect=observed), patch.object(telemetry.os, 'readlink', return_value=str(path)):
+                descriptor, _ = telemetry.effective_stderr(binding)
+                try: self.assertEqual(os.read(descriptor, 6), b'event\n')
+                finally: os.close(descriptor)
+                path.chmod(0o666)
+                with self.assertRaisesRegex(ValueError, '^stderr_file_writable$'): telemetry.effective_stderr(binding)
+
     def test_effective_stderr_does_not_follow_a_symlink_parent(self):
         with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
             root = Path(directory); actual = root / 'actual'; actual.mkdir(mode=0o700)
@@ -207,6 +224,21 @@ class FileStreamCursor(unittest.TestCase):
             with patch.object(telemetry.os, 'stat', side_effect=observed), patch.object(telemetry.os, 'readlink', return_value=str(root / 'alias/stderr')), \
                  self.assertRaises((OSError, ValueError)):
                 telemetry.effective_stderr(binding)
+
+
+class SafeFailureEvidence(unittest.TestCase):
+    def test_only_allowlisted_failure_codes_and_errno_are_public(self):
+        arguments = ['vrf_telemetry.py', '--native-revision', 'a' * 40, '--profile-sha256', 'b' * 64,
+                     '--since', '2026-11-17T10:00:00Z', '--until', '2026-11-17T10:00:01Z']
+        for error, reason in [(ValueError('stderr_file_writable'), 'stderr_file_writable'),
+                              (ValueError('untrusted diagnostic text'), 'binding_or_namespace'),
+                              (PermissionError(13, 'private path must not be disclosed'), 'binding_or_namespace')]:
+            output = io.StringIO()
+            with patch.object(sys, 'argv', arguments), patch.object(telemetry, 'sample', side_effect=error), redirect_stdout(output):
+                self.assertEqual(telemetry.main(), 1)
+            value = json.loads(output.getvalue()); self.assertEqual(value['reason'], reason)
+            self.assertNotIn('private path', output.getvalue()); self.assertNotIn('untrusted diagnostic', output.getvalue())
+            if isinstance(error, OSError): self.assertEqual(value['errno'], 13)
 
 
 class QualifiedNativeBinding(unittest.TestCase):
