@@ -18,6 +18,10 @@ Native and telemetry source revisions are intentionally distinct. Installing thi
 Python tool does not require a Native restart or a release promotion. The private
 qualification workflow accepts only a tooling-only Native tree difference.
 
+The effective stderr FD is inspected, rather than assuming that systemd's sink mode
+matches a logger's later FD redirection. A regular file is read only through validated,
+no-follow namespace components and an inode matching the running process's FD 2.
+
 The output contains public request addresses, event kind, observed slot, timestamp,
 expiry flag, and whether the simulation returned an error. It never contains the raw
 error, journal message, command line, account contents, transaction bytes, or credentials.
@@ -34,7 +38,16 @@ Dispatch **VRF relay telemetry (read-only)** on `master` with:
 For example, the reported preflight-isolation interval can be inspected using
 `2026-11-17T01:44:00Z` through `2026-11-17T01:59:00Z` and prefix `3s5CG3`.
 A matching structured event is positive pre-dispatch evidence. External callback
-outcomes alone do not establish that simulation occurred.
+outcomes alone do not establish that simulation occurred. File-backed stderr events
+without their own timestamps are explicitly returned as a limited retained-tail query;
+the requested historical UTC window is not asserted and no event timestamp is invented.
+
+For live collection, an explicit EOF fence creates an opaque, metadata-only file cursor.
+Subsequent reads bind the invocation, device, inode, offset, and exact observation interval.
+Partial lines are revisited without copying log text into the cursor. A changed file,
+truncation, restart, skipped interval, or budget limit cannot silently become complete
+coverage. Live file-event timestamps describe the observation interval, not source time.
+Both private cursor formats are removed from public workflow artifacts.
 
 The query has fixed byte, entry, event, and elapsed-time limits. An unavailable sink,
 failed journal query, or exceeded limit is explicit; unavailable counts are `null`,

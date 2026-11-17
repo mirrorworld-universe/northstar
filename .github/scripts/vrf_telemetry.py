@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Sonic: Bounded, read-only ER relay telemetry; never signing or service control."""
 import argparse
+import base64
 from datetime import datetime, timezone
 import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import selectors
 import shlex
@@ -68,7 +70,11 @@ def parse_window(start, end):
     left, right = (datetime.fromisoformat(value[:-1] + '+00:00') for value in (start, end))
     require(left.tzinfo == timezone.utc and right.tzinfo == timezone.utc and 0 < (right - left).total_seconds() <= 26 * 3600,
             'bounded_window')
-    return int(left.timestamp() * 1_000_000), int(right.timestamp() * 1_000_000)
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    def micros(value):
+        delta = value - epoch
+        return (delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds
+    return micros(left), micros(right)
 
 
 def unavailable_events(reason):
@@ -165,6 +171,102 @@ def journal_events(start, end, prefix='', after_cursor=None, namespace=''):
     return result
 
 
+def effective_stderr(binding):
+    proc = '/proc/' + str(binding['validator_pid']) + '/fd/2'; metadata = os.stat(proc)
+    if not stat.S_ISREG(metadata.st_mode): return None
+    path = Path(os.readlink(proc)); owner = binding['native_owner_uid']; group = binding['native_owner_gid']
+    home = Path(pwd.getpwuid(owner).pw_dir)
+    require(home.is_absolute() and home.is_relative_to('/home'), 'native_home_namespace')
+    require(path.is_absolute() and len(str(path)) <= 4096 and not str(path).endswith(' (deleted)')
+            and all(part not in ('.', '..') and not any(ord(char) < 32 for char in part) for part in path.parts)
+            and any(path.is_relative_to(root) for root in (Path('/solana'), Path('/var/log'), home)), 'stderr_namespace')
+    parent = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for component in path.parts[1:-1]:
+            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            os.close(parent); parent = child; info = os.fstat(parent)
+            require(info.st_uid in (0, owner) and not info.st_mode & 0o002
+                    and (not info.st_mode & 0o020 or info.st_gid in (0, group)), 'stderr_parent_namespace')
+        descriptor = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    finally: os.close(parent)
+    try:
+        info = os.fstat(descriptor)
+        require(stat.S_ISREG(info.st_mode) and info.st_uid in (0, owner) and info.st_nlink == 1 and not info.st_mode & 0o022
+                and (info.st_dev, info.st_ino) == (metadata.st_dev, metadata.st_ino), 'effective_stderr_binding')
+        return descriptor, checksum({'path': str(path), 'device': info.st_dev, 'inode': info.st_ino})
+    except BaseException:
+        os.close(descriptor); raise
+
+
+def file_events(descriptor, source, invocation, start, end, prefix='', cursor=None, initialize=False):
+    start_us, end_us = parse_window(start, end); info = os.fstat(descriptor)
+    result = {'version': 1, 'source': 'effective-stderr-file', 'status': 'observed', 'coverage_complete': True,
+              'counts': {'simulation_rejected': 0, 'simulation_unavailable': 0}, 'events': [], 'unique_requests': 0,
+              'raw_messages_included': False, 'timestamp_source': 'observed_offset_interval', 'requested_window_applied': False}
+    historical = cursor is None and not initialize; line_start = True
+    if cursor is not None:
+        try:
+            require(isinstance(cursor, str) and re.fullmatch('[A-Za-z0-9_-]{1,1024}', cursor), 'stderr_cursor')
+            saved = json.loads(base64.urlsafe_b64decode(cursor + '=' * (-len(cursor) % 4)))
+            require(isinstance(saved, dict) and set(saved) == {'version', 'source', 'invocation', 'device', 'inode', 'offset', 'until_us', 'line_start'}
+                    and type(saved['version']) is int and saved['version'] == 1 and saved['source'] == source and saved['invocation'] == invocation
+                    and integer(saved['device']) and saved['device'] == info.st_dev and integer(saved['inode']) and saved['inode'] == info.st_ino
+                    and integer(saved['offset']) and saved['offset'] <= info.st_size and integer(saved['until_us'])
+                    and saved['until_us'] + 1 == start_us and type(saved['line_start']) is bool, 'stderr_cursor_binding')
+            offset = saved['offset']; line_start = saved['line_start']
+        except (ValueError, TypeError, KeyError):
+            return {**unavailable_events('stderr_cursor_resync'), 'resync_required': True, 'source': 'effective-stderr-file'}
+    elif initialize:
+        offset = info.st_size
+        if offset:
+            os.lseek(descriptor, offset - 1, os.SEEK_SET); line_start = os.read(descriptor, 1) == b'\n'
+        result.update(status='initialized', scope='Initial EOF fence; no historical coverage asserted')
+    else:
+        offset = max(0, info.st_size - MAX_LOG_BYTES); line_start = offset == 0
+        result.update(status='limited', coverage_complete=False, limit='source_timestamps_unavailable', timestamp_source='unavailable',
+                      scope='Retained file tail only; UTC event time cannot be established')
+    identities = set(); consumed = 0; started = time.monotonic()
+    if not initialize:
+        os.lseek(descriptor, offset, os.SEEK_SET); chunks = []; remaining = min(MAX_LOG_BYTES, info.st_size - offset)
+        while remaining:
+            if time.monotonic() - started > 5:
+                result.update(status='limited', coverage_complete=False, limit='time'); break
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                result.update(status='limited', coverage_complete=False, limit='short_read'); break
+            chunks.append(chunk); remaining -= len(chunk)
+        raw = b''.join(chunks)
+        if info.st_size - offset > MAX_LOG_BYTES: result.update(status='limited', coverage_complete=False, limit='bytes')
+        for number, line in enumerate(raw.splitlines(keepends=True)):
+            if time.monotonic() - started > 5: result.update(status='limited', coverage_complete=False, limit='time'); break
+            if not line.endswith(b'\n'): break
+            if number >= 65536: result.update(status='limited', coverage_complete=False, limit='lines'); break
+            if not line_start: consumed += len(line); line_start = True; continue
+            if line.startswith(b'{'):
+                if len(line) > 65536: result.update(status='limited', coverage_complete=False, limit='message')
+                else:
+                    wrapped = json.dumps({'MESSAGE': line.decode(errors='replace').rstrip('\r\n'), '__REALTIME_TIMESTAMP': str(end_us)}).encode() + b'\n'
+                    selected = classify_entries(wrapped, start_us, end_us, prefix)
+                    for event in selected['events']:
+                        if len(result['events']) >= MAX_EVENTS:
+                            result.update(status='limited', coverage_complete=False, limit='events'); break
+                        if historical: event.pop('at_us', None)
+                        else: event['timestamp_source'] = 'observed_offset_interval'
+                        result['events'].append(event); result['counts'][event['event']] += 1; identities.add(event['request'])
+                    if result.get('limit') == 'events': break
+            consumed += len(line)
+        offset += consumed
+        result['partial_line_bytes_pending'] = len(raw) - consumed if result.get('limit') not in ('events', 'lines', 'bytes', 'time', 'short_read') else None
+    final = os.fstat(descriptor)
+    if (final.st_dev, final.st_ino) != (info.st_dev, info.st_ino) or final.st_size < info.st_size:
+        return {**unavailable_events('stderr_changed_during_read'), 'resync_required': True, 'source': 'effective-stderr-file'}
+    saved = {'version': 1, 'source': source, 'invocation': invocation, 'device': info.st_dev, 'inode': info.st_ino,
+             'offset': offset, 'until_us': end_us, 'line_start': line_start}
+    result['next_stderr_cursor'] = base64.urlsafe_b64encode(json.dumps(saved, separators=(',', ':')).encode()).decode().rstrip('=')
+    result['unique_requests'] = len(identities)
+    return result
+
+
 def properties():
     names = ['ActiveState', 'SubState', 'MainPID', 'NRestarts', 'Restart', 'InvocationID',
              'MemoryCurrent', 'CPUUsageNSec', 'TasksCurrent', 'StandardOutput', 'StandardError', 'LogNamespace', 'ExecStart']
@@ -193,7 +295,8 @@ def qualified_binding(revision, expected_profile, values, full_hash=False):
             and report.get('upgrade_plan_sha256') == plan_sha and report.get('session_replaced') is False
             and report.get('journal_paths_preserved') is True and report.get('protocol_controls_unchanged') is True
             and report.get('vrf_relay_enabled') is True and plan.get('l1_rpc_profile') == 'full'
-            and type(plan['desired'].get('uid')) is int and plan['desired']['uid'] > 0, 'qualified_native_record')
+            and type(plan['desired'].get('uid')) is int and plan['desired']['uid'] > 0
+            and integer(plan['desired'].get('gid')), 'qualified_native_record')
     directory(PROFILE.parent, owner)
     raw_profile = read_bounded(PROFILE, 65536, owner)
     require(hashlib.sha256(raw_profile).hexdigest() == expected_profile, 'profile_digest')
@@ -243,7 +346,7 @@ def qualified_binding(revision, expected_profile, values, full_hash=False):
             and re.fullmatch('[a-f0-9]{64}', plan['identity']['context']), 'public_binding_schema')
     return {'native_revision': revision, 'plan_sha256': plan_sha, 'profile_sha256': expected_profile, 'session': plan['identity']['session'],
             'portal': plan['identity']['portal'], 'token_bridge': plan['identity']['token_bridge'], 'validator': plan['identity']['validator'],
-            'context': plan['identity']['context'], 'native_owner_uid': owner,
+            'context': plan['identity']['context'], 'native_owner_uid': owner, 'native_owner_gid': plan['desired']['gid'],
             'coordinator': worker['coordinator'], 'consumer': worker['allowed_consumers'][0],
             'fulfiller': worker['fulfiller'], 'verifier': worker['verifier'], 'vrf_public_key': worker['vrf_public_key'],
             'coordinator_programdata_sha256': worker['coordinator_programdata_sha256'],
@@ -296,7 +399,7 @@ def rpc(port, method):
     except (OSError, ValueError, KeyError, TimeoutError): return {'status': 'unavailable'}
 
 
-def sample(revision, profile, start, end, prefix='', cursor=None, full_hash=False):
+def sample(revision, profile, start, end, prefix='', cursor=None, full_hash=False, stderr_cursor=None, initialize_stderr=False):
     before = properties(); binding, owner = qualified_binding(revision, profile, before, full_hash)
     relay = relay_status(binding, owner)
     rpc_values = {'l1_health': rpc(8899, 'getHealth'), 'er_health': rpc(8910, 'getHealth'),
@@ -306,7 +409,18 @@ def sample(revision, profile, start, end, prefix='', cursor=None, full_hash=Fals
             and rpc_values['er_genesis'].get('value') in (None, '11111111111111111111111111111111'), 'rpc_identity')
     output_mode, error_mode = before['StandardOutput'], before['StandardError']
     journal = output_mode in ('journal', 'journal-or-kmsg') if error_mode == 'inherit' else error_mode in ('journal', 'journal-or-kmsg')
-    events = journal_events(start, end, prefix, cursor, before['LogNamespace']) if journal else unavailable_events('stderr_not_journal')
+    source = effective_stderr(binding)
+    if source is not None:
+        descriptor, source_sha = source
+        try:
+            events = file_events(descriptor, source_sha, binding['invocation_id'], start, end, prefix, stderr_cursor, initialize_stderr)
+            effective = os.stat('/proc/' + str(binding['validator_pid']) + '/fd/2'); held = os.fstat(descriptor)
+            require((effective.st_dev, effective.st_ino) == (held.st_dev, held.st_ino), 'stderr_changed_during_sample')
+        finally: os.close(descriptor)
+        binding['stderr_source_sha256'] = source_sha
+    else:
+        events = journal_events(start, end, prefix, cursor, before['LogNamespace']) if journal else unavailable_events('stderr_not_journal')
+        binding['stderr_source_sha256'] = checksum({'output': output_mode, 'error': error_mode, 'namespace': before['LogNamespace']})
     after = properties()
     require(all(before[key] == after[key] for key in ('MainPID', 'InvocationID', 'ExecStart', 'NRestarts', 'ActiveState', 'SubState')),
             'native_changed_during_sample')
@@ -323,9 +437,11 @@ def main():
     parser.add_argument('--native-revision', required=True); parser.add_argument('--profile-sha256', required=True)
     parser.add_argument('--since', required=True); parser.add_argument('--until', required=True)
     parser.add_argument('--request-prefix', default=''); parser.add_argument('--after-cursor'); parser.add_argument('--full-hash', action='store_true')
+    parser.add_argument('--stderr-cursor'); parser.add_argument('--initialize-stderr', action='store_true')
     args = parser.parse_args()
     try:
-        result = sample(args.native_revision, args.profile_sha256, args.since, args.until, args.request_prefix, args.after_cursor, args.full_hash)
+        result = sample(args.native_revision, args.profile_sha256, args.since, args.until, args.request_prefix, args.after_cursor,
+                        args.full_hash, args.stderr_cursor, args.initialize_stderr)
     except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
         print(json.dumps({'version': 1, 'read_only': True, 'status': 'unavailable', 'reason': 'binding_or_namespace', 'raw_messages_included': False}))
         return 1
