@@ -114,6 +114,101 @@ class LoopbackRpc(unittest.TestCase):
         self.assertEqual(telemetry.rpc(self.server.server_address[1], 'getHealth'), {'status': 'unavailable'})
 
 
+class FileBackedStderr(unittest.TestCase):
+    def test_effective_file_stderr_is_not_mistaken_for_an_absent_journal(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            path = Path(directory) / 'stderr.log'; path.write_text(json.dumps({'event': 'simulation_unavailable', 'request': REQUEST}) + '\n'); path.chmod(0o600)
+            identity = path.stat(); proc = '/proc/123/fd/2'; real_stat = os.stat
+            values = {'MainPID': '123', 'InvocationID': 'a' * 32, 'ExecStart': 'bound', 'NRestarts': '0', 'ActiveState': 'active',
+                      'SubState': 'running', 'StandardOutput': 'null', 'StandardError': 'inherit', 'LogNamespace': '',
+                      'MemoryCurrent': '1', 'CPUUsageNSec': '1', 'TasksCurrent': '1'}
+            binding = {'validator_pid': 123, 'invocation_id': 'a' * 32, 'session': REQUEST,
+                       'native_owner_uid': os.getuid(), 'native_owner_gid': os.getgid()}
+            def source_stat(name, *args, **kwargs): return identity if str(name) == proc else real_stat(name, *args, **kwargs)
+            def rpc(_port, method):
+                return {'status': 'observed', 'value': REQUEST if method == 'getSessionPda' else '11111111111111111111111111111111' if method == 'getGenesisHash' else 'ok'}
+            with patch.object(telemetry, 'properties', return_value=values), patch.object(telemetry, 'qualified_binding', return_value=(binding, os.getuid())), \
+                 patch.object(telemetry, 'relay_status', return_value={'phase': 'running'}), patch.object(telemetry, 'rpc', side_effect=rpc), \
+                 patch.object(telemetry.os, 'readlink', return_value=str(path)), patch.object(telemetry.os, 'stat', side_effect=source_stat):
+                result = telemetry.sample('a' * 40, 'b' * 64, '2026-11-17T01:44:00Z', '2026-11-17T01:59:00Z')
+            self.assertEqual(result['events']['status'], 'limited')
+            self.assertEqual(result['events']['source'], 'effective-stderr-file')
+            self.assertEqual(result['events']['counts']['simulation_unavailable'], 1)
+            self.assertFalse(result['events']['coverage_complete'])
+            self.assertNotIn('at_us', result['events']['events'][0])
+
+
+class FileStreamCursor(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(); self.addCleanup(self.temporary.cleanup)
+        self.path = Path(self.temporary.name) / 'stderr.log'; self.path.write_bytes(b'older line\n'); self.path.chmod(0o600)
+        self.start = '2026-11-17T10:00:00.000000Z'; self.end = '2026-11-17T10:00:01.000000Z'
+
+    def scan(self, start=None, end=None, cursor=None, initialize=False, invocation='a' * 32):
+        descriptor = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
+        try: return telemetry.file_events(descriptor, 'b' * 64, invocation, start or self.start, end or self.end, cursor=cursor, initialize=initialize)
+        finally: os.close(descriptor)
+
+    def append(self, raw):
+        with self.path.open('ab') as stream: stream.write(raw)
+
+    def event(self):
+        return json.dumps({'event': 'simulation_rejected', 'request': REQUEST, 'slot': 123,
+                           'expired': False, 'error': {'diagnostic': 'do-not-export'}}).encode() + b'\n'
+
+    def test_initial_fence_and_incremental_events_do_not_invent_source_time(self):
+        self.append(self.event()); initial = self.scan(initialize=True)
+        self.assertEqual(initial['status'], 'initialized'); self.assertEqual(initial['events'], [])
+        self.append(self.event())
+        result = self.scan('2026-11-17T10:00:01.000001Z', '2026-11-17T10:00:02.000000Z', initial['next_stderr_cursor'])
+        self.assertTrue(result['coverage_complete']); self.assertEqual(result['counts']['simulation_rejected'], 1)
+        self.assertEqual(result['events'][0]['timestamp_source'], 'observed_offset_interval')
+        self.assertEqual(result['events'][0]['at_us'], telemetry.parse_window('2026-11-17T10:00:01.000001Z', '2026-11-17T10:00:02.000000Z')[1])
+        self.assertNotIn('do-not-export', json.dumps(result))
+
+    def test_partial_append_is_revisited_without_retaining_raw_text_in_the_cursor(self):
+        initial = self.scan(initialize=True); raw = self.event(); self.append(raw[:20])
+        partial = self.scan('2026-11-17T10:00:01.000001Z', '2026-11-17T10:00:02.000000Z', initial['next_stderr_cursor'])
+        self.assertEqual(partial['events'], []); self.assertEqual(partial['partial_line_bytes_pending'], 20)
+        self.append(raw[20:])
+        result = self.scan('2026-11-17T10:00:02.000001Z', '2026-11-17T10:00:03.000000Z', partial['next_stderr_cursor'])
+        self.assertEqual(result['counts']['simulation_rejected'], 1)
+        empty = self.scan('2026-11-17T10:00:03.000001Z', '2026-11-17T10:00:04.000000Z', result['next_stderr_cursor'])
+        self.assertEqual(empty['events'], [])
+
+    def test_truncation_replacement_restart_or_interval_gap_requires_resync(self):
+        initial = self.scan(initialize=True)
+        for invocation, start in [('c' * 32, '2026-11-17T10:00:01.000001Z'), ('a' * 32, '2026-11-17T10:00:01.000002Z')]:
+            result = self.scan(start, '2026-11-17T10:00:02.000000Z', initial['next_stderr_cursor'], invocation=invocation)
+            self.assertTrue(result['resync_required']); self.assertIsNone(result['counts'])
+        self.path.write_bytes(b'')
+        self.assertTrue(self.scan('2026-11-17T10:00:01.000001Z', '2026-11-17T10:00:02.000000Z', initial['next_stderr_cursor'])['resync_required'])
+        replacement = self.path.with_name('replacement'); replacement.write_bytes(b'new line\n' * 2); os.replace(replacement, self.path)
+        self.assertTrue(self.scan('2026-11-17T10:00:01.000001Z', '2026-11-17T10:00:02.000000Z', initial['next_stderr_cursor'])['resync_required'])
+
+    def test_byte_budget_is_explicit_instead_of_silent_zero_coverage(self):
+        initial = self.scan(initialize=True); self.append(b'ordinary line\n' * 100)
+        with patch.object(telemetry, 'MAX_LOG_BYTES', 32):
+            result = self.scan('2026-11-17T10:00:01.000001Z', '2026-11-17T10:00:02.000000Z', initial['next_stderr_cursor'])
+        self.assertFalse(result['coverage_complete']); self.assertEqual(result['limit'], 'bytes')
+
+    def test_microsecond_window_roundtrip_does_not_use_float_epoch_arithmetic(self):
+        start, end = telemetry.parse_window('2026-11-17T11:33:06.953001Z', '2026-11-17T11:33:06.953002Z')
+        self.assertEqual(end - start, 1); self.assertEqual(start % 1_000_000, 953001)
+
+    def test_effective_stderr_does_not_follow_a_symlink_parent(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            root = Path(directory); actual = root / 'actual'; actual.mkdir(mode=0o700)
+            path = actual / 'stderr'; path.write_bytes(b'event\n'); path.chmod(0o600)
+            (root / 'alias').symlink_to(actual, target_is_directory=True)
+            source = path.stat(); real_stat = os.stat
+            def observed(name, *args, **kwargs): return source if str(name) == '/proc/123/fd/2' else real_stat(name, *args, **kwargs)
+            binding = {'validator_pid': 123, 'native_owner_uid': os.getuid(), 'native_owner_gid': os.getgid()}
+            with patch.object(telemetry.os, 'stat', side_effect=observed), patch.object(telemetry.os, 'readlink', return_value=str(root / 'alias/stderr')), \
+                 self.assertRaises((OSError, ValueError)):
+                telemetry.effective_stderr(binding)
+
+
 class QualifiedNativeBinding(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(); self.addCleanup(self.temporary.cleanup)
@@ -135,7 +230,7 @@ class QualifiedNativeBinding(unittest.TestCase):
         arguments = [str(binary), '--vrf-relay-config', str(configuration)]
         self.plan = {'version': 1, 'kind': 'native-upgrade', 'source_revision': self.revision,
             'identity': {'session': REQUEST, 'portal': REQUEST, 'token_bridge': REQUEST, 'validator': REQUEST, 'context': 'b' * 64}, 'l1_rpc_profile': 'full', 'vrf_relay': self.profile,
-            'desired': {'uid': os.getuid(), 'arguments': arguments, 'state_environment': environment, 'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest()},
+            'desired': {'uid': os.getuid(), 'gid': os.getgid(), 'arguments': arguments, 'state_environment': environment, 'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest()},
             'artifacts': {'validator': hashlib.sha256(binary.read_bytes()).hexdigest()}}
         self.control = control; self.save(control / 'plan.json', self.plan)
         self.save(control / 'progress.json', {'version': 1, 'plan_sha256': telemetry.checksum(self.plan), 'phase': 'qualified'})

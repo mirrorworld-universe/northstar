@@ -51,7 +51,7 @@ jobs:
           sudo -n python3 -B .github/scripts/vrf_telemetry.py \
             --native-revision "$NATIVE" --profile-sha256 "$PROFILE" \
             --since "$SINCE" --until "$UNTIL" --request-prefix "$PREFIX" --full-hash > "$report"
-          python3 -B -c 'import json,sys; p=sys.argv[1]; value=json.load(open(p)); value.get("events",{}).pop("next_cursor",None); open(p,"w").write(json.dumps(value,separators=(",",":"))+"\n")' "$report"
+          python3 -B -c 'import json,sys; p=sys.argv[1]; value=json.load(open(p)); value.get("events",{}).pop("next_cursor",None); value.get("events",{}).pop("next_stderr_cursor",None); open(p,"w").write(json.dumps(value,separators=(",",":"))+"\n")' "$report"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
