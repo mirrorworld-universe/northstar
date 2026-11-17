@@ -1,0 +1,61 @@
+name: VRF relay telemetry (read-only)
+on:
+  workflow_dispatch:
+    inputs:
+      native_revision:
+        description: Exact qualified retained runtime revision (not the telemetry source revision)
+        type: string
+        required: true
+      profile_sha256:
+        description: Exact retained relay profile digest
+        type: string
+        required: true
+      since:
+        description: Inclusive UTC window start, for example 2026-11-17T01:44:00Z
+        type: string
+        required: true
+      until:
+        description: Inclusive UTC window end, at most 26 hours after start
+        type: string
+        required: true
+      request_prefix:
+        description: Optional public request prefix, at least six base58 characters
+        type: string
+        required: false
+permissions:
+  contents: read
+concurrency:
+  group: native-vrf-read-only-telemetry
+  cancel-in-progress: false
+jobs:
+  inspect:
+    if: github.repository == 'mirrorworld-universe/northstar' && github.ref == 'refs/heads/master'
+    runs-on: [devnet]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Collect only bounded public simulation evidence
+        env:
+          NATIVE: ${{ inputs.native_revision }}
+          PROFILE: ${{ inputs.profile_sha256 }}
+          SINCE: ${{ inputs.since }}
+          UNTIL: ${{ inputs.until }}
+          PREFIX: ${{ inputs.request_prefix }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$NATIVE" =~ ^[a-f0-9]{40}$ && "$PROFILE" =~ ^[a-f0-9]{64}$ ]]
+          report="$RUNNER_TEMP/native-vrf-telemetry.json"
+          sudo -n python3 -B .github/scripts/vrf_telemetry.py \
+            --native-revision "$NATIVE" --profile-sha256 "$PROFILE" \
+            --since "$SINCE" --until "$UNTIL" --request-prefix "$PREFIX" --full-hash > "$report"
+          python3 -B -c 'import json,sys; p=sys.argv[1]; value=json.load(open(p)); value.get("events",{}).pop("next_cursor",None); open(p,"w").write(json.dumps(value,separators=(",",":"))+"\n")' "$report"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-vrf-telemetry-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-vrf-telemetry.json
+          if-no-files-found: error
+          retention-days: 7
