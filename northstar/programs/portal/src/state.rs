@@ -442,6 +442,22 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_bond_status_wire_tags() {
+        for (byte, status) in [
+            (0, CheckpointBondStatus::Locked),
+            (1, CheckpointBondStatus::Released),
+            (2, CheckpointBondStatus::Slashed),
+        ] {
+            assert_eq!(borsh::to_vec(&status).unwrap(), [byte]);
+            assert_eq!(
+                CheckpointBondStatus::try_from_slice(&[byte]).unwrap(),
+                status
+            );
+        }
+        assert!(CheckpointBondStatus::try_from_slice(&[3]).is_err());
+    }
+
+    #[test]
     fn test_checkpoint_len() {
         let checkpoint = Checkpoint {
             discriminator: Checkpoint::DISCRIMINATOR,
