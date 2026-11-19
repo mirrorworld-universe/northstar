@@ -1,6 +1,7 @@
 use {
     super::initialize_pda_account,
     crate::{
+        bond::{plan_resolution, Balances, BondError, Resolution},
         find_challenge_pda, find_checkpoint_cursor_pda, find_checkpoint_pda, find_da_proof_pda,
         find_session_pda, find_step_proof_pda, BisectChallenge, CancelCheckpoint, Challenge,
         ChallengeStatus, ChallengeTurn, Checkpoint, CheckpointBondStatus, CheckpointCursor,
@@ -150,36 +151,29 @@ fn resolve_checkpoint_bond(
     checkpoint: &mut AccountInfo,
     recipient: &mut AccountInfo,
     checkpoint_state: &mut Checkpoint,
-    next_status: CheckpointBondStatus,
+    action: Resolution,
 ) -> ProgramResult {
-    if checkpoint_state.bond_status != CheckpointBondStatus::Locked {
-        return Err(PortalError::CheckpointBondAlreadyResolved.into());
-    }
-
-    let bond_lamports = checkpoint_state.bond_lamports;
-    if bond_lamports == 0 {
-        return Err(PortalError::CheckpointBondInsufficient.into());
-    }
-
-    let rent_lamports = Rent::get()?.try_minimum_balance(crate::account_size(checkpoint_state))?;
-    let minimum_locked_lamports = rent_lamports
-        .checked_add(bond_lamports)
-        .ok_or(PortalError::ArithmeticOverflow)?;
-    if checkpoint.lamports() < minimum_locked_lamports {
-        return Err(PortalError::CheckpointBondInsufficient.into());
-    }
-
-    let recipient_lamports = recipient
-        .lamports()
-        .checked_add(bond_lamports)
-        .ok_or(PortalError::ArithmeticOverflow)?;
-    recipient.set_lamports(recipient_lamports);
-    let checkpoint_lamports = checkpoint
-        .lamports()
-        .checked_sub(bond_lamports)
-        .ok_or(PortalError::ArithmeticOverflow)?;
-    checkpoint.set_lamports(checkpoint_lamports);
-    checkpoint_state.bond_status = next_status;
+    let rent = Rent::get()?.try_minimum_balance(checkpoint.data_len())?;
+    let payment = plan_resolution(
+        checkpoint_state.bond_status,
+        action,
+        Balances {
+            checkpoint: checkpoint.lamports(),
+            recipient: recipient.lamports(),
+        },
+        checkpoint_state.bond_lamports,
+        rent,
+        checkpoint.address() == recipient.address(),
+    )
+    .map_err(|error| match error {
+        BondError::Aliased => PortalError::CheckpointStateInvalid,
+        BondError::AlreadyResolved => PortalError::CheckpointBondAlreadyResolved,
+        BondError::Insufficient => PortalError::CheckpointBondInsufficient,
+        BondError::Overflow => PortalError::ArithmeticOverflow,
+    })?;
+    checkpoint.set_lamports(payment.balances.checkpoint);
+    recipient.set_lamports(payment.balances.recipient);
+    checkpoint_state.bond_status = payment.status;
 
     Ok(())
 }
@@ -192,12 +186,7 @@ fn release_checkpoint_bond(
     if proposer.address() != &checkpoint_state.proposer {
         return Err(PortalError::CheckpointStateInvalid.into());
     }
-    resolve_checkpoint_bond(
-        checkpoint,
-        proposer,
-        checkpoint_state,
-        CheckpointBondStatus::Released,
-    )
+    resolve_checkpoint_bond(checkpoint, proposer, checkpoint_state, Resolution::Release)
 }
 
 #[allow(dead_code)]
@@ -206,12 +195,7 @@ pub(crate) fn slash_checkpoint_bond(
     recipient: &mut AccountInfo,
     checkpoint_state: &mut Checkpoint,
 ) -> ProgramResult {
-    resolve_checkpoint_bond(
-        checkpoint,
-        recipient,
-        checkpoint_state,
-        CheckpointBondStatus::Slashed,
-    )
+    resolve_checkpoint_bond(checkpoint, recipient, checkpoint_state, Resolution::Slash)
 }
 
 fn load_checkpoint(

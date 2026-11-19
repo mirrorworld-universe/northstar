@@ -84,14 +84,7 @@ pub enum CheckpointStatus {
     Invalid = 5,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-#[borsh(use_discriminant = true)]
-#[repr(u8)]
-pub enum CheckpointBondStatus {
-    Locked = 0,
-    Released = 1,
-    Slashed = 2,
-}
+pub use crate::bond::CheckpointBondStatus;
 
 impl Checkpoint {
     pub const SEED_PREFIX: &[u8] = b"checkpoint";

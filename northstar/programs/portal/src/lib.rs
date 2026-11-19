@@ -2,6 +2,7 @@
 #[cfg(not(target_os = "solana"))]
 extern crate alloc;
 
+mod bond;
 pub mod continuity;
 mod error;
 mod events;
