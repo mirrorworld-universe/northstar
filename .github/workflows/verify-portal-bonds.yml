@@ -1,0 +1,46 @@
+# Sonic: Keep the production checkpoint-bond planner and its proof in sync.
+name: Verify Portal checkpoint bonds
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - northstar/programs/portal/**
+      - rust-toolchain.toml
+      - .github/workflows/verify-portal-bonds.yml
+  push:
+    branches: [master]
+    paths:
+      - northstar/programs/portal/**
+      - rust-toolchain.toml
+      - .github/workflows/verify-portal-bonds.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.99.1 --profile minimal
+          version=0.2026.11.02.8bf68ee
+          cd "$RUNNER_TEMP"
+          curl -fsSL --retry 2 "https://github.com/verus-lang/verus/releases/download/release/$version/verus-$version-x86-linux.zip" -o verus.zip
+          echo 'f3a0119292df8855e4435da8130bee1873b0e6a60c306accf81a08ea687bba3c  verus.zip' | sha256sum --check --strict -
+          unzip -q verus.zip
+      - name: Prove accounting and check controls
+        run: python3 northstar/programs/portal/proofs/check.py --verus "$RUNNER_TEMP/verus-x86-linux/verus" --logs target/bond-proofs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: checkpoint-bond-proof-logs
+          path: target/bond-proofs
+          if-no-files-found: warn

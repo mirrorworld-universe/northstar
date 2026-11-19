@@ -1,0 +1,39 @@
+Portal checkpoint-bond validation — 2026-11-19 (local, x86_64 Linux)
+Program & regression revision: 7d19d4274c5a5948adbb96e51b3d93bf81450ab2
+
+Verus 0.2026.11.02.8bf68ee; Z3 version 4.16.0 - 64 bit
+Machine-verifier results (excerpts from raw JSON and stderr):
+production: {"encountered-error":false,"encountered-vir-error":false,"success":true,"verified":8,"errors":0,"is-verifying-entire-crate":true}
+missing_debit: {"encountered-error":true,"encountered-vir-error":false,"success":false,"verified":7,"errors":1,"is-verifying-entire-crate":true}
+error: postcondition not satisfied
+missing_rent_floor: {"encountered-error":true,"encountered-vir-error":false,"success":false,"verified":7,"errors":1,"is-verifying-entire-crate":true}
+error: postcondition not satisfied
+error: postcondition not satisfied
+nonterminal_status: {"encountered-error":true,"encountered-vir-error":false,"success":false,"verified":7,"errors":1,"is-verifying-entire-crate":true}
+error: postcondition not satisfied
+
+Ordinary SBF builds: cargo-build-sbf 4.5.0, platform-tools v1.56, SBPFv0; Cargo.lock locked.
+
+default: northstar_portal.so 361504 bytes, sha256 8cd0a6a4779bb02287afe9bbab208eca1a0996bf39fc2cab682c47c794058044
+host library: test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+delegate_pda.rs: test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+integration.rs: test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test live_validator_challenge_bisection_and_da_reveal ... ignored, requires a Northstar solana-test-validator started with --portal
+live_challenge.rs: test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out
+state_invariants.rs: test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+zk_verifier.rs: test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+doc tests: test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+v2: northstar_portal.so 466240 bytes, sha256 843d72e5f87f628f8677783a2b48e99d03fffbff12badd168a874ea8b97aaece
+host library: test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+delegate_pda.rs: test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+integration.rs: test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test live_validator_challenge_bisection_and_da_reveal ... ignored, requires a Northstar solana-test-validator started with --portal
+live_challenge.rs: test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out
+state_invariants.rs: test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+zk_verifier.rs: test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+doc tests: test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+Workspace lint: cargo clippy --locked --all --tests: exit 0.
+Formatting: cargo +nightly fmt --all: exit 0.
+No live-validator test, deployment, or independent acceptance.
