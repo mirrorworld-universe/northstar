@@ -338,6 +338,134 @@ fn regression_v2_capacity_backpressure_preserves_signed_retry_across_settlement(
 }
 
 #[test]
+fn regression_v2_rpc_acknowledges_successor_before_l1_settlement() {
+    use {
+        solana_commitment_config::{CommitmentConfig, CommitmentLevel},
+        solana_rpc::rpc::ErTxExecutor,
+        solana_rpc_client::rpc_client::RpcClient,
+        solana_rpc_client_types::config::RpcSendTransactionConfig,
+    };
+    let fixture = Fixture::new();
+    let mut root = fixture.parent.clone();
+    let directory = tempfile::tempdir().unwrap();
+    let config = crate::ManagerConfig {
+        portal_program_id: PORTAL_PROGRAM_ID,
+        manager_account: fixture.manager.clone(),
+        checkpoint_plan_dir: Some(directory.path().join("plans")),
+    };
+    let mut manager = crate::Manager::new(config.clone());
+    let start = |manager: &mut crate::Manager, root: Arc<Bank>| {
+        manager
+            .init_runtime(
+                root,
+                create_test_cluster_info(),
+                find_free_addr(),
+                find_free_addr(),
+                find_free_addr(),
+            )
+            .unwrap();
+    };
+    start(&mut manager, root.clone());
+    manager.activate_session(root.clone(), fixture.session, 0, 10_000, 1_000);
+    manager.process_finalized_l1_inputs(&root);
+    let proposed = Bank::new_from_parent(root.clone(), SlotLeader::default(), root.slot() + 20);
+    let (_, _, transactions) = manager
+        .settlement_transactions_if_due(&proposed, proposed.last_blockhash())
+        .unwrap();
+    // Hold even the predecessor proposal off L1 until after the successor's receipt.
+    assert_eq!(transactions.len(), 1);
+    drop(proposed);
+    manager.reanchor_to_l1_parent(root.clone());
+    let recipient = Pubkey::new_unique();
+    let (prefix, wire) = {
+        let runtime = manager.runtime.as_ref().unwrap();
+        let tx = VersionedTransaction::from(Transaction::new_signed_with_payer(
+            &[transfer(&fixture.payer.pubkey(), &recipient, 1_000_000)],
+            Some(&fixture.payer.pubkey()),
+            &[&fixture.payer],
+            runtime.bank().last_blockhash(),
+        ));
+        let wire = bincode::serialize(&tx).unwrap();
+        let rpc = RpcClient::new(runtime.rpc_addr());
+        let signature = rpc
+            .send_transaction_with_config(
+                &tx,
+                RpcSendTransactionConfig {
+                    preflight_commitment: Some(CommitmentLevel::Confirmed),
+                    ..RpcSendTransactionConfig::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(signature, tx.signatures[0]);
+        let started = Instant::now();
+        let receipt = loop {
+            if let Some(status) = rpc
+                .get_signature_statuses(&[signature])
+                .unwrap()
+                .value
+                .into_iter()
+                .next()
+                .flatten()
+            {
+                assert!(status.err.is_none());
+                if status.satisfies_commitment(CommitmentConfig::confirmed()) {
+                    break status.slot;
+                }
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "ER receipt did not confirm"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let prefix = runtime.checkpoint_artifact_v2().unwrap();
+        assert!(
+            receipt > prefix.checkpoint.er_slot,
+            "receipt must be in the successor"
+        );
+        let store = runtime.lineage_store_v2().unwrap();
+        let store = store.lock().unwrap();
+        assert!(store.accepted_head().is_none());
+        assert_eq!(store.unsealed().len(), 1);
+        assert!(!store
+            .accepted_state()
+            .accounts()
+            .contains_key(&recipient.to_bytes()));
+        assert_eq!(runtime.bank().get_balance(&recipient), 1_000_000);
+        (prefix, wire)
+    };
+    manager.shutdown_runtime();
+    manager = crate::Manager::new(config);
+    start(&mut manager, root.clone());
+    assert!(manager.resume_active_session_from_l1(root.clone()));
+    {
+        let runtime = manager.runtime.as_ref().unwrap();
+        assert_eq!(runtime.bank().get_balance(&recipient), 1_000_000);
+        assert!(
+            matches!(runtime._tx_client.execute_wire(wire), Err(solana_rpc::rpc::ErTxError::Rejected(message)) if message == "transaction already processed")
+        );
+    }
+    let first = super::token_settlement_v2::settle_checkpoint_without_restart(
+        &mut manager,
+        &mut root,
+        |_| Ok(true),
+    )
+    .unwrap();
+    assert_eq!(first, prefix);
+    let second = super::token_settlement_v2::settle_checkpoint_without_restart(
+        &mut manager,
+        &mut root,
+        |_| Ok(true),
+    )
+    .unwrap();
+    assert_eq!(second.pre, first.post);
+    assert_eq!(second.checkpoint.step_count, 1);
+    let runtime = manager.runtime.as_ref().unwrap();
+    assert_eq!(runtime.bank().get_balance(&recipient), 1_000_000);
+    manager.shutdown_runtime();
+}
+
+#[test]
 fn regression_v2_sol_payout_chains_after_restart_and_later_topup() {
     let fixture = Fixture::new();
     let mut root = fixture.parent.clone();
