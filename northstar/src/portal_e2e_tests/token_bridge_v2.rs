@@ -552,8 +552,13 @@ fn regression_v2_bridge_deposit_records_only_authorized_cumulative_credit() {
     expected.extend_from_slice(&42u64.to_le_bytes());
     assert_eq!(world.unsigned_record(42, 2).data, expected);
     world.send(&[world.deposit(source, 42, 2)], &[]).unwrap();
+    let posted = || -> northstar_token_bridge::state::TokenVault {
+        borsh::from_slice(world.bank.get_account(&world.vault).unwrap().data()).unwrap()
+    };
     assert_eq!(world.token_amount(&source), 958);
     assert_eq!(world.token_amount(&world.vault_token), 42);
+    let after_first = posted();
+    assert_eq!((after_first.deposited, after_first.withdrawn), (42, 0));
     let receipt: northstar_token_bridge::state::TokenDepositReceipt =
         borsh::from_slice(world.bank.get_account(&world.receipt).unwrap().data()).unwrap();
     assert_eq!(receipt.balance, 42);
@@ -589,8 +594,14 @@ fn regression_v2_bridge_deposit_records_only_authorized_cumulative_credit() {
     let unchanged: northstar_token_bridge::state::TokenDepositReceipt =
         borsh::from_slice(world.bank.get_account(&world.receipt).unwrap().data()).unwrap();
     assert_eq!(unchanged, receipt);
+    assert_eq!(posted(), after_first);
     world.send(&[world.deposit(source, 8, 3)], &[]).unwrap();
     assert_eq!(world.token_amount(&world.vault_token), 50);
+    assert_eq!(
+        posted().deposited - posted().withdrawn,
+        world.token_amount(&world.vault_token)
+    );
+    assert_eq!(world.token_amount(&source), 950);
     let key = northstar_portal::find_ingress_record_v2_pda(&world.portal, &world.context, 3).0;
     let next: IngressRecordV2 =
         borsh::from_slice(world.bank.get_account(&key).unwrap().data()).unwrap();

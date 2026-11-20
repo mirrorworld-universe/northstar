@@ -117,6 +117,7 @@ async fn withdrawal_pays_once_and_token_failure_rolls_back_portal_consumption() 
     const SLOT: u64 = 44;
     const AMOUNT: u64 = 6;
     const TARGET: u64 = 10;
+    const DONATION: u64 = 11;
     let mut w = TestWorld::new().await;
     let portal = PORTAL_PROGRAM_ID;
     let bridge = northstar_token_bridge::id();
@@ -212,6 +213,26 @@ async fn withdrawal_pays_once_and_token_failure_rolls_back_portal_consumption() 
     mint.freeze_authority = Some(validator).into();
     Mint::pack(mint, &mut mint_account.data).unwrap();
     w.context.set_account(&w.mint, &mint_account.into());
+    let donate = spl_token_interface::instruction::transfer_checked(
+        &spl,
+        &w.alice_token,
+        &w.mint,
+        &w.vault_token,
+        &w.alice.pubkey(),
+        &[],
+        DONATION,
+        DECIMALS,
+    )
+    .unwrap();
+    process(&mut w.context, &validator, &[donate], &[&w.payer, &w.alice]).await;
+    assert_eq!(
+        TokenVault::try_from_slice(&read(&mut w.context, vault).await.data).unwrap(),
+        vault_state
+    );
+    assert_eq!(
+        w.token_amount(w.vault_token).await,
+        vault_state.deposited - vault_state.withdrawn + DONATION
+    );
     let (checkpoint, bump) = northstar_portal::find_checkpoint_pda(&portal, &w.session, SLOT);
     let chk = Checkpoint {
         discriminator: Checkpoint::DISCRIMINATOR,
@@ -398,7 +419,10 @@ async fn withdrawal_pays_once_and_token_failure_rolls_back_portal_consumption() 
             ..vault_state
         }
     );
-    assert_eq!(SplTokenAccount::unpack(&after[2].data).unwrap().amount, 0);
+    assert_eq!(
+        SplTokenAccount::unpack(&after[2].data).unwrap().amount,
+        DONATION
+    );
     assert_eq!(
         SplTokenAccount::unpack(&after[3].data).unwrap().amount,
         AMOUNT

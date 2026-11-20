@@ -1,5 +1,9 @@
 #[cfg(target_os = "solana")]
 mod accounting;
+#[cfg(target_os = "solana")]
+mod custody;
+#[cfg(target_os = "solana")]
+mod deposit_credit;
 pub mod instruction;
 pub mod state;
 
