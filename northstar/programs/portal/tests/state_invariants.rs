@@ -16,6 +16,9 @@ use {
     solana_transaction::{Transaction, TransactionError},
 };
 
+#[path = "state_invariants/receipts.rs"]
+mod receipts;
+
 const PORTAL: Pubkey = Pubkey::from_str_const("GikCSCpYUq7QR7esoK6GM4UbJzKgdKNvS5bR1rBYH5E4");
 const BALANCE: u64 = 10_000_000;
 const ER_SLOT: u64 = 44;
