@@ -1,0 +1,49 @@
+{
+  "verus": "0.2026.11.02.8bf68ee",
+  "verus_commit": "8bf68ee741df833ea5d0fe6a2255126fdea87e47",
+  "z3": "Z3 version 4.16.0 - 64 bit",
+  "flags": [
+    "--crate-type",
+    "lib",
+    "--edition=2021",
+    "--no-cheating",
+    "--output-json",
+    "--time-expanded"
+  ],
+  "source_sha256": {
+    "src/dispute_range.rs": "08160632281d8d02027e56e1c1f633600dab005e0b79f8a7a336d9cafd57f89a",
+    "proofs/dispute_geometry.rs": "26e0d24a52203ab5737791ee946e15a0b2c19c6878b29e31b4d46d8e58fe368a"
+  },
+  "runs": {
+    "production": {
+      "verdict": "verified",
+      "verified": 11,
+      "errors": 0
+    },
+    "wrong_midpoint": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 10,
+      "errors": 1
+    },
+    "missing_round": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 10,
+      "errors": 1
+    },
+    "wrong_half": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 10,
+      "errors": 1
+    },
+    "wrong_deadline_cap": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 10,
+      "errors": 1
+    },
+    "includes_deadline": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 10,
+      "errors": 1
+    }
+  }
+}

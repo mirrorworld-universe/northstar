@@ -1,5 +1,5 @@
-# Sonic: Verify the same executable accounting modules that the two programs use.
-name: Verify Portal and token bridge accounting
+# Sonic: Verify the executable modules shared with the two programs.
+name: Verify Portal and token bridge invariants
 
 on:
   workflow_dispatch:
@@ -29,7 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [bond, receipt, authorization, bridge]
+        suite: [bond, receipt, authorization, bridge, custody, credit, batch, range, prefix]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -53,8 +53,12 @@ jobs:
         env:
           SUITE: ${{ matrix.suite }}
         run: |
-          expected=northstar/programs/portal/proofs/evidence/settlement/$SUITE.json
-          if [[ $SUITE == bond ]]; then expected=northstar/programs/portal/proofs/evidence/summary.json; fi
+          root=northstar/programs/portal/proofs/evidence
+          case "$SUITE" in
+            bond) expected="$root/summary.json" ;;
+            receipt|authorization|bridge) expected="$root/settlement/$SUITE.json" ;;
+            *) expected="$root/extended/$SUITE.json" ;;
+          esac
           cmp "target/proofs/$SUITE/summary.json" "$expected"
       - uses: actions/upload-artifact@v4
         if: always()

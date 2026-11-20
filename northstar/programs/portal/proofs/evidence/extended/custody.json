@@ -1,0 +1,49 @@
+{
+  "verus": "0.2026.11.02.8bf68ee",
+  "verus_commit": "8bf68ee741df833ea5d0fe6a2255126fdea87e47",
+  "z3": "Z3 version 4.16.0 - 64 bit",
+  "flags": [
+    "--crate-type",
+    "lib",
+    "--edition=2021",
+    "--no-cheating",
+    "--output-json",
+    "--time-expanded"
+  ],
+  "source_sha256": {
+    "src/custody.rs": "c0d8b472db112a990adcd632f44e272eae42889d63da1b0821211094e2fdad3a",
+    "proofs/vault_custody.rs": "ebd97e35e1e080e862d74bdc7db14a38999d029e1e9b0ced497a5286596a9e04"
+  },
+  "runs": {
+    "production": {
+      "verdict": "verified",
+      "verified": 11,
+      "errors": 0
+    },
+    "nonzero_initial_claim": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 10,
+      "errors": 1
+    },
+    "wrong_deposit_posting": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 10,
+      "errors": 1
+    },
+    "wrong_payout_capacity": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 10,
+      "errors": 1
+    },
+    "wrong_peer_observation": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 10,
+      "errors": 1
+    },
+    "wrong_vault_observation": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 10,
+      "errors": 1
+    }
+  }
+}
