@@ -1,5 +1,8 @@
 # Northstar devnet ER reference stack
 
+For the deployed topology, service boundaries, and monitoring handoff, start with
+[Northstar devnet ER architecture](../../docs/devnet-er-architecture.md).
+
 This stack uses the deployed **ER callback path**: Native discovers requests in its
 accepted continuity-v2 lineage. The separate request signer checks finalized
 Portal checkpoint membership against the independent Solana devnet L1 RPC and
@@ -7,11 +10,8 @@ returns a VRF proof. The Native relay submits fulfillment to ER; the Coordinator
 verifies the proof and calls the allowed consumer on ER. This is neither the
 standalone L1 coin-flip worker nor the public HTTP VRF API.
 
-Reference evidence: the [Native upgrade](https://github.com/mirrorworld-universe/northstar/actions/runs/43982895796)
-retained the relay configuration, and the separate [fresh callback run](https://github.com/mirrorworld-universe/vrf-oracle/actions/runs/43994020478)
-verified the on-chain verifier CPI, callback output, and request closure. Those
-reports do not qualify this container setup, callback-result L1 settlement, or
-SP1 verification.
+The hosted qualification reports linked in the architecture document do not
+qualify this container setup, callback-result L1 settlement, or SP1 verification.
 
 ## Services and custody
 
