@@ -673,8 +673,7 @@ impl EphemeralTransactionClient {
         }
         if let Some(store) = self.lineage_store_v2() {
             let store = store.lock().unwrap();
-            return store.sealed().is_some()
-                || store.unsealed().len() >= crate::checkpoint_v2::MAX_CHECKPOINT_TRANSITIONS_V2;
+            return store.admission_capacity(self.bank().slot()) == 0;
         }
         let capture = self.checkpoint_capture.read().unwrap();
         capture.completed.is_some() || capture.steps.len() == CANONICAL_CHECKPOINT_STEPS_V1
@@ -1172,16 +1171,14 @@ impl EphemeralTransactionClient {
             warn!("Versioned token credit requires an authenticated input record");
             return;
         }
-        let capacity_blocked = self.lineage_store_v2().is_some_and(|store| {
-            let store = store.lock().unwrap();
-            store.sealed().is_some()
-                || store.unsealed().len() >= crate::checkpoint_v2::MAX_CHECKPOINT_TRANSITIONS_V2
-        });
+        let bank = self.bank();
+        let capacity_blocked = self
+            .lineage_store_v2()
+            .is_some_and(|store| txs.len() > store.lock().unwrap().admission_capacity(bank.slot()));
         if (ingress.is_none() && self.checkpoint_awaits_settlement()) || capacity_blocked {
             warn!("ER transaction rejected: canonical checkpoint awaits settlement");
             return;
         }
-        let bank = self.bank();
         if deposit_context.is_none() {
             for transaction in &txs {
                 let frozen = self.frozen_accounts.read().unwrap().clone();

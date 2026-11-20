@@ -617,6 +617,19 @@ impl Manager {
     /// testing does not burn SOL on empty Begin/Finish transactions.
     pub fn settlement_plan(&self) -> Option<SettlementPlan> {
         let runtime = self.runtime.as_ref()?;
+        #[cfg(feature = "checkpoint-continuity-v2")]
+        if let Some(store) = runtime.lineage_store_v2() {
+            // Once the successor is writable, the live overlay is no longer the sealed prefix.
+            match store.lock().unwrap().settlement_plan() {
+                Ok(Some(plan)) => return Some(plan),
+                Ok(None) => (),
+                Err(error) => {
+                    runtime.quarantine_checkpoint("checkpoint_lineage_recovery_failed");
+                    warn!("Retained settlement plan could not be read: {error}");
+                    return None;
+                }
+            }
+        }
         let session_pda = (*runtime.session_pda().read().unwrap())?;
         let diff = runtime.state_diff_from_l1();
         let checkpoint = runtime.checkpoint_artifact_v1();
