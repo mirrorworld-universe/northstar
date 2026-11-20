@@ -1198,7 +1198,9 @@ impl EphemeralRuntime {
         {
             return Ok(false);
         }
-        let state = store.working_state()?;
+        // Verify only the prefix named by the finalized L1 head. The live successor may
+        // have since changed the same accounts or created additional payout effects.
+        let state = store.accepted_state();
         let context = state
             .identity()
             .commitment(crate::continuity_v2::hash_parts)
@@ -1287,8 +1289,9 @@ impl EphemeralRuntime {
             }
         }
         store.record_settled(&head)?;
-        self.withdrawal_payout_events.write().unwrap().clear();
-        self.token_withdrawal_payout_events.write().unwrap().clear();
+        let (sol, tokens) = store.pending_payout_events()?;
+        *self.withdrawal_payout_events.write().unwrap() = sol;
+        *self.token_withdrawal_payout_events.write().unwrap() = tokens;
         Ok(true)
     }
 
@@ -1330,13 +1333,8 @@ impl EphemeralRuntime {
             .checked_sub(candidate.ingress_count())
             .ok_or_else(|| std::io::Error::other("finalized ingress head regressed"))?;
         self._tx_client.set_pending_ingress_v2(pending);
-        if store.sealed().is_some() {
-            return Ok(None);
-        }
-        let capacity = crate::checkpoint_v2::MAX_CHECKPOINT_TRANSITIONS_V2
-            .saturating_sub(store.unsealed().len())
-            .min(8);
         let bank = self.bank();
+        let capacity = store.admission_capacity(bank.slot()).min(8);
         let mut transitions = Vec::new();
         let mut changed = HashSet::new();
         let mut token = None;

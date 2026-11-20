@@ -126,6 +126,80 @@ fn regression_lineage_store_v2_settlement_plan_is_durable_and_immutable() {
 }
 
 #[test]
+fn regression_v2_retains_successor_while_only_accepting_sealed_prefix() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("state");
+    let mut store =
+        CheckpointLineageStoreV2::open(&directory, identity(), None, StartupModeV2::InitializeNew)
+            .unwrap();
+    store.append(transition(store.accepted_state())).unwrap();
+    let artifact =
+        build_checkpoint_artifact_v2(store.accepted_state(), 1, store.unsealed()).unwrap();
+    store
+        .seal([70; 32], 1, borsh::to_vec(&artifact).unwrap())
+        .unwrap();
+    let head = L1CheckpointHeadV2 {
+        checkpoint: [70; 32],
+        er_slot: 1,
+        state_root: artifact.checkpoint.new_state_root,
+        checkpoint_hash: artifact.binding_hash().unwrap(),
+    };
+    let next = transition(&store.working_state().unwrap());
+    assert_eq!(
+        store.append(next.clone()).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    let mut plan = crate::settlement::SettlementPlan {
+        er_slot: 1,
+        checksum: [0; 32],
+        chunks: vec![],
+        owner_changes: vec![],
+        lamport_changes: vec![],
+        receipt_balances: vec![],
+        token_withdrawals: vec![],
+        unsupported_changes: vec![],
+    };
+    plan.checksum = plan.recomputed_checksum();
+    store.bind_settlement_plan(&plan).unwrap();
+    let mut same_slot = next.clone();
+    same_slot.er_slot = 1;
+    assert!(store.append(same_slot).is_err());
+    store
+        .append(next)
+        .expect("durably record successor without waiting for settlement");
+    let successor = store.working_state().unwrap();
+    assert_eq!(successor.ingress_count(), 2);
+    assert!(store.accepted_head().is_none());
+    let mut wrong = head.clone();
+    wrong.state_root = successor.root().unwrap();
+    assert!(store.record_accepted(wrong).is_err());
+    drop(store);
+
+    let mut store = CheckpointLineageStoreV2::open(
+        &directory,
+        identity(),
+        Some(head.clone()),
+        StartupModeV2::Resume,
+    )
+    .unwrap();
+    assert_eq!(store.accepted_state().ingress_count(), 1);
+    assert_eq!(store.working_state().unwrap(), successor);
+    assert_eq!(store.settlement_plan().unwrap(), Some(plan));
+    assert_eq!(store.pending_transitions().len(), 1);
+    let second = build_checkpoint_artifact_v2(store.accepted_state(), 2, store.unsealed()).unwrap();
+    assert!(store
+        .seal([71; 32], 2, borsh::to_vec(&second).unwrap())
+        .is_err());
+    store.record_settled(&head).unwrap();
+    assert_eq!(store.working_state().unwrap(), successor);
+    store
+        .seal([71; 32], 2, borsh::to_vec(&second).unwrap())
+        .unwrap();
+    assert_eq!(second.pre, artifact.post);
+    assert_eq!(store.accepted_head(), Some(&head));
+}
+
+#[test]
 fn regression_lineage_store_v2_plan_persistence_failure_prevents_publication() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("state");

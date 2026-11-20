@@ -73,10 +73,54 @@ impl LineageCapsuleV2 {
         {
             return Err(invalid("invalid retained transaction cache"));
         }
+        let mut state = self.checkpoint_prefix_state()?;
+        if self.unsealed.len() > MAX_CHECKPOINT_TRANSITIONS_V2 {
+            return Err(invalid("checkpoint transition limit exceeded"));
+        }
+        if let Some(first) = self.unsealed.first() {
+            if self
+                .sealed
+                .as_ref()
+                .is_some_and(|sealed| sealed.settlement_plan.is_none())
+                || self
+                    .transition_slot_floor()
+                    .is_some_and(|slot| first.er_slot <= slot)
+            {
+                return Err(invalid(
+                    "successor overlaps an unprepared checkpoint prefix",
+                ));
+            }
+            let last = self.unsealed.last().expect("nonempty successor");
+            build_checkpoint_artifact_v2(&state, last.er_slot, &self.unsealed).map_err(invalid)?;
+            for transition in &self.unsealed {
+                transition.apply(&mut state).map_err(invalid)?;
+            }
+        }
+        if let Some(head) = &self.accepted_head {
+            if self.accepted_state.root().map_err(invalid)? != head.state_root {
+                return Err(invalid("accepted lineage head differs from its snapshot"));
+            }
+        } else if self.accepted_state
+            != CommittedStateV2::new(*self.accepted_state.identity()).map_err(invalid)?
+        {
+            return Err(invalid("nonempty lineage state has no accepted L1 head"));
+        }
+        Ok(state)
+    }
+
+    fn transition_slot_floor(&self) -> Option<u64> {
+        self.sealed
+            .as_ref()
+            .map(|sealed| sealed.er_slot)
+            .into_iter()
+            .chain(self.accepted_head.as_ref().map(|head| head.er_slot))
+            .max()
+    }
+
+    fn checkpoint_prefix_state(&self) -> io::Result<CommittedStateV2> {
         let mut state = self.accepted_state.clone();
         if let Some(sealed) = &self.sealed {
-            if !self.unsealed.is_empty()
-                || sealed.transitions.is_empty()
+            if sealed.transitions.is_empty()
                 || sealed.transitions.len() > MAX_CHECKPOINT_TRANSITIONS_V2
                 || sealed.artifact.is_empty()
                 || hash_parts(&[&sealed.artifact]) != sealed.artifact_hash
@@ -118,34 +162,6 @@ impl LineageCapsuleV2 {
                 }
                 state = result;
             }
-        }
-        if self.unsealed.len() > MAX_CHECKPOINT_TRANSITIONS_V2 {
-            return Err(invalid("checkpoint transition limit exceeded"));
-        }
-        for transition in &self.unsealed {
-            if self
-                .accepted_head
-                .as_ref()
-                .is_some_and(|head| transition.er_slot <= head.er_slot)
-            {
-                return Err(invalid(
-                    "checkpoint transition does not advance the accepted ER slot",
-                ));
-            }
-            transition.apply(&mut state).map_err(invalid)?;
-        }
-        if let Some(last) = self.unsealed.last() {
-            build_checkpoint_artifact_v2(&self.accepted_state, last.er_slot, &self.unsealed)
-                .map_err(invalid)?;
-        }
-        if let Some(head) = &self.accepted_head {
-            if self.accepted_state.root().map_err(invalid)? != head.state_root {
-                return Err(invalid("accepted lineage head differs from its snapshot"));
-            }
-        } else if self.accepted_state
-            != CommittedStateV2::new(*self.accepted_state.identity()).map_err(invalid)?
-        {
-            return Err(invalid("nonempty lineage state has no accepted L1 head"));
         }
         Ok(state)
     }
@@ -400,25 +416,46 @@ impl CheckpointLineageStoreV2 {
             .map(|(slot, wire)| (*slot, wire.as_slice()))
     }
 
+    pub(crate) fn admission_capacity(&self, er_slot: u64) -> usize {
+        // Until the plan is durable, settlement still reads the live overlay to build it.
+        if self.poisoned
+            || self
+                .sealed()
+                .is_some_and(|sealed| sealed.settlement_plan.is_none())
+            || self
+                .capsule
+                .transition_slot_floor()
+                .is_some_and(|floor| er_slot <= floor)
+        {
+            return 0;
+        }
+        MAX_CHECKPOINT_TRANSITIONS_V2.saturating_sub(self.unsealed().len())
+    }
+
     pub fn append(&mut self, transition: RecordedTransitionV2) -> io::Result<()> {
         self.append_batch(vec![transition])
     }
 
     pub fn append_batch(&mut self, transitions: Vec<RecordedTransitionV2>) -> io::Result<()> {
-        if transitions.is_empty() {
+        let Some(earliest_slot) = transitions.iter().map(|step| step.er_slot).min() else {
             return Ok(());
-        }
-        if self.capsule.sealed.is_some()
-            || self
-                .capsule
-                .unsealed
-                .len()
-                .checked_add(transitions.len())
-                .is_none_or(|length| length > MAX_CHECKPOINT_TRANSITIONS_V2)
+        };
+        if self
+            .capsule
+            .transition_slot_floor()
+            .is_some_and(|slot| earliest_slot <= slot)
+            && self
+                .sealed()
+                .is_none_or(|sealed| sealed.settlement_plan.is_some())
         {
+            return Err(invalid(
+                "checkpoint transition does not advance the prefix ER slot",
+            ));
+        }
+        if transitions.len() > self.admission_capacity(earliest_slot) {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
-                "checkpoint is sealed or full",
+                "checkpoint admission window is closed or full",
             ));
         }
         let mut state = self.working_state()?;
@@ -538,7 +575,8 @@ impl CheckpointLineageStoreV2 {
         if self.capsule.accepted_head.as_ref() == Some(&head) {
             return Ok(());
         }
-        let state = self.working_state()?;
+        // The L1 head can authenticate the sealed prefix, never the live successor.
+        let state = self.capsule.checkpoint_prefix_state()?;
         let sealed = self
             .capsule
             .sealed
