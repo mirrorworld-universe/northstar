@@ -10,6 +10,7 @@ mod instruction;
 mod instructions;
 mod pda;
 mod profile;
+mod receipt;
 mod state;
 
 #[cfg(not(feature = "no-entrypoint"))]

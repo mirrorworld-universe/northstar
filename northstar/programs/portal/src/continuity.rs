@@ -123,27 +123,54 @@ pub fn parse_session(data: &[u8]) -> Result<Session, PortalError> {
 }
 
 pub fn parse_deposit_receipt(data: &[u8]) -> Result<crate::DepositReceipt, PortalError> {
+    read_receipt_frame(data).map(|(base, _)| base)
+}
+
+impl crate::DepositReceipt {
+    pub(crate) fn binding(&self) -> crate::receipt::Binding<'_> {
+        crate::receipt::Binding {
+            session: self.session.as_array(),
+            recipient: self.recipient.as_array(),
+            bump: self.bump,
+        }
+    }
+}
+
+pub(crate) struct ReceiptScope {
+    pub(crate) context: [u8; 32],
+    pub(crate) cap: u64,
+}
+
+pub(crate) fn read_receipt_frame(
+    data: &[u8],
+) -> Result<(crate::DepositReceipt, Option<ReceiptScope>), PortalError> {
     if data.starts_with(&DepositReceiptV2::DISCRIMINATOR) {
         let frame = DepositReceiptV2::try_from_slice(data)
             .map_err(|_| PortalError::DepositReceiptDeserializeFailed)?;
         if !frame.base.is_valid()
             || frame.session_context == [0; 32]
-            || frame
-                .base
-                .balance
-                .checked_add(frame.base.withdrawn)
-                .is_none_or(|amount| amount > frame.total_deposited)
+            || !crate::receipt::within_deposit_cap(
+                frame.base.balance,
+                frame.base.withdrawn,
+                frame.total_deposited,
+            )
         {
             return Err(PortalError::DepositReceiptStateInvalid);
         }
-        Ok(frame.base)
+        Ok((
+            frame.base,
+            Some(ReceiptScope {
+                context: frame.session_context,
+                cap: frame.total_deposited,
+            }),
+        ))
     } else {
         let state = crate::DepositReceipt::try_from_slice(data)
             .map_err(|_| PortalError::DepositReceiptDeserializeFailed)?;
         if !state.is_valid() {
             return Err(PortalError::DepositReceiptStateInvalid);
         }
-        Ok(state)
+        Ok((state, None))
     }
 }
 
@@ -154,18 +181,18 @@ pub fn write_deposit_receipt(
     if data.starts_with(&DepositReceiptV2::DISCRIMINATOR) {
         let mut frame = DepositReceiptV2::try_from_slice(data)
             .map_err(|_| PortalError::DepositReceiptDeserializeFailed)?;
-        if state.session != frame.base.session
-            || state.recipient != frame.base.recipient
-            || state.bump != frame.base.bump
+        if !crate::receipt::same_binding(state.binding(), frame.base.binding())
             || state.withdrawn < frame.base.withdrawn
-            || state
-                .balance
-                .checked_add(state.withdrawn)
-                .is_none_or(|amount| amount > frame.total_deposited)
+            || !crate::receipt::within_deposit_cap(
+                state.balance,
+                state.withdrawn,
+                frame.total_deposited,
+            )
         {
             return Err(PortalError::DepositReceiptStateInvalid);
         }
-        frame.base = *state;
+        frame.base.balance = state.balance;
+        frame.base.withdrawn = state.withdrawn;
         frame
             .serialize(&mut &mut data[..])
             .map_err(|_| PortalError::DepositReceiptStateInvalid)
