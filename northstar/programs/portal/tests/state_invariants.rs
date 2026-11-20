@@ -273,6 +273,39 @@ async fn invariant_settlement_surplus_preserves_total_and_checkpoint_balances() 
 }
 
 #[tokio::test]
+async fn full_lamport_batch_credits_only_surplus_and_replays_without_writes() {
+    let mut fixture = Fixture::new();
+    let count = northstar_portal::MAX_SETTLEMENT_LAMPORT_ACCOUNTS;
+    let keys: Vec<_> = (0..count).map(|_| fixture.delegated(BALANCE + 4)).collect();
+    let targets: Vec<_> = (0..count).map(|i| BALANCE + i as u64).collect();
+    let instruction = fixture.settle(&keys, &targets);
+    let mut context = fixture.program_test.start_with_context().await;
+    send(
+        &mut context,
+        &fixture.payer,
+        std::slice::from_ref(&instruction),
+    )
+    .await
+    .unwrap();
+    let vault = get(&mut context, fixture.vault).await;
+    let session = get(&mut context, fixture.session).await;
+    let initial = (BALANCE + 4) * count as u64 + BALANCE;
+    assert_eq!(targets.iter().sum::<u64>() + vault.lamports, initial);
+    for (&key, &target) in keys.iter().zip(&targets) {
+        assert_eq!(get(&mut context, key).await.lamports, target);
+    }
+    context.get_new_latest_blockhash().await.unwrap();
+    send(&mut context, &fixture.payer, &[instruction])
+        .await
+        .unwrap();
+    assert_eq!(get(&mut context, fixture.vault).await, vault);
+    assert_eq!(get(&mut context, fixture.session).await, session);
+    for (&key, &target) in keys.iter().zip(&targets) {
+        assert_eq!(get(&mut context, key).await.lamports, target);
+    }
+}
+
+#[tokio::test]
 async fn invariant_guarded_equal_balances_still_advance_accumulator() {
     let mut fixture = Fixture::new();
     let key = fixture.delegated(BALANCE);

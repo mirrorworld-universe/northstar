@@ -2,6 +2,7 @@ use {
     crate::{
         find_checkpoint_cursor_pda, find_checkpoint_pda, find_delegation_record_pda,
         find_fee_vault_pda, find_session_pda,
+        lamport_batch::{self, BatchError, Effect, Guard, Row},
         state::{Checkpoint, CheckpointCursor, CheckpointStatus, DelegationRecord, FeeVault},
         BeginSettlement, FinishSettlement, PortalError, Session, SettleAccountLamports,
         SettleAccountOwner, SettlementStatus, WriteSettlementChunk, MAX_SETTLEMENT_CHUNK,
@@ -486,6 +487,14 @@ pub fn process_settle_account_lamports_with_surplus(
     )
 }
 
+fn batch_error(e: BatchError) -> PortalError {
+    match e {
+        BatchError::Rent => PortalError::SettlementLamportsBelowRentExempt,
+        BatchError::Overflow => PortalError::ArithmeticOverflow,
+        BatchError::Unbalanced => PortalError::SettlementLamportsNotConserved,
+    }
+}
+
 fn process_settle_account_lamports_inner(
     program_id: &Pubkey,
     accounts: &mut [AccountInfo],
@@ -563,11 +572,14 @@ fn process_settle_account_lamports_inner(
             });
         // A new L1 donation can change balances after success; balance equality alone is
         // insufficient to identify a retry of this checkpoint-bound operation.
-        if session_state.settlement_accumulator == next_accumulator {
-            return Ok(());
-        }
-        if session_state.settlement_accumulator != previous_accumulator {
-            return Err(PortalError::SettlementChecksumMismatch.into());
+        match lamport_batch::guard(
+            &session_state.settlement_accumulator,
+            &previous_accumulator,
+            &next_accumulator,
+        ) {
+            Guard::Retry => return Ok(()),
+            Guard::Mismatch => return Err(PortalError::SettlementChecksumMismatch.into()),
+            Guard::Apply => (),
         }
         Some(fee_vault)
     } else {
@@ -575,44 +587,29 @@ fn process_settle_account_lamports_inner(
     };
 
     let rent = Rent::get()?;
-    let mut current_total = 0u128;
-    let mut target_total = 0u128;
-    let mut already_settled = true;
+    let mut tally = lamport_batch::empty();
     for index in 0..account_count {
         let account = &settlement_accounts[index * 2];
-        let target_lamports = lamports[index];
-        current_total = current_total
-            .checked_add(account.lamports() as u128)
-            .ok_or(PortalError::ArithmeticOverflow)?;
-        target_total = target_total
-            .checked_add(target_lamports as u128)
-            .ok_or(PortalError::ArithmeticOverflow)?;
-        if account.data_len() > 0
-            && target_lamports < rent.try_minimum_balance(account.data_len())?
-        {
-            return Err(PortalError::SettlementLamportsBelowRentExempt.into());
-        }
-        already_settled &= account.lamports() == target_lamports;
-    }
-
-    if already_settled && previous_accumulator.is_none() {
-        return Ok(());
-    }
-    let surplus = current_total
-        .checked_sub(target_total)
-        .ok_or(PortalError::SettlementLamportsNotConserved)?;
-    let vault_balance = if let Some(vault) = fee_vault.as_ref() {
-        Some(
-            vault
-                .lamports()
-                .checked_add(u64::try_from(surplus).map_err(|_| PortalError::ArithmeticOverflow)?)
-                .ok_or(PortalError::ArithmeticOverflow)?,
+        let floor = if account.data_len() == 0 {
+            0
+        } else {
+            rent.try_minimum_balance(account.data_len())?
+        };
+        tally = lamport_batch::add(
+            tally,
+            Row {
+                current: account.lamports(),
+                target: lamports[index],
+                floor,
+            },
         )
-    } else {
-        if surplus != 0 {
-            return Err(PortalError::SettlementLamportsNotConserved.into());
-        }
-        None
+        .map_err(batch_error)?;
+    }
+    let vault_balance = match lamport_batch::finish(tally, fee_vault.as_ref().map(|v| v.lamports()))
+        .map_err(batch_error)?
+    {
+        Effect::Noop => return Ok(()),
+        Effect::Write(balance) => balance,
     };
 
     for index in 0..account_count {

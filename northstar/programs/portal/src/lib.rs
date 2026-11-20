@@ -4,10 +4,14 @@ extern crate alloc;
 
 mod bond;
 pub mod continuity;
+mod dispute_range;
 mod error;
 mod events;
+#[cfg(feature = "checkpoint-continuity-v2")]
+mod ingress_prefix;
 mod instruction;
 mod instructions;
+mod lamport_batch;
 mod pda;
 mod profile;
 mod receipt;
