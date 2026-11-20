@@ -1,0 +1,14 @@
+---
+all:
+  children:
+    northstar_er_reference:
+      hosts:
+        er-reference.example.org:
+      vars:
+        northstar_profiles_dir: /secure/reviewed-er-profile
+        northstar_portal_id: REPLACE_WITH_REVIEWED_DEVNET_PORTAL
+        northstar_validator_image: registry.example.org/northstar/er-validator@sha256:REPLACE_WITH_DIGEST
+        northstar_signer_image: registry.example.org/northstar/vrf-request-signer@sha256:REPLACE_WITH_DIGEST
+        # Optional: configure only on an approved GPU host.
+        # northstar_prover_image: registry.example.org/northstar/er-prover@sha256:REPLACE_WITH_DIGEST
+        # northstar_gpu_device: '0'

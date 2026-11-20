@@ -1,0 +1,180 @@
+name: northstar-er-reference
+
+x-defaults: &defaults
+  init: true
+  read_only: true
+  restart: "no"
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pull_policy: never
+  tmpfs:
+    - /tmp:mode=1777
+  logging:
+    driver: json-file
+    options:
+      max-size: 20m
+      max-file: "3"
+
+services:
+  validator:
+    <<: *defaults
+    image: ${NORTHSTAR_VALIDATOR_IMAGE:-northstar/er-validator:reference}
+    user: "10001:10001"
+    network_mode: host
+    depends_on:
+      vrf-oracle:
+        condition: service_healthy
+    environment:
+      HOME: /var/lib/northstar
+      NORTHSTAR_CHECKPOINT_PLAN_DIR: /var/lib/northstar/checkpoints
+      NORTHSTAR_UNSETTLED_STATE_DIR: /var/lib/northstar/unsettled
+    entrypoint: [/usr/local/bin/agave-validator]
+    command:
+      - --identity
+      - /run/northstar/credentials/identity.json
+      - --ledger
+      - /var/lib/northstar/ledger
+      - --log
+      - "-"
+      - --no-voting
+      - --entrypoint
+      - entrypoint.devnet.solana.com:8001
+      - --expected-genesis-hash
+      - EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG
+      - --gossip-port
+      - "8001"
+      - --dynamic-port-range
+      - 8002-8030
+      - --private-rpc
+      - --full-rpc-api
+      - --account-index
+      - program-id
+      - spl-token-owner
+      - spl-token-mint
+      - --rpc-bind-address
+      - 127.0.0.1
+      - --rpc-port
+      - "8899"
+      - --ephemeral-rpc-port
+      - "8910"
+      - --ephemeral-ws-port
+      - "8911"
+      - --ephemeral-tpu-port
+      - "8912"
+      - --portal
+      - ${NORTHSTAR_PORTAL_ID:?Set the reviewed devnet Portal ID}
+      - --vrf-relay-config
+      - /etc/northstar/relay.json
+    volumes:
+      - type: bind
+        source: ${NORTHSTAR_STACK_DIR:?Set an absolute reference stack directory}/config/relay.json
+        target: /etc/northstar/relay.json
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${NORTHSTAR_STACK_DIR}/credentials/validator/identity.json
+        target: /run/northstar/credentials/identity.json
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${NORTHSTAR_STACK_DIR}/credentials/validator/fulfiller.json
+        target: /run/northstar/credentials/fulfiller.json
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${NORTHSTAR_STACK_DIR}/credentials/validator/bearer
+        target: /run/northstar/credentials/bearer
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${NORTHSTAR_STACK_DIR}/state/validator
+        target: /var/lib/northstar
+        bind: {create_host_path: false}
+    working_dir: /var/lib/northstar
+    ulimits:
+      nofile: 1000000
+      memlock: -1
+    healthcheck:
+      test: [CMD, python3, /opt/northstar/healthcheck.py, validator]
+      interval: 15s
+      timeout: 12s
+      retries: 4
+      start_period: 10m
+    stop_grace_period: 2m
+
+  vrf-oracle:
+    <<: *defaults
+    image: ${NORTHSTAR_SIGNER_IMAGE:-northstar/vrf-request-signer:reference}
+    user: "10002:10002"
+    # The signer only accepts loopback, and Native only accepts HTTP on loopback.
+    # Host networking preserves this contract without publishing port 9030.
+    network_mode: host
+    environment:
+      HOME: /var/lib/northstar-vrf-request-signer
+      TOKIO_WORKER_THREADS: "2"
+    entrypoint: [/usr/local/bin/vrf-request-signer]
+    command: [--config, /etc/northstar/signer.json]
+    mem_limit: 512m
+    pids_limit: 64
+    volumes:
+      - type: bind
+        source: ${NORTHSTAR_STACK_DIR}/config/signer.json
+        target: /etc/northstar/signer.json
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${NORTHSTAR_STACK_DIR}/credentials/signer/vrf.json
+        target: /run/northstar/credentials/vrf.json
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${NORTHSTAR_STACK_DIR}/credentials/signer/bearer
+        target: /run/northstar/credentials/bearer
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${NORTHSTAR_STACK_DIR}/state/signer
+        target: /var/lib/northstar-vrf-request-signer
+        bind: {create_host_path: false}
+    healthcheck:
+      test: [CMD, python3, /opt/northstar/healthcheck.py, signer]
+      interval: 10s
+      timeout: 5s
+      retries: 4
+      start_period: 1m
+    stop_grace_period: 45s
+
+  prover:
+    <<: *defaults
+    profiles: [proof-lab]
+    image: ${NORTHSTAR_PROVER_IMAGE:-northstar/er-prover:reference}
+    user: "10003:10003"
+    network_mode: none
+    environment:
+      HOME: /var/lib/northstar-prover
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      NORTHSTAR_GPU_REPLAY_DIR: /opt/northstar/prover/replay
+      NORTHSTAR_GPU_PROVER: /opt/northstar/prover/bin/northstar-zkvm-replay-script
+      NORTHSTAR_GPU_WORKER_SOCKET: /var/lib/northstar-prover/worker.sock
+    entrypoint: [python3, /opt/northstar/prover/gpu-worker.py]
+    command: [serve, /var/lib/northstar-prover/worker.sock, /var/lib/northstar-prover/jobs]
+    volumes:
+      - type: bind
+        source: ${NORTHSTAR_STACK_DIR}/state/prover
+        target: /var/lib/northstar-prover
+        bind: {create_host_path: false}
+    working_dir: /var/lib/northstar-prover
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${NORTHSTAR_GPU_DEVICE:-0}"]
+              capabilities: [gpu]
+    healthcheck:
+      test: [CMD, python3, /opt/northstar/prover/gpu-worker.py, preflight]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 4m
+    stop_grace_period: 45s
