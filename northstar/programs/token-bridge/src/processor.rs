@@ -6,6 +6,7 @@ mod token_ingress_v2;
 use northstar_portal::Session;
 use {
     crate::{
+        accounting::{transfer_access, transfer_balances, withdrawal_target, BridgeError, Holding},
         instruction::TokenBridgeInstruction,
         portal_abi::{is_valid_settlement_checkpoint, is_valid_settlement_session},
         state::{account_size, BridgeBuffer, ErTokenAccount, TokenDepositReceipt, TokenVault},
@@ -461,6 +462,28 @@ fn process_deposit(
     Ok(())
 }
 
+impl<'a> From<&'a ErTokenAccount> for Holding<'a> {
+    fn from(state: &'a ErTokenAccount) -> Self {
+        Self {
+            session_bridge: &state.session_bridge,
+            mint: &state.mint,
+            amount: state.amount,
+        }
+    }
+}
+
+impl From<BridgeError> for ProgramError {
+    fn from(error: BridgeError) -> Self {
+        match error {
+            BridgeError::MissingSignature => Self::MissingRequiredSignature,
+            BridgeError::Binding => Self::InvalidAccountData,
+            BridgeError::Insufficient => Self::InsufficientFunds,
+            BridgeError::Overflow => Self::ArithmeticOverflow,
+            BridgeError::Withdrawal => Self::InvalidArgument,
+        }
+    }
+}
+
 fn process_transfer(
     program_id: &Pubkey,
     accounts: &mut [AccountInfo],
@@ -471,26 +494,20 @@ fn process_transfer(
     let source = next_account_info(account_info_iter)?;
     let destination = next_account_info(account_info_iter)?;
 
-    require_signer(authority)?;
-    if source.address() == destination.address() {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    transfer_access(
+        authority.is_signer(),
+        source.address().as_array(),
+        destination.address().as_array(),
+    )?;
     let mut source_state = load_er_token_account(program_id, source)?;
     let mut destination_state = load_er_token_account(program_id, destination)?;
-    if source_state.owner != key_bytes(authority.address())
-        || source_state.session_bridge != destination_state.session_bridge
-        || source_state.mint != destination_state.mint
-    {
-        return Err(ProgramError::InvalidAccountData);
-    }
-    source_state.amount = source_state
-        .amount
-        .checked_sub(amount)
-        .ok_or(ProgramError::InsufficientFunds)?;
-    destination_state.amount = destination_state
-        .amount
-        .checked_add(amount)
-        .ok_or(ProgramError::ArithmeticOverflow)?;
+    (source_state.amount, destination_state.amount) = transfer_balances(
+        authority.address().as_array(),
+        &source_state.owner,
+        Holding::from(&source_state),
+        Holding::from(&destination_state),
+        amount,
+    )?;
     store(source, &source_state)?;
     store(destination, &destination_state)
 }
@@ -731,18 +748,16 @@ fn process_settle_withdrawal(
     if destination.mint.to_bytes() != bridge.mint.to_bytes() {
         return Err(ProgramError::InvalidAccountData);
     }
-    if withdrawn <= vault_state.withdrawn {
+    let Some(next) = withdrawal_target(
+        vault_state.withdrawn,
+        vault_state.deposited,
+        withdrawn,
+        amount,
+    )?
+    else {
         return Ok(());
-    }
-
-    let expected_withdrawn = vault_state
-        .withdrawn
-        .checked_add(amount)
-        .ok_or(ProgramError::ArithmeticOverflow)?;
-    if withdrawn != expected_withdrawn || withdrawn > vault_state.deposited {
-        return Err(ProgramError::InvalidArgument);
-    }
-    vault_state.withdrawn = withdrawn;
+    };
+    vault_state.withdrawn = next;
 
     if token_program.address() != &pinocchio_token::ID {
         return Err(ProgramError::IncorrectProgramId);

@@ -1,3 +1,5 @@
+#[cfg(target_os = "solana")]
+mod accounting;
 pub mod instruction;
 pub mod state;
 
