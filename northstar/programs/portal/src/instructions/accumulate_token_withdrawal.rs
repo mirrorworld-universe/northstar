@@ -6,6 +6,7 @@ use {
         account_size, find_checkpoint_pda, find_session_pda,
         find_token_withdrawal_authorization_pda,
         instructions::settlement::{accumulate_token_withdrawal_checksum, TokenWithdrawalChecksum},
+        withdrawal_auth::{mark_consumed, AuthorizationKey},
         AccumulateTokenWithdrawal, Checkpoint, CheckpointStatus, ConsumeTokenWithdrawal,
         PortalError, Session, SessionBridge, SettlementStatus, TokenWithdrawalAuthorization,
     },
@@ -245,17 +246,25 @@ pub fn process_consume_token_withdrawal(
         TokenWithdrawalAuthorization::try_from_slice(&authorization.try_borrow()?)
             .map_err(|_| PortalError::InvalidAccountData)?;
     if !authorization_state.is_valid()
-        || authorization_state.checkpoint != *checkpoint.address()
-        || authorization_state.tuple_hash != token_withdrawal_tuple_hash(&withdrawal)
-        || authorization_state.bump != authorization_bump
-        || authorization_state.consumed
+        || !mark_consumed(
+            &mut authorization_state.consumed,
+            AuthorizationKey {
+                checkpoint: authorization_state.checkpoint.as_array(),
+                tuple_hash: &authorization_state.tuple_hash,
+                bump: authorization_state.bump,
+            },
+            AuthorizationKey {
+                checkpoint: checkpoint.address().as_array(),
+                tuple_hash: &token_withdrawal_tuple_hash(&withdrawal),
+                bump: authorization_bump,
+            },
+        )
     {
         return Err(PortalError::InvalidAccountData.into());
     }
-
-    authorization_state.consumed = true;
     let mut authorization_data = authorization.try_borrow_mut()?;
-    BorshSerialize::serialize(&authorization_state, &mut &mut authorization_data[..]).unwrap();
+    BorshSerialize::serialize(&authorization_state, &mut &mut authorization_data[..])
+        .map_err(|_| PortalError::InvalidAccountData)?;
     Ok(())
 }
 

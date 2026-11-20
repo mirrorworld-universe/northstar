@@ -12,6 +12,7 @@ mod pda;
 mod profile;
 mod receipt;
 mod state;
+mod withdrawal_auth;
 
 #[cfg(not(feature = "no-entrypoint"))]
 use pinocchio::no_allocator;

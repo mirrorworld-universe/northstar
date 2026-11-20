@@ -351,6 +351,19 @@ async fn withdrawal_pays_once_and_token_failure_rolls_back_portal_consumption() 
             .unwrap()
             .consumed
     );
+    // The destination is part of Portal's authorized tuple, even for the same mint.
+    let mut other_destination = settle.clone();
+    other_destination.accounts[9] = rw(w.alice_token);
+    let other_before = read(&mut w.context, w.alice_token).await;
+    let (rejected, logs) = execute(&mut w, other_destination).await;
+    assert!(rejected.is_err());
+    assert!(logs
+        .iter()
+        .any(|m| m.starts_with(&format!("Program {portal} failed:"))));
+    assert!(!logs.contains(&format!("Program {spl} invoke [2]")));
+    assert_eq!(read(&mut w.context, w.alice_token).await, other_before);
+    assert_eq!(settlement_snapshot(&mut w.context, keys).await, before);
+
     let (failure, logs) = execute(&mut w, settle.clone()).await;
     assert!(failure.is_err());
     assert!(logs.contains(&format!("Program {portal} success")));
