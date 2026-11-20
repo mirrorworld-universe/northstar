@@ -1,5 +1,7 @@
 # Portal checkpoint-bond proof
 
+For the separate SOL receipt, token withdrawal authorization and SPL bridge proofs, see [settlement verification](SETTLEMENT.md).
+
 **Result, 2026-11-19:** Verus with Z3 verified the executable accounting used by Portal’s release and slash paths. The verifier reported **8 verified, 0 errors**; this is its count of verified functions, not eight independent financial guarantees. Three intentionally incorrect variants each failed the planner’s postcondition. See the [recorded run](evidence/run.txt) and [source hashes and control results](evidence/summary.json). Local reproduction is complete; independent review is pending.
 
 ## What was proved
@@ -50,4 +52,4 @@ The trusted boundary includes Verus/vstd’s specifications for Rust primitives,
 
 [Program tests](../tests/integration.rs) cover release on commit/cancel, slashing on a timeout, and retry. The strengthened release test checks the caller rejects an aliased proposer account; this tests the binding at the wrapper, not which inner guard fires. Raising the Rent sysvar makes the previously sufficient checkpoint balance insufficient. Both rejected transactions preserve checkpoint, cursor, proposer and committer state, roll back a preceding instruction, and charge the fee payer exactly the quoted fee. Restoring rent allows the same bond to be paid. The [wire test](../src/state.rs) checks all three Borsh tags and rejects an unknown one.
 
-**Local program results:** 62 tests passed in each of the default and `checkpoint-continuity-v2` builds. The same external live-validator test was already marked ignored in each; no live deployment was tested. These are regression results across two build profiles, not 124 distinct properties. Independent reproduction and the separate receipt proof are still needed for the full Portal objective.
+**Local program results:** 62 tests passed in each of the default and `checkpoint-continuity-v2` builds. The same external live-validator test was already marked ignored in each; no live deployment was tested. These are regression results across two build profiles, not 124 distinct properties. The [subsequent receipt proof](SETTLEMENT.md) covers the second accounting component; independent reproduction and review remain outstanding.

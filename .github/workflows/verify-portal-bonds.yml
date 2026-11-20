@@ -1,17 +1,23 @@
-# Sonic: Keep the production checkpoint-bond planner and its proof in sync.
-name: Verify Portal checkpoint bonds
+# Sonic: Verify the same executable accounting modules that the two programs use.
+name: Verify Portal and token bridge accounting
 
 on:
   workflow_dispatch:
   pull_request:
     paths:
       - northstar/programs/portal/**
+      - northstar/programs/token-bridge/**
+      - northstar/zk-types/**
+      - Cargo.lock
       - rust-toolchain.toml
       - .github/workflows/verify-portal-bonds.yml
   push:
     branches: [master]
     paths:
       - northstar/programs/portal/**
+      - northstar/programs/token-bridge/**
+      - northstar/zk-types/**
+      - Cargo.lock
       - rust-toolchain.toml
       - .github/workflows/verify-portal-bonds.yml
 
@@ -20,6 +26,10 @@ permissions:
 
 jobs:
   verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [bond, receipt, authorization, bridge]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -37,10 +47,18 @@ jobs:
           echo 'f3a0119292df8855e4435da8130bee1873b0e6a60c306accf81a08ea687bba3c  verus.zip' | sha256sum --check --strict -
           unzip -q verus.zip
       - name: Prove accounting and check controls
-        run: python3 northstar/programs/portal/proofs/check.py --verus "$RUNNER_TEMP/verus-x86-linux/verus" --logs target/bond-proofs
+        run: python3 northstar/programs/portal/proofs/check.py --suite "${{ matrix.suite }}" --verus "$RUNNER_TEMP/verus-x86-linux/verus" --logs "target/proofs/${{ matrix.suite }}"
+      - name: Compare with the reviewed proof inputs and results
+        shell: bash
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          expected=northstar/programs/portal/proofs/evidence/settlement/$SUITE.json
+          if [[ $SUITE == bond ]]; then expected=northstar/programs/portal/proofs/evidence/summary.json; fi
+          cmp "target/proofs/$SUITE/summary.json" "$expected"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: checkpoint-bond-proof-logs
-          path: target/bond-proofs
+          name: accounting-proof-logs-${{ matrix.suite }}
+          path: target/proofs/${{ matrix.suite }}
           if-no-files-found: warn

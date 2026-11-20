@@ -1,0 +1,54 @@
+{
+  "verus": "0.2026.11.02.8bf68ee",
+  "verus_commit": "8bf68ee741df833ea5d0fe6a2255126fdea87e47",
+  "z3": "Z3 version 4.16.0 - 64 bit",
+  "flags": [
+    "--crate-type",
+    "lib",
+    "--edition=2021",
+    "--no-cheating",
+    "--output-json",
+    "--time-expanded"
+  ],
+  "source_sha256": {
+    "src/accounting.rs": "3a67bb1926a297ff5eae59637fcf7dc1292671c6aea8b948a0ad65da9b6766c2",
+    "proofs/token_accounting.rs": "59b3e2a6dc9aef7a6262caa5dbe2ccbc9aee3855bc9f5318b8d150dab4f8edb0"
+  },
+  "runs": {
+    "production": {
+      "verdict": "verified",
+      "verified": 5,
+      "errors": 0
+    },
+    "wrong_signer_flag": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 4,
+      "errors": 1
+    },
+    "wrong_mint_comparison": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 4,
+      "errors": 1
+    },
+    "missing_credit": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 4,
+      "errors": 1
+    },
+    "equal_counter_not_replay": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 4,
+      "errors": 1
+    },
+    "reject_exact_step": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 4,
+      "errors": 1
+    },
+    "reject_exact_vault_cap": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 4,
+      "errors": 1
+    }
+  }
+}

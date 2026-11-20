@@ -1,0 +1,39 @@
+{
+  "verus": "0.2026.11.02.8bf68ee",
+  "verus_commit": "8bf68ee741df833ea5d0fe6a2255126fdea87e47",
+  "z3": "Z3 version 4.16.0 - 64 bit",
+  "flags": [
+    "--crate-type",
+    "lib",
+    "--edition=2021",
+    "--no-cheating",
+    "--output-json",
+    "--time-expanded"
+  ],
+  "source_sha256": {
+    "src/withdrawal_auth.rs": "6878e94950de29e2a5d53b07d9074241a528991254ae60a9233bce29c2787dc2",
+    "proofs/token_authorization.rs": "057da15b049d6cf690822da5afb4e1b39756dd78c9a04c3cea1e0c98cf3f4aad"
+  },
+  "runs": {
+    "production": {
+      "verdict": "verified",
+      "verified": 3,
+      "errors": 0
+    },
+    "wrong_pre_state": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 2,
+      "errors": 1
+    },
+    "wrong_digest_comparison": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 2,
+      "errors": 1
+    },
+    "missing_consumption": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 2,
+      "errors": 1
+    }
+  }
+}
