@@ -1,0 +1,92 @@
+---
+- name: Stage the Northstar ER reference on a dedicated Docker host
+  hosts: northstar_er_reference
+  become: true
+  gather_facts: false
+  serial: 1
+  vars:
+    northstar_stack_dir: /srv/northstar-er-reference
+    northstar_gpu_device: "0"
+    image_digest: '^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}$'
+  tasks:
+    - name: Require a dedicated directory and reviewed release inputs
+      ansible.builtin.assert:
+        that:
+          - northstar_stack_dir is match('^(/[a-zA-Z0-9][a-zA-Z0-9_.-]*)+$')
+          - northstar_profiles_dir is defined
+          - northstar_portal_id | default('') is match('^[1-9A-HJ-NP-Za-km-z]{32,44}$')
+          - northstar_validator_image | default('') is match(image_digest)
+          - northstar_signer_image | default('') is match(image_digest)
+          - northstar_prover_image is not defined or northstar_prover_image is match(image_digest)
+          - northstar_gpu_device | string is match('^[0-9]+$|^GPU-[a-fA-F0-9-]+$')
+
+    - name: Check for existing Compose containers, including stopped instances
+      ansible.builtin.command:
+        argv: [docker, ps, --all, --quiet, --filter, label=com.docker.compose.project=northstar-er-reference]
+      register: existing_containers
+      check_mode: false
+      changed_when: false
+
+    - name: Refuse to stage over an existing stack
+      ansible.builtin.assert:
+        that: existing_containers.stdout_lines | length == 0
+        fail_msg: Reconcile the existing reference project before changing its configuration.
+
+    - name: Create dedicated directories without resetting any state
+      ansible.builtin.file:
+        path: "{{ northstar_stack_dir }}/{{ item.path }}"
+        state: directory
+        owner: "{{ item.uid }}"
+        group: "{{ item.uid }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - {path: '', uid: '0', mode: '0750'}
+        - {path: config, uid: '0', mode: '0700'}
+        - {path: credentials, uid: '0', mode: '0700'}
+        - {path: credentials/validator, uid: '10001', mode: '0700'}
+        - {path: credentials/signer, uid: '10002', mode: '0700'}
+        - {path: state, uid: '0', mode: '0700'}
+        - {path: state/validator, uid: '10001', mode: '0700'}
+        - {path: state/signer, uid: '10002', mode: '0700'}
+        - {path: state/prover, uid: '10003', mode: '0700'}
+
+    - name: Stage Compose definition
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../compose.yaml"
+        dest: "{{ northstar_stack_dir }}/compose.yaml"
+        owner: '0'
+        group: '0'
+        mode: '0644'
+
+    - name: Stage reviewed paired configuration, not credentials
+      ansible.builtin.copy:
+        src: "{{ northstar_profiles_dir }}/{{ item }}.json"
+        dest: "{{ northstar_stack_dir }}/config/{{ item }}.json"
+        owner: '0'
+        group: '0'
+        mode: '0444'
+      loop: [relay, signer]
+      diff: false
+
+    - name: Stage public Compose variables
+      ansible.builtin.copy:
+        dest: "{{ northstar_stack_dir }}/.env"
+        owner: '0'
+        group: '0'
+        mode: '0600'
+        content: |
+          NORTHSTAR_STACK_DIR={{ northstar_stack_dir }}
+          NORTHSTAR_PORTAL_ID={{ northstar_portal_id }}
+          NORTHSTAR_VALIDATOR_IMAGE={{ northstar_validator_image }}
+          NORTHSTAR_SIGNER_IMAGE={{ northstar_signer_image }}
+          NORTHSTAR_GPU_DEVICE={{ northstar_gpu_device }}
+          {% if northstar_prover_image is defined %}
+          NORTHSTAR_PROVER_IMAGE={{ northstar_prover_image }}
+          {% endif %}
+
+    - name: Validate the Compose model, including the optional prover
+      ansible.builtin.command:
+        argv: [docker, compose, --profile, proof-lab, config, --quiet]
+        chdir: "{{ northstar_stack_dir }}"
+      when: not ansible_check_mode
+      changed_when: false

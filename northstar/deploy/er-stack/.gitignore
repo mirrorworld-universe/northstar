@@ -1,0 +1,10 @@
+/.env
+/artifacts/
+/credentials/
+/state/
+/config/*
+!/config/*.example.json
+/ansible/inventory*.yml
+!/ansible/inventory.example.yml
+/compose.override.yaml
+/__pycache__/

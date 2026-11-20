@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "worker": {
+    "network": "devnet_er",
+    "rpc_url": "http://127.0.0.1:8910",
+    "expected_genesis": "11111111111111111111111111111111",
+    "l1_rpc_url": "http://127.0.0.1:8899",
+    "er_session": "REPLACE_WITH_SESSION_V2_PUBKEY",
+    "er_session_context": "REPLACE_WITH_SESSION_CONTEXT_HEX",
+    "coordinator": "REPLACE_WITH_COORDINATOR_PUBKEY",
+    "coordinator_programdata_sha256": "REPLACE_WITH_COORDINATOR_PROGRAMDATA_SHA256",
+    "verifier": "REPLACE_WITH_BAI_VERIFIER_PUBKEY",
+    "verifier_programdata_sha256": "REPLACE_WITH_VERIFIER_PROGRAMDATA_SHA256",
+    "vrf_public_key": "REPLACE_WITH_VRF_PUBKEY",
+    "fulfiller": "REPLACE_WITH_FULFILLER_PUBKEY",
+    "signer_file": "/run/northstar/credentials/fulfiller.json",
+    "state_dir": "/var/lib/northstar/relay-journal",
+    "commitment": "confirmed",
+    "allowed_consumers": ["REPLACE_WITH_CONSUMER_PUBKEY"],
+    "allow_store": false,
+    "poll_ms": 2000,
+    "max_attempts": 2,
+    "max_records": 128
+  },
+  "signer": {
+    "url": "http://127.0.0.1:9030",
+    "bearer_token_file": "/run/northstar/credentials/bearer",
+    "policy_sha256": "REPLACE_WITH_REVIEWED_SIGNER_POLICY_SHA256"
+  }
+}

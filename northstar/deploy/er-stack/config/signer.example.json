@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "listen": "127.0.0.1:9030",
+  "policy": {
+    "network": "devnet_er",
+    "l1_rpc_url": "https://api.devnet.solana.com/",
+    "l1_genesis": "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+    "portal": "REPLACE_WITH_REVIEWED_DEVNET_PORTAL",
+    "portal_programdata_sha256": "REPLACE_WITH_PORTAL_PROGRAMDATA_SHA256",
+    "session": "REPLACE_WITH_SESSION_V2_PUBKEY",
+    "session_context": "REPLACE_WITH_SESSION_CONTEXT_HEX",
+    "coordinator": "REPLACE_WITH_COORDINATOR_PUBKEY",
+    "coordinator_programdata_sha256": "REPLACE_WITH_COORDINATOR_PROGRAMDATA_SHA256",
+    "verifier": "REPLACE_WITH_BAI_VERIFIER_PUBKEY",
+    "verifier_programdata_sha256": "REPLACE_WITH_VERIFIER_PROGRAMDATA_SHA256",
+    "vrf_public_key": "REPLACE_WITH_VRF_PUBKEY",
+    "allowed_consumers": ["REPLACE_WITH_CONSUMER_PUBKEY"],
+    "allow_store": false,
+    "min_challenge_window_slots": 10
+  },
+  "vrf_key_file": "/run/northstar/credentials/vrf.json",
+  "bearer_token_file": "/run/northstar/credentials/bearer",
+  "state_dir": "/var/lib/northstar-vrf-request-signer/admissions",
+  "max_records": 128
+}
