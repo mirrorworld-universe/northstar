@@ -1,20 +1,20 @@
 #![allow(dead_code)]
 #[path = "../src/accounting.rs"]
-mod accounting;
+pub(crate) mod accounting;
 
-mod bridge_spec {
+pub(crate) mod bridge_spec {
     use super::accounting::*;
     use vstd::prelude::*;
 
     verus! {
-    pub(super) open spec fn access(signed: bool, source: &[u8; 32], dest: &[u8; 32],
+    pub(crate) open spec fn access(signed: bool, source: &[u8; 32], dest: &[u8; 32],
         result: Result<(), BridgeError>) -> bool {
         result == (if !signed { Err(BridgeError::MissingSignature) }
             else if source@ =~= dest@ { Err(BridgeError::Binding) }
             else { Ok(()) })
     }
 
-    pub(super) open spec fn transfer(authority: &[u8; 32], owner: &[u8; 32], source: Holding,
+    pub(crate) open spec fn transfer(authority: &[u8; 32], owner: &[u8; 32], source: Holding,
         dest: Holding, amount: u64, result: Result<(u64, u64), BridgeError>) -> bool {
         let bound = (authority@ =~= owner@) && (source.session_bridge@ =~= dest.session_bridge@)
             && (source.mint@ =~= dest.mint@);
@@ -31,7 +31,7 @@ mod bridge_spec {
         }
     }
 
-    pub(super) open spec fn withdrawal(stored: u64, deposited: u64, proposed: u64, amount: u64,
+    pub(crate) open spec fn withdrawal(stored: u64, deposited: u64, proposed: u64, amount: u64,
         result: Result<Option<u64>, BridgeError>) -> bool {
         let exact = stored as int + amount as int;
         if proposed <= stored { result == Ok(None) }

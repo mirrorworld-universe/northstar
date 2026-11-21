@@ -1,13 +1,13 @@
 #![allow(dead_code)]
 #[path = "../src/deposit_credit.rs"]
-mod deposit_credit;
+pub(crate) mod deposit_credit;
 
-mod credit_spec {
+pub(crate) mod credit_spec {
     use super::deposit_credit::*;
     use vstd::prelude::*;
 
     verus! {
-    pub(super) open spec fn deposit(receipt: u64, holding: u64, delegated: bool, n: u64, r: Option<Deposit>) -> bool {
+    pub(crate) open spec fn deposit(receipt: u64, holding: u64, delegated: bool, n: u64, r: Option<Deposit>) -> bool {
         let next = receipt as int + n as int;
         let credited = holding as int + n as int;
         &&& (r is Some) == (next <= u64::MAX as int && (delegated || credited <= u64::MAX as int))
@@ -20,7 +20,7 @@ mod credit_spec {
         }
     }
 
-    pub(super) open spec fn claim(origin: u64, cursor: u64, available: u64, target: u64, holding: u64,
+    pub(crate) open spec fn claim(origin: u64, cursor: u64, available: u64, target: u64, holding: u64,
         r: Result<Credit, CreditError>) -> bool {
         let delta = target as int - cursor as int;
         &&& (r is Ok) == (origin <= cursor < target <= available && holding as int + delta <= u64::MAX as int)
@@ -31,7 +31,7 @@ mod credit_spec {
         }
     }
 
-    pub(super) open spec fn debit(holding: u64, n: u64, r: Option<u64>) -> bool {
+    pub(crate) open spec fn debit(holding: u64, n: u64, r: Option<u64>) -> bool {
         match r { Some(left) => left as int + n as int == holding as int, None => n > holding }
     }
 

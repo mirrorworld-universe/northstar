@@ -55,6 +55,35 @@ impl Flow {
     }
 }
 
+/// The runtime must observe both a posted vault counter and consumption of the exact ticket.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Clone, Copy)]
+pub struct Ticket<'a> {
+    pub checkpoint: &'a [u8; 32],
+    pub tuple_hash: &'a [u8; 32],
+    pub bump: u8,
+}
+
+#[cfg_attr(verus_keep_ghost, verus_spec(r => ensures r == (posted >= target)))]
+pub fn reached(posted: u64, target: u64) -> bool {
+    posted >= target
+}
+
+/// Some(false) is a legitimate outstanding claim; None is conflicting evidence.
+#[cfg_attr(verus_keep_ghost, verus_spec(r => ensures crate::liability_spec::observation(planned, seen, r)))]
+pub fn paid_authorization(planned: Ticket<'_>, seen: Option<(Ticket<'_>, bool)>) -> Option<bool> {
+    let Some((actual, consumed)) = seen else {
+        return Some(false);
+    };
+    if actual.bump != planned.bump
+        || actual.checkpoint.as_slice() != planned.checkpoint.as_slice()
+        || actual.tuple_hash.as_slice() != planned.tuple_hash.as_slice()
+    {
+        return None;
+    }
+    Some(consumed)
+}
+
 #[cfg(verus_keep_ghost)]
 verus! {
 impl Flow {

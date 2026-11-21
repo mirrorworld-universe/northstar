@@ -442,6 +442,12 @@ fn invariant_v2_token_reconciliation_rejects_changed_authorization_tuple() {
         &payout.vault,
         payout.withdrawn,
     );
+    let counter_only = manager
+        .runtime
+        .as_ref()
+        .unwrap()
+        .token_payouts_complete_v2(&world.bank, checkpoint, &plan.token_withdrawals)
+        .unwrap();
     let authorization = northstar_portal::TokenWithdrawalAuthorization {
         discriminator: northstar_portal::TokenWithdrawalAuthorization::DISCRIMINATOR,
         checkpoint,
@@ -459,6 +465,10 @@ fn invariant_v2_token_reconciliation_rejects_changed_authorization_tuple() {
         .is_err();
     manager.shutdown_runtime();
     assert!(withdrawn.is_ok(), "{withdrawn:?}");
+    assert!(
+        !counter_only,
+        "a posted counter alone cannot retire a pending claim"
+    );
     assert!(
         rejected,
         "a consumed authorization with another tuple must not resolve a payout"

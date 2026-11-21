@@ -1,13 +1,13 @@
 #![allow(dead_code)]
 #[path = "../src/withdrawal_auth.rs"]
-mod withdrawal_auth;
+pub(crate) mod withdrawal_auth;
 
-mod auth_spec {
+pub(crate) mod auth_spec {
     use super::withdrawal_auth::*;
     use vstd::prelude::*;
 
     verus! {
-    pub(super) open spec fn transition(before: bool, after: bool, stored: AuthorizationKey,
+    pub(crate) open spec fn transition(before: bool, after: bool, stored: AuthorizationKey,
         requested: AuthorizationKey, accepted: bool) -> bool {
         let bound = (stored.checkpoint@ =~= requested.checkpoint@)
             && (stored.tuple_hash@ =~= requested.tuple_hash@) && stored.bump == requested.bump;

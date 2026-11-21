@@ -1,6 +1,9 @@
 use {
-    super::*, northstar_portal::SessionBridgeV2,
-    spl_token_interface::state::Account as SplTokenAccount, std::io,
+    super::*,
+    northstar_portal::SessionBridgeV2,
+    northstar_token_bridge::liability::{paid_authorization, reached, Ticket},
+    spl_token_interface::state::Account as SplTokenAccount,
+    std::io,
 };
 
 fn invalid_binding() -> io::Error {
@@ -156,7 +159,7 @@ impl EphemeralRuntime {
             {
                 return Err(invalid_binding());
             }
-            if vault.withdrawn < withdrawal.withdrawn {
+            if !reached(vault.withdrawn, withdrawal.withdrawn) {
                 return Ok(false);
             }
             let (key, bump) = northstar_portal::find_token_withdrawal_authorization_pda(
@@ -165,11 +168,20 @@ impl EphemeralRuntime {
                 &withdrawal.vault,
                 withdrawal.withdrawn,
             );
-            let Some(physical) = l1_root.get_account(&key) else {
-                return Ok(false);
-            };
-            let authorization: northstar_portal::TokenWithdrawalAuthorization =
-                borsh::from_slice(physical.data()).map_err(|_| invalid_binding())?;
+            let authorization = l1_root
+                .get_account(&key)
+                .map(|physical| {
+                    let authorization: northstar_portal::TokenWithdrawalAuthorization =
+                        borsh::from_slice(physical.data()).map_err(|_| invalid_binding())?;
+                    if physical.owner() != &self.portal_program_id
+                        || physical.executable()
+                        || !authorization.is_valid()
+                    {
+                        return Err(invalid_binding());
+                    }
+                    Ok(authorization)
+                })
+                .transpose()?;
             // Payouts consume this tuple and advance the vault, not the deposit receipt's counter.
             let expected = solana_sha256_hasher::hashv(&[
                 b"northstar-token-withdrawal-authorization-v0",
@@ -186,16 +198,22 @@ impl EphemeralRuntime {
                 &[withdrawal.decimals],
             ])
             .to_bytes();
-            if physical.owner() != &self.portal_program_id
-                || physical.executable()
-                || !authorization.is_valid()
-                || authorization.bump != bump
-                || authorization.checkpoint != checkpoint
-                || authorization.tuple_hash != expected
-            {
-                return Err(invalid_binding());
-            }
-            if !authorization.consumed {
+            let planned = Ticket {
+                checkpoint: checkpoint.as_array(),
+                tuple_hash: &expected,
+                bump,
+            };
+            let seen = authorization.as_ref().map(|a| {
+                (
+                    Ticket {
+                        checkpoint: a.checkpoint.as_array(),
+                        tuple_hash: &a.tuple_hash,
+                        bump: a.bump,
+                    },
+                    a.consumed,
+                )
+            });
+            if !paid_authorization(planned, seen).ok_or_else(invalid_binding)? {
                 return Ok(false);
             }
         }

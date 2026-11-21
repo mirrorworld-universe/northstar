@@ -1,16 +1,16 @@
 #![allow(dead_code)]
 #[path = "../src/custody.rs"]
-mod custody;
+pub(crate) mod custody;
 
-mod custody_spec {
+pub(crate) mod custody_spec {
     use super::custody::*;
     use vstd::prelude::*;
 
     verus! {
-    pub(super) open spec fn net(l: Ledger) -> int { l.deposited as int - l.withdrawn as int }
-    pub(super) open spec fn backed(l: Ledger, tokens: u64) -> bool { 0 <= net(l) <= tokens as int }
+    pub(crate) open spec fn net(l: Ledger) -> int { l.deposited as int - l.withdrawn as int }
+    pub(crate) open spec fn backed(l: Ledger, tokens: u64) -> bool { 0 <= net(l) <= tokens as int }
 
-    pub(super) open spec fn posting(d: Direction, l: Ledger, b: Amounts, n: u64, r: Result<Expected, CustodyError>) -> bool {
+    pub(crate) open spec fn posting(d: Direction, l: Ledger, b: Amounts, n: u64, r: Result<Expected, CustodyError>) -> bool {
         let change: int = match d { Direction::Deposit => n as int, Direction::Payout => -(n as int) };
         let deposited = l.deposited as int + if d is Deposit { n as int } else { 0 };
         let withdrawn = l.withdrawn as int + if d is Payout { n as int } else { 0 };
@@ -27,7 +27,7 @@ mod custody_spec {
         }
     }
 
-    pub(super) open spec fn observed(e: Expected, a: Amounts, r: Result<Ledger, CustodyError>) -> bool {
+    pub(crate) open spec fn observed(e: Expected, a: Amounts, r: Result<Ledger, CustodyError>) -> bool {
         r == (if a == e.amounts() { Ok(e.ledger()) } else { Err(CustodyError::Movement) })
     }
 
