@@ -26,6 +26,8 @@ class Suite:
     functions: tuple[str, ...]
     # The diagnostic must point to this postcondition, not a build or resource error.
     controls: dict[str, tuple[str, str, str]]
+    # Additional files imported by a composed proof, relative to its package.
+    dependencies: tuple[str, ...] = ()
 
 
 BOND = "ensures crate::bond_spec::correct_result"
@@ -108,6 +110,27 @@ SUITES = {
             "wrong_deadline_cap": ("Some(if end < hard { end } else { hard })", "Some(end)", "ensures crate::range_spec::deadline"),
             "includes_deadline": ("    now < turn && now < hard\n", "    now <= turn && now < hard\n", "ensures r == (now < turn"),
         }),
+    "liability": Suite("token-bridge", "aggregate_liability", "liability", 50,
+        ("liability::empty_flow", "liability::Flow::record", "liability::Flow::conserved",
+         "liability_spec::fold_all_entries", "liability_spec::genesis", "liability_spec::replace_one",
+         "liability_spec::funded_deposit", "liability_spec::consume_deferred", "liability_spec::accept_er_transaction",
+         "liability_spec::direct_payout", "liability_spec::settle_pending", "liability_spec::handoff_or_donation",
+         "liability_spec::reachable_gate", "liability_spec::outstanding_until_paid", "liability::reached",
+         "liability::paid_authorization", "funds::custody::prepare", "funds::custody::Expected::confirm",
+         "credits::deposit_credit::advance", "portal::withdrawal_auth::mark_consumed", "bridge::accounting::withdrawal_target"), {
+            "nonzero_initial_pending": ("pending: 0,", "pending: 1,", "ensures crate::liability_spec::zero"),
+            "old_holding_on_new_side": ("(&mut self.before, n)", "(&mut self.after, n)", "ensures crate::liability_spec::add"),
+            "ingress_as_payout": ("(&mut self.ingress, n)", "(&mut self.pending, n)", "ensures crate::liability_spec::add"),
+            "lost_pending_claim": ("(&mut self.pending, n)", "(&mut self.pending, 0)", "ensures crate::liability_spec::add"),
+            "accept_unspent_gap": ("available == claims", "available >= claims", "ensures r == crate::liability_spec::balanced"),
+            "accept_overflow": ("_ => false,", "_ => true,", "ensures r == crate::liability_spec::balanced"),
+            "miss_exact_posting": ("    posted >= target\n", "    posted > target\n", "ensures r == (posted >= target)"),
+            "absent_receipt_as_paid": ("return Some(false);", "return Some(true);", "ensures crate::liability_spec::observation"),
+            "wrong_claim_digest": ("actual.tuple_hash.as_slice() != planned.tuple_hash.as_slice()",
+                                   "actual.tuple_hash.as_slice() == planned.tuple_hash.as_slice()", "ensures crate::liability_spec::observation"),
+            "unconsumed_as_paid": ("Some(consumed)\n}", "Some(true)\n}", "ensures crate::liability_spec::observation"),
+        }, ("proofs/vault_custody.rs", "src/custody.rs", "proofs/delegated_credit.rs", "src/deposit_credit.rs",
+            "proofs/token_accounting.rs", "src/accounting.rs", "../portal/proofs/token_authorization.rs", "../portal/src/withdrawal_auth.rs")),
     "prefix": Suite("portal", "continuity_prefix", "ingress_prefix", 6,
         ("ingress_prefix::next_sequence", "ingress_prefix::permits", "prefix_spec::cannot_apply_advancing_prefix_twice",
          "prefix_spec::adjacent_budgets_add", "prefix_spec::reachable_prefixes"), {
@@ -134,6 +157,7 @@ def main():
     package = PROGRAMS / suite.package
     driver = Path("proofs", suite.driver + ".rs")
     planner = Path("src", suite.planner + ".rs")
+    sources = (planner, driver, *(Path(path) for path in suite.dependencies))
     args.logs.mkdir(parents=True, exist_ok=True)
     summary_path = args.logs / "summary.json"
     summary_path.unlink(missing_ok=True)  # Never leave a stale pass for an incomplete run.
@@ -146,7 +170,7 @@ def main():
     env = dict(os.environ, VERUS_Z3_PATH=str(z3))
     summary = {
         "verus": info["version"], "verus_commit": VERUS_COMMIT, "z3": z3_info, "flags": FLAGS,
-        "source_sha256": {str(p): hashlib.sha256((package / p).read_bytes()).hexdigest() for p in (planner, driver)},
+        "source_sha256": {str(p): hashlib.sha256((package / p).read_bytes()).hexdigest() for p in sources},
         "runs": {},
     }
 
@@ -184,10 +208,10 @@ def main():
     check("production", package)
     source = (package / planner).read_text()
     with tempfile.TemporaryDirectory(prefix=f"{args.suite}-proof-controls-") as tmp:
-        root = Path(tmp)
-        (root / planner.parent).mkdir()
-        (root / driver.parent).mkdir()
-        shutil.copyfile(package / driver, root / driver)
+        root = Path(tmp) / suite.package
+        for path in sources:
+            (root / path.parent).mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(package / path, root / path)
         for name, (old, new, expected) in suite.controls.items():
             require(source.count(old) == 1, f"{name}: update the control to match the reviewed source")
             (root / planner).write_text(source.replace(old, new))

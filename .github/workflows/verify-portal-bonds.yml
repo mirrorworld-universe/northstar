@@ -1,10 +1,14 @@
-# Sonic: Verify the executable modules shared with the two programs.
+# Sonic: Verify the executable modules shared with the programs and the V2 journal.
 name: Verify Portal and token bridge invariants
 
 on:
   workflow_dispatch:
   pull_request:
     paths:
+      - northstar/src/ephemeral_runtime/token_settlement_v2.rs
+      - northstar/src/continuity_v2.rs
+      - northstar/src/continuity_v2/**
+      - northstar/src/lineage_store_v2.rs
       - northstar/programs/portal/**
       - northstar/programs/token-bridge/**
       - northstar/zk-types/**
@@ -14,6 +18,10 @@ on:
   push:
     branches: [master]
     paths:
+      - northstar/src/ephemeral_runtime/token_settlement_v2.rs
+      - northstar/src/continuity_v2.rs
+      - northstar/src/continuity_v2/**
+      - northstar/src/lineage_store_v2.rs
       - northstar/programs/portal/**
       - northstar/programs/token-bridge/**
       - northstar/zk-types/**
@@ -29,7 +37,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [bond, receipt, authorization, bridge, custody, credit, batch, range, prefix]
+        suite: [bond, receipt, authorization, bridge, custody, credit, batch, range, prefix, liability]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

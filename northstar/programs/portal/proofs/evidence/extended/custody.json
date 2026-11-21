@@ -12,7 +12,7 @@
   ],
   "source_sha256": {
     "src/custody.rs": "c0d8b472db112a990adcd632f44e272eae42889d63da1b0821211094e2fdad3a",
-    "proofs/vault_custody.rs": "ebd97e35e1e080e862d74bdc7db14a38999d029e1e9b0ced497a5286596a9e04"
+    "proofs/vault_custody.rs": "425d9d4f87026f12df85faac60a41c76e4efb8ad2368b29da3f39295b31894f0"
   },
   "runs": {
     "production": {

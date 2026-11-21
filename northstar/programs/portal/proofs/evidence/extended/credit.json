@@ -12,7 +12,7 @@
   ],
   "source_sha256": {
     "src/deposit_credit.rs": "786e9a293058a31fb395c0a69f6bc9e365acfe79d34c72f7af6080a42bb20bb8",
-    "proofs/delegated_credit.rs": "b4135e2663045ce04598a710d1db1027a24ba20a135a44bf4cf224af7df47e28"
+    "proofs/delegated_credit.rs": "39ad1f02eb22f4084fb80a7cfa19527f442c9e94145d9082aa2b7253957d1c66"
   },
   "runs": {
     "production": {

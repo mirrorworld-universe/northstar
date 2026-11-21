@@ -1,11 +1,12 @@
 # Portal and SPL bridge: verification map
 
-**Local run, 2026-11-20.** Five new proof crates check executable functions used in production. They gave **48 verified, 0 errors** with Verus/Z3. All **23 targeted mutations** failed their specified production postcondition. Including the [checkpoint-bond](README.md) and [receipt, authorization and ER transfer](SETTLEMENT.md) suites, the branch has **nine suites, 73 verified, 0 errors, 41 rejected mutations**. Verus counts verified functions, including harnesses and derived implementations; these numbers are not counts of independent security guarantees.
+**Local run, 2026-11-21.** The [aggregate liability proof and V2 journal gate](LIABILITIES.md) extend the earlier [bond](README.md) and [settlement](SETTLEMENT.md) work. Ten suites passed with zero verifier errors. The new suite verified 50 functions, including 28 rechecked from four component suites; all 10 new mutation controls failed the intended postcondition. Across the ten runs there are 51 rejected controls. These are verifier results, not counts of independent security guarantees.
 
-## What the five new suites establish
+## Verification scope
 
 | Suite | Property | Verus / controls |
 | --- | --- | ---: |
+| [Aggregate liabilities](LIABILITIES.md) | From a complete, balanced starting inventory, deposits, V2 ER execution and matched payouts preserve the sum of spendable, uncredited and unpaid claims. V2 recording and replay reject an unbalanced transaction per vault. | 50 / 10 |
 | [Vault custody](../../token-bridge/proofs/vault_custody.rs) | Deposits and payouts preserve backing and the exact excess of SPL custody over net recorded deposits. Posting requires both observed SPL balances to move by exactly the requested amount. | 11 / 5 |
 | [Deposit credit](../../token-bridge/proofs/delegated_credit.rs) | Immediate and deferred credit agree. Successive cursor advances credit the same total as one advance; stale cursors cannot credit again. ER debits cannot exceed the holding. | 9 / 5 |
 | [SOL batch settlement](batch_settlement.rs) | For up to seven accounts, totals fit in `u128`, every target respects its rent floor, and the batch neither creates nor loses lamports. A guarded retry does not post a surplus twice. | 11 / 4 |
@@ -18,7 +19,7 @@ Let `N = deposited − withdrawn`, over mathematical integers, and `V` be the to
 
 The [SBF adapter](../../token-bridge/src/processor/custody_adapter.rs) reads both accounts using Pinocchio's SPL-owner- and length-checked account view. [Deposit, direct withdrawal and settled withdrawal](../../token-bridge/src/processor.rs) reread the same accounts after real `TransferChecked` and expose the proposed counters only on an exact match. No CPI-success assumption substitutes for this observation in the theorem. The instructions otherwise keep their signer, mint, PDA and authorization checks. The unchanged-counter replay branch does not transfer or write a vault. These changes add SPL balance reads and make exact two-sided movement a condition of posting; they do not introduce an underfunded-vault recovery policy.
 
-**Limit:** `N` is a vault counter, not a theorem equating all outstanding ER holdings and pending authorizations with `N`. These proofs do not establish custody against outside reductions (for example an independently authorized SPL debit), permanent vault control, Token-2022 behavior, or that all holders can redeem. They also do not prove correctness of SPL, account decoding or SVM rollback.
+**Limit:** The custody component alone covers `N`, not the holders. The [composed proof](LIABILITIES.md) adds the holder, uncredited and unpaid terms and explains the assumptions needed to identify them. Neither theorem establishes custody against outside reductions, permanent vault control, Token-2022 behavior, or that all holders can redeem. They also do not prove correctness of SPL, account decoding or SVM rollback.
 
 ### Credits, batch writes and checkpoint decisions
 
@@ -33,7 +34,7 @@ Use the [pinned Verus setup](README.md#reproduce) with bundled Z3. From the repo
 
 ```bash
 set -eu
-for suite in custody credit batch range prefix; do
+for suite in custody credit batch range prefix liability; do
   python3 northstar/programs/portal/proofs/check.py --suite "$suite" \
     --verus "$VERUS" --logs "target/proofs/$suite"
   cmp "target/proofs/$suite/summary.json" \
@@ -41,7 +42,7 @@ for suite in custody credit batch range prefix; do
 done
 ```
 
-The [CI matrix](../../../../.github/workflows/verify-portal-bonds.yml) runs all nine suites under `--no-cheating`. It checks whole-crate results and named functions and compares the proof input hashes and output counts with the recorded summaries. A negative control is accepted only for a specific failed production postcondition, never a compilation error or timeout. Local [evidence](evidence/extended/run.txt) identifies the verified program revision and exact SBF artifacts.
+The [CI matrix](../../../../.github/workflows/verify-portal-bonds.yml) runs all ten suites under `--no-cheating`. It checks whole-crate results and named functions and compares the proof input hashes and output counts with the recorded summaries. A negative control is accepted only for a specific failed production postcondition, never a compilation error or timeout. Local [evidence](evidence/extended/run.txt) identifies the verified program revision and exact SBF artifacts.
 
 For execution, use the default and V2 [SBF build and test commands](SETTLEMENT.md#reproduction-and-independent-review). To run the additional 36 V2 bank regressions, first build the test-only CPI fixture into the **same V2 output directory**:
 

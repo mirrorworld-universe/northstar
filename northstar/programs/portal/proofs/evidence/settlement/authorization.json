@@ -12,7 +12,7 @@
   ],
   "source_sha256": {
     "src/withdrawal_auth.rs": "6878e94950de29e2a5d53b07d9074241a528991254ae60a9233bce29c2787dc2",
-    "proofs/token_authorization.rs": "057da15b049d6cf690822da5afb4e1b39756dd78c9a04c3cea1e0c98cf3f4aad"
+    "proofs/token_authorization.rs": "f4e6af90b773efd680fa221f6003b834988d2fae373cea40f109c1b55bb6cc33"
   },
   "runs": {
     "production": {

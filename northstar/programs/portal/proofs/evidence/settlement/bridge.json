@@ -12,7 +12,7 @@
   ],
   "source_sha256": {
     "src/accounting.rs": "3a67bb1926a297ff5eae59637fcf7dc1292671c6aea8b948a0ad65da9b6766c2",
-    "proofs/token_accounting.rs": "59b3e2a6dc9aef7a6262caa5dbe2ccbc9aee3855bc9f5318b8d150dab4f8edb0"
+    "proofs/token_accounting.rs": "74777abb8db8f4ab6735ca1b7a72914f14aee86883cdf99a0e1ae549d9b88d4c"
   },
   "runs": {
     "production": {

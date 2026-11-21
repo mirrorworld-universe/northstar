@@ -1,6 +1,6 @@
 # Portal checkpoint-bond proof
 
-Start with the [nine-suite verification map](INVARIANTS.md) for Portal and the SPL bridge. The [settlement record](SETTLEMENT.md) covers SOL receipts, token authorizations and ER transfers; this page covers checkpoint bonds.
+Start with the [verification map](INVARIANTS.md) for Portal and the SPL bridge. The [settlement record](SETTLEMENT.md) covers SOL receipts, token authorizations and ER transfers; this page covers checkpoint bonds.
 
 **Result, 2026-11-19:** Verus with Z3 verified the executable accounting used by Portal’s release and slash paths. The verifier reported **8 verified, 0 errors**; this is its count of verified functions, not eight independent financial guarantees. Three intentionally incorrect variants each failed the planner’s postcondition. See the [recorded run](evidence/run.txt) and [source hashes and control results](evidence/summary.json). Local reproduction is complete; independent review is pending.
 
