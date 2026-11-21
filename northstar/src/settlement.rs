@@ -81,6 +81,24 @@ pub struct TokenWithdrawalSettlement {
     pub decimals: u8,
 }
 
+impl TokenWithdrawalSettlement {
+    pub(crate) fn payout(&self) -> northstar_portal::payout_wire::Payout<'_> {
+        northstar_portal::payout_wire::Payout {
+            bridge_program: self.bridge_program.as_array(),
+            session_bridge: self.session_bridge.as_array(),
+            er_token_account: self.er_token_account.as_array(),
+            vault: self.vault.as_array(),
+            vault_token_account: self.vault_token_account.as_array(),
+            destination_token_account: self.l1_destination_token_account.as_array(),
+            mint: self.mint.as_array(),
+            token_program: self.token_program.as_array(),
+            amount: self.amount,
+            withdrawn: self.withdrawn,
+            decimals: self.decimals,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountOwnerSettlement {
     pub account: Pubkey,
@@ -1144,22 +1162,7 @@ fn accumulate_token_withdrawal_checksum(
     accumulator: [u8; 32],
     withdrawal: &TokenWithdrawalSettlement,
 ) -> [u8; 32] {
-    hashv(&[
-        &accumulator,
-        b"token_withdrawal",
-        withdrawal.bridge_program.as_ref(),
-        withdrawal.session_bridge.as_ref(),
-        withdrawal.er_token_account.as_ref(),
-        withdrawal.vault.as_ref(),
-        withdrawal.vault_token_account.as_ref(),
-        withdrawal.l1_destination_token_account.as_ref(),
-        withdrawal.mint.as_ref(),
-        withdrawal.token_program.as_ref(),
-        &withdrawal.amount.to_le_bytes(),
-        &withdrawal.withdrawn.to_le_bytes(),
-        &[withdrawal.decimals],
-    ])
-    .to_bytes()
+    withdrawal.payout().accumulate(&accumulator)
 }
 
 #[cfg(test)]

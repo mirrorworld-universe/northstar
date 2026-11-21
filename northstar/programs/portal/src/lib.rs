@@ -12,6 +12,8 @@ mod ingress_prefix;
 mod instruction;
 mod instructions;
 mod lamport_batch;
+mod payout_hash;
+pub mod payout_wire;
 mod pda;
 mod profile;
 mod receipt;

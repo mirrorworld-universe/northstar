@@ -82,7 +82,7 @@ pub(super) fn settle_checkpoint<F>(
 where
     F: Fn(&Bank) -> TestResult<bool>,
 {
-    settle_checkpoint_inner(manager, root, asset_complete, true)
+    settle_checkpoint_inner(manager, root, asset_complete, |phase, _, _| Ok(phase == 2))
 }
 
 pub(super) fn settle_checkpoint_without_restart<F>(
@@ -93,14 +93,14 @@ pub(super) fn settle_checkpoint_without_restart<F>(
 where
     F: Fn(&Bank) -> TestResult<bool>,
 {
-    settle_checkpoint_inner(manager, root, asset_complete, false)
+    settle_checkpoint_inner(manager, root, asset_complete, |_, _, _| Ok(false))
 }
 
 fn settle_checkpoint_inner<F>(
     manager: &mut crate::Manager,
     root: &mut Arc<Bank>,
     asset_complete: F,
-    restart_after_partial: bool,
+    mut restart_after: impl FnMut(usize, &Bank, &crate::Manager) -> TestResult<bool>,
 ) -> TestResult<CheckpointArtifactV2>
 where
     F: Fn(&Bank) -> TestResult<bool>,
@@ -146,6 +146,7 @@ where
         if transactions.is_empty() {
             return Err(format!("settlement phase {phase} is empty"));
         }
+        let mut restart = false;
         for transaction in transactions {
             bank.process_transaction(&transaction).map_err(|error| {
                 format!(
@@ -158,13 +159,14 @@ where
                         .collect::<Vec<_>>()
                 )
             })?;
-            if phase == 2 {
+            restart = restart_after(phase, &bank, manager)?;
+            if restart || phase == 2 {
                 break;
             }
         }
         bank.freeze();
         *root = Arc::new(bank);
-        if phase == 2 && restart_after_partial {
+        if restart {
             let config = manager.config.clone();
             manager.shutdown_runtime();
             *manager = crate::Manager::new(config);
@@ -220,9 +222,9 @@ where
                     ))
                 });
                 return Err(format!(
-                    "partial metadata settlement did not resume: phase={phase}, L1 slot={}, \
-                     active={}, active_before_resume={active_before_resume}, \
-                     physical={physical:?}, binding={binding:?}, lineage_files={lineage_files:?}",
+                    "partial settlement did not resume: phase={phase}, L1 slot={}, active={}, \
+                     active_before_resume={active_before_resume}, physical={physical:?}, \
+                     binding={binding:?}, lineage_files={lineage_files:?}",
                     root.slot(),
                     manager.has_active_runtime()
                 ));
@@ -473,6 +475,119 @@ fn invariant_v2_token_reconciliation_rejects_changed_authorization_tuple() {
         rejected,
         "a consumed authorization with another tuple must not resolve a payout"
     );
+}
+
+#[test]
+fn invariant_v2_partly_paid_plan_resumes_without_repaying_the_prefix() {
+    let mut world = delegated_token_world(PORTAL_PROGRAM_ID, true);
+    let source = world.funded_tokens(42);
+    let a = world.funded_tokens(0);
+    let b = world.funded_tokens(0);
+    world.send(&[world.deposit(source, 42, 3)], &[]).unwrap();
+    world.bank.freeze();
+    let directory = tempfile::tempdir().unwrap();
+    let mut manager = crate::Manager::new(crate::ManagerConfig {
+        portal_program_id: PORTAL_PROGRAM_ID,
+        manager_account: world.payer.clone(),
+        checkpoint_plan_dir: Some(directory.path().join("plans")),
+    });
+    let result = (|| -> TestResult<()> {
+        manager
+            .init_runtime(
+                world.bank.clone(),
+                create_test_cluster_info(),
+                find_free_addr(),
+                find_free_addr(),
+                find_free_addr(),
+            )
+            .map_err(|e| e.to_string())?;
+        manager.activate_session(world.bank.clone(), world.session, 0, 10_000, 0);
+        manager.process_finalized_l1_inputs(&world.bank);
+        withdraw(&world, &manager, a, 7)?;
+        withdraw(&world, &manager, b, 11)?;
+        reconcile_single_holder(&world, &manager, (24, 0, 18))?;
+        let mut interrupted = false;
+        settle_checkpoint_inner(
+            &mut manager,
+            &mut world.bank,
+            |bank| Ok((token_amount(bank, &a)?, token_amount(bank, &b)?) == (7, 11)),
+            |_, bank, manager| {
+                let amounts = (token_amount(bank, &a)?, token_amount(bank, &b)?);
+                if interrupted || !matches!(amounts, (7, 0) | (0, 11)) {
+                    return Ok(false);
+                }
+                // Ticket PDAs use the sealed slot, not the working bank's pre-seal slot.
+                let store = manager
+                    .runtime
+                    .as_ref()
+                    .and_then(|r| r.lineage_store_v2())
+                    .ok_or("lineage missing")?;
+                let plan = store
+                    .lock()
+                    .unwrap()
+                    .settlement_plan()
+                    .map_err(|e| e.to_string())?
+                    .ok_or("sealed plan missing")?;
+                let payouts = &plan.token_withdrawals;
+                if payouts.len() != 2 {
+                    return Err("expected two payments in one sealed plan".into());
+                }
+                let checkpoint = northstar_portal::find_checkpoint_pda(
+                    &PORTAL_PROGRAM_ID,
+                    &world.session,
+                    plan.er_slot,
+                )
+                .0;
+                let paid = amounts.0 + amounts.1;
+                let physical = bank.get_account(&world.vault).ok_or("missing vault")?;
+                let vault: northstar_token_bridge::state::TokenVault =
+                    borsh::from_slice(physical.data()).map_err(|e| e.to_string())?;
+                if paid != payouts[0].amount
+                    || vault.withdrawn != payouts[0].withdrawn
+                    || vault.deposited != 42
+                    || token_amount(bank, &world.vault_token)? != 24 + payouts[1].amount
+                {
+                    return Err(
+                        "partial payout does not reconcile with remaining liabilities".into(),
+                    );
+                }
+                for (index, payout) in payouts.iter().enumerate() {
+                    let (key, bump) = northstar_portal::find_token_withdrawal_authorization_pda(
+                        &PORTAL_PROGRAM_ID,
+                        &checkpoint,
+                        &payout.vault,
+                        payout.withdrawn,
+                    );
+                    let account = bank.get_account(&key).ok_or("missing payment ticket")?;
+                    let ticket: northstar_portal::TokenWithdrawalAuthorization =
+                        borsh::from_slice(account.data()).map_err(|e| e.to_string())?;
+                    if account.owner() != &PORTAL_PROGRAM_ID
+                        || !ticket.is_valid()
+                        || ticket.checkpoint != checkpoint
+                        || ticket.bump != bump
+                        || ticket.tuple_hash != payout.payout().authorization_hash()
+                        || ticket.consumed != (index == 0)
+                    {
+                        return Err(format!(
+                            "unexpected authorization at partial payout index {index}"
+                        ));
+                    }
+                }
+                interrupted = true;
+                Ok(true)
+            },
+        )?;
+        if !interrupted {
+            return Err("restart did not occur between SPL payouts".into());
+        }
+        reconcile_single_holder(&world, &manager, (24, 0, 0))?;
+        if token_amount(&world.bank, &world.vault_token)? != 24 {
+            return Err("unexpected final SPL custody".into());
+        }
+        Ok(())
+    })();
+    manager.shutdown_runtime();
+    assert!(result.is_ok(), "{result:?}");
 }
 
 #[test]

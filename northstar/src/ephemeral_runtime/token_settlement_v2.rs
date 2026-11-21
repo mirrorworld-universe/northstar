@@ -114,12 +114,12 @@ impl EphemeralRuntime {
             let cumulative = cumulative_by_bridge
                 .entry(event.session_bridge)
                 .or_insert(state.withdrawn);
-            *cumulative = cumulative
-                .checked_add(event.amount)
-                .ok_or_else(invalid_binding)?;
-            if event.amount == 0 || *cumulative > state.deposited {
-                return Err(invalid_binding());
-            }
+            let withdrawn = northstar_token_bridge::payout_schedule::reserve(
+                cumulative,
+                state.deposited,
+                event.amount,
+            )
+            .ok_or_else(invalid_binding)?;
             settlements.push(TokenWithdrawalSettlement {
                 bridge_program: event.bridge_program,
                 session_bridge: event.session_bridge,
@@ -130,7 +130,7 @@ impl EphemeralRuntime {
                 mint: bridge.mint,
                 token_program: bridge.token_program,
                 amount: event.amount,
-                withdrawn: *cumulative,
+                withdrawn,
                 decimals: mint_state.decimals,
             });
         }
@@ -144,79 +144,74 @@ impl EphemeralRuntime {
         withdrawals: &[TokenWithdrawalSettlement],
     ) -> io::Result<bool> {
         for withdrawal in withdrawals {
-            let physical = l1_root
-                .get_account(&withdrawal.vault)
-                .ok_or_else(invalid_binding)?;
-            let vault: northstar_token_bridge::state::TokenVault =
-                borsh::from_slice(physical.data()).map_err(|_| invalid_binding())?;
-            if physical.owner() != &withdrawal.bridge_program
-                || physical.executable()
-                || !vault.is_valid()
-                || vault.session_bridge != withdrawal.session_bridge.to_bytes()
-                || vault.mint != withdrawal.mint.to_bytes()
-                || vault.vault_token_account != withdrawal.vault_token_account.to_bytes()
-                || vault.token_program != withdrawal.token_program.to_bytes()
-            {
-                return Err(invalid_binding());
-            }
-            if !reached(vault.withdrawn, withdrawal.withdrawn) {
-                return Ok(false);
-            }
-            let (key, bump) = northstar_portal::find_token_withdrawal_authorization_pda(
-                &self.portal_program_id,
-                &checkpoint,
-                &withdrawal.vault,
-                withdrawal.withdrawn,
-            );
-            let authorization = l1_root
-                .get_account(&key)
-                .map(|physical| {
-                    let authorization: northstar_portal::TokenWithdrawalAuthorization =
-                        borsh::from_slice(physical.data()).map_err(|_| invalid_binding())?;
-                    if physical.owner() != &self.portal_program_id
-                        || physical.executable()
-                        || !authorization.is_valid()
-                    {
-                        return Err(invalid_binding());
-                    }
-                    Ok(authorization)
-                })
-                .transpose()?;
-            // Payouts consume this tuple and advance the vault, not the deposit receipt's counter.
-            let expected = solana_sha256_hasher::hashv(&[
-                b"northstar-token-withdrawal-authorization-v0",
-                withdrawal.bridge_program.as_ref(),
-                withdrawal.session_bridge.as_ref(),
-                withdrawal.er_token_account.as_ref(),
-                withdrawal.vault.as_ref(),
-                withdrawal.vault_token_account.as_ref(),
-                withdrawal.l1_destination_token_account.as_ref(),
-                withdrawal.mint.as_ref(),
-                withdrawal.token_program.as_ref(),
-                &withdrawal.amount.to_le_bytes(),
-                &withdrawal.withdrawn.to_le_bytes(),
-                &[withdrawal.decimals],
-            ])
-            .to_bytes();
-            let planned = Ticket {
-                checkpoint: checkpoint.as_array(),
-                tuple_hash: &expected,
-                bump,
-            };
-            let seen = authorization.as_ref().map(|a| {
-                (
-                    Ticket {
-                        checkpoint: a.checkpoint.as_array(),
-                        tuple_hash: &a.tuple_hash,
-                        bump: a.bump,
-                    },
-                    a.consumed,
-                )
-            });
-            if !paid_authorization(planned, seen).ok_or_else(invalid_binding)? {
+            if !self.token_payout_paid_v2(l1_root, checkpoint, withdrawal)? {
                 return Ok(false);
             }
         }
         Ok(true)
+    }
+
+    pub(crate) fn token_payout_paid_v2(
+        &self,
+        l1_root: &Bank,
+        checkpoint: Pubkey,
+        withdrawal: &TokenWithdrawalSettlement,
+    ) -> io::Result<bool> {
+        let physical = l1_root
+            .get_account(&withdrawal.vault)
+            .ok_or_else(invalid_binding)?;
+        let vault: northstar_token_bridge::state::TokenVault =
+            borsh::from_slice(physical.data()).map_err(|_| invalid_binding())?;
+        if physical.owner() != &withdrawal.bridge_program
+            || physical.executable()
+            || !vault.is_valid()
+            || vault.session_bridge != withdrawal.session_bridge.to_bytes()
+            || vault.mint != withdrawal.mint.to_bytes()
+            || vault.vault_token_account != withdrawal.vault_token_account.to_bytes()
+            || vault.token_program != withdrawal.token_program.to_bytes()
+        {
+            return Err(invalid_binding());
+        }
+        if !reached(vault.withdrawn, withdrawal.withdrawn) {
+            return Ok(false);
+        }
+        let (key, bump) = northstar_portal::find_token_withdrawal_authorization_pda(
+            &self.portal_program_id,
+            &checkpoint,
+            &withdrawal.vault,
+            withdrawal.withdrawn,
+        );
+        let authorization = l1_root
+            .get_account(&key)
+            .map(|physical| {
+                let authorization: northstar_portal::TokenWithdrawalAuthorization =
+                    borsh::from_slice(physical.data()).map_err(|_| invalid_binding())?;
+                if physical.owner() != &self.portal_program_id
+                    || physical.executable()
+                    || !authorization.is_valid()
+                {
+                    return Err(invalid_binding());
+                }
+                Ok(authorization)
+            })
+            .transpose()?;
+        // Payouts consume this tuple and advance the vault, not the deposit receipt's counter.
+        let expected = withdrawal.payout().authorization_hash();
+        let planned = Ticket {
+            checkpoint: checkpoint.as_array(),
+            tuple_hash: &expected,
+            bump,
+        };
+        let seen = authorization.as_ref().map(|a| {
+            (
+                Ticket {
+                    checkpoint: a.checkpoint.as_array(),
+                    tuple_hash: &a.tuple_hash,
+                    bump: a.bump,
+                },
+                a.consumed,
+            )
+        });
+        paid_authorization(planned, seen).ok_or_else(invalid_binding)
     }
 }

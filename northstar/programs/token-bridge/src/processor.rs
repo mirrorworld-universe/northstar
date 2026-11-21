@@ -800,8 +800,9 @@ fn process_settle_withdrawal(
         AccountMeta::readonly(mint.address()),
         AccountMeta::readonly(token_program.address()),
     ];
-    let portal_data =
-        encode_portal_consume_token_withdrawal(er_slot, checksum, amount, withdrawn, decimals);
+    let portal_data = northstar_portal::payout_wire::consume_instruction(
+        er_slot, &checksum, amount, withdrawn, decimals,
+    );
     let portal_instruction = Instruction {
         program_id: &portal_id,
         accounts: &portal_accounts,
@@ -1423,22 +1424,5 @@ fn encode_portal_delegate(grid_id: u64) -> [u8; 9] {
         3
     };
     data[1..].copy_from_slice(&grid_id.to_le_bytes());
-    data
-}
-
-fn encode_portal_consume_token_withdrawal(
-    er_slot: u64,
-    checksum: [u8; 32],
-    amount: u64,
-    withdrawn: u64,
-    decimals: u8,
-) -> [u8; 58] {
-    let mut data = [0; 58];
-    data[0] = 27;
-    data[1..9].copy_from_slice(&er_slot.to_le_bytes());
-    data[9..41].copy_from_slice(&checksum);
-    data[41..49].copy_from_slice(&amount.to_le_bytes());
-    data[49..57].copy_from_slice(&withdrawn.to_le_bytes());
-    data[57] = decimals;
     data
 }

@@ -242,11 +242,16 @@ impl Manager {
                     )
                 }
                 CheckpointStatus::Settled => {
-                    if Self::token_withdrawals_complete(bank, &plan) {
-                        return Ok(None);
+                    // A restart can reuse the recent blockhash. Do not submit an already
+                    // executed transaction ahead of the rest of the retained plan.
+                    let mut unpaid = Vec::new();
+                    for withdrawal in plan.token_withdrawals {
+                        if !runtime.token_payout_paid_v2(bank, checkpoint, &withdrawal)? {
+                            unpaid.push(withdrawal);
+                        }
                     }
                     crate::settlement::token_withdrawal_transactions(
-                        &plan.token_withdrawals,
+                        &unpaid,
                         self.config.portal_program_id,
                         session,
                         plan.er_slot,
