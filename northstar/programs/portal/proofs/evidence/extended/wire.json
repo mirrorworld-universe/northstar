@@ -1,0 +1,64 @@
+{
+  "verus": "0.2026.11.02.8bf68ee",
+  "verus_commit": "8bf68ee741df833ea5d0fe6a2255126fdea87e47",
+  "z3": "Z3 version 4.16.0 - 64 bit",
+  "flags": [
+    "--crate-type",
+    "lib",
+    "--edition=2021",
+    "--no-cheating",
+    "--output-json",
+    "--time-expanded"
+  ],
+  "source_sha256": {
+    "src/payout_wire.rs": "735a249680c81de94a7d59cee03320e3c24ce762c0616a6aa8e41912771d182d",
+    "proofs/payout_transcript.rs": "b4b4fd0f8b80b1b360a191d921d29c26fd075ffe6973b05ac1f2f956eb7a4594"
+  },
+  "runs": {
+    "production": {
+      "verdict": "verified",
+      "verified": 15,
+      "errors": 0
+    },
+    "wrong_endian_digit": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 14,
+      "errors": 1
+    },
+    "wrong_er_position": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 14,
+      "errors": 1
+    },
+    "wrong_recipient_position": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 14,
+      "errors": 1
+    },
+    "wrong_amount_field": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 14,
+      "errors": 1
+    },
+    "wrong_auth_framing": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 14,
+      "errors": 1
+    },
+    "wrong_effect_framing": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 14,
+      "errors": 1
+    },
+    "wrong_cpi_tag": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 14,
+      "errors": 1
+    },
+    "wrong_cpi_target": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 14,
+      "errors": 1
+    }
+  }
+}

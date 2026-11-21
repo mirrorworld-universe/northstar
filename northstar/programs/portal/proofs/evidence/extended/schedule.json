@@ -1,0 +1,46 @@
+{
+  "verus": "0.2026.11.02.8bf68ee",
+  "verus_commit": "8bf68ee741df833ea5d0fe6a2255126fdea87e47",
+  "z3": "Z3 version 4.16.0 - 64 bit",
+  "flags": [
+    "--crate-type",
+    "lib",
+    "--edition=2021",
+    "--no-cheating",
+    "--output-json",
+    "--time-expanded"
+  ],
+  "source_sha256": {
+    "src/payout_schedule.rs": "d109d1278bdfe0bdc0e95d1187e6909500ba8d41d095c0aeb2712bc39c1d4778",
+    "proofs/payout_prefix.rs": "c66a9ba2a47040d547185047cf2ff7a9293aed9d7b1860f409360a224b77cc7a",
+    "proofs/token_accounting.rs": "74777abb8db8f4ab6735ca1b7a72914f14aee86883cdf99a0e1ae549d9b88d4c",
+    "src/accounting.rs": "3a67bb1926a297ff5eae59637fcf7dc1292671c6aea8b948a0ad65da9b6766c2"
+  },
+  "runs": {
+    "production": {
+      "verdict": "verified",
+      "verified": 15,
+      "errors": 0
+    },
+    "reject_unit_amount": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 14,
+      "errors": 1
+    },
+    "incorrect_increment": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 14,
+      "errors": 1
+    },
+    "reject_exact_capacity": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 14,
+      "errors": 1
+    },
+    "wrong_next_counter": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 14,
+      "errors": 1
+    }
+  }
+}

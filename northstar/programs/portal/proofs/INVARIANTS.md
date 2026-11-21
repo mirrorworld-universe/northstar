@@ -1,11 +1,13 @@
 # Portal and SPL bridge: verification map
 
-**Local run, 2026-11-21.** The [aggregate liability proof and V2 journal gate](LIABILITIES.md) extend the earlier [bond](README.md) and [settlement](SETTLEMENT.md) work. Ten suites passed with zero verifier errors. The new suite verified 50 functions, including 28 rechecked from four component suites; all 10 new mutation controls failed the intended postcondition. Across the ten runs there are 51 rejected controls. These are verifier results, not counts of independent security guarantees.
+**Local run, 2026-11-21.** Twelve suites passed with zero verifier errors; all 63 controls failed their intended production postcondition. The latest two suites cover [what identifies a payout and what happens after a partial payout](PAYOUTS.md). The [aggregate liability proof and V2 journal gate](LIABILITIES.md) cover backing per vault. The earlier [bond](README.md) and [settlement](SETTLEMENT.md) records describe the component proofs. Suite counts include rechecked imports and are not counts of independent guarantees.
 
 ## Verification scope
 
 | Suite | Property | Verus / controls |
 | --- | --- | ---: |
+| [Payout wire encoding](PAYOUTS.md#which-payment-do-the-bytes-identify) | The pre-hash bytes distinguish every withdrawal tuple. Authorization and settlement use distinct messages; the bridge CPI preserves the tag and every argument. | 15 / 8 |
+| [V2 payout schedule](PAYOUTS.md#what-if-only-some-transfers-land) | From any paid prefix of a funded, ordered plan for one vault, retry pays no prefix item and posts each remaining counter exactly once in order. | 15 / 4 |
 | [Aggregate liabilities](LIABILITIES.md) | From a complete, balanced starting inventory, deposits, V2 ER execution and matched payouts preserve the sum of spendable, uncredited and unpaid claims. V2 recording and replay reject an unbalanced transaction per vault. | 50 / 10 |
 | [Vault custody](../../token-bridge/proofs/vault_custody.rs) | Deposits and payouts preserve backing and the exact excess of SPL custody over net recorded deposits. Posting requires both observed SPL balances to move by exactly the requested amount. | 11 / 5 |
 | [Deposit credit](../../token-bridge/proofs/delegated_credit.rs) | Immediate and deferred credit agree. Successive cursor advances credit the same total as one advance; stale cursors cannot credit again. ER debits cannot exceed the holding. | 9 / 5 |
@@ -34,7 +36,7 @@ Use the [pinned Verus setup](README.md#reproduce) with bundled Z3. From the repo
 
 ```bash
 set -eu
-for suite in custody credit batch range prefix liability; do
+for suite in custody credit batch range prefix liability wire schedule; do
   python3 northstar/programs/portal/proofs/check.py --suite "$suite" \
     --verus "$VERUS" --logs "target/proofs/$suite"
   cmp "target/proofs/$suite/summary.json" \
@@ -42,7 +44,7 @@ for suite in custody credit batch range prefix liability; do
 done
 ```
 
-The [CI matrix](../../../../.github/workflows/verify-portal-bonds.yml) runs all ten suites under `--no-cheating`. It checks whole-crate results and named functions and compares the proof input hashes and output counts with the recorded summaries. A negative control is accepted only for a specific failed production postcondition, never a compilation error or timeout. Local [evidence](evidence/extended/run.txt) identifies the verified program revision and exact SBF artifacts.
+The [CI matrix](../../../../.github/workflows/verify-portal-bonds.yml) runs all twelve suites under `--no-cheating`. It checks whole-crate results and named functions and compares the proof input hashes and output counts with the recorded summaries. A negative control is accepted only for a specific failed production postcondition, never a compilation error or timeout. The [custody](evidence/extended/run.txt) and [payout](evidence/extended/payouts.txt) records identify the respective program revisions and local SBF artifacts.
 
 For execution, use the default and V2 [SBF build and test commands](SETTLEMENT.md#reproduction-and-independent-review). To run the additional 36 V2 bank regressions, first build the test-only CPI fixture into the **same V2 output directory**:
 
