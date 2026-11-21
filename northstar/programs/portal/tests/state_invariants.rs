@@ -16,6 +16,9 @@ use {
     solana_transaction::{Transaction, TransactionError},
 };
 
+#[path = "state_invariants/receipts.rs"]
+mod receipts;
+
 const PORTAL: Pubkey = Pubkey::from_str_const("GikCSCpYUq7QR7esoK6GM4UbJzKgdKNvS5bR1rBYH5E4");
 const BALANCE: u64 = 10_000_000;
 const ER_SLOT: u64 = 44;
@@ -267,6 +270,39 @@ async fn invariant_settlement_surplus_preserves_total_and_checkpoint_balances() 
     assert_eq!(get(&mut context, fixture.session).await, settled_session);
     assert_eq!(get(&mut context, a).await.lamports, BALANCE - 1);
     assert_eq!(get(&mut context, fixture.vault).await.lamports, BALANCE + 1);
+}
+
+#[tokio::test]
+async fn full_lamport_batch_credits_only_surplus_and_replays_without_writes() {
+    let mut fixture = Fixture::new();
+    let count = northstar_portal::MAX_SETTLEMENT_LAMPORT_ACCOUNTS;
+    let keys: Vec<_> = (0..count).map(|_| fixture.delegated(BALANCE + 4)).collect();
+    let targets: Vec<_> = (0..count).map(|i| BALANCE + i as u64).collect();
+    let instruction = fixture.settle(&keys, &targets);
+    let mut context = fixture.program_test.start_with_context().await;
+    send(
+        &mut context,
+        &fixture.payer,
+        std::slice::from_ref(&instruction),
+    )
+    .await
+    .unwrap();
+    let vault = get(&mut context, fixture.vault).await;
+    let session = get(&mut context, fixture.session).await;
+    let initial = (BALANCE + 4) * count as u64 + BALANCE;
+    assert_eq!(targets.iter().sum::<u64>() + vault.lamports, initial);
+    for (&key, &target) in keys.iter().zip(&targets) {
+        assert_eq!(get(&mut context, key).await.lamports, target);
+    }
+    context.get_new_latest_blockhash().await.unwrap();
+    send(&mut context, &fixture.payer, &[instruction])
+        .await
+        .unwrap();
+    assert_eq!(get(&mut context, fixture.vault).await, vault);
+    assert_eq!(get(&mut context, fixture.session).await, session);
+    for (&key, &target) in keys.iter().zip(&targets) {
+        assert_eq!(get(&mut context, key).await.lamports, target);
+    }
 }
 
 #[tokio::test]

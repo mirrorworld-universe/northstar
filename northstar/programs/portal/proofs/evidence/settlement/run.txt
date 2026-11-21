@@ -1,0 +1,34 @@
+Portal and SPL bridge accounting, local x86_64 Linux run, 2026-11-20
+Program, proof input and SBF regression revision: a58b9f88e4639d20e397a7c8c44aa5a9f9d3f380
+Cargo.lock SHA-256: a254b70527a4ea476ef17e8320ffe435610d26f7213c3086de7177fbc5067925
+
+Verus: release 0.2026.11.02.8bf68ee, commit 8bf68ee741df833ea5d0fe6a2255126fdea87e47
+Bundled Z3: 4.16.0. Host rustc: 1.99.1 (58cf8f9c3).
+Check mode: --crate-type lib --edition=2021 --no-cheating --output-json --time-expanded.
+Whole proof crates, executable Rust shared with program handlers:
+  receipt:       9 verified, 0 errors; six separate controls each 8 verified, 1 error.
+  authorization: 3 verified, 0 errors; three separate controls each 2 verified, 1 error.
+  bridge:        5 verified, 0 errors; six separate controls each 4 verified, 1 error.
+  prior bond:    8 verified, 0 errors; three separate controls each 7 verified, 1 error.
+The control errors are expected, targeted postcondition failures, not timeouts or compilation errors.
+See the machine-generated per-suite summary JSON in this directory; bond evidence is one directory up.
+
+Ordinary SBF builds: cargo-build-sbf 4.5.0, platform-tools v1.56, SBPFv0, --locked.
+SBF compiler: rustc 1.89.0-dev (e57530ef2 2026-08-14). No test verifier enabled.
+Observed artifact SHA-256 (identifies these local builds; not an on-chain identity assertion):
+  default northstar_portal.so       360872 bytes  fed395bfcf6fa42cc5bb2fed087d21a440c687caa0dbf10c7bfe4945304c62d3
+  default northstar_token_bridge.so 105608 bytes  88793d7828b9bc414a964430bae70d616f3c594d6c2cc780944cf8f35a7401fb
+  v2      northstar_portal.so       466184 bytes  b94cdc88568b60ea258e2852657577419d5c506759c5d9f30617569b30e321f4
+  v2      northstar_token_bridge.so 138352 bytes  118d4204dd7bd94d5f4b3609af26362746ff614f8901ea753f2a6b518a4c2ebd
+Both profiles: repository SPL-address binary program-binaries/src/programs/spl_p_token-1.0.0.so
+  SHA-256 8190d3f7ceb6cb7a7a8d8924bff89f9f611e15ce1f806f2b6237f3311a98f697
+
+Host and program-test results using the corresponding ordinary artifacts (not distinct proof claims):
+  default Portal: 64 passed; 0 failed; 1 ignored (external validator required).
+  v2 Portal:      64 passed; 0 failed; 1 ignored (same external validator case).
+  default bridge: --lib 3 passed; --test core 17 passed; 0 failed.
+  v2 bridge:      --lib 5 passed; --test core accounting:: 2 passed; 0 failed, 15 filtered out.
+Only the two accounting-specific, profile-aware bridge core tests were selected for v2;
+legacy setup/withdrawal tests were not run against the v2 build. No bridge validator_e2e run.
+Workspace cargo clippy --locked --all --tests and cargo +nightly fmt --all passed.
+No live-validator, remote CI or independent-auditor result is included in this local record.

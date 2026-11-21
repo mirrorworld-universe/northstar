@@ -1768,6 +1768,57 @@ async fn checkpoint_rejects_second_active_proposal() {
     assert_eq!(cursor.active_er_slot, 10);
 }
 
+async fn assert_bond_commit_rejection(
+    context: &mut ProgramTestContext,
+    committer: &Keypair,
+    commit: Instruction,
+    protected: &[Pubkey],
+    expected: northstar_portal::PortalError,
+) {
+    let payer = &context.payer;
+    let mut before = Vec::new();
+    for key in protected {
+        before.push(context.banks_client.get_account(*key).await.unwrap());
+    }
+    let payer_before = get_lamports(&mut context.banks_client, &payer.pubkey()).await;
+    // The first instruction must roll back, but the exact message fee still applies.
+    let tx = Transaction::new_signed_with_payer(
+        &[transfer(&payer.pubkey(), &committer.pubkey(), 1), commit],
+        Some(&payer.pubkey()),
+        &[payer, committer],
+        context.banks_client.get_latest_blockhash().await.unwrap(),
+    );
+    let fee = context
+        .banks_client
+        .get_fee_for_message(tx.message.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(fee > 0);
+    let err = context
+        .banks_client
+        .process_transaction(tx)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.unwrap(),
+        solana_transaction::TransactionError::InstructionError(
+            1,
+            solana_instruction_error::InstructionError::Custom(expected as u32),
+        )
+    );
+    for (key, original) in protected.iter().zip(before) {
+        assert_eq!(
+            context.banks_client.get_account(*key).await.unwrap(),
+            original
+        );
+    }
+    assert_eq!(
+        get_lamports(&mut context.banks_client, &payer.pubkey()).await,
+        payer_before - fee
+    );
+}
+
 #[tokio::test]
 async fn checkpoint_bond_locks_and_releases() {
     let mut context = setup().await;
@@ -1911,6 +1962,28 @@ async fn checkpoint_bond_locks_and_releases() {
         .warp_to_slot(current_slot + challenge_window_slots + 1)
         .unwrap();
 
+    let protected = [
+        checkpoint_pda,
+        find_checkpoint_cursor_pda(&PORTAL_PROGRAM_ID, &session_pda).0,
+        proposer_pubkey,
+        committer.pubkey(),
+    ];
+    let aliased_proposer = build_commit_checkpoint_ix(
+        &PORTAL_PROGRAM_ID,
+        &committer.pubkey(),
+        &checkpoint_pda,
+        &session_pda,
+        er_slot,
+    );
+    assert_bond_commit_rejection(
+        &mut context,
+        &committer,
+        aliased_proposer,
+        &protected,
+        northstar_portal::PortalError::CheckpointStateInvalid,
+    )
+    .await;
+
     let proposer_before_commit = get_lamports(&mut context.banks_client, &proposer_pubkey).await;
     let commit_ix = build_commit_checkpoint_ix(
         &PORTAL_PROGRAM_ID,
@@ -1920,6 +1993,18 @@ async fn checkpoint_bond_locks_and_releases() {
         er_slot,
     );
     let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+    let mut raised_rent = rent.clone();
+    raised_rent.lamports_per_byte += 1;
+    context.set_sysvar(&raised_rent);
+    assert_bond_commit_rejection(
+        &mut context,
+        &committer,
+        commit_ix.clone(),
+        &protected,
+        northstar_portal::PortalError::CheckpointBondInsufficient,
+    )
+    .await;
+    context.set_sysvar(&rent);
     let tx = Transaction::new_signed_with_payer(
         std::slice::from_ref(&commit_ix),
         Some(&payer_pubkey),

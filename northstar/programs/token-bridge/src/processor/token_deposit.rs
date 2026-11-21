@@ -3,7 +3,10 @@ use {
         account_size, create_pda, key_bytes, load_er_token_account, load_session_bridge,
         require_bridge_delegation, require_signer, require_system_program, store,
     },
-    crate::state::{TokenDepositProgress, TokenDepositReceipt},
+    crate::{
+        deposit_credit::{advance, CreditError},
+        state::{TokenDepositProgress, TokenDepositReceipt},
+    },
     borsh::BorshDeserialize,
     pinocchio::{
         cpi::Seed, error::ProgramError, AccountView as AccountInfo, Address as Pubkey,
@@ -184,7 +187,6 @@ pub(super) fn apply(program: &Pubkey, accounts: &mut [AccountInfo], balance: u64
             .map_err(|_| ProgramError::InvalidAccountData)?;
         if progress.discriminator != TokenDepositProgress::CURSOR_DISCRIMINATOR
             || progress.bump != bump
-            || progress.balance < baseline.balance
         {
             return Err(ProgramError::InvalidAccountData);
         }
@@ -196,9 +198,18 @@ pub(super) fn apply(program: &Pubkey, accounts: &mut [AccountInfo], balance: u64
             bump,
         }
     };
-    if balance > available || balance <= progress.balance {
-        return Err(ProgramError::InvalidArgument);
-    }
+    let credit = advance(
+        baseline.balance,
+        progress.balance,
+        available,
+        balance,
+        state.amount,
+    )
+    .map_err(|e| match e {
+        CreditError::Cursor => ProgramError::InvalidAccountData,
+        CreditError::Range => ProgramError::InvalidArgument,
+        CreditError::Overflow => ProgramError::ArithmeticOverflow,
+    })?;
     #[cfg(feature = "checkpoint-continuity-v2")]
     {
         let input_account = rest.first().ok_or(ProgramError::NotEnoughAccountKeys)?;
@@ -234,16 +245,13 @@ pub(super) fn apply(program: &Pubkey, accounts: &mut [AccountInfo], balance: u64
             origin_deposited,amount,cumulative_deposited}
             if source==program.to_bytes() && session_bridge==bridge.address().to_bytes() && target==account.address().to_bytes()
                 && source_receipt==receipt.address().to_bytes() && mint==state.mint && token_program==bridge_state.token_program.to_bytes()
-                && origin_deposited==baseline.balance && cumulative_deposited==balance && balance.checked_sub(progress.balance)==Some(amount))
+                && origin_deposited==baseline.balance && cumulative_deposited==credit.cursor && credit.delta==amount)
         {
             return Err(ProgramError::InvalidAccountData);
         }
     }
-    state.amount = state
-        .amount
-        .checked_add(balance - progress.balance)
-        .ok_or(ProgramError::ArithmeticOverflow)?;
-    progress.balance = balance;
+    state.amount = credit.holding;
+    progress.balance = credit.cursor;
     if !cursor.owned_by(program) {
         let bump_seed = [bump];
         create_pda(

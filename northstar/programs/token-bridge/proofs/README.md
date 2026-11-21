@@ -1,0 +1,7 @@
+# Token bridge verification
+
+The [aggregate liability record](../../portal/proofs/LIABILITIES.md) explains the composed theorem, V2 enforcement and the distinction between a pending effect and its L1 authorization.
+
+The [extended verification map](../../portal/proofs/INVARIANTS.md) covers [vault custody](vault_custody.rs), [immediate and delegated credit](delegated_credit.rs), and the boundaries of the backing invariant.
+
+[Verification record and reproduction commands](../../portal/proofs/SETTLEMENT.md) cover the ER transfer, the L1 vault withdrawal counter and Portal's matching one-use authorization. The [bridge proof crate](token_accounting.rs) imports the [production decisions](../src/accounting.rs) by path. The [SBF integration tests](../tests/core/accounting.rs) separately exercise persistence and real Portal and token CPIs. They do not prove all SPL behavior or global vault solvency.

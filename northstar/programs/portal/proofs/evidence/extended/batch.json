@@ -1,0 +1,44 @@
+{
+  "verus": "0.2026.11.02.8bf68ee",
+  "verus_commit": "8bf68ee741df833ea5d0fe6a2255126fdea87e47",
+  "z3": "Z3 version 4.16.0 - 64 bit",
+  "flags": [
+    "--crate-type",
+    "lib",
+    "--edition=2021",
+    "--no-cheating",
+    "--output-json",
+    "--time-expanded"
+  ],
+  "source_sha256": {
+    "src/lamport_batch.rs": "9a3d6b885343b4bb72ae05a184452695cab144553d5da6326ad91bb07e6248a4",
+    "proofs/batch_settlement.rs": "634ea46e66c11fc7a3cdcb0cc38d43113394ecdadfd56916753eceaa9e08a282"
+  },
+  "runs": {
+    "production": {
+      "verdict": "verified",
+      "verified": 11,
+      "errors": 0
+    },
+    "wrong_rent_boundary": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 10,
+      "errors": 1
+    },
+    "wrong_target_sum": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 10,
+      "errors": 1
+    },
+    "lost_vault_credit": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 10,
+      "errors": 1
+    },
+    "wrong_retry_guard": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 10,
+      "errors": 1
+    }
+  }
+}

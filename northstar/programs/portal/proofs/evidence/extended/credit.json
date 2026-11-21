@@ -1,0 +1,49 @@
+{
+  "verus": "0.2026.11.02.8bf68ee",
+  "verus_commit": "8bf68ee741df833ea5d0fe6a2255126fdea87e47",
+  "z3": "Z3 version 4.16.0 - 64 bit",
+  "flags": [
+    "--crate-type",
+    "lib",
+    "--edition=2021",
+    "--no-cheating",
+    "--output-json",
+    "--time-expanded"
+  ],
+  "source_sha256": {
+    "src/deposit_credit.rs": "786e9a293058a31fb395c0a69f6bc9e365acfe79d34c72f7af6080a42bb20bb8",
+    "proofs/delegated_credit.rs": "39ad1f02eb22f4084fb80a7cfa19527f442c9e94145d9082aa2b7253957d1c66"
+  },
+  "runs": {
+    "production": {
+      "verdict": "verified",
+      "verified": 9,
+      "errors": 0
+    },
+    "wrong_credit_branch": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 8,
+      "errors": 1
+    },
+    "missing_retirement": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 8,
+      "errors": 1
+    },
+    "equal_cursor_reapplied": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 8,
+      "errors": 1
+    },
+    "wrong_origin_boundary": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 8,
+      "errors": 1
+    },
+    "wrong_persisted_cursor": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 8,
+      "errors": 1
+    }
+  }
+}
