@@ -5,6 +5,8 @@ mod custody;
 #[cfg(target_os = "solana")]
 mod deposit_credit;
 pub mod instruction;
+#[cfg(not(target_os = "solana"))]
+pub mod liability;
 pub mod state;
 
 #[cfg(any(target_os = "solana", test))]

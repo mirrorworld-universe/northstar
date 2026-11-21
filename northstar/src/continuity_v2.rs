@@ -15,6 +15,8 @@ use {
     thiserror::Error,
 };
 
+mod token_liability;
+
 pub const MAX_COMMITTED_ACCOUNTS_V2: usize = 4_096;
 pub const MAX_COMMITTED_STATE_BYTES_V2: usize = 1_048_576;
 pub type Hash32 = [u8; 32];
@@ -116,6 +118,10 @@ pub enum StateErrorV2 {
     InvalidCredit,
     #[error("token ingress requires authenticated SVM execution")]
     TokenExecutionRequired,
+    #[error(
+        "ER token holdings, authenticated ingress and pending payouts do not balance for a vault"
+    )]
+    TokenLiability,
     #[error("execution writes a frozen account")]
     Frozen,
     #[error("execution accounts are not canonical")]
@@ -577,6 +583,7 @@ impl RecordedTransitionV2 {
             return Err(StateErrorV2::InvalidPrestate);
         }
         let mut candidate = state.clone();
+        let portal = Pubkey::from(state.identity.portal);
         match &self.payload {
             TransitionPayloadV2::TokenIngress {
                 record,
@@ -592,6 +599,14 @@ impl RecordedTransitionV2 {
                     return Err(StateErrorV2::InvalidAccounts);
                 }
                 candidate.apply_token_ingress_execution(record, pre, post)?;
+                token_liability::check(
+                    &portal,
+                    &self.before.session_context,
+                    pre,
+                    post,
+                    Some(&record.payload),
+                    &[],
+                )?;
             }
             TransitionPayloadV2::Ingress {
                 record,
@@ -612,6 +627,14 @@ impl RecordedTransitionV2 {
                     return Err(StateErrorV2::InvalidAccounts);
                 }
                 candidate.apply_execution(pre, post)?;
+                token_liability::check(
+                    &portal,
+                    &self.before.session_context,
+                    pre,
+                    post,
+                    None,
+                    &self.settlement_effects,
+                )?;
             }
         }
         candidate.apply_settlement_effects(&self.settlement_effects)?;
@@ -667,6 +690,8 @@ mod tests {
             },
         )
     }
+
+    mod liability_tests;
 
     fn closed_account_fixture() -> (CommittedStateV2, CommittedStateV2, RecordedTransitionV2) {
         let mut state = CommittedStateV2::new(identity()).unwrap();

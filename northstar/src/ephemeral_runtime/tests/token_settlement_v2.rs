@@ -667,6 +667,90 @@ fn regression_v2_token_withdrawal_rejects_wrong_mint_decimals() {
     assert_eq!(payouts, 0);
 }
 
+// At these cuts there is no partially paid checkpoint. Count the active ER copy, not
+// its locked L1 mirror; count one journal effect, not an extra claim for its authorization.
+fn reconcile_single_holder(
+    world: &TokenWorldV2,
+    manager: &crate::Manager,
+    expected: (u64, u64, u64),
+) -> TestResult<()> {
+    use northstar_token_bridge::state::{TokenDepositProgress, TokenDepositReceipt, TokenVault};
+    let runtime = manager.runtime.as_ref().ok_or("runtime missing")?;
+    let bank = runtime.bank();
+    let receipt: TokenDepositReceipt = borsh::from_slice(
+        world
+            .bank
+            .get_account(&world.receipt)
+            .ok_or("receipt missing")?
+            .data(),
+    )
+    .map_err(|e| e.to_string())?;
+    let origin: TokenDepositProgress = borsh::from_slice(
+        world
+            .bank
+            .get_account(&world.origin)
+            .ok_or("origin missing")?
+            .data(),
+    )
+    .map_err(|e| e.to_string())?;
+    let key = Pubkey::find_program_address(
+        &[
+            TokenDepositProgress::CURSOR_SEED,
+            world.er.as_ref(),
+            &origin.balance.to_le_bytes(),
+        ],
+        &world.bridge,
+    )
+    .0;
+    let credited = match bank.get_account(&key) {
+        Some(a) => {
+            borsh::from_slice::<TokenDepositProgress>(a.data())
+                .map_err(|e| e.to_string())?
+                .balance
+        }
+        None => origin.balance,
+    };
+    let h = er_amount(manager, &world.er)?;
+    let u = receipt
+        .balance
+        .checked_sub(credited)
+        .ok_or("cursor ahead of custody receipt")?;
+    let events = runtime
+        .lineage_store_v2()
+        .ok_or("lineage missing")?
+        .lock()
+        .unwrap()
+        .pending_payout_events()
+        .map_err(|e| e.to_string())?
+        .1;
+    let p = events
+        .iter()
+        .filter(|e| e.bridge_program == world.bridge && e.session_bridge == world.registry)
+        .try_fold(0u64, |sum, e| sum.checked_add(e.amount))
+        .ok_or("pending sum overflow")?;
+    let vault: TokenVault = borsh::from_slice(
+        world
+            .bank
+            .get_account(&world.vault)
+            .ok_or("vault missing")?
+            .data(),
+    )
+    .map_err(|e| e.to_string())?;
+    let claims = u128::from(h) + u128::from(u) + u128::from(p);
+    let actual = token_amount(&world.bank, &world.vault_token)?;
+    if (h, u, p) != expected
+        || vault.deposited.checked_sub(vault.withdrawn).map(u128::from) != Some(claims)
+        || claims > u128::from(actual)
+    {
+        return Err(format!(
+            "liability mismatch: held={h}, uncredited={u}, unpaid={p}, deposited={}, \
+             withdrawn={}, custody={actual}",
+            vault.deposited, vault.withdrawn
+        ));
+    }
+    Ok(())
+}
+
 #[test]
 fn regression_v2_spl_payout_chains_after_restart_and_later_topup() {
     let mut world = delegated_token_world(PORTAL_PROGRAM_ID, true);
@@ -696,9 +780,12 @@ fn regression_v2_spl_payout_chains_after_restart_and_later_topup() {
         if er_amount(&manager, &world.er)? != 42 {
             return Err("authenticated initial token credit missing".into());
         }
+        reconcile_single_holder(&world, &manager, (42, 0, 0))?;
         withdraw(&world, &manager, destination, 20)?;
+        reconcile_single_holder(&world, &manager, (22, 0, 20))?;
         let first = settle(&mut manager, &mut world.bank, &destination, 20)
             .map_err(|error| format!("first SPL checkpoint: {error}"))?;
+        reconcile_single_holder(&world, &manager, (22, 0, 0))?;
         if token_amount(&world.bank, &destination)? != 20 {
             return Err("first L1 payout missing".into());
         }
@@ -717,6 +804,7 @@ fn regression_v2_spl_payout_chains_after_restart_and_later_topup() {
             return Err("settled token session did not resume".into());
         }
         manager.process_finalized_l1_inputs(&world.bank);
+        reconcile_single_holder(&world, &manager, (22, 0, 0))?;
         if er_amount(&manager, &world.er)? != 22 {
             return Err("settled ER balance did not resume".into());
         }
@@ -729,17 +817,21 @@ fn regression_v2_spl_payout_chains_after_restart_and_later_topup() {
             .send(&[world.deposit(source, 7, 4)], &[])
             .map_err(|error| format!("later topup: {error:?}"))?;
         world.bank.freeze();
+        reconcile_single_holder(&world, &manager, (22, 7, 0))?;
         manager.reanchor_to_l1_parent(world.bank.clone());
         manager.process_finalized_l1_inputs(&world.bank);
+        reconcile_single_holder(&world, &manager, (29, 0, 0))?;
         if er_amount(&manager, &world.er)? != 29 {
             return Err("later topup did not execute after restart".into());
         }
         withdraw(&world, &manager, destination, 9)?;
+        reconcile_single_holder(&world, &manager, (20, 0, 9))?;
         let second = settle(&mut manager, &mut world.bank, &destination, 29)
             .map_err(|error| format!("second SPL checkpoint: {error}"))?;
         if second.checkpoint.previous_state_root != first.checkpoint.new_state_root {
             return Err("second SPL checkpoint does not chain from accepted first root".into());
         }
+        reconcile_single_holder(&world, &manager, (20, 0, 0))?;
         if er_amount(&manager, &world.er)? != 20 || token_amount(&world.bank, &destination)? != 29 {
             return Err("second SPL payout or ER balance differs".into());
         }
