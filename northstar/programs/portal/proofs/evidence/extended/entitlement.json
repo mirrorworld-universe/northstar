@@ -1,0 +1,82 @@
+{
+  "verus": "0.2026.11.02.8bf68ee",
+  "verus_commit": "8bf68ee741df833ea5d0fe6a2255126fdea87e47",
+  "z3": "Z3 version 4.16.0 - 64 bit",
+  "flags": [
+    "--crate-type",
+    "lib",
+    "--edition=2021",
+    "--no-cheating",
+    "--output-json",
+    "--time-expanded"
+  ],
+  "source_sha256": {
+    "src/entitlement.rs": "3fe500c367acf03011dc3cd454617481dd61b2b8bb7126326c320e9bf4b2a765",
+    "proofs/recipient_entitlement.rs": "55c771ae50dc5b5454345e9223d04e92671c4dbb1679894751691c7701b83456",
+    "proofs/token_accounting.rs": "74777abb8db8f4ab6735ca1b7a72914f14aee86883cdf99a0e1ae549d9b88d4c",
+    "src/accounting.rs": "3a67bb1926a297ff5eae59637fcf7dc1292671c6aea8b948a0ad65da9b6766c2",
+    "proofs/vault_custody.rs": "425d9d4f87026f12df85faac60a41c76e4efb8ad2368b29da3f39295b31894f0",
+    "src/custody.rs": "c0d8b472db112a990adcd632f44e272eae42889d63da1b0821211094e2fdad3a",
+    "../portal/proofs/token_authorization.rs": "f4e6af90b773efd680fa221f6003b834988d2fae373cea40f109c1b55bb6cc33",
+    "../portal/src/withdrawal_auth.rs": "6878e94950de29e2a5d53b07d9074241a528991254ae60a9233bce29c2787dc2",
+    "../portal/proofs/payout_transcript.rs": "0b2f5e2db1f3cf3540f424b7407ceb2af63713a284d938c4877fb0d39ae32a11",
+    "../portal/src/payout_wire.rs": "735a249680c81de94a7d59cee03320e3c24ce762c0616a6aa8e41912771d182d"
+  },
+  "runs": {
+    "production": {
+      "verdict": "verified",
+      "verified": 50,
+      "errors": 0
+    },
+    "wrong_signer": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 49,
+      "errors": 1
+    },
+    "wrong_owner": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 49,
+      "errors": 1
+    },
+    "wrong_issued_amount": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 49,
+      "errors": 1
+    },
+    "wrong_projected_payee": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 49,
+      "errors": 1
+    },
+    "wrong_mint": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 49,
+      "errors": 1
+    },
+    "wrong_payee": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 49,
+      "errors": 1
+    },
+    "wrong_amount": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 49,
+      "errors": 1
+    },
+    "mismatched_cardinality": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 49,
+      "errors": 1
+    },
+    "wrong_first_budget": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 49,
+      "errors": 1
+    },
+    "wrong_preceding_target": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 49,
+      "errors": 1
+    }
+  }
+}

@@ -5,6 +5,10 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
+      - northstar/src/ephemeral_tx_client/continuity_v2.rs
+      - northstar/src/ephemeral_runtime.rs
+      - northstar/src/lineage_store_v2/**
+      - northstar/src/lineage_store_v2_tests.rs
       - northstar/src/manager_continuity_v2.rs
       - northstar/src/settlement.rs
       - northstar/src/ephemeral_runtime/tests/token_settlement_v2.rs
@@ -21,6 +25,10 @@ on:
   push:
     branches: [master]
     paths:
+      - northstar/src/ephemeral_tx_client/continuity_v2.rs
+      - northstar/src/ephemeral_runtime.rs
+      - northstar/src/lineage_store_v2/**
+      - northstar/src/lineage_store_v2_tests.rs
       - northstar/src/manager_continuity_v2.rs
       - northstar/src/settlement.rs
       - northstar/src/ephemeral_runtime/tests/token_settlement_v2.rs
@@ -43,7 +51,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [bond, receipt, authorization, bridge, custody, credit, batch, range, prefix, liability, wire, schedule]
+        suite: [bond, receipt, authorization, bridge, custody, credit, batch, range, prefix, liability, wire, schedule, entitlement]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

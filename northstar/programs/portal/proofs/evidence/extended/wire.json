@@ -12,7 +12,7 @@
   ],
   "source_sha256": {
     "src/payout_wire.rs": "735a249680c81de94a7d59cee03320e3c24ce762c0616a6aa8e41912771d182d",
-    "proofs/payout_transcript.rs": "b4b4fd0f8b80b1b360a191d921d29c26fd075ffe6973b05ac1f2f956eb7a4594"
+    "proofs/payout_transcript.rs": "0b2f5e2db1f3cf3540f424b7407ceb2af63713a284d938c4877fb0d39ae32a11"
   },
   "runs": {
     "production": {
