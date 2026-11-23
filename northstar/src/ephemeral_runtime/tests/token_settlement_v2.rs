@@ -114,7 +114,7 @@ where
         .ok_or("sealed artifact missing")?;
     for phase in 0..16 {
         manager.reanchor_to_l1_parent(root.clone());
-        manager.process_finalized_l1_inputs(root);
+        let settled = manager.process_finalized_l1_inputs(root);
         let runtime = manager.runtime.as_ref().ok_or("runtime missing")?;
         let store = runtime.lineage_store_v2().ok_or("lineage missing")?;
         let complete = {
@@ -125,6 +125,16 @@ where
                     .is_some_and(|head| head.state_root == artifact.checkpoint.new_state_root)
         };
         drop(store);
+        assert_eq!(
+            settled, complete,
+            "notify only when the finalized checkpoint settles"
+        );
+        if settled {
+            assert!(
+                !manager.process_finalized_l1_inputs(root),
+                "duplicate root must not notify again"
+            );
+        }
         if complete && asset_complete(root)? {
             return Ok(artifact);
         }

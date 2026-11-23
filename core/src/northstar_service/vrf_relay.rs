@@ -266,10 +266,15 @@ pub(super) struct Service {
     wake: crossbeam_channel::Sender<()>,
     join: Option<JoinHandle<()>>,
 }
+impl Service {
+    pub(super) fn notify(&self) {
+        let _ = self.wake.try_send(());
+    }
+}
 impl Drop for Service {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        let _ = self.wake.try_send(());
+        self.notify();
         if self.join.take().is_some_and(|join| join.join().is_err()) {
             log::error!("VRF relay shutdown did not join cleanly");
         }
@@ -324,6 +329,22 @@ mod tests {
         value["worker"]["rpc_url"] = json!("https://other.example.invalid");
         let other: RelaySettings = serde_json::from_value(value).unwrap();
         assert!(validate_endpoint(&other, "0.0.0.0:18910".parse().unwrap()).is_err());
+    }
+
+    #[test]
+    fn guard_checkpoint_wake_is_coalesced_and_nonblocking() {
+        let (wake, receiver) = crossbeam_channel::bounded(1);
+        let service = Service {
+            stop: Arc::new(AtomicBool::new(false)),
+            wake,
+            join: None,
+        };
+        service.notify();
+        service.notify();
+        assert_eq!(receiver.len(), 1);
+        receiver.try_recv().unwrap();
+        service.notify();
+        assert_eq!(receiver.len(), 1);
     }
 
     #[test]

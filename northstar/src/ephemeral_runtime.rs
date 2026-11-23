@@ -1292,6 +1292,11 @@ impl EphemeralRuntime {
         let (sol, tokens) = store.pending_payout_events()?;
         *self.withdrawal_payout_events.write().unwrap() = sol;
         *self.token_withdrawal_payout_events.write().unwrap() = tokens;
+        info!(
+            "Portal checkpoint settlement reconciled er_slot={} finalized_l1_slot={}",
+            head.er_slot,
+            l1_root.slot()
+        );
         Ok(true)
     }
 
