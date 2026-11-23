@@ -54,6 +54,130 @@ fn holding(registry: Pubkey, mint: Pubkey, owner: Pubkey, amount: u64) -> (Pubke
     )
 }
 
+// Native test controller, real SBF bridge. Its PDA is scoped to the signing controller;
+// the only instruction this fixture can sign is a withdrawal from that PDA's own holding.
+#[cfg(feature = "checkpoint-continuity-v2")]
+pub(super) fn start_as_test_pda(
+    id: &Pubkey,
+    accounts: &[AccountInfo],
+    data: &[u8],
+) -> ProgramResult {
+    let [controller, owner, er, registry, portal, dest, token, mint, bridge] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    let (key, bump) = Pubkey::find_program_address(&[b"request", controller.key.as_ref()], id);
+    if !controller.is_signer
+        || key != *owner.key
+        || *bridge.key != northstar_token_bridge::id()
+        || !matches!(
+            TokenBridgeInstruction::try_from_slice(data),
+            Ok(TokenBridgeInstruction::StartWithdrawal { .. })
+        )
+    {
+        return Err(ProgramError::InvalidArgument);
+    }
+    let ix = Instruction {
+        program_id: *bridge.key,
+        accounts: vec![
+            AccountMeta::new_readonly(key, true),
+            AccountMeta::new(*er.key, false),
+            AccountMeta::new_readonly(*registry.key, false),
+            AccountMeta::new_readonly(*portal.key, false),
+            AccountMeta::new_readonly(*dest.key, false),
+            AccountMeta::new_readonly(*token.key, false),
+            AccountMeta::new_readonly(*mint.key, false),
+        ],
+        data: data.to_vec(),
+    };
+    invoke_signed(
+        &ix,
+        accounts,
+        &[&[b"request", controller.key.as_ref(), &[bump]]],
+    )
+}
+
+#[cfg(feature = "checkpoint-continuity-v2")]
+#[tokio::test]
+async fn v2_entitlement_accepts_the_holding_pda_only_as_an_effective_signer() {
+    let mut w = TestWorld::new().await;
+    let payer = w.payer.pubkey();
+    let bridge = northstar_token_bridge::id();
+    let owner = Pubkey::find_program_address(&[b"request", payer.as_ref()], &w.owner_program_id).0;
+    let context = [91; 32];
+    let (registry, bump) =
+        northstar_portal::find_session_bridge_v2_pda(&PORTAL_PROGRAM_ID, &context, &w.mint);
+    let base = SessionBridge {
+        discriminator: SessionBridge::DISCRIMINATOR,
+        session: w.session,
+        mint: w.mint,
+        bridge_program: bridge,
+        vault: find_token_vault_pda(&bridge, &registry).0,
+        token_program: spl_token_interface::id(),
+        bump,
+    };
+    seed(
+        &mut w.context,
+        registry,
+        PORTAL_PROGRAM_ID,
+        &SessionBridgeV2 {
+            discriminator: SessionBridgeV2::DISCRIMINATOR,
+            base,
+            session_context: context,
+        },
+    );
+    let (er, state) = holding(registry, w.mint, owner, 9);
+    seed(&mut w.context, er, bridge, &state);
+    let data = borsh::to_vec(&TokenBridgeInstruction::StartWithdrawal {
+        amount: 4,
+        decimals: DECIMALS,
+    })
+    .unwrap();
+    let raw = vec![
+        AccountMeta::new_readonly(owner, false),
+        AccountMeta::new(er, false),
+        AccountMeta::new_readonly(registry, false),
+        AccountMeta::new_readonly(PORTAL_PROGRAM_ID, false),
+        AccountMeta::new_readonly(w.bob_token, false),
+        AccountMeta::new_readonly(spl_token_interface::id(), false),
+        AccountMeta::new_readonly(w.mint, false),
+    ];
+    let unsigned = Instruction {
+        program_id: bridge,
+        accounts: raw.clone(),
+        data: data.clone(),
+    };
+    let before = read(&mut w.context, er).await;
+    assert!(execute(&mut w, unsigned).await.0.is_err());
+    let mut wrong = raw.clone();
+    wrong[0] = AccountMeta::new_readonly(payer, true);
+    assert!(execute(
+        &mut w,
+        Instruction {
+            program_id: bridge,
+            accounts: wrong,
+            data: data.clone()
+        }
+    )
+    .await
+    .0
+    .is_err());
+    assert_eq!(read(&mut w.context, er).await, before);
+    let mut accounts = vec![AccountMeta::new_readonly(payer, true)];
+    accounts.extend(raw);
+    accounts.push(AccountMeta::new_readonly(bridge, false));
+    let ix = Instruction {
+        program_id: w.owner_program_id,
+        accounts,
+        data,
+    };
+    let (result, logs) = execute(&mut w, ix).await;
+    assert!(result.is_ok(), "{result:?}: {logs:?}");
+    assert_eq!(
+        ErTokenAccount::try_from_slice(&read(&mut w.context, er).await.data).unwrap(),
+        ErTokenAccount { amount: 5, ..state }
+    );
+}
+
 #[tokio::test]
 async fn er_transfer_conserves_amount_and_preserves_account_identity() {
     let mut w = TestWorld::new().await;

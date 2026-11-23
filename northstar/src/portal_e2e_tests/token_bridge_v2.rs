@@ -430,6 +430,10 @@ impl TokenWorldV2 {
     }
 
     pub(crate) fn funded_tokens(&self, amount: u64) -> Pubkey {
+        self.funded_tokens_for(self.payer.pubkey(), amount)
+    }
+
+    pub(crate) fn funded_tokens_for(&self, owner: Pubkey, amount: u64) -> Pubkey {
         let account = Keypair::new();
         let token = spl_token_interface::id();
         let create = solana_system_interface::instruction::create_account(
@@ -443,7 +447,7 @@ impl TokenWorldV2 {
             &token,
             &account.pubkey(),
             &self.mint,
-            &self.payer.pubkey(),
+            &owner,
         )
         .unwrap();
         let mint = spl_token_interface::instruction::mint_to_checked(

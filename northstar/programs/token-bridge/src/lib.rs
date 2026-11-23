@@ -4,6 +4,7 @@ mod accounting;
 mod custody;
 #[cfg(target_os = "solana")]
 mod deposit_credit;
+pub mod entitlement;
 pub mod instruction;
 #[cfg(not(target_os = "solana"))]
 pub mod liability;

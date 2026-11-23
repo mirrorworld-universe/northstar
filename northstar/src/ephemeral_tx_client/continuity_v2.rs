@@ -454,26 +454,45 @@ impl EphemeralTransactionClient {
                     || *portal != self.portal_program_id
                     || value.owner != program.to_bytes()
                     || !token.is_valid()
-                    || token.owner != owner.to_bytes()
-                    || token.session_bridge != bridge.to_bytes()
-                    || token.mint != registration_state.mint.to_bytes()
                     || keys.get(instruction.accounts[5] as usize)
                         != Some(&registration_state.token_program)
                     || keys.get(instruction.accounts[6] as usize) != Some(&registration_state.mint)
-                    || (top_level
-                        && !transaction
-                            .message
-                            .is_signer(instruction.accounts[0] as usize))
                 {
                     return Err(solana_transaction::TransactionError::CommitCancelled);
                 }
+                use northstar_token_bridge::entitlement::{issue, Intent, Source};
+                // A successful inner bridge call already passed the SVM signer check in
+                // StartWithdrawal. A PDA signer need not sign the outer transaction.
+                let signed = !top_level
+                    || transaction
+                        .message
+                        .is_signer(instruction.accounts[0] as usize);
+                let request = issue(
+                    signed,
+                    owner.as_array(),
+                    Source {
+                        owner: &token.owner,
+                        registry: &token.session_bridge,
+                        mint: &token.mint,
+                    },
+                    Intent {
+                        bridge: program.to_bytes(),
+                        registry: bridge.to_bytes(),
+                        source: account.to_bytes(),
+                        mint: registration_state.mint.to_bytes(),
+                        destination: destination.to_bytes(),
+                        amount,
+                        decimals,
+                    },
+                )
+                .ok_or(solana_transaction::TransactionError::CommitCancelled)?;
                 SettlementEffectV2::TokenWithdrawal {
-                    bridge: program.to_bytes(),
-                    session_bridge: bridge.to_bytes(),
-                    account: account.to_bytes(),
-                    destination: destination.to_bytes(),
-                    amount,
-                    decimals,
+                    bridge: request.bridge,
+                    session_bridge: request.registry,
+                    account: request.source,
+                    destination: request.destination,
+                    amount: request.amount,
+                    decimals: request.decimals,
                     cumulative_withdrawn: state
                         .withdrawn(account.to_bytes())
                         .checked_add(amount)

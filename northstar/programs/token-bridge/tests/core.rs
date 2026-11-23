@@ -38,6 +38,10 @@ fn process_pda_owner_delegate(
     accounts: &[AccountInfo],
     data: &[u8],
 ) -> ProgramResult {
+    #[cfg(feature = "checkpoint-continuity-v2")]
+    if accounts.len() == 9 {
+        return accounting::start_as_test_pda(program_id, accounts, data);
+    }
     let [payer, owner, er_token_account, bridge_program, session_bridge, portal_program, session, delegation_record, buffer, system_program_info, receipt, origin] =
         accounts
     else {

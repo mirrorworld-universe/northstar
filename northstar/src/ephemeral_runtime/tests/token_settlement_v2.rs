@@ -491,8 +491,8 @@ fn invariant_v2_token_reconciliation_rejects_changed_authorization_tuple() {
 fn invariant_v2_partly_paid_plan_resumes_without_repaying_the_prefix() {
     let mut world = delegated_token_world(PORTAL_PROGRAM_ID, true);
     let source = world.funded_tokens(42);
-    let a = world.funded_tokens(0);
-    let b = world.funded_tokens(0);
+    let a = world.funded_tokens_for(Pubkey::new_unique(), 0);
+    let b = world.funded_tokens_for(Pubkey::new_unique(), 0);
     world.send(&[world.deposit(source, 42, 3)], &[]).unwrap();
     world.bank.freeze();
     let directory = tempfile::tempdir().unwrap();
@@ -516,6 +516,54 @@ fn invariant_v2_partly_paid_plan_resumes_without_repaying_the_prefix() {
         withdraw(&world, &manager, a, 7)?;
         withdraw(&world, &manager, b, 11)?;
         reconcile_single_holder(&world, &manager, (24, 0, 18))?;
+        {
+            let runtime = manager.runtime.as_ref().ok_or("runtime missing")?;
+            if !runtime.seal_checkpoint_if_nonempty() {
+                return Err("checkpoint did not seal".into());
+            }
+            let plan = manager.settlement_plan().ok_or("sealed plan missing")?;
+            let store = runtime.lineage_store_v2().ok_or("lineage missing")?;
+            let mut store = store.lock().unwrap();
+            let first = &plan.token_withdrawals[0];
+            let mut redirected = plan.clone();
+            redirected.token_withdrawals[0].l1_destination_token_account =
+                plan.token_withdrawals[1].l1_destination_token_account;
+            let mut split = plan.clone();
+            let mut part = first.clone();
+            part.amount -= 1;
+            part.withdrawn -= 1;
+            split.token_withdrawals[0].amount = 1;
+            split.token_withdrawals.insert(0, part);
+            let mut changed_mint = plan.clone();
+            changed_mint.token_withdrawals[0].mint = Pubkey::new_unique();
+            let mut duplicate = plan.clone();
+            duplicate.token_withdrawals.push(first.clone());
+            let mut omitted = plan.clone();
+            omitted.token_withdrawals.pop();
+            let mut repeated_ticket = plan.clone();
+            repeated_ticket.token_withdrawals[1].withdrawn = first.withdrawn;
+            for (name, mut candidate) in [
+                ("destination", redirected),
+                ("split", split),
+                ("mint", changed_mint),
+                ("duplicate", duplicate),
+                ("omitted", omitted),
+                ("repeated target", repeated_ticket),
+            ] {
+                candidate.checksum = candidate.recomputed_checksum();
+                if store.bind_settlement_plan(&candidate).is_ok()
+                    || store
+                        .settlement_plan()
+                        .map_err(|e| e.to_string())?
+                        .is_some()
+                {
+                    return Err(format!("{name}: nonmatching plan passed first bind"));
+                }
+            }
+            store
+                .bind_settlement_plan(&plan)
+                .map_err(|e| e.to_string())?;
+        }
         let mut interrupted = false;
         settle_checkpoint_inner(
             &mut manager,
@@ -650,6 +698,16 @@ fn regression_v2_token_plan_rejects_missing_registry_without_dropping_payout() {
 
 #[test]
 fn regression_v2_cpi_token_withdrawal_records_and_settles_one_effect() {
+    check_cpi_withdrawal_occurrences(1);
+}
+
+#[test]
+fn invariant_v2_identical_owner_requests_pay_twice_with_distinct_tickets() {
+    check_cpi_withdrawal_occurrences(2);
+}
+
+fn check_cpi_withdrawal_occurrences(count: usize) {
+    let total = 20 * count as u64;
     let mut world = delegated_token_world(PORTAL_PROGRAM_ID, true);
     let source = world.funded_tokens(100);
     let destination = world.funded_tokens(0);
@@ -698,12 +756,13 @@ fn regression_v2_cpi_token_withdrawal_records_and_settles_one_effect() {
             accounts.extend(inner.accounts);
             let mut data = vec![0];
             data.extend(inner.data);
+            let call = solana_instruction::Instruction {
+                program_id: caller,
+                accounts,
+                data,
+            };
             let transaction = Transaction::new_signed_with_payer(
-                &[solana_instruction::Instruction {
-                    program_id: caller,
-                    accounts,
-                    data,
-                }],
+                &vec![call; count],
                 Some(&world.payer.pubkey()),
                 &[world.payer.as_ref()],
                 runtime.bank().last_blockhash(),
@@ -716,8 +775,8 @@ fn regression_v2_cpi_token_withdrawal_records_and_settles_one_effect() {
                 .unwrap()],
                 &SendTransactionServiceStats::default(),
             );
-            if er_amount(&manager, &world.er)? != 22 {
-                return Err("CPI withdrawal did not execute".into());
+            if er_amount(&manager, &world.er)? != 42 - total {
+                return Err("CPI withdrawal total did not execute".into());
             }
             let store = runtime.lineage_store_v2().ok_or("lineage missing")?;
             let events = store
@@ -726,14 +785,36 @@ fn regression_v2_cpi_token_withdrawal_records_and_settles_one_effect() {
                 .pending_payout_events()
                 .map_err(|error| error.to_string())?
                 .1;
-            if events.len() != 1
-                || events[0].amount != 20
-                || events[0].l1_destination_token_account != destination
+            if events.len() != count
+                || events
+                    .iter()
+                    .any(|e| e.amount != 20 || e.l1_destination_token_account != destination)
             {
-                return Err("CPI withdrawal was not captured exactly once".into());
+                return Err("CPI withdrawal occurrences differ from calls".into());
             }
             drop(store);
-            settle(&mut manager, &mut world.bank, &destination, 20)?;
+            let artifact = settle(&mut manager, &mut world.bank, &destination, total)?;
+            let checkpoint = northstar_portal::find_checkpoint_pda(
+                &world.portal,
+                &world.session,
+                artifact.checkpoint.er_slot,
+            )
+            .0;
+            for n in 1..=count as u64 {
+                let key = northstar_portal::find_token_withdrawal_authorization_pda(
+                    &world.portal,
+                    &checkpoint,
+                    &world.vault,
+                    20 * n,
+                )
+                .0;
+                let value = world.bank.get_account(&key).ok_or("ticket missing")?;
+                let ticket: northstar_portal::TokenWithdrawalAuthorization =
+                    borsh::from_slice(value.data()).map_err(|e| e.to_string())?;
+                if !ticket.consumed || ticket.checkpoint != checkpoint {
+                    return Err("distinct ticket not consumed".into());
+                }
+            }
             Ok(())
         })();
     manager.shutdown_runtime();

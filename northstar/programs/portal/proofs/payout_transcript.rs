@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 #[path = "../src/payout_wire.rs"]
-mod payout_wire;
+pub(crate) mod payout_wire;
 
 pub mod wire_spec {
     use super::payout_wire::*;
@@ -39,7 +39,7 @@ pub mod wire_spec {
         &&& s[272] == w.decimals
     }
 
-    spec fn same(a: &Payout, b: &Payout) -> bool {
+    pub(crate) open spec fn same(a: &Payout, b: &Payout) -> bool {
         &&& a.bridge_program@ =~= b.bridge_program@
         &&& a.session_bridge@ =~= b.session_bridge@
         &&& a.er_token_account@ =~= b.er_token_account@
@@ -52,16 +52,14 @@ pub mod wire_spec {
     }
 
     // This is injectivity of bytes before SHA-256, not injectivity of the digest.
-    fn payload_injective(a: &Payout, b: &Payout) {
-        let x = a.payload();
-        let y = b.payload();
-        proof {
-            le_roundtrip(a.amount);
-            le_roundtrip(b.amount);
-            le_roundtrip(a.withdrawn);
-            le_roundtrip(b.withdrawn);
-        }
-        assert((x@ =~= y@) ==> same(a, b));
+    pub(crate) proof fn payload_injective(a: &Payout, b: &Payout, bytes: Seq<u8>)
+        requires layout(a, bytes), layout(b, bytes),
+        ensures same(a, b),
+    {
+        le_roundtrip(a.amount);
+        le_roundtrip(b.amount);
+        le_roundtrip(a.withdrawn);
+        le_roundtrip(b.withdrawn);
     }
 
     pub open spec fn auth_parts(s: &[u8; 273], parts: [&[u8]; 2]) -> bool {
