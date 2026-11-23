@@ -142,8 +142,11 @@ struct PendingSettlementSubmission {
     checksum: [u8; 32],
     signatures: Vec<Signature>,
     recent_blockhash: Hash,
+    first_submit_l1_slot: u64,
     submitted_l1_slot: u64,
     attempts: u64,
+    forward_backpressured: bool,
+    phase: &'static str,
     current_transaction: Transaction,
     remaining_transactions: Vec<Transaction>,
 }
@@ -171,8 +174,11 @@ impl PendingSettlementSubmission {
                 checksum,
                 signatures,
                 recent_blockhash,
+                first_submit_l1_slot: submitted_l1_slot,
                 submitted_l1_slot,
                 attempts,
+                forward_backpressured: false,
+                phase: settlement_phase(&current_transaction),
                 current_transaction: current_transaction.clone(),
                 remaining_transactions: transactions,
             },
@@ -214,20 +220,64 @@ impl PendingSettlementSubmission {
             .into_iter()
             .collect();
         self.recent_blockhash = transaction.message.recent_blockhash;
+        self.first_submit_l1_slot = bank.slot();
         self.submitted_l1_slot = bank.slot();
+        self.forward_backpressured = false;
+        self.phase = settlement_phase(transaction);
         self.current_transaction = transaction.clone();
     }
 
     fn should_rebroadcast(&self, bank: &Bank) -> bool {
         const SETTLEMENT_REBROADCAST_INTERVAL_SLOTS: u64 = 10;
-        bank.slot()
-            >= self
-                .submitted_l1_slot
-                .saturating_add(SETTLEMENT_REBROADCAST_INTERVAL_SLOTS)
+        let interval = if self.forward_backpressured {
+            1
+        } else {
+            SETTLEMENT_REBROADCAST_INTERVAL_SLOTS
+        };
+        bank.slot() >= self.submitted_l1_slot.saturating_add(interval)
     }
 
-    fn mark_rebroadcasted(&mut self, bank: &Bank) {
+    fn dispatch(
+        &mut self,
+        bank: &Bank,
+        sender: &BankingPacketSender,
+        forward_sender: Option<&Sender<(BankingPacketBatch, bool)>>,
+        kind: &'static str,
+    ) {
+        let outcome = submit_settlement_transactions(
+            sender,
+            forward_sender,
+            std::slice::from_ref(&self.current_transaction),
+        );
         self.submitted_l1_slot = bank.slot();
+        self.forward_backpressured = matches!(outcome, Err(SettlementSubmitError::ForwardFull));
+        let outcome = match outcome {
+            Ok(()) if forward_sender.is_some() => "local_and_forward_queued",
+            Ok(()) => "local_queued",
+            Err(SettlementSubmitError::Local(_)) => "local_disconnected",
+            Err(SettlementSubmitError::ForwardFull) => "local_queued_forward_full",
+            Err(SettlementSubmitError::ForwardDisconnected) => "local_queued_forward_disconnected",
+        };
+        let level = if self.forward_backpressured && kind == "retry" {
+            Level::Debug
+        } else {
+            Level::Info
+        };
+        log!(
+            level,
+            "Portal settlement dispatch phase={} er_slot={} l1_slot={} first_submit_l1_slot={} \
+             plan_attempt={} signature={} kind={kind} outcome={outcome}",
+            self.phase,
+            self.er_slot,
+            bank.slot(),
+            self.first_submit_l1_slot,
+            self.attempts,
+            self.current_transaction
+                .signatures
+                .first()
+                .copied()
+                .unwrap_or_default()
+        );
     }
 
     fn failed_signature_reasons(&self, bank: &Bank) -> Vec<(Signature, String)> {
@@ -242,6 +292,16 @@ impl PendingSettlementSubmission {
             })
             .collect()
     }
+}
+
+fn settlement_phase(transaction: &Transaction) -> &'static str {
+    transaction
+        .message
+        .instructions
+        .first()
+        .map_or("other", |ix| {
+            northstar::settlement_instruction_kind(&ix.data)
+        })
 }
 
 #[cfg(test)]
@@ -421,31 +481,39 @@ fn submit_settlement_if_due(
     };
 
     *settlement_attempts = settlement_attempts.saturating_add(1);
-    let Some((pending, transaction)) = PendingSettlementSubmission::new(
+    submit_prepared_settlement(
+        bank,
+        sender,
+        forward_sender,
+        pending_settlement,
+        (er_slot, checksum, transactions),
+        *settlement_attempts,
+    );
+}
+
+fn submit_prepared_settlement(
+    bank: &Bank,
+    sender: &BankingPacketSender,
+    forward_sender: Option<&Sender<(BankingPacketBatch, bool)>>,
+    pending_settlement: &mut Option<PendingSettlementSubmission>,
+    (er_slot, checksum, transactions): (u64, [u8; 32], Vec<Transaction>),
+    attempt: u64,
+) {
+    let Some((pending, _)) = PendingSettlementSubmission::new(
         er_slot,
         checksum,
-        recent_blockhash,
+        bank.last_blockhash(),
         bank.slot(),
-        *settlement_attempts,
+        attempt,
         transactions,
     ) else {
         return;
     };
-
-    if let Err(err) =
-        submit_settlement_transactions(sender, forward_sender, std::slice::from_ref(&transaction))
-    {
-        warn!("Failed to enqueue Portal settlement transaction: {err}");
-        return;
-    }
-
-    info!(
-        "Enqueued Portal settlement transaction for er_slot={} attempts={} remaining_txs={}",
-        er_slot,
-        *settlement_attempts,
-        pending.remaining_transactions.len(),
-    );
-    *pending_settlement = Some(pending);
+    // Local banking may accept the packet even if leader forwarding is full. Track it
+    // before sending so a partial enqueue cannot create a second signature.
+    pending_settlement
+        .insert(pending)
+        .dispatch(bank, sender, forward_sender, "initial");
 }
 
 fn submit_next_pending_settlement_if_ready(
@@ -462,34 +530,7 @@ fn submit_next_pending_settlement_if_ready(
     match pending.status(bank) {
         PendingSettlementStatus::Pending => {
             if pending.should_rebroadcast(bank) {
-                let transaction = pending.current_transaction.clone();
-                match submit_settlement_transactions(
-                    sender,
-                    forward_sender,
-                    std::slice::from_ref(&transaction),
-                ) {
-                    Ok(()) => {
-                        pending.mark_rebroadcasted(bank);
-                        info!(
-                            "Rebroadcast Portal settlement transaction for er_slot={} \
-                             checksum={:?} attempts={} l1_slot={} signatures={:?}",
-                            pending.er_slot,
-                            pending.checksum,
-                            pending.attempts,
-                            bank.slot(),
-                            pending.signatures,
-                        );
-                    }
-                    Err(err) => warn!(
-                        "Failed to rebroadcast Portal settlement transaction for er_slot={} \
-                         checksum={:?} attempts={} l1_slot={} signatures={:?}: {err}",
-                        pending.er_slot,
-                        pending.checksum,
-                        pending.attempts,
-                        bank.slot(),
-                        pending.signatures,
-                    ),
-                }
+                pending.dispatch(bank, sender, forward_sender, "retry");
             } else {
                 debug!(
                     "Portal settlement still unconfirmed for er_slot={} checksum={:?} attempts={} \
@@ -501,13 +542,14 @@ fn submit_next_pending_settlement_if_ready(
         }
         PendingSettlementStatus::Confirmed => {
             info!(
-                "Portal settlement transaction confirmed for er_slot={} checksum={:?} attempts={} \
-                 submitted_l1_slot={} confirmed_l1_slot={} signatures={:?}",
+                "Portal settlement observed phase={} er_slot={} l1_slot={} \
+                 first_submit_l1_slot={} plan_attempt={} signatures={:?} \
+                 outcome=frozen_bank_success",
+                pending.phase,
                 pending.er_slot,
-                pending.checksum,
-                pending.attempts,
-                pending.submitted_l1_slot,
                 bank.slot(),
+                pending.first_submit_l1_slot,
+                pending.attempts,
                 pending.signatures,
             );
             let Some(mut transaction) = pending.pop_next_transaction() else {
@@ -516,31 +558,19 @@ fn submit_next_pending_settlement_if_ready(
             };
             manager.resign_settlement_transaction(&mut transaction, bank.last_blockhash());
             pending.track_transaction(&transaction, bank);
-            if let Err(err) = submit_settlement_transactions(
-                sender,
-                forward_sender,
-                std::slice::from_ref(&transaction),
-            ) {
-                warn!("Failed to enqueue next Portal settlement transaction: {err}");
-                return true;
-            }
-            info!(
-                "Enqueued next Portal settlement transaction for er_slot={} remaining_txs={}",
-                pending.er_slot,
-                pending.remaining_transactions.len(),
-            );
+            pending.dispatch(bank, sender, forward_sender, "next");
             true
         }
         PendingSettlementStatus::Expired => {
             warn!(
-                "Portal settlement transaction expired before confirmation for er_slot={} \
-                 checksum={:?} attempts={} submitted_l1_slot={} current_l1_slot={} \
-                 signatures={:?}; retrying",
+                "Portal settlement observed phase={} er_slot={} l1_slot={} \
+                 first_submit_l1_slot={} plan_attempt={} signatures={:?} \
+                 outcome=frozen_bank_hash_expiry",
+                pending.phase,
                 pending.er_slot,
-                pending.checksum,
-                pending.attempts,
-                pending.submitted_l1_slot,
                 bank.slot(),
+                pending.first_submit_l1_slot,
+                pending.attempts,
                 pending.signatures,
             );
             *pending_settlement = None;
@@ -863,7 +893,15 @@ impl NorthStarService {
                     }
 
                     // Sonic: Authenticated ingress consumes finalized roots, not event-bank hints.
-                    manager.process_finalized_l1_inputs(&bank_forks.read().unwrap().root_bank());
+                    let root = bank_forks.read().unwrap().root_bank();
+                    let checkpoint_settled = manager.process_finalized_l1_inputs(&root);
+                    #[cfg(not(feature = "vrf-relay"))]
+                    let _ = checkpoint_settled;
+                    #[cfg(feature = "vrf-relay")]
+                    if checkpoint_settled && let Some(relay) = relay_service.as_ref() {
+                        // Checkpoint settlement changes relay eligibility without producing an ER transaction.
+                        relay.notify();
+                    }
 
                     warn_stuck_settlement_if_due(
                         &latest_bank,
@@ -1101,6 +1139,67 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, SettlementSubmitError::ForwardDisconnected));
+    }
+
+    #[test]
+    fn regression_forward_pressure_retries_the_same_settlement_before_normal_interval() {
+        let bank = create_processable_test_bank();
+        let payer = Arc::new(Keypair::new());
+        fund_test_payer(&bank, &payer);
+        let transaction = signed_test_transfer(&bank, &payer);
+        let original = bincode::serialize(&transaction).unwrap();
+        let manager = northstar::Manager::new(northstar::ManagerConfig {
+            portal_program_id: Pubkey::new_unique(),
+            manager_account: payer,
+            checkpoint_plan_dir: None,
+        });
+        let (sender, local) = crate::banking_channels::channel_for_test();
+        let (forward, leader) = bounded(1);
+        submit_settlement_transactions(&sender, Some(&forward), std::slice::from_ref(&transaction))
+            .unwrap();
+        local.try_recv().unwrap();
+        let mut pending = None;
+        submit_prepared_settlement(
+            &bank,
+            &sender,
+            Some(&forward),
+            &mut pending,
+            (7, [3; 32], vec![transaction]),
+            1,
+        );
+        assert_eq!(packet_count(&local.try_recv().unwrap()), 1);
+        let tracked = pending
+            .as_ref()
+            .expect("the signed intent must remain pending after a partial enqueue");
+        assert_eq!(
+            bincode::serialize(&tracked.current_transaction).unwrap(),
+            original
+        );
+
+        leader.try_recv().unwrap();
+        let next = Bank::new_from_parent(bank.clone(), SlotLeader::new_unique(), bank.slot() + 1);
+        assert!(submit_next_pending_settlement_if_ready(
+            &manager,
+            &next,
+            &sender,
+            Some(&forward),
+            &mut pending
+        ));
+        let (batch, _) = leader
+            .try_recv()
+            .expect("retry must use the next bank, not the normal rebroadcast interval");
+        assert_eq!(
+            batch.iter().next().unwrap().data(..),
+            Some(original.as_slice())
+        );
+        assert!(submit_next_pending_settlement_if_ready(
+            &manager,
+            &next,
+            &sender,
+            Some(&forward),
+            &mut pending
+        ));
+        assert!(leader.is_empty());
     }
 
     #[test]

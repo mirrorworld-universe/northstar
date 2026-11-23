@@ -63,6 +63,21 @@ pub use crate::{
 
 const DEFAULT_ER_SLOT_DURATION_MS: u64 = 50;
 const DEFAULT_CHECKPOINT_CHALLENGE_WINDOW_SLOTS: u64 = 10;
+
+/// Classify a locally built settlement instruction for correlation with its L1 receipt.
+pub fn settlement_instruction_kind(data: &[u8]) -> &'static str {
+    use northstar_portal::PortalInstruction;
+    match borsh::from_slice::<PortalInstruction>(data) {
+        Ok(PortalInstruction::ProposeCheckpoint(_)) => "propose",
+        Ok(PortalInstruction::CommitCheckpoint(_)) => "commit",
+        Ok(PortalInstruction::ProposeCheckpointV2(_)) => "propose_v2",
+        Ok(PortalInstruction::CommitCheckpointV2(_)) => "commit_v2",
+        Ok(PortalInstruction::BeginSettlement(_)) => "begin",
+        Ok(PortalInstruction::FinishSettlement(_)) => "finish",
+        Ok(PortalInstruction::WriteSettlementChunk(_)) => "write_chunk",
+        _ => "other",
+    }
+}
 pub const DEFAULT_ER_SLOT_DURATION: Duration = Duration::from_millis(DEFAULT_ER_SLOT_DURATION_MS);
 pub(crate) const DEFAULT_ER_TRANSACTION_MAX_AGE: usize = (solana_clock::MAX_PROCESSING_AGE
     * solana_clock::DEFAULT_MS_PER_SLOT as usize)
@@ -545,9 +560,17 @@ impl Manager {
         self.runtime.as_ref().map(|r| r.session_pda())
     }
 
-    pub fn process_finalized_l1_inputs(&self, _bank: &Bank) {
+    /// Process authenticated L1 inputs. Returns true only when the durable V2
+    /// checkpoint advances through settlement and the runtime remains usable.
+    pub fn process_finalized_l1_inputs(&self, _bank: &Bank) -> bool {
         #[cfg(feature = "checkpoint-continuity-v2")]
-        self.process_finalized_continuity_inputs(_bank);
+        {
+            self.process_finalized_continuity_inputs(_bank)
+        }
+        #[cfg(not(feature = "checkpoint-continuity-v2"))]
+        {
+            false
+        }
     }
 
     /// Compute current ER-vs-L1 state diff/hash, if runtime exists.
