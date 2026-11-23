@@ -389,31 +389,34 @@ impl Manager {
         Ok(())
     }
 
-    pub(super) fn process_finalized_continuity_inputs(&self, bank: &Bank) {
+    pub(super) fn process_finalized_continuity_inputs(&self, bank: &Bank) -> bool {
         let Some(runtime) = self.runtime.as_ref().filter(|runtime| runtime.is_active()) else {
-            return;
+            return false;
         };
         let Some(store) = runtime.lineage_store_v2() else {
-            return;
+            return false;
         };
         let Some(session) = *runtime.session_pda().read().unwrap() else {
-            return;
+            return false;
         };
         if bank.get_account(&session).is_none() && store.lock().unwrap().accepted_head().is_none() {
-            return;
+            return false;
         }
-        let result = runtime.reconcile_checkpoint_v2(bank).and_then(|_| {
+        match runtime.reconcile_checkpoint_v2(bank).and_then(|settled| {
             for _ in 0..crate::checkpoint_v2::MAX_CHECKPOINT_TRANSITIONS_V2 {
                 let Some(record) = runtime.process_l1_ingress_v2(bank)? else {
-                    return Ok(());
+                    break;
                 };
                 runtime.execute_token_ingress_v2(bank, record)?;
             }
-            Ok(())
-        });
-        if let Err(error) = result {
-            runtime.quarantine_checkpoint("checkpoint_lineage_recovery_failed");
-            warn!("Continuity input processing quarantined before publication: {error}");
+            Ok(settled)
+        }) {
+            Ok(settled) => settled && runtime.is_active(),
+            Err(error) => {
+                runtime.quarantine_checkpoint("checkpoint_lineage_recovery_failed");
+                warn!("Continuity input processing quarantined before publication: {error}");
+                false
+            }
         }
     }
 }
