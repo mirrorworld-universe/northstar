@@ -1,3 +1,5 @@
+#[path = "core/accounting.rs"]
+mod accounting;
 #[path = "core/token_deposit.rs"]
 mod token_deposit;
 

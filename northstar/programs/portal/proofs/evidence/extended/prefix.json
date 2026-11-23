@@ -1,0 +1,44 @@
+{
+  "verus": "0.2026.11.02.8bf68ee",
+  "verus_commit": "8bf68ee741df833ea5d0fe6a2255126fdea87e47",
+  "z3": "Z3 version 4.16.0 - 64 bit",
+  "flags": [
+    "--crate-type",
+    "lib",
+    "--edition=2021",
+    "--no-cheating",
+    "--output-json",
+    "--time-expanded"
+  ],
+  "source_sha256": {
+    "src/ingress_prefix.rs": "e1141ae1124575b2344584834233bcbb65e50ecbbca9f096593d0819bb4d6fd5",
+    "proofs/continuity_prefix.rs": "e3b25692681e8338058a806c1b2d57060902801bf6a903ddc47984e01c3090d5"
+  },
+  "runs": {
+    "production": {
+      "verdict": "verified",
+      "verified": 6,
+      "errors": 0
+    },
+    "sequence_stalls": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 5,
+      "errors": 1
+    },
+    "overrestrict_step_budget": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 5,
+      "errors": 1
+    },
+    "wrong_tip_root": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 5,
+      "errors": 1
+    },
+    "wrong_consumed_root": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 5,
+      "errors": 1
+    }
+  }
+}

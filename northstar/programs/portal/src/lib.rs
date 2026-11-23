@@ -2,14 +2,23 @@
 #[cfg(not(target_os = "solana"))]
 extern crate alloc;
 
+mod bond;
 pub mod continuity;
+mod dispute_range;
 mod error;
 mod events;
+#[cfg(feature = "checkpoint-continuity-v2")]
+mod ingress_prefix;
 mod instruction;
 mod instructions;
+mod lamport_batch;
+mod payout_hash;
+pub mod payout_wire;
 mod pda;
 mod profile;
+mod receipt;
 mod state;
+mod withdrawal_auth;
 
 #[cfg(not(feature = "no-entrypoint"))]
 use pinocchio::no_allocator;

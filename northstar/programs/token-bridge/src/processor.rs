@@ -1,3 +1,4 @@
+mod custody_adapter;
 mod token_deposit;
 #[cfg(feature = "checkpoint-continuity-v2")]
 mod token_ingress_v2;
@@ -6,6 +7,9 @@ mod token_ingress_v2;
 use northstar_portal::Session;
 use {
     crate::{
+        accounting::{transfer_access, transfer_balances, withdrawal_target, BridgeError, Holding},
+        custody::{self, Direction},
+        deposit_credit,
         instruction::TokenBridgeInstruction,
         portal_abi::{is_valid_settlement_checkpoint, is_valid_settlement_session},
         state::{account_size, BridgeBuffer, ErTokenAccount, TokenDepositReceipt, TokenVault},
@@ -187,14 +191,15 @@ fn process_initialize_vault(program_id: &Pubkey, accounts: &mut [AccountInfo]) -
         return Err(ProgramError::InvalidAccountData);
     }
 
+    let initial = custody::empty();
     let state = TokenVault {
         discriminator: TokenVault::DISCRIMINATOR,
         session_bridge: key_bytes(session_bridge.address()),
         mint: bridge.mint.to_bytes(),
         vault_token_account: key_bytes(vault_token_account.address()),
         token_program: bridge.token_program.to_bytes(),
-        deposited: 0,
-        withdrawn: 0,
+        deposited: initial.deposited,
+        withdrawn: initial.withdrawn,
         bump,
     };
     if vault.lamports() == 0 {
@@ -373,6 +378,13 @@ fn process_deposit(
     if token_program.address() != &pinocchio_token::ID {
         return Err(ProgramError::IncorrectProgramId);
     }
+    let movement = custody_adapter::prepare(
+        Direction::Deposit,
+        &vault_state,
+        vault_token_account,
+        source_token_account,
+        amount,
+    )?;
     TransferChecked::<_>::new(
         source_token_account,
         mint,
@@ -382,6 +394,12 @@ fn process_deposit(
         decimals,
     )
     .invoke()?;
+    custody_adapter::finish(
+        movement,
+        &mut vault_state,
+        vault_token_account,
+        source_token_account,
+    )?;
 
     let initial_receipt = TokenDepositReceipt {
         discriminator: TokenDepositReceipt::DISCRIMINATOR,
@@ -423,22 +441,14 @@ fn process_deposit(
     {
         return Err(ProgramError::InvalidAccountData);
     }
-    receipt.balance = receipt
-        .balance
-        .checked_add(amount)
+    let credit = deposit_credit::record(receipt.balance, er_state.amount, is_delegated, amount)
         .ok_or(ProgramError::ArithmeticOverflow)?;
+    receipt.balance = credit.receipt;
     store(deposit_receipt, &receipt)?;
-    vault_state.deposited = vault_state
-        .deposited
-        .checked_add(amount)
-        .ok_or(ProgramError::ArithmeticOverflow)?;
     store(vault, &vault_state)?;
 
-    if !is_delegated {
-        er_state.amount = er_state
-            .amount
-            .checked_add(amount)
-            .ok_or(ProgramError::ArithmeticOverflow)?;
+    if let Some(holding) = credit.immediate {
+        er_state.amount = holding;
         store(er_token_account, &er_state)?;
     }
     #[cfg(feature = "checkpoint-continuity-v2")]
@@ -461,6 +471,28 @@ fn process_deposit(
     Ok(())
 }
 
+impl<'a> From<&'a ErTokenAccount> for Holding<'a> {
+    fn from(state: &'a ErTokenAccount) -> Self {
+        Self {
+            session_bridge: &state.session_bridge,
+            mint: &state.mint,
+            amount: state.amount,
+        }
+    }
+}
+
+impl From<BridgeError> for ProgramError {
+    fn from(error: BridgeError) -> Self {
+        match error {
+            BridgeError::MissingSignature => Self::MissingRequiredSignature,
+            BridgeError::Binding => Self::InvalidAccountData,
+            BridgeError::Insufficient => Self::InsufficientFunds,
+            BridgeError::Overflow => Self::ArithmeticOverflow,
+            BridgeError::Withdrawal => Self::InvalidArgument,
+        }
+    }
+}
+
 fn process_transfer(
     program_id: &Pubkey,
     accounts: &mut [AccountInfo],
@@ -471,26 +503,20 @@ fn process_transfer(
     let source = next_account_info(account_info_iter)?;
     let destination = next_account_info(account_info_iter)?;
 
-    require_signer(authority)?;
-    if source.address() == destination.address() {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    transfer_access(
+        authority.is_signer(),
+        source.address().as_array(),
+        destination.address().as_array(),
+    )?;
     let mut source_state = load_er_token_account(program_id, source)?;
     let mut destination_state = load_er_token_account(program_id, destination)?;
-    if source_state.owner != key_bytes(authority.address())
-        || source_state.session_bridge != destination_state.session_bridge
-        || source_state.mint != destination_state.mint
-    {
-        return Err(ProgramError::InvalidAccountData);
-    }
-    source_state.amount = source_state
-        .amount
-        .checked_sub(amount)
-        .ok_or(ProgramError::InsufficientFunds)?;
-    destination_state.amount = destination_state
-        .amount
-        .checked_add(amount)
-        .ok_or(ProgramError::ArithmeticOverflow)?;
+    (source_state.amount, destination_state.amount) = transfer_balances(
+        authority.address().as_array(),
+        &source_state.owner,
+        Holding::from(&source_state),
+        Holding::from(&destination_state),
+        amount,
+    )?;
     store(source, &source_state)?;
     store(destination, &destination_state)
 }
@@ -530,15 +556,15 @@ fn process_withdraw(
         owner.address(),
         &bridge.mint,
     )?;
-    er_state.amount = er_state
-        .amount
-        .checked_sub(amount)
-        .ok_or(ProgramError::InsufficientFunds)?;
-    vault_state.withdrawn = vault_state
-        .withdrawn
-        .checked_add(amount)
-        .filter(|withdrawn| *withdrawn <= vault_state.deposited)
-        .ok_or(ProgramError::InsufficientFunds)?;
+    er_state.amount =
+        deposit_credit::retire(er_state.amount, amount).ok_or(ProgramError::InsufficientFunds)?;
+    let movement = custody_adapter::prepare(
+        Direction::Payout,
+        &vault_state,
+        vault_token_account,
+        destination_token_account,
+        amount,
+    )?;
 
     if token_program.address() != &pinocchio_token::ID {
         return Err(ProgramError::IncorrectProgramId);
@@ -559,7 +585,12 @@ fn process_withdraw(
         decimals,
     )
     .invoke_signed(&[vault_signer])?;
-
+    custody_adapter::finish(
+        movement,
+        &mut vault_state,
+        vault_token_account,
+        destination_token_account,
+    )?;
     store(vault, &vault_state)?;
     store(er_token_account, &er_state)
 }
@@ -614,10 +645,8 @@ fn process_start_withdrawal(
         owner.address(),
         &bridge.mint,
     )?;
-    er_state.amount = er_state
-        .amount
-        .checked_sub(amount)
-        .ok_or(ProgramError::InsufficientFunds)?;
+    er_state.amount =
+        deposit_credit::retire(er_state.amount, amount).ok_or(ProgramError::InsufficientFunds)?;
     store(er_token_account, &er_state)
 }
 
@@ -731,18 +760,23 @@ fn process_settle_withdrawal(
     if destination.mint.to_bytes() != bridge.mint.to_bytes() {
         return Err(ProgramError::InvalidAccountData);
     }
-    if withdrawn <= vault_state.withdrawn {
+    if withdrawal_target(
+        vault_state.withdrawn,
+        vault_state.deposited,
+        withdrawn,
+        amount,
+    )?
+    .is_none()
+    {
         return Ok(());
     }
-
-    let expected_withdrawn = vault_state
-        .withdrawn
-        .checked_add(amount)
-        .ok_or(ProgramError::ArithmeticOverflow)?;
-    if withdrawn != expected_withdrawn || withdrawn > vault_state.deposited {
-        return Err(ProgramError::InvalidArgument);
-    }
-    vault_state.withdrawn = withdrawn;
+    let movement = custody_adapter::prepare(
+        Direction::Payout,
+        &vault_state,
+        vault_token_account,
+        destination_token_account,
+        amount,
+    )?;
 
     if token_program.address() != &pinocchio_token::ID {
         return Err(ProgramError::IncorrectProgramId);
@@ -766,8 +800,9 @@ fn process_settle_withdrawal(
         AccountMeta::readonly(mint.address()),
         AccountMeta::readonly(token_program.address()),
     ];
-    let portal_data =
-        encode_portal_consume_token_withdrawal(er_slot, checksum, amount, withdrawn, decimals);
+    let portal_data = northstar_portal::payout_wire::consume_instruction(
+        er_slot, &checksum, amount, withdrawn, decimals,
+    );
     let portal_instruction = Instruction {
         program_id: &portal_id,
         accounts: &portal_accounts,
@@ -800,6 +835,12 @@ fn process_settle_withdrawal(
         decimals,
     )
     .invoke_signed(&[Signer::from(&vault_seeds)])?;
+    custody_adapter::finish(
+        movement,
+        &mut vault_state,
+        vault_token_account,
+        destination_token_account,
+    )?;
     store(vault, &vault_state)
 }
 
@@ -1383,22 +1424,5 @@ fn encode_portal_delegate(grid_id: u64) -> [u8; 9] {
         3
     };
     data[1..].copy_from_slice(&grid_id.to_le_bytes());
-    data
-}
-
-fn encode_portal_consume_token_withdrawal(
-    er_slot: u64,
-    checksum: [u8; 32],
-    amount: u64,
-    withdrawn: u64,
-    decimals: u8,
-) -> [u8; 58] {
-    let mut data = [0; 58];
-    data[0] = 27;
-    data[1..9].copy_from_slice(&er_slot.to_le_bytes());
-    data[9..41].copy_from_slice(&checksum);
-    data[41..49].copy_from_slice(&amount.to_le_bytes());
-    data[49..57].copy_from_slice(&withdrawn.to_le_bytes());
-    data[57] = decimals;
     data
 }

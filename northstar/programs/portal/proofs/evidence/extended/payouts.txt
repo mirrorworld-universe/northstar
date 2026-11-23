@@ -1,0 +1,26 @@
+Payout transcripts and partial settlement: local x86_64 Linux run, 2026-11-21
+Production, tests and proof sources: 9685a457e6c736df64ae89432c57b440a304c175
+Verus 0.2026.11.02.8bf68ee with bundled Z3 4.16.0, whole-crate --no-cheating.
+
+wire:     15 verified, 0 errors; 8 controls, each 14 verified and 1 intended postcondition failure.
+schedule: 15 verified, 0 errors; 4 controls, each 14 verified and 1 intended postcondition failure.
+The schedule crate rechecks the token-accounting crate. Counts include verifier obligations for
+loops/constants; they are not numbers of distinct functions or independent security guarantees.
+The other ten suites reproduced their reviewed input hashes and outcomes. All 12 suites: 63 controls.
+
+Production SBF, cargo-build-sbf 4.5.0, platform-tools v1.56, SBPFv0, --locked:
+Portal default                   361328 bytes  3415a2e1d6292f8ed588f3cea3485c9419bc9424603250083097f3edd082589e
+Bridge default                   108400 bytes  5566b77b19b65309fab5e9f243f3c7a1a1dc8da4c4ce3acabdce8cb7375ec42c
+Portal checkpoint-continuity-v2  466928 bytes  ce9d2f0b8fba5e2bb4824fb291873a49df7932c1f86c9bd6a13b70df9a9885d7
+Bridge checkpoint-continuity-v2  140400 bytes  73fd1cea44da6604633dad39fb7cdc5a4b4aaee0f66f58645b749750132a6468
+V2 CPI test fixture                            81cac3ff41505b330d69e19636a926ea458bb329cda2a7a512465866dda2d49c
+
+Portal, each profile: 67 passed, 1 ignored (external validator). Includes both SHA-256 golden vectors
+and CPI/Borsh compatibility. Bridge default: 3 library and 17 core tests passed. V2: 5 library and
+2 accounting core tests passed, 15 legacy core tests filtered. Northstar default library: 227 passed,
+6 ignored. Northstar V2 selection ('v2'): 55 passed, 208 filtered. Workspace and V2 Clippy: -D warnings.
+The two-recipient restart regression returned AlreadyProcessed on resubmission before the dispatch fix;
+it passed after filtering individual payouts on matching consumed authorization and posted counter.
+
+See PAYOUTS.md and INVARIANTS.md for the proof boundary, commands and test selection. No deployed
+binary, production inventory or live-validator result is attested by this record.

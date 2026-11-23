@@ -1,0 +1,39 @@
+{
+  "verus": "0.2026.11.02.8bf68ee",
+  "verus_commit": "8bf68ee741df833ea5d0fe6a2255126fdea87e47",
+  "z3": "Z3 version 4.16.0 - 64 bit",
+  "flags": [
+    "--crate-type",
+    "lib",
+    "--edition=2021",
+    "--no-cheating",
+    "--output-json",
+    "--time-expanded"
+  ],
+  "source_sha256": {
+    "src/bond.rs": "22ddf8464e050cd8689f725879ab46406ed6de893af0bfcc6c274e30c88d3264",
+    "proofs/checkpoint_bond.rs": "9bfc75b307c5c9393acd3fa46dbd4da4a0f957047a23e2867f28eec3a96e1b9b"
+  },
+  "runs": {
+    "production": {
+      "verdict": "verified",
+      "verified": 8,
+      "errors": 0
+    },
+    "missing_debit": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 7,
+      "errors": 1
+    },
+    "missing_rent_floor": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 7,
+      "errors": 1
+    },
+    "nonterminal_status": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 7,
+      "errors": 1
+    }
+  }
+}

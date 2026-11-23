@@ -1,0 +1,82 @@
+# Sonic: Verify the executable modules shared with the programs and the V2 journal.
+name: Verify Portal and token bridge invariants
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - northstar/src/manager_continuity_v2.rs
+      - northstar/src/settlement.rs
+      - northstar/src/ephemeral_runtime/tests/token_settlement_v2.rs
+      - northstar/src/ephemeral_runtime/token_settlement_v2.rs
+      - northstar/src/continuity_v2.rs
+      - northstar/src/continuity_v2/**
+      - northstar/src/lineage_store_v2.rs
+      - northstar/programs/portal/**
+      - northstar/programs/token-bridge/**
+      - northstar/zk-types/**
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .github/workflows/verify-portal-bonds.yml
+  push:
+    branches: [master]
+    paths:
+      - northstar/src/manager_continuity_v2.rs
+      - northstar/src/settlement.rs
+      - northstar/src/ephemeral_runtime/tests/token_settlement_v2.rs
+      - northstar/src/ephemeral_runtime/token_settlement_v2.rs
+      - northstar/src/continuity_v2.rs
+      - northstar/src/continuity_v2/**
+      - northstar/src/lineage_store_v2.rs
+      - northstar/programs/portal/**
+      - northstar/programs/token-bridge/**
+      - northstar/zk-types/**
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .github/workflows/verify-portal-bonds.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [bond, receipt, authorization, bridge, custody, credit, batch, range, prefix, liability, wire, schedule]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.99.1 --profile minimal
+          version=0.2026.11.02.8bf68ee
+          cd "$RUNNER_TEMP"
+          curl -fsSL --retry 2 "https://github.com/verus-lang/verus/releases/download/release/$version/verus-$version-x86-linux.zip" -o verus.zip
+          echo 'f3a0119292df8855e4435da8130bee1873b0e6a60c306accf81a08ea687bba3c  verus.zip' | sha256sum --check --strict -
+          unzip -q verus.zip
+      - name: Prove accounting and check controls
+        run: python3 northstar/programs/portal/proofs/check.py --suite "${{ matrix.suite }}" --verus "$RUNNER_TEMP/verus-x86-linux/verus" --logs "target/proofs/${{ matrix.suite }}"
+      - name: Compare with the reviewed proof inputs and results
+        shell: bash
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          root=northstar/programs/portal/proofs/evidence
+          case "$SUITE" in
+            bond) expected="$root/summary.json" ;;
+            receipt|authorization|bridge) expected="$root/settlement/$SUITE.json" ;;
+            *) expected="$root/extended/$SUITE.json" ;;
+          esac
+          cmp "target/proofs/$SUITE/summary.json" "$expected"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: accounting-proof-logs-${{ matrix.suite }}
+          path: target/proofs/${{ matrix.suite }}
+          if-no-files-found: warn

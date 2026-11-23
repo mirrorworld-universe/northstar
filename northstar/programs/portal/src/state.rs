@@ -84,14 +84,7 @@ pub enum CheckpointStatus {
     Invalid = 5,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-#[borsh(use_discriminant = true)]
-#[repr(u8)]
-pub enum CheckpointBondStatus {
-    Locked = 0,
-    Released = 1,
-    Slashed = 2,
-}
+pub use crate::bond::CheckpointBondStatus;
 
 impl Checkpoint {
     pub const SEED_PREFIX: &[u8] = b"checkpoint";
@@ -446,6 +439,22 @@ mod tests {
         };
         let serialized = borsh::to_vec(&record).unwrap();
         assert_eq!(serialized.len(), 49);
+    }
+
+    #[test]
+    fn checkpoint_bond_status_wire_tags() {
+        for (byte, status) in [
+            (0, CheckpointBondStatus::Locked),
+            (1, CheckpointBondStatus::Released),
+            (2, CheckpointBondStatus::Slashed),
+        ] {
+            assert_eq!(borsh::to_vec(&status).unwrap(), [byte]);
+            assert_eq!(
+                CheckpointBondStatus::try_from_slice(&[byte]).unwrap(),
+                status
+            );
+        }
+        assert!(CheckpointBondStatus::try_from_slice(&[3]).is_err());
     }
 
     #[test]

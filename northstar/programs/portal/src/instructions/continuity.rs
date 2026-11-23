@@ -6,11 +6,14 @@ use {
         open_session::{process_open_session_initialized, V2SessionInitialization},
     },
     crate::{
-        find_ingress_record_v2_pda, find_session_epoch_v2_pda, find_session_pda, OpenSessionV2,
-        PortalError, SessionEpochV2, SessionV2,
+        find_ingress_record_v2_pda, find_session_epoch_v2_pda, find_session_pda,
+        ingress_prefix::{self, Head},
+        OpenSessionV2, PortalError, SessionEpochV2, SessionV2,
     },
     borsh::{BorshDeserialize, BorshSerialize},
-    northstar_zk_types::continuity::{IngressPayloadV2, IngressRecordV2, INGRESS_RECORD_SEED_V2},
+    northstar_zk_types::continuity::{
+        IngressPayloadV2, IngressRecordV2, StateRootOpeningV2, INGRESS_RECORD_SEED_V2,
+    },
     pinocchio::{
         cpi::{Seed, Signer},
         error::ProgramError,
@@ -23,6 +26,33 @@ use {
 pub use {
     bridge::process_register_session_bridge_v2, token_credit::process_record_token_deposit_v2,
 };
+
+fn permits_prefix(
+    frame: &SessionV2,
+    pre: &StateRootOpeningV2,
+    post: &StateRootOpeningV2,
+    steps: u64,
+) -> bool {
+    ingress_prefix::permits(
+        Head {
+            count: frame.consumed_ingress_count,
+            root: &frame.consumed_ingress_root,
+        },
+        Head {
+            count: frame.ingress_count,
+            root: &frame.ingress_root,
+        },
+        Head {
+            count: pre.ingress_count,
+            root: &pre.ingress_root,
+        },
+        Head {
+            count: post.ingress_count,
+            root: &post.ingress_root,
+        },
+        steps,
+    )
+}
 
 fn hash_parts(parts: &[&[u8]]) -> [u8; 32] {
     hashv(parts).to_bytes()
@@ -135,9 +165,7 @@ pub(super) fn append_ingress_v2(
         .identity(program_id, session.address())
         .commitment(hash_parts)
         .map_err(|_| PortalError::InvalidAccountData)?;
-    let sequence = frame
-        .ingress_count
-        .checked_add(1)
+    let sequence = ingress_prefix::next_sequence(frame.ingress_count)
         .ok_or(PortalError::ArithmeticOverflow)?;
     let (expected, bump) = find_ingress_record_v2_pda(program_id, &context, sequence);
     if record_account.address() != &expected
@@ -372,14 +400,7 @@ pub fn process_propose_checkpoint_v2(
             .map_err(|_| PortalError::InvalidAccountData)?;
         if args.pre.session_context != context
             || args.post.session_context != context
-            || args.pre.ingress_count != frame.consumed_ingress_count
-            || args.pre.ingress_root != frame.consumed_ingress_root
-            || args.post.ingress_count > frame.ingress_count
-            || args
-                .post
-                .ingress_count
-                .checked_sub(args.pre.ingress_count)
-                .is_none_or(|count| count > args.proposal.step_count)
+            || !permits_prefix(&frame, &args.pre, &args.post, args.proposal.step_count)
             || args.proposal.previous_state_root
                 != args
                     .pre
@@ -525,9 +546,7 @@ pub fn process_commit_checkpoint_v2(
             || state.checkpoint != checkpoint.address().to_bytes()
             || state.pre.session_context != context
             || state.post.session_context != context
-            || state.pre.ingress_count != frame.consumed_ingress_count
-            || state.pre.ingress_root != frame.consumed_ingress_root
-            || state.post.ingress_count > frame.ingress_count
+            || !permits_prefix(&frame, &state.pre, &state.post, checkpoint_state.step_count)
             || checkpoint_state.previous_state_root
                 != state
                     .pre

@@ -1,11 +1,14 @@
 #[cfg(not(feature = "checkpoint-continuity-v2"))]
 use crate::find_session_bridge_pda;
+#[cfg(feature = "checkpoint-continuity-v2")]
+use solana_sha256_hasher::hashv;
 use {
     super::initialize_pda_account,
     crate::{
         account_size, find_checkpoint_pda, find_session_pda,
         find_token_withdrawal_authorization_pda,
-        instructions::settlement::{accumulate_token_withdrawal_checksum, TokenWithdrawalChecksum},
+        payout_wire::Payout,
+        withdrawal_auth::{mark_consumed, AuthorizationKey},
         AccumulateTokenWithdrawal, Checkpoint, CheckpointStatus, ConsumeTokenWithdrawal,
         PortalError, Session, SessionBridge, SettlementStatus, TokenWithdrawalAuthorization,
     },
@@ -17,7 +20,6 @@ use {
         AccountView as AccountInfo, Address as Pubkey, ProgramResult,
     },
     pinocchio_idl_macros::p_instruction,
-    solana_sha256_hasher::hashv,
 };
 
 #[p_instruction(
@@ -87,15 +89,15 @@ pub fn process_accumulate_token_withdrawal(
         return Err(PortalError::InvalidPdaSeeds.into());
     }
 
-    let withdrawal = TokenWithdrawalChecksum {
-        bridge_program: &bridge.bridge_program,
-        session_bridge: session_bridge.address(),
-        er_token_account: er_token_account.address(),
-        vault: vault.address(),
-        vault_token_account: vault_token_account.address(),
-        destination_token_account: destination_token_account.address(),
-        mint: mint.address(),
-        token_program: token_program.address(),
+    let withdrawal = Payout {
+        bridge_program: bridge.bridge_program.as_array(),
+        session_bridge: session_bridge.address().as_array(),
+        er_token_account: er_token_account.address().as_array(),
+        vault: vault.address().as_array(),
+        vault_token_account: vault_token_account.address().as_array(),
+        destination_token_account: destination_token_account.address().as_array(),
+        mint: mint.address().as_array(),
+        token_program: token_program.address().as_array(),
         amount: settlement.amount,
         withdrawn: settlement.withdrawn,
         decimals: settlement.decimals,
@@ -103,7 +105,7 @@ pub fn process_accumulate_token_withdrawal(
     let authorization_state = TokenWithdrawalAuthorization {
         discriminator: TokenWithdrawalAuthorization::DISCRIMINATOR,
         checkpoint,
-        tuple_hash: token_withdrawal_tuple_hash(&withdrawal),
+        tuple_hash: withdrawal.authorization_hash(),
         consumed: false,
         bump: authorization_bump,
     };
@@ -143,7 +145,7 @@ pub fn process_accumulate_token_withdrawal(
     }
 
     session_state.settlement_accumulator =
-        accumulate_token_withdrawal_checksum(session_state.settlement_accumulator, &withdrawal);
+        withdrawal.accumulate(&session_state.settlement_accumulator);
     let mut session_data = session.try_borrow_mut()?;
     #[cfg(feature = "checkpoint-continuity-v2")]
     crate::continuity::write_session(&mut session_data, &session_state)?;
@@ -228,15 +230,15 @@ pub fn process_consume_token_withdrawal(
         return Err(PortalError::InvalidPdaSeeds.into());
     }
 
-    let withdrawal = TokenWithdrawalChecksum {
-        bridge_program: &bridge.bridge_program,
-        session_bridge: session_bridge.address(),
-        er_token_account: er_token_account.address(),
-        vault: vault.address(),
-        vault_token_account: vault_token_account.address(),
-        destination_token_account: destination_token_account.address(),
-        mint: mint.address(),
-        token_program: token_program.address(),
+    let withdrawal = Payout {
+        bridge_program: bridge.bridge_program.as_array(),
+        session_bridge: session_bridge.address().as_array(),
+        er_token_account: er_token_account.address().as_array(),
+        vault: vault.address().as_array(),
+        vault_token_account: vault_token_account.address().as_array(),
+        destination_token_account: destination_token_account.address().as_array(),
+        mint: mint.address().as_array(),
+        token_program: token_program.address().as_array(),
         amount: settlement.amount,
         withdrawn: settlement.withdrawn,
         decimals: settlement.decimals,
@@ -245,17 +247,25 @@ pub fn process_consume_token_withdrawal(
         TokenWithdrawalAuthorization::try_from_slice(&authorization.try_borrow()?)
             .map_err(|_| PortalError::InvalidAccountData)?;
     if !authorization_state.is_valid()
-        || authorization_state.checkpoint != *checkpoint.address()
-        || authorization_state.tuple_hash != token_withdrawal_tuple_hash(&withdrawal)
-        || authorization_state.bump != authorization_bump
-        || authorization_state.consumed
+        || !mark_consumed(
+            &mut authorization_state.consumed,
+            AuthorizationKey {
+                checkpoint: authorization_state.checkpoint.as_array(),
+                tuple_hash: &authorization_state.tuple_hash,
+                bump: authorization_state.bump,
+            },
+            AuthorizationKey {
+                checkpoint: checkpoint.address().as_array(),
+                tuple_hash: &withdrawal.authorization_hash(),
+                bump: authorization_bump,
+            },
+        )
     {
         return Err(PortalError::InvalidAccountData.into());
     }
-
-    authorization_state.consumed = true;
     let mut authorization_data = authorization.try_borrow_mut()?;
-    BorshSerialize::serialize(&authorization_state, &mut &mut authorization_data[..]).unwrap();
+    BorshSerialize::serialize(&authorization_state, &mut &mut authorization_data[..])
+        .map_err(|_| PortalError::InvalidAccountData)?;
     Ok(())
 }
 
@@ -329,24 +339,6 @@ fn load_bridge(
     Ok(bridge)
 }
 
-fn token_withdrawal_tuple_hash(withdrawal: &TokenWithdrawalChecksum<'_>) -> [u8; 32] {
-    hashv(&[
-        b"northstar-token-withdrawal-authorization-v0",
-        withdrawal.bridge_program.as_ref(),
-        withdrawal.session_bridge.as_ref(),
-        withdrawal.er_token_account.as_ref(),
-        withdrawal.vault.as_ref(),
-        withdrawal.vault_token_account.as_ref(),
-        withdrawal.destination_token_account.as_ref(),
-        withdrawal.mint.as_ref(),
-        withdrawal.token_program.as_ref(),
-        &withdrawal.amount.to_le_bytes(),
-        &withdrawal.withdrawn.to_le_bytes(),
-        &[withdrawal.decimals],
-    ])
-    .to_bytes()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,28 +354,28 @@ mod tests {
         let other_destination = Pubkey::new_from_array([7; 32]);
         let mint = Pubkey::new_from_array([8; 32]);
         let token_program = Pubkey::new_from_array([9; 32]);
-        let withdrawal = |destination_token_account, amount| TokenWithdrawalChecksum {
-            bridge_program: &bridge_program,
-            session_bridge: &session_bridge,
-            er_token_account: &er_token_account,
-            vault: &vault,
-            vault_token_account: &vault_token_account,
+        let withdrawal = |destination_token_account, amount| Payout {
+            bridge_program: bridge_program.as_array(),
+            session_bridge: session_bridge.as_array(),
+            er_token_account: er_token_account.as_array(),
+            vault: vault.as_array(),
+            vault_token_account: vault_token_account.as_array(),
             destination_token_account,
-            mint: &mint,
-            token_program: &token_program,
+            mint: mint.as_array(),
+            token_program: token_program.as_array(),
             amount,
             withdrawn: 10,
             decimals: 6,
         };
 
-        let expected = token_withdrawal_tuple_hash(&withdrawal(&destination, 10));
+        let expected = withdrawal(destination.as_array(), 10).authorization_hash();
         assert_ne!(
             expected,
-            token_withdrawal_tuple_hash(&withdrawal(&other_destination, 10))
+            withdrawal(other_destination.as_array(), 10).authorization_hash()
         );
         assert_ne!(
             expected,
-            token_withdrawal_tuple_hash(&withdrawal(&destination, 9))
+            withdrawal(destination.as_array(), 9).authorization_hash()
         );
     }
 }

@@ -1,0 +1,54 @@
+{
+  "verus": "0.2026.11.02.8bf68ee",
+  "verus_commit": "8bf68ee741df833ea5d0fe6a2255126fdea87e47",
+  "z3": "Z3 version 4.16.0 - 64 bit",
+  "flags": [
+    "--crate-type",
+    "lib",
+    "--edition=2021",
+    "--no-cheating",
+    "--output-json",
+    "--time-expanded"
+  ],
+  "source_sha256": {
+    "src/receipt.rs": "4338b6ee1af7af271efad049868661dbbc4d21df3135590e92bde36c5cd33d00",
+    "proofs/sol_receipt.rs": "e3f1fe1b45252a0c5747524802a8a1a503521b7cc8f8ce26c450b37f09d63b9b"
+  },
+  "runs": {
+    "production": {
+      "verdict": "verified",
+      "verified": 9,
+      "errors": 0
+    },
+    "wrong_binding": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 8,
+      "errors": 1
+    },
+    "exact_retry_is_update": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 8,
+      "errors": 1
+    },
+    "reject_exact_delta": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 8,
+      "errors": 1
+    },
+    "wrong_rent_boundary": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 8,
+      "errors": 1
+    },
+    "missing_debit": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 8,
+      "errors": 1
+    },
+    "reject_exact_cap": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 8,
+      "errors": 1
+    }
+  }
+}

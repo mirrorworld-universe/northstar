@@ -1,0 +1,82 @@
+{
+  "verus": "0.2026.11.02.8bf68ee",
+  "verus_commit": "8bf68ee741df833ea5d0fe6a2255126fdea87e47",
+  "z3": "Z3 version 4.16.0 - 64 bit",
+  "flags": [
+    "--crate-type",
+    "lib",
+    "--edition=2021",
+    "--no-cheating",
+    "--output-json",
+    "--time-expanded"
+  ],
+  "source_sha256": {
+    "src/liability.rs": "716fa292aac8450ddcf3c6b992545182eb1c6175e195e301c7e59e7306c5e79a",
+    "proofs/aggregate_liability.rs": "87c94be8d167ca022eb100c7a00aaf2379fa27bf3114b1576afb2c7f9f7c705b",
+    "proofs/vault_custody.rs": "425d9d4f87026f12df85faac60a41c76e4efb8ad2368b29da3f39295b31894f0",
+    "src/custody.rs": "c0d8b472db112a990adcd632f44e272eae42889d63da1b0821211094e2fdad3a",
+    "proofs/delegated_credit.rs": "39ad1f02eb22f4084fb80a7cfa19527f442c9e94145d9082aa2b7253957d1c66",
+    "src/deposit_credit.rs": "786e9a293058a31fb395c0a69f6bc9e365acfe79d34c72f7af6080a42bb20bb8",
+    "proofs/token_accounting.rs": "74777abb8db8f4ab6735ca1b7a72914f14aee86883cdf99a0e1ae549d9b88d4c",
+    "src/accounting.rs": "3a67bb1926a297ff5eae59637fcf7dc1292671c6aea8b948a0ad65da9b6766c2",
+    "../portal/proofs/token_authorization.rs": "f4e6af90b773efd680fa221f6003b834988d2fae373cea40f109c1b55bb6cc33",
+    "../portal/src/withdrawal_auth.rs": "6878e94950de29e2a5d53b07d9074241a528991254ae60a9233bce29c2787dc2"
+  },
+  "runs": {
+    "production": {
+      "verdict": "verified",
+      "verified": 50,
+      "errors": 0
+    },
+    "nonzero_initial_pending": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 49,
+      "errors": 1
+    },
+    "old_holding_on_new_side": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 49,
+      "errors": 1
+    },
+    "ingress_as_payout": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 49,
+      "errors": 1
+    },
+    "lost_pending_claim": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 49,
+      "errors": 1
+    },
+    "accept_unspent_gap": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 49,
+      "errors": 1
+    },
+    "accept_overflow": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 49,
+      "errors": 1
+    },
+    "miss_exact_posting": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 49,
+      "errors": 1
+    },
+    "absent_receipt_as_paid": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 49,
+      "errors": 1
+    },
+    "wrong_claim_digest": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 49,
+      "errors": 1
+    },
+    "unconsumed_as_paid": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 49,
+      "errors": 1
+    }
+  }
+}

@@ -1,0 +1,34 @@
+Extended Portal/SPL verification: local run, 2026-11-20, x86_64 Linux
+Production functions, proof inputs and runtime regressions: 4225742fc51c89d0489ec415397724b3e80394d2
+Cargo.lock SHA-256: a254b70527a4ea476ef17e8320ffe435610d26f7213c3086de7177fbc5067925
+Toolchain: Verus 0.2026.11.02.8bf68ee, bundled Z3 4.16.0; host rustc 1.99.1.
+All production runs: entire proof crate, --no-cheating, 0 verifier errors and no failed named obligations.
+
+                         Verified     Expected, targeted postcondition failures in separate controls
+vault custody                 11       5 (each 10 verified, 1 error)
+delegated deposit credit       9       5 (each  8 verified, 1 error)
+SOL lamport batches           11       4 (each 10 verified, 1 error)
+challenge interval/time       11       5 (each 10 verified, 1 error)
+v2 ingress prefixes            6       4 (each  5 verified, 1 error)
+New suites total              48      23
+Rerun previous suites         25      18 (bond 8/3; receipt 9/6; authorization 3/3; ER transfer/counter 5/6)
+Full branch total             73      41
+The five JSON summaries here contain input hashes and the individual control outcomes.
+
+Ordinary programs: cargo-build-sbf 4.5.0, platform-tools v1.56, SBPFv0, --locked.
+Artifact                       Bytes     SHA-256
+Portal default                360608     a73cf4a6a03f47cced4aed802cdcaf6269a5a7801fbb68b418429b5b29574e9d
+bridge default                108312     4c98bc50806ede854db4be32b5c20fd75454b00f46a079f96eb3535b9ce3f633
+Portal checkpoint-continuity-v2 466208   a71c339ae39e8f558dfccf6b40a506ca431ac5d87358e54001e1b21892ca7e4b
+bridge checkpoint-continuity-v2 140312   7cee97293690b382d98ea3099ea95614adfe70d74af63888f1de82500b8cd0b5
+CPI test fixture                         81cac3ff41505b330d69e19636a926ea458bb329cda2a7a512465866dda2d49c
+SPL binary: repository spl_p_token-1.0.0 at the SPL Token address (see settlement/run.txt).
+
+Host and SBF program-test execution, 0 failures in the completed matrix:
+- Portal: 65 passed and one external live-validator test ignored per build profile.
+- Bridge default: 3 library and 17 core tests passed.
+- Bridge V2: 5 library and 2 profile-aware accounting core tests passed; 15 legacy core cases filtered out.
+- Northstar V2 bank tests filtered by regression_v2_: 36 passed, 223 filtered out. The initial run lacked
+  the separate continuity fixture; building it from the locked source and rerunning the full selection passed.
+- Workspace cargo clippy --locked --all --tests and cargo +nightly fmt --all passed.
+No bridge live-validator test, deployment comparison or independent audit in this record.

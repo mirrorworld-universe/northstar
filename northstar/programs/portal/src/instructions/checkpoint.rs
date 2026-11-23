@@ -1,6 +1,8 @@
 use {
     super::initialize_pda_account,
     crate::{
+        bond::{plan_resolution, Balances, BondError, Resolution},
+        dispute_range::{self, Range, RangeError, Response},
         find_challenge_pda, find_checkpoint_cursor_pda, find_checkpoint_pda, find_da_proof_pda,
         find_session_pda, find_step_proof_pda, BisectChallenge, CancelCheckpoint, Challenge,
         ChallengeStatus, ChallengeTurn, Checkpoint, CheckpointBondStatus, CheckpointCursor,
@@ -150,36 +152,29 @@ fn resolve_checkpoint_bond(
     checkpoint: &mut AccountInfo,
     recipient: &mut AccountInfo,
     checkpoint_state: &mut Checkpoint,
-    next_status: CheckpointBondStatus,
+    action: Resolution,
 ) -> ProgramResult {
-    if checkpoint_state.bond_status != CheckpointBondStatus::Locked {
-        return Err(PortalError::CheckpointBondAlreadyResolved.into());
-    }
-
-    let bond_lamports = checkpoint_state.bond_lamports;
-    if bond_lamports == 0 {
-        return Err(PortalError::CheckpointBondInsufficient.into());
-    }
-
-    let rent_lamports = Rent::get()?.try_minimum_balance(crate::account_size(checkpoint_state))?;
-    let minimum_locked_lamports = rent_lamports
-        .checked_add(bond_lamports)
-        .ok_or(PortalError::ArithmeticOverflow)?;
-    if checkpoint.lamports() < minimum_locked_lamports {
-        return Err(PortalError::CheckpointBondInsufficient.into());
-    }
-
-    let recipient_lamports = recipient
-        .lamports()
-        .checked_add(bond_lamports)
-        .ok_or(PortalError::ArithmeticOverflow)?;
-    recipient.set_lamports(recipient_lamports);
-    let checkpoint_lamports = checkpoint
-        .lamports()
-        .checked_sub(bond_lamports)
-        .ok_or(PortalError::ArithmeticOverflow)?;
-    checkpoint.set_lamports(checkpoint_lamports);
-    checkpoint_state.bond_status = next_status;
+    let rent = Rent::get()?.try_minimum_balance(checkpoint.data_len())?;
+    let payment = plan_resolution(
+        checkpoint_state.bond_status,
+        action,
+        Balances {
+            checkpoint: checkpoint.lamports(),
+            recipient: recipient.lamports(),
+        },
+        checkpoint_state.bond_lamports,
+        rent,
+        checkpoint.address() == recipient.address(),
+    )
+    .map_err(|error| match error {
+        BondError::Aliased => PortalError::CheckpointStateInvalid,
+        BondError::AlreadyResolved => PortalError::CheckpointBondAlreadyResolved,
+        BondError::Insufficient => PortalError::CheckpointBondInsufficient,
+        BondError::Overflow => PortalError::ArithmeticOverflow,
+    })?;
+    checkpoint.set_lamports(payment.balances.checkpoint);
+    recipient.set_lamports(payment.balances.recipient);
+    checkpoint_state.bond_status = payment.status;
 
     Ok(())
 }
@@ -192,12 +187,7 @@ fn release_checkpoint_bond(
     if proposer.address() != &checkpoint_state.proposer {
         return Err(PortalError::CheckpointStateInvalid.into());
     }
-    resolve_checkpoint_bond(
-        checkpoint,
-        proposer,
-        checkpoint_state,
-        CheckpointBondStatus::Released,
-    )
+    resolve_checkpoint_bond(checkpoint, proposer, checkpoint_state, Resolution::Release)
 }
 
 #[allow(dead_code)]
@@ -206,12 +196,7 @@ pub(crate) fn slash_checkpoint_bond(
     recipient: &mut AccountInfo,
     checkpoint_state: &mut Checkpoint,
 ) -> ProgramResult {
-    resolve_checkpoint_bond(
-        checkpoint,
-        recipient,
-        checkpoint_state,
-        CheckpointBondStatus::Slashed,
-    )
+    resolve_checkpoint_bond(checkpoint, recipient, checkpoint_state, Resolution::Slash)
 }
 
 fn load_checkpoint(
@@ -353,21 +338,30 @@ fn clear_active_checkpoint(cursor_state: &mut CheckpointCursor) {
 }
 
 fn next_turn_deadline(current_slot: u64, hard_deadline: u64) -> Result<u64, ProgramError> {
-    Ok(core::cmp::min(
-        current_slot
-            .checked_add(CHALLENGE_TURN_WINDOW_SLOTS)
-            .ok_or(PortalError::ArithmeticOverflow)?,
-        hard_deadline,
-    ))
+    dispute_range::next_deadline(current_slot, hard_deadline, CHALLENGE_TURN_WINDOW_SLOTS)
+        .ok_or(PortalError::ArithmeticOverflow.into())
+}
+
+fn step_range(state: &Challenge) -> Range {
+    Range {
+        lo: state.start_step,
+        hi: state.end_step,
+    }
+}
+
+fn turn_live(state: &Challenge, slot: u64) -> bool {
+    dispute_range::live(
+        slot,
+        state.turn_deadline_l1_slot,
+        state.hard_deadline_l1_slot,
+    )
 }
 
 fn require_live_turn(challenge_state: &Challenge, current_slot: u64) -> ProgramResult {
     if challenge_state.status != ChallengeStatus::Active {
         return Err(PortalError::ChallengeStateInvalid.into());
     }
-    if current_slot >= challenge_state.turn_deadline_l1_slot
-        || current_slot >= challenge_state.hard_deadline_l1_slot
-    {
+    if !turn_live(challenge_state, current_slot) {
         return Err(PortalError::CheckpointChallengeWindowClosed.into());
     }
     Ok(())
@@ -1157,39 +1151,33 @@ pub fn process_respond_challenge(
         return Err(PortalError::DataAvailabilityCommitmentMismatch.into());
     }
 
-    let width = challenge_state
-        .end_step
-        .checked_sub(challenge_state.start_step)
-        .ok_or(PortalError::ChallengeResponseInvalid)?;
-    if width == 0 {
-        return Err(PortalError::ChallengeResponseInvalid.into());
-    }
-    if width == 1 {
-        if claimed_step != challenge_state.start_step
-            || claimed_state_root != challenge_state.end_state_root
-        {
-            return Err(PortalError::ChallengeResponseInvalid.into());
+    match dispute_range::respond(step_range(&challenge_state))
+        .ok_or(PortalError::ChallengeResponseInvalid)?
+    {
+        Response::Step => {
+            if claimed_step != challenge_state.start_step
+                || claimed_state_root != challenge_state.end_state_root
+            {
+                return Err(PortalError::ChallengeResponseInvalid.into());
+            }
+            challenge_state.turn = ChallengeTurn::Prove;
         }
-        challenge_state.turn = ChallengeTurn::Prove;
-    } else {
-        let midpoint = challenge_state
-            .start_step
-            .checked_add(width / 2)
-            .ok_or(PortalError::ArithmeticOverflow)?;
-        if claimed_step != midpoint
-            || !verify_trace_authentication_path(
-                &checkpoint_state,
-                claimed_step,
-                &claimed_state_root,
-                trace_path_len,
-                &trace_path,
-            )
-        {
-            return Err(PortalError::ChallengeResponseInvalid.into());
+        Response::Mid(midpoint) => {
+            if claimed_step != midpoint
+                || !verify_trace_authentication_path(
+                    &checkpoint_state,
+                    claimed_step,
+                    &claimed_state_root,
+                    trace_path_len,
+                    &trace_path,
+                )
+            {
+                return Err(PortalError::ChallengeResponseInvalid.into());
+            }
+            challenge_state.midpoint_step = midpoint;
+            challenge_state.midpoint_state_root = claimed_state_root;
+            challenge_state.turn = ChallengeTurn::Challenger;
         }
-        challenge_state.midpoint_step = midpoint;
-        challenge_state.midpoint_state_root = claimed_state_root;
-        challenge_state.turn = ChallengeTurn::Challenger;
     }
     challenge_state.turn_deadline_l1_slot =
         next_turn_deadline(current_slot, challenge_state.hard_deadline_l1_slot)?;
@@ -1232,24 +1220,27 @@ pub fn process_bisect_challenge(
     if state.turn != ChallengeTurn::Challenger || challenger.address() != &state.challenger {
         return Err(PortalError::ChallengeTurnInvalid.into());
     }
-    if state.midpoint_step <= state.start_step || state.midpoint_step >= state.end_step {
-        return Err(PortalError::ChallengeResponseInvalid.into());
-    }
-
+    let (next, rounds) = dispute_range::select_half(
+        step_range(&state),
+        state.midpoint_step,
+        dispute_upper,
+        state.rounds,
+    )
+    .map_err(|e| match e {
+        RangeError::Invalid => PortalError::ChallengeResponseInvalid,
+        RangeError::Overflow => PortalError::ArithmeticOverflow,
+    })?;
+    state.start_step = next.lo;
+    state.end_step = next.hi;
     if dispute_upper {
-        state.start_step = state.midpoint_step;
         state.start_state_root = state.midpoint_state_root;
     } else {
-        state.end_step = state.midpoint_step;
         state.end_state_root = state.midpoint_state_root;
     }
     state.midpoint_step = 0;
     state.midpoint_state_root = [0; 32];
     state.turn = ChallengeTurn::Respondent;
-    state.rounds = state
-        .rounds
-        .checked_add(1)
-        .ok_or(PortalError::ArithmeticOverflow)?;
+    state.rounds = rounds;
     state.turn_deadline_l1_slot = next_turn_deadline(current_slot, state.hard_deadline_l1_slot)?;
     store_challenge(challenge, &state)
 }
@@ -1290,9 +1281,7 @@ pub fn process_timeout_challenge(
         return Err(PortalError::ChallengeStateInvalid.into());
     }
     let current_slot = Clock::get()?.slot;
-    if current_slot < challenge_state.turn_deadline_l1_slot
-        && current_slot < challenge_state.hard_deadline_l1_slot
-    {
+    if turn_live(&challenge_state, current_slot) {
         return Err(PortalError::ChallengeDeadlineNotReached.into());
     }
     if bond_recipient.address() != &challenge_state.challenger {
@@ -1398,7 +1387,7 @@ pub fn process_create_step_proof(
     let challenge_state = load_challenge(program_id, checkpoint.address(), challenge)?;
     require_live_turn(&challenge_state, Clock::get()?.slot)?;
     if challenge_state.turn != ChallengeTurn::Prove
-        || challenge_state.end_step != challenge_state.start_step.saturating_add(1)
+        || !dispute_range::isolated(step_range(&challenge_state))
         || step_index != challenge_state.start_step
     {
         return Err(PortalError::ChallengeTurnInvalid.into());
@@ -1778,7 +1767,7 @@ pub fn process_resolve_challenge(
     let mut challenge_state = load_challenge(program_id, checkpoint.address(), challenge)?;
     require_live_turn(&challenge_state, Clock::get()?.slot)?;
     if challenge_state.turn != ChallengeTurn::Prove
-        || challenge_state.end_step != challenge_state.start_step.saturating_add(1)
+        || !dispute_range::isolated(step_range(&challenge_state))
     {
         return Err(PortalError::ChallengeTurnInvalid.into());
     }
