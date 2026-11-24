@@ -131,6 +131,13 @@ SUITES = {
             "unconsumed_as_paid": ("Some(consumed)\n}", "Some(true)\n}", "ensures crate::liability_spec::observation"),
         }, ("proofs/vault_custody.rs", "src/custody.rs", "proofs/delegated_credit.rs", "src/deposit_credit.rs",
             "proofs/token_accounting.rs", "src/accounting.rs", "../portal/proofs/token_authorization.rs", "../portal/src/withdrawal_auth.rs")),
+    "audit": Suite("token-bridge", "cpi_audit", "audit_match", 5,
+        ("audit_match::equal", "audit_match::compare", "audit_spec::matched_bytes", "audit_spec::reachable_verdicts"), {
+            "wrong_trace_source": ("record.execution, observed.execution", "record.execution, record.execution", "ensures crate::audit_spec::comparison"),
+            "ignore_write_difference": ("record.writes, observed.writes", "record.writes, record.writes", "ensures crate::audit_spec::comparison"),
+            "ignore_effect_difference": ("record.effects, observed.effects", "record.effects, record.effects", "ensures crate::audit_spec::comparison"),
+            "reject_single_cpi": ("cpi_count == 0", "cpi_count <= 1", "ensures crate::audit_spec::comparison"),
+        }),
     "provenance": Suite("token-bridge", "withdrawal_provenance", "trace_origin", 65,
         ("trace_origin::withdrawal", "trace_origin::listed", "trace_origin::visible", "trace_origin::permits",
          "trace_origin::retain_parent", "trace_origin::request", "origin_spec::transitive", "origin_spec::inherited",

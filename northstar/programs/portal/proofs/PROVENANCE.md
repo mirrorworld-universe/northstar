@@ -12,6 +12,8 @@ Replay reconstructs the V2 registration from the session identity and call field
 
 **Compatibility:** no Portal/SPL instruction, on-chain account or capsule schema changes. New v0 records with withdrawal-shaped calls use a tagged opening in the existing replay byte field. Older records that need historical lookup tables and did not retain them fail closed; replay never substitutes the current table. Legacy and static-key calls do not need that opening. This is a validator check, not a new L1 authorization requirement.
 
+**Independent check:** when a trusted pre-transaction bank is available, the [optional CPI auditor](CPI-AUDIT.md) re-executes the original signed transaction and compares the resulting trace, writes and payouts. The replay gate does not require this bank or this verdict.
+
 ## What is proved, and what is tested?
 
 The [production helpers](../../token-bridge/src/trace_origin.rs) and [Verus composition](../../token-bridge/proofs/withdrawal_provenance.rs) establish the ten-byte `StartWithdrawal` layout, signer-prefix rule, immediate-parent account containment and its transitivity through arbitrary nesting. For any accepted request/effect row, exact fields and amount come from the resolved call, and a direct owner index is strictly inside the signer prefix. Positive witnesses cover direct and CPI calls. The signature primitive, full Rust replay traversal, address-table deserializer, bank, SHA-256 and SVM execution are **not** formally verified by this suite.

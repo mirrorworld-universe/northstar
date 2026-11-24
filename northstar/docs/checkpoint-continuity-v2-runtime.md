@@ -39,7 +39,9 @@ SVM execution records account pre/post values, execution results, readonly input
 observations, replay data, and supported withdrawal effects at the pre-commit
 boundary. A failed persistence operation cancels SVM commit and quarantines the
 runtime. This capture does not itself verify SVM execution or independently
-authenticate arbitrary readonly L1 inputs.
+authenticate arbitrary readonly L1 inputs. The optional [CPI withdrawal audit](../programs/portal/proofs/CPI-AUDIT.md)
+can re-execute a selected transaction against an independently pinned pre-state.
+Checkpoint admission and recovery do not require or invoke it.
 
 ## Durable recovery
 

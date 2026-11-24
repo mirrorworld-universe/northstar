@@ -1,0 +1,31 @@
+Local validation: optional V2 CPI withdrawal audit, 2026-11-24
+Implementation and SBF regression: 7c7e57659b06b19d707cb9b0c1d341ecc1958b3f
+
+Verus 0.2026.11.02.8bf68ee, bundled Z3 4.16.0, whole crate, --no-cheating.
+The new audit suite verified 5 functions, 0 errors. Each of 4 independent controls
+produced 4 verified functions and the intended single failed postcondition. Source
+hashes, named controls and tool pins are in audit.json. The theorem concerns the
+comparison of independently supplied execution, write and effect bytes, not SVM
+execution, snapshot authenticity, hash security or the account loader.
+
+Two separate test banks were built from the same genesis inputs. On the producer,
+a controller signed one transaction containing two withdrawals from its test PDA.
+The SBF caller used invoke_signed. The production V2 bridge debited 3 tokens twice.
+The auditor matched the two inner calls, writes and ordered effects on the frozen
+pre-state. Its bank kept 42 tokens, retained no transaction signature, and could
+repeat the audit. Missing or mismatched pins did not yield a positive verdict.
+A structurally valid checkpoint with a changed recorded compute count disagreed
+with re-execution.
+
+Local execution: V2 Northstar library filter 'v2': 66 passed, 208 filtered out.
+Default Northstar library: 234 passed, six ignored. Workspace and V2 Clippy passed
+with -D warnings; nightly workspace formatting and diff whitespace checks passed.
+
+V2 SBF artifacts used by the bank tests (SHA-256):
+Portal              ce9d2f0b8fba5e2bb4824fb291873a49df7932c1f86c9bd6a13b70df9a9885d7
+Token bridge        cac7e2f17b485e616abfe36dff8d797040dce13726321967788ed2328b54bb3b
+Continuity fixture  070727186043537bce7069c9c4d5011d5a295288cd7f190e7de06b786eeb2b08
+
+Audit only; checkpoint admission does not invoke it. No deployed binary, external
+historical bank or live withdrawal was attested. See CPI-AUDIT.md for the required
+independent inputs and reproduction commands.
