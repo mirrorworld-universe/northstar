@@ -5,6 +5,7 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
+      - northstar/Cargo.toml
       - northstar/src/ephemeral_tx_client/continuity_v2.rs
       - northstar/src/ephemeral_runtime.rs
       - northstar/src/lineage_store_v2/**
@@ -25,6 +26,7 @@ on:
   push:
     branches: [master]
     paths:
+      - northstar/Cargo.toml
       - northstar/src/ephemeral_tx_client/continuity_v2.rs
       - northstar/src/ephemeral_runtime.rs
       - northstar/src/lineage_store_v2/**
@@ -51,7 +53,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [bond, receipt, authorization, bridge, custody, credit, batch, range, prefix, liability, wire, schedule, entitlement]
+        suite: [bond, receipt, authorization, bridge, custody, credit, batch, range, prefix, liability, wire, schedule, entitlement, provenance]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

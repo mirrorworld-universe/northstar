@@ -12,7 +12,7 @@
   ],
   "source_sha256": {
     "src/entitlement.rs": "3fe500c367acf03011dc3cd454617481dd61b2b8bb7126326c320e9bf4b2a765",
-    "proofs/recipient_entitlement.rs": "55c771ae50dc5b5454345e9223d04e92671c4dbb1679894751691c7701b83456",
+    "proofs/recipient_entitlement.rs": "ccc8b8902a8febc7ba634cf8bd2b86341897d4daea8a05bddbc4a5d24b8f395c",
     "proofs/token_accounting.rs": "74777abb8db8f4ab6735ca1b7a72914f14aee86883cdf99a0e1ae549d9b88d4c",
     "src/accounting.rs": "3a67bb1926a297ff5eae59637fcf7dc1292671c6aea8b948a0ad65da9b6766c2",
     "proofs/vault_custody.rs": "425d9d4f87026f12df85faac60a41c76e4efb8ad2368b29da3f39295b31894f0",
