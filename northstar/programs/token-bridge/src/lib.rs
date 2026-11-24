@@ -1,5 +1,7 @@
 #[cfg(target_os = "solana")]
 mod accounting;
+#[cfg(not(target_os = "solana"))]
+pub mod audit_match;
 #[cfg(target_os = "solana")]
 mod custody;
 #[cfg(target_os = "solana")]

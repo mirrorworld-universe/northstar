@@ -55,6 +55,8 @@ pub mod unsettled_state;
 pub mod vrf_candidate_capture;
 #[cfg(feature = "vrf-relay")]
 pub mod vrf_commitment;
+#[cfg(feature = "checkpoint-continuity-v2")]
+pub mod withdrawal_audit_v2;
 
 pub use crate::{
     ephemeral_runtime::{EphemeralRuntime, ErStateDiff, ErStateDiffAccount},
