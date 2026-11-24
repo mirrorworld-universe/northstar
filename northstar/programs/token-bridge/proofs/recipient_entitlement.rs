@@ -1,19 +1,19 @@
 #![allow(dead_code)]
 #![feature(proc_macro_hygiene)]
 #[path = "../src/entitlement.rs"]
-mod entitlement;
+pub(crate) mod entitlement;
 #[path = "token_accounting.rs"]
 mod counter;
-use counter::{accounting, bridge_spec};
+pub(crate) use counter::{accounting, bridge_spec};
 #[path = "vault_custody.rs"]
 mod funds;
-use funds::{custody, custody_spec};
+pub(crate) use funds::{custody, custody_spec};
 #[path = "../../portal/proofs/token_authorization.rs"]
 mod portal;
-use portal::{auth_spec, withdrawal_auth};
+pub(crate) use portal::{auth_spec, withdrawal_auth};
 #[path = "../../portal/proofs/payout_transcript.rs"]
 mod transcript;
-use transcript::{payout_wire, wire_spec};
+pub(crate) use transcript::{payout_wire, wire_spec};
 extern crate self as northstar_portal;
 
 pub mod entitlement_spec {

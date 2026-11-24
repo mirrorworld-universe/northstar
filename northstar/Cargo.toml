@@ -19,6 +19,7 @@ serde_json = { workspace = true, optional = true }
 northstar-replay-harness = { workspace = true, optional = true }
 northstar-transaction-proof = { workspace = true, optional = true }
 solana-account.workspace = true
+solana-address-lookup-table-interface = { workspace = true, features = ["bincode", "bytemuck"] }
 solana-accounts-db.workspace = true
 solana-clock.workspace = true
 solana-fee-structure.workspace = true
@@ -42,7 +43,8 @@ solana-sha256-hasher = { workspace = true, features = ["sha2"] }
 solana-signature.workspace = true
 solana-svm-timings.workspace = true
 solana-svm.workspace = true
-solana-transaction.workspace = true
+solana-transaction = { workspace = true, features = ["verify"] }
+solana-transaction-context.workspace = true
 solana-transaction-status.workspace = true
 solana-ledger.workspace = true
 solana-loader-v3-interface.workspace = true
@@ -84,7 +86,6 @@ northstar-replay-harness.workspace = true
 agave-feature-set.workspace = true
 agave-snapshots.workspace = true
 northstar-transaction-proof.workspace = true
-solana-address-lookup-table-interface.workspace = true
 solana-commitment-config.workspace = true
 solana-compute-budget-interface.workspace = true
 solana-rpc-client.workspace = true
@@ -93,4 +94,3 @@ solana-ledger = { workspace = true, features = ["agave-unstable-api"] }
 solana-runtime = { workspace = true, features = ["agave-unstable-api", "dev-context-only-utils"] }
 solana-instruction = { workspace = true }
 solana-program-binaries.workspace = true
-solana-transaction-context.workspace = true

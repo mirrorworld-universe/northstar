@@ -133,10 +133,22 @@ impl EphemeralTransactionClient {
                 .map_err(|_| solana_transaction::TransactionError::CommitCancelled)?;
             let wire = bincode::serialize(transaction)
                 .map_err(|_| solana_transaction::TransactionError::CommitCancelled)?;
-            let replay = replay
+            let mut replay = replay
                 .get(position)
                 .and_then(Clone::clone)
                 .unwrap_or_default();
+            let mut readonly_l1_values = Vec::new();
+            if ingress.is_none() && status.is_ok() {
+                crate::continuity_v2::token_provenance::capture(
+                    bank,
+                    transaction,
+                    &output.inner,
+                    self.sync_status.latest_l1_slot(),
+                    &mut replay,
+                    &mut readonly_l1_values,
+                )
+                .map_err(|e| self.v2_invalid_transition(e))?;
+            }
             let payload = if let Some(record) = ingress {
                 state
                     .apply_token_ingress_execution(&record, &pre, &post)
@@ -161,7 +173,6 @@ impl EphemeralTransactionClient {
                     replay,
                 }
             };
-            let mut readonly_l1_values = Vec::new();
             if let Some(executed) = processed.executed_transaction() {
                 for (key, value) in &executed.loaded_transaction.accounts {
                     if !state.accounts().contains_key(&key.to_bytes()) && !outputs.contains_key(key)
@@ -387,12 +398,8 @@ impl EphemeralTransactionClient {
                         .ok_or(solana_transaction::TransactionError::CommitCancelled)?,
                 }
             } else {
-                let Ok(
-                    northstar_token_bridge::instruction::TokenBridgeInstruction::StartWithdrawal {
-                        amount,
-                        decimals,
-                    },
-                ) = borsh::from_slice(&instruction.data)
+                let Some((amount, decimals)) =
+                    northstar_token_bridge::trace_origin::withdrawal(&instruction.data)
                 else {
                     continue;
                 };

@@ -16,6 +16,7 @@ use {
 };
 
 mod token_liability;
+pub(crate) mod token_provenance;
 
 pub const MAX_COMMITTED_ACCOUNTS_V2: usize = 4_096;
 pub const MAX_COMMITTED_STATE_BYTES_V2: usize = 1_048_576;
@@ -122,6 +123,8 @@ pub enum StateErrorV2 {
         "ER token holdings, authenticated ingress and pending payouts do not balance for a vault"
     )]
     TokenLiability,
+    #[error("token withdrawal effects differ from retained transaction evidence")]
+    TokenProvenance,
     #[error("execution writes a frozen account")]
     Frozen,
     #[error("execution accounts are not canonical")]
@@ -599,7 +602,7 @@ impl RecordedTransitionV2 {
                     return Err(StateErrorV2::InvalidAccounts);
                 }
                 candidate.apply_token_ingress_execution(record, pre, post)?;
-                token_liability::check(
+                let touched = token_liability::check(
                     &portal,
                     &self.before.session_context,
                     pre,
@@ -607,6 +610,7 @@ impl RecordedTransitionV2 {
                     Some(&record.payload),
                     &[],
                 )?;
+                token_provenance::verify(self, state, &candidate, &touched)?;
             }
             TransitionPayloadV2::Ingress {
                 record,
@@ -627,7 +631,7 @@ impl RecordedTransitionV2 {
                     return Err(StateErrorV2::InvalidAccounts);
                 }
                 candidate.apply_execution(pre, post)?;
-                token_liability::check(
+                let touched = token_liability::check(
                     &portal,
                     &self.before.session_context,
                     pre,
@@ -635,6 +639,7 @@ impl RecordedTransitionV2 {
                     None,
                     &self.settlement_effects,
                 )?;
+                token_provenance::verify(self, state, &candidate, &touched)?;
             }
         }
         candidate.apply_settlement_effects(&self.settlement_effects)?;
@@ -644,6 +649,32 @@ impl RecordedTransitionV2 {
         *state = candidate;
         Ok(())
     }
+}
+
+#[cfg(test)]
+pub(crate) fn test_execution_wire(marker: u8) -> (Vec<u8>, Vec<u8>) {
+    use solana_signer::Signer;
+    let payer = solana_keypair::Keypair::new_from_array([42; 32]);
+    let tx = solana_transaction::Transaction::new_signed_with_payer(
+        &[],
+        Some(&payer.pubkey()),
+        &[&payer],
+        solana_hash::Hash::new_from_array([marker; 32]),
+    );
+    let result = RecordedExecutionResultV2 {
+        status: bincode::serialize(&Ok::<(), solana_transaction::TransactionError>(())).unwrap(),
+        executed_units: 0,
+        inner: vec![],
+        logs: vec![],
+        return_data: None,
+    };
+    (
+        bincode::serialize(&solana_transaction::versioned::VersionedTransaction::from(
+            tx,
+        ))
+        .unwrap(),
+        borsh::to_vec(&result).unwrap(),
+    )
 }
 
 #[cfg(test)]
@@ -736,10 +767,10 @@ mod tests {
             before: base.opening().unwrap(),
             after: state.opening().unwrap(),
             payload: TransitionPayloadV2::Execution {
-                transaction: vec![1],
+                transaction: test_execution_wire(1).0,
                 pre,
                 post,
-                execution_result: vec![],
+                execution_result: test_execution_wire(1).1,
                 replay: vec![],
             },
             readonly_l1_values: vec![],
@@ -788,10 +819,10 @@ mod tests {
             before: closed.opening().unwrap(),
             after: restored.opening().unwrap(),
             payload: TransitionPayloadV2::Execution {
-                transaction: vec![2],
+                transaction: test_execution_wire(2).0,
                 pre,
                 post,
-                execution_result: vec![],
+                execution_result: test_execution_wire(2).1,
                 replay: vec![],
             },
             readonly_l1_values: vec![],

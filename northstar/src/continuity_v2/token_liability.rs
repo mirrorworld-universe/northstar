@@ -10,9 +10,9 @@ use {
     std::collections::BTreeMap,
 };
 
-type Scope = (Hash32, Hash32, Hash32); // bridge program, session bridge, mint
+pub(super) type Scope = (Hash32, Hash32, Hash32); // bridge program, session bridge, mint
 
-fn holding(
+pub(super) fn holding(
     portal: &Pubkey,
     context: &Hash32,
     key: &Hash32,
@@ -70,7 +70,7 @@ pub(super) fn check(
     post: &[(Hash32, CommittedAccountV2)],
     ingress: Option<&IngressPayloadV2>,
     effects: &[Vec<u8>],
-) -> Result<(), StateErrorV2> {
+) -> Result<BTreeMap<Hash32, Scope>, StateErrorV2> {
     let mut flows = BTreeMap::new();
     let mut touched = BTreeMap::new();
     for ((key, before), (_, after)) in pre.iter().zip(post) {
@@ -122,7 +122,7 @@ pub(super) fn check(
         }
     }
     if flows.into_values().all(Flow::conserved) {
-        Ok(())
+        Ok(touched)
     } else {
         Err(StateErrorV2::TokenLiability)
     }

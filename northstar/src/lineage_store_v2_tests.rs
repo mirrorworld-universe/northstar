@@ -383,10 +383,10 @@ fn regression_lineage_store_v2_rejects_unsealable_transitions_without_mutation()
         before: opening,
         after: opening,
         payload: TransitionPayloadV2::Execution {
-            transaction: vec![1],
+            transaction: crate::continuity_v2::test_execution_wire(1).0,
             pre: vec![],
             post: vec![],
-            execution_result: vec![],
+            execution_result: crate::continuity_v2::test_execution_wire(1).1,
             replay: vec![0; crate::checkpoint::MAX_TRANSACTION_EFFECT_BYTES_V1],
         },
         readonly_l1_values: vec![],

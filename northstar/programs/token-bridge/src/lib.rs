@@ -11,6 +11,8 @@ pub mod liability;
 #[cfg(not(target_os = "solana"))]
 pub mod payout_schedule;
 pub mod state;
+#[cfg(not(target_os = "solana"))]
+pub mod trace_origin;
 
 #[cfg(any(target_os = "solana", test))]
 mod portal_abi;
