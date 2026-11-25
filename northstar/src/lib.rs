@@ -24,6 +24,8 @@ use {
     unsettled_state::{RecoveredUnsettledState, RecoveryDisposition, UnsettledSessionIdentity},
 };
 
+#[cfg(any(test, feature = "certified-er-replay"))]
+pub mod certified_replay;
 pub mod checkpoint;
 pub mod checkpoint_v2;
 pub mod continuity_v2;
