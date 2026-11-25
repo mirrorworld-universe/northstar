@@ -1,3 +1,7 @@
+// Sonic: Opt-in recent hash schedule for independent, disposable ER replay.
+#[cfg(feature = "dev-context-only-utils")]
+pub mod certified_er;
+
 #[cfg(feature = "stable-abi")]
 use solana_frozen_abi_macro::{StableAbi, StableAbiSample, frozen_abi};
 #[allow(deprecated)]

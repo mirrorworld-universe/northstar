@@ -28,6 +28,7 @@ dev-context-only-utils = [
     "dep:qualifier_attr",
     "dep:solana-keypair",
     "dep:solana-rent",
+    "dep:solana-sha256-hasher",
     "dep:solana-signer",
     "dep:solana-stake-interface",
     "dep:solana-vote-program",
@@ -81,6 +82,8 @@ solana-rent = { workspace = true, optional = true }
 solana-reward-info = { workspace = true, features = ["serde"] }
 solana-runtime-transaction = { workspace = true }
 solana-sdk-ids = { workspace = true }
+# Sonic: Deterministic transaction recent blockhashes in disposable ER replay.
+solana-sha256-hasher = { workspace = true, optional = true, features = ["sha2"] }
 solana-signer = { workspace = true, optional = true }
 solana-slot-hashes = { workspace = true }
 solana-stake-interface = { workspace = true, optional = true, features = ["serde", "wincode"] }

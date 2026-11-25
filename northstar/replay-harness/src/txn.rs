@@ -460,6 +460,144 @@ mod tests {
     }
 
     #[test]
+    fn epoch_restart_replays_exact_signed_packet_and_excludes_other_histories() {
+        use {
+            crate::er_replay_receipt::{Error, ordered},
+            solana_account::WritableAccount,
+            solana_accounts_db::blockhash_queue::certified_er::RecentHashEpoch,
+            solana_instruction::{AccountMeta, Instruction},
+            solana_keypair::Keypair,
+            solana_runtime::bank::replay_execution::certified_er_replay_bank,
+            solana_signer::Signer,
+            solana_transaction::Transaction,
+        };
+        let epoch = RecentHashEpoch::new([7; 32], 10, 4).unwrap();
+        let other = RecentHashEpoch::new([8; 32], 10, 4).unwrap();
+        let slot = 20;
+        let parent_bank_hash = Hash::new_unique();
+        let parent_hashes = SlotHashes::new(&[(slot - 1, parent_bank_hash).into()]);
+        let mut accounts = vec![
+            clock_sysvar_account(),
+            epoch_schedule_sysvar_account(),
+            rent_sysvar_account(),
+            (
+                sysvar::slot_hashes::id(),
+                account(
+                    1,
+                    wincode::serialize(&parent_hashes).unwrap(),
+                    sysvar::id(),
+                    false,
+                ),
+            ),
+        ];
+        for (_, value) in &mut accounts {
+            value.set_owner(sysvar::id());
+        }
+        let payer = Keypair::new();
+        let recipient = Pubkey::new_unique();
+        let program = deploy_program("simple-transfer");
+        let program_id = program[0].0;
+        accounts.extend(program);
+        accounts.extend([
+            (payer.pubkey(), empty_account(5_000_000)),
+            (recipient, empty_account(2_000_000)),
+            system_program_account(),
+        ]);
+        accounts.sort_unstable_by_key(|(key, _)| *key);
+        let sign = |hash| {
+            wincode::serialize(&VersionedTransaction::from(
+                Transaction::new_signed_with_payer(
+                    &[Instruction::new_with_bytes(
+                        program_id,
+                        &1000u64.to_be_bytes(),
+                        vec![
+                            AccountMeta::new(payer.pubkey(), true),
+                            AccountMeta::new(recipient, false),
+                            AccountMeta::new_readonly(Pubkey::default(), false),
+                        ],
+                    )],
+                    Some(&payer.pubkey()),
+                    &[&payer],
+                    hash,
+                ),
+            ))
+            .unwrap()
+        };
+        let run = |profile: &RecentHashEpoch, wire: &[u8]| {
+            let bank =
+                certified_er_replay_bank(&accounts, feature_set(), 0, slot, profile).unwrap();
+            assert_eq!(
+                bank.last_blockhash(),
+                profile.completed_slot_hash(slot - 1).unwrap()
+            );
+            ordered::replay_on_disposable_bank(bank, slot, &ordered::encode(slot, &[wire]).unwrap())
+        };
+        let wire = sign(epoch.completed_slot_hash(slot - 5).unwrap()); // oldest valid age: four
+        let first = run(&epoch, &wire).unwrap();
+        assert_eq!(run(&epoch, &wire).unwrap(), first);
+        let [obs] = first.transactions.as_slice() else {
+            panic!("wrong receipt count");
+        };
+        assert_eq!(
+            obs.calls
+                .iter()
+                .map(|c| (c.depth, c.program))
+                .collect::<Vec<_>>(),
+            [
+                (1, program_id.to_bytes()),
+                (2, Pubkey::default().to_bytes())
+            ]
+        );
+        assert_eq!(
+            obs.writes
+                .iter()
+                .find(|w| w.address == recipient)
+                .unwrap()
+                .after
+                .lamports(),
+            2_001_000
+        );
+        assert_eq!(run(&other, &wire), Err(Error::Age));
+        for hash in [
+            epoch.completed_slot_hash(slot - 6).unwrap(),
+            epoch.completed_slot_hash(slot).unwrap(),
+            Hash::new_unique(),
+        ] {
+            assert_eq!(run(&epoch, &sign(hash)), Err(Error::Age));
+        }
+        assert!(certified_er_replay_bank(&accounts, feature_set(), 0, slot + 1, &epoch).is_none());
+        // A queue is not a source of parent bank hashes or rent policy.
+        for key in [sysvar::slot_hashes::id(), sysvar::rent::id()] {
+            let mut missing = accounts.clone();
+            missing.retain(|(k, _)| k != &key);
+            assert!(certified_er_replay_bank(&missing, feature_set(), 0, slot, &epoch).is_none());
+            let mut invalid = accounts.clone();
+            invalid
+                .iter_mut()
+                .find(|(k, _)| k == &key)
+                .unwrap()
+                .1
+                .set_data_from_slice(&[0xff; 8]);
+            assert!(certified_er_replay_bank(&invalid, feature_set(), 0, slot, &epoch).is_none());
+        }
+        let mut wrong_parent = accounts.clone();
+        let value = &mut wrong_parent
+            .iter_mut()
+            .find(|(k, _)| *k == sysvar::slot_hashes::id())
+            .unwrap()
+            .1;
+        value.set_data_from_slice(
+            &wincode::serialize(&SlotHashes::new(&[(slot, parent_bank_hash).into()])).unwrap(),
+        );
+        assert!(certified_er_replay_bank(&wrong_parent, feature_set(), 0, slot, &epoch).is_none());
+        // No caller-supplied RecentBlockhashes sysvar can introduce pre-epoch entries.
+        #[allow(deprecated)]
+        accounts.push((sysvar::recent_blockhashes::id(), empty_account(1)));
+        accounts.sort_unstable_by_key(|(key, _)| *key);
+        assert!(certified_er_replay_bank(&accounts, feature_set(), 0, slot, &epoch).is_none());
+    }
+
+    #[test]
     fn ordered_er_replay_requires_prior_credit_and_agrees_on_cpi_trace() {
         use {
             crate::er_replay_receipt::{Error, ordered, successful_batch_root},
