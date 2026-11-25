@@ -1,6 +1,7 @@
-//! Observe one fully signed packet on a replica's independently prepared working bank.
-//! This does not commit accounts, advance a replay cursor, or authenticate the bank's
-//! bootstrap inputs. Repeated observations on one bank are not sequential execution.
+//! [`observe_success`] observes one packet without committing. [`ordered`] replays
+//! complete batches on an owned, disposable bank. Neither authenticates the bootstrap.
+
+pub mod ordered;
 
 use {
     agave_transaction_view::transaction_view::UnsanitizedTransactionView,
@@ -204,6 +205,20 @@ pub fn successful_batch_root(entries: &[Receipt]) -> Result<Digest, Error> {
 /// features, sysvars, blockhash queue and pre-state. No part of the packet supplies
 /// any of those inputs. No account overrides, log parsing, or RPC simulation.
 pub fn observe_success(bank: &Bank, slot: u64, wire: &[u8]) -> Result<Observation, Error> {
+    execute_success(bank, slot, wire, ExecutionMode::Observe)
+}
+
+enum ExecutionMode {
+    Observe,
+    AdvanceScratch,
+}
+
+fn execute_success(
+    bank: &Bank,
+    slot: u64,
+    wire: &[u8],
+    mode: ExecutionMode,
+) -> Result<Observation, Error> {
     if slot != bank.slot() || bank.freeze_started() {
         return Err(Error::Slot);
     }
@@ -222,10 +237,14 @@ pub fn observe_success(bank: &Bank, slot: u64, wire: &[u8]) -> Result<Observatio
         return Err(Error::Age);
     }
     let batch = bank.prepare_locked_batch_from_single_tx(&tx);
-    let output = bank.load_and_execute_transactions(
+    let guard = bank
+        .try_enter_transaction_execution()
+        .ok_or(Error::Bank(TransactionError::CommitCancelled))?;
+    let mut timings = ExecuteTimings::default();
+    let output = guard.load_and_execute_transactions(
         &batch,
         age,
-        &mut ExecuteTimings::default(),
+        &mut timings,
         &mut TransactionErrorMetrics::default(),
         TransactionProcessingConfig {
             recording_config: ExecutionRecordingConfig {
@@ -310,11 +329,29 @@ pub fn observe_success(bank: &Bank, slot: u64, wire: &[u8]) -> Result<Observatio
     if bank.freeze_started() {
         return Err(Error::Slot);
     }
-    Ok(Observation {
+    let observation = Observation {
         receipt: trace.receipt(wire),
         calls: trace.calls,
         writes,
-    })
+    };
+    if let ExecutionMode::AdvanceScratch = mode {
+        let results = bank.commit_transactions(
+            batch.sanitized_transactions(),
+            output.processing_results,
+            &output.processed_counts,
+            &mut timings,
+        );
+        let [result] = results.as_slice() else {
+            return Err(Error::NotExecuted);
+        };
+        result
+            .as_ref()
+            .map_err(|e| Error::Bank(e.clone()))?
+            .status
+            .as_ref()
+            .map_err(|e| Error::Bank(e.clone()))?;
+    }
+    Ok(observation)
 }
 
 #[cfg(test)]

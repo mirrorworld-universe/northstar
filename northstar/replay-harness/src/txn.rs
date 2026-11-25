@@ -460,6 +460,125 @@ mod tests {
     }
 
     #[test]
+    fn ordered_er_replay_requires_prior_credit_and_agrees_on_cpi_trace() {
+        use {
+            crate::er_replay_receipt::{Error, ordered, successful_batch_root},
+            solana_fee_structure::FeeStructure,
+            solana_instruction::{AccountMeta, Instruction},
+            solana_keypair::Keypair,
+            solana_leader_schedule::SlotLeader,
+            solana_runtime::{bank::Bank, genesis_utils::create_genesis_config},
+            solana_signer::Signer,
+            solana_transaction::Transaction,
+        };
+
+        let mut genesis = create_genesis_config(100_000_000);
+        genesis
+            .genesis_config
+            .accounts
+            .remove(&disable_sbpf_v0_execution::id());
+        let recipient = Keypair::new();
+        let output = Pubkey::new_unique();
+        let program = deploy_program("simple-transfer");
+        let program_id = program[0].0;
+        let slot = (1u64 << 40) + 21;
+        let recent = Hash::new_unique();
+        let make_scratch = || {
+            let parent = Bank::new_for_tests(&genesis.genesis_config);
+            for (address, account) in &program {
+                parent.store_account(address, account);
+            }
+            for address in [recipient.pubkey(), output] {
+                parent.store_account(&address, &empty_account(2_000_000));
+            }
+            let mut bank = Bank::new_from_parent_ephemeral_isolated(
+                Arc::new(parent),
+                SlotLeader::default(),
+                slot,
+            );
+            bank.configure_er(
+                &FeeStructure {
+                    lamports_per_signature: 0,
+                    lamports_per_write_lock: 0,
+                    compute_fee_bins: vec![],
+                },
+                150,
+            );
+            bank.register_recent_blockhash_for_test(&recent, Some(0));
+            bank
+        };
+        let transfer = |from: &Keypair, to: Pubkey, amount: u64| {
+            wincode::serialize(&VersionedTransaction::from(
+                Transaction::new_signed_with_payer(
+                    &[Instruction::new_with_bytes(
+                        program_id,
+                        &amount.to_be_bytes(),
+                        vec![
+                            AccountMeta::new(from.pubkey(), true),
+                            AccountMeta::new(to, false),
+                            AccountMeta::new_readonly(Pubkey::default(), false),
+                        ],
+                    )],
+                    Some(&from.pubkey()),
+                    &[from],
+                    recent,
+                ),
+            ))
+            .unwrap()
+        };
+        let credit = transfer(&genesis.mint_keypair, recipient.pubkey(), 4_000_000);
+        let spend = transfer(&recipient, output, 4_000_000);
+        let run = |packets: &[&[u8]]| {
+            ordered::replay_on_disposable_bank(
+                make_scratch(),
+                slot,
+                &ordered::encode(slot, packets).unwrap(),
+            )
+        };
+        // The second signed instruction is valid only against the first instruction's post-state.
+        assert!(matches!(run(&[&spend, &credit]), Err(Error::Bank(_))));
+        let first = run(&[&credit, &spend]).unwrap();
+        assert_eq!(run(&[&credit, &spend]).unwrap(), first);
+        let [credit_obs, spend_obs] = first.transactions.as_slice() else {
+            panic!("wrong receipt count")
+        };
+        let funded = credit_obs
+            .writes
+            .iter()
+            .find(|w| w.address == recipient.pubkey())
+            .unwrap();
+        let debited = spend_obs
+            .writes
+            .iter()
+            .find(|w| w.address == recipient.pubkey())
+            .unwrap();
+        assert_eq!(funded.after.lamports(), 6_000_000);
+        assert_eq!(debited.before.as_ref(), Some(&funded.after));
+        assert_eq!(debited.after.lamports(), 2_000_000);
+        for obs in &first.transactions {
+            assert_eq!(obs.calls.len(), 2);
+            assert_eq!(
+                (obs.calls[0].depth, obs.calls[0].program),
+                (1, program_id.to_bytes())
+            );
+            assert_eq!(
+                (obs.calls[1].depth, obs.calls[1].program),
+                (2, Pubkey::default().to_bytes())
+            );
+        }
+        assert_eq!(
+            first.receipts_root,
+            successful_batch_root(&[credit_obs.receipt, spend_obs.receipt]).unwrap()
+        );
+        let bad_tail = transfer(&recipient, output, 9_000_000);
+        assert!(matches!(
+            run(&[&credit, &spend, &bad_tail]),
+            Err(Error::Bank(_))
+        ));
+        assert_eq!(run(&[&credit, &spend]).unwrap(), first);
+    }
+
+    #[test]
     fn test_simple_transfer() {
         let [(program_id, program), (program_data_id, program_data)] =
             deploy_program("simple-transfer");
