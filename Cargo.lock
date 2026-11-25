@@ -5431,6 +5431,7 @@ name = "northstar-replay-harness"
 version = "0.1.0"
 dependencies = [
  "agave-feature-set",
+ "agave-transaction-view",
  "bincode",
  "northstar-zk-types",
  "serde",
@@ -5445,6 +5446,7 @@ dependencies = [
  "solana-instruction 4.0.0",
  "solana-instruction-error 3.1.0",
  "solana-keypair",
+ "solana-leader-schedule",
  "solana-loader-v3-interface",
  "solana-message 6.0.0",
  "solana-program-option",
@@ -5459,6 +5461,7 @@ dependencies = [
  "solana-signer",
  "solana-slot-hashes",
  "solana-svm",
+ "solana-svm-timings",
  "solana-svm-transaction",
  "solana-system-interface",
  "solana-transaction 6.0.0",

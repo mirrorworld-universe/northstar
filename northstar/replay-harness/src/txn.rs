@@ -340,6 +340,126 @@ mod tests {
     }
 
     #[test]
+    fn signed_er_replay_observes_sbf_cpi_and_writes_without_committing() {
+        use {
+            crate::er_replay_receipt::{Error, observe_success},
+            solana_fee_structure::FeeStructure,
+            solana_instruction::{AccountMeta, Instruction},
+            solana_keypair::Keypair,
+            solana_leader_schedule::SlotLeader,
+            solana_runtime::{bank::Bank, genesis_utils::create_genesis_config},
+            solana_signer::Signer,
+            solana_transaction::Transaction,
+        };
+
+        let mut genesis = create_genesis_config(1_000_000_000);
+        genesis
+            .genesis_config
+            .accounts
+            .remove(&disable_sbpf_v0_execution::id());
+        let sender = Keypair::new();
+        let recipient = Pubkey::new_unique();
+        let program = deploy_program("simple-transfer");
+        let program_id = program[0].0;
+        let slot = (1u64 << 40) + 17;
+        let recent = Hash::new_unique();
+        let make_bank = || {
+            let parent = Bank::new_for_tests(&genesis.genesis_config);
+            for (key, account) in &program {
+                parent.store_account(key, account);
+            }
+            parent.store_account(&sender.pubkey(), &empty_account(5_000_000));
+            parent.store_account(&recipient, &empty_account(2_000_000));
+            let mut bank = Bank::new_from_parent_ephemeral_isolated(
+                Arc::new(parent),
+                SlotLeader::default(),
+                slot,
+            );
+            bank.configure_er(
+                &FeeStructure {
+                    lamports_per_signature: 0,
+                    lamports_per_write_lock: 0,
+                    compute_fee_bins: vec![],
+                },
+                150,
+            );
+            bank.register_recent_blockhash_for_test(&recent, Some(0));
+            bank.wrap_with_bank_forks_for_tests()
+        };
+        let wire_for = |amount: u64, hash| {
+            wincode::serialize(&VersionedTransaction::from(
+                Transaction::new_signed_with_payer(
+                    &[Instruction::new_with_bytes(
+                        program_id,
+                        &amount.to_be_bytes(),
+                        vec![
+                            AccountMeta::new(sender.pubkey(), true),
+                            AccountMeta::new(recipient, false),
+                            AccountMeta::new_readonly(Pubkey::default(), false),
+                        ],
+                    )],
+                    Some(&genesis.mint_keypair.pubkey()),
+                    &[&genesis.mint_keypair, &sender],
+                    hash,
+                ),
+            ))
+            .unwrap()
+        };
+        let wire = wire_for(1_000, recent);
+        let (bank, _forks) = make_bank();
+        let (independent, _other_forks) = make_bank();
+        let first = observe_success(&bank, slot, &wire).unwrap();
+        let second = observe_success(&independent, slot, &wire).unwrap();
+        assert_eq!(first, second);
+        // Replaying a different signed packet on the same bank must not reuse the receipt.
+        let other = observe_success(&bank, slot, &wire_for(900, recent)).unwrap();
+        assert_ne!(first.receipt, other.receipt);
+        assert_eq!(first.calls.len(), 2);
+        assert_eq!(
+            (first.calls[0].depth, first.calls[0].program),
+            (1, program_id.to_bytes())
+        );
+        assert_eq!(
+            (first.calls[1].depth, first.calls[1].program),
+            (2, Pubkey::default().to_bytes())
+        );
+        assert_eq!(
+            first.calls[1].accounts,
+            [sender.pubkey().to_bytes(), recipient.to_bytes()]
+        );
+        let delta = first
+            .writes
+            .iter()
+            .find(|w| w.address == recipient)
+            .unwrap();
+        assert_eq!(delta.before.as_ref().unwrap().lamports(), 2_000_000);
+        assert_eq!(delta.after.lamports(), 2_001_000);
+        assert_eq!(bank.get_balance(&recipient), 2_000_000);
+        assert_eq!(observe_success(&bank, slot + 1, &wire), Err(Error::Slot));
+        assert_eq!(observe_success(&bank, slot, &[]), Err(Error::Wire));
+        let mut changed_signature = wire.clone();
+        changed_signature[1] ^= 1;
+        assert!(matches!(
+            observe_success(&bank, slot, &changed_signature),
+            Err(Error::Bank(
+                solana_transaction_error::TransactionError::SignatureFailure
+            ))
+        ));
+        let mut padded = wire.clone();
+        padded.push(0);
+        assert_eq!(observe_success(&bank, slot, &padded), Err(Error::Wire));
+        assert_eq!(
+            observe_success(&bank, slot, &wire_for(1_000, Hash::new_unique())),
+            Err(Error::Age)
+        );
+        assert!(matches!(
+            observe_success(&bank, slot, &wire_for(6_000_000, recent)),
+            Err(Error::Bank(_))
+        ));
+        assert_eq!(bank.get_balance(&sender.pubkey()), 5_000_000);
+    }
+
+    #[test]
     fn test_simple_transfer() {
         let [(program_id, program), (program_data_id, program_data)] =
             deploy_program("simple-transfer");
