@@ -319,7 +319,7 @@ impl EphemeralRuntime {
     /// side effects (stake-history rebuild, `begin_partitioned_rewards`,
     /// `update_epoch_stakes`, `distribute_partitioned_epoch_rewards`). That
     /// makes it safe for the ER slot to land in an arbitrarily distant epoch.
-    fn er_slot_for(parent: &Bank) -> u64 {
+    pub(crate) fn er_slot_for(parent: &Bank) -> u64 {
         const ER_SLOT_OFFSET: u64 = 1u64 << 40;
         parent.slot().saturating_add(ER_SLOT_OFFSET)
     }
@@ -421,7 +421,7 @@ impl EphemeralRuntime {
         self.retired_bank_forks_pending.load(Ordering::Relaxed)
     }
 
-    fn prepare_initial_working_bank(bank: &Bank) {
+    pub(crate) fn prepare_initial_working_bank(bank: &Bank) {
         let ticks_per_slot = bank.ticks_per_slot();
         bank.set_tick_height(bank.max_tick_height() - ticks_per_slot);
     }

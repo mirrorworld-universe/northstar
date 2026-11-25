@@ -159,18 +159,7 @@ pub fn audit(
             _ => return Err(Unavailable("bank does not open the committed pre-state")),
         }
     }
-    let tx: VersionedTransaction = bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .with_limit(MAX_TRANSACTION_BYTES_V1 as u64)
-        .reject_trailing_bytes()
-        .deserialize(transaction)
-        .map_err(|_| Mismatch("invalid signed transaction bytes"))?;
-    tx.sanitize().map_err(|_| Mismatch("invalid transaction"))?;
-    tx.verify_and_hash_message()
-        .map_err(|_| Mismatch("invalid transaction signatures"))?;
-    if bincode::serialize(&tx).ok().as_deref() != Some(transaction.as_slice()) {
-        return Err(Mismatch("noncanonical signed transaction"));
-    }
+    let tx = signed_transaction(transaction).map_err(Mismatch)?;
     let signature = *tx.signatures.first().ok_or(Mismatch("missing signature"))?;
     if let Some(lookups) = tx.message.address_table_lookups() {
         bank.load_addresses(lookups)
@@ -332,6 +321,27 @@ pub fn audit(
         cpi_withdrawals: cpi_count,
     })
 }
+
+fn signed_transaction(bytes: &[u8]) -> Result<VersionedTransaction, &'static str> {
+    if bytes.is_empty() || bytes.len() > MAX_TRANSACTION_BYTES_V1 {
+        return Err("invalid signed transaction length");
+    }
+    let tx: VersionedTransaction = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(MAX_TRANSACTION_BYTES_V1 as u64)
+        .reject_trailing_bytes()
+        .deserialize(bytes)
+        .map_err(|_| "invalid signed transaction bytes")?;
+    tx.sanitize().map_err(|_| "invalid transaction")?;
+    tx.verify_and_hash_message()
+        .map_err(|_| "invalid transaction signatures")?;
+    if tx.signatures.is_empty() || bincode::serialize(&tx).ok().as_deref() != Some(bytes) {
+        return Err("noncanonical signed transaction");
+    }
+    Ok(tx)
+}
+
+pub mod reconstruction;
 
 #[cfg(test)]
 mod tests;

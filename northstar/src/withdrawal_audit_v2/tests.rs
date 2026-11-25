@@ -8,13 +8,15 @@ use {
     northstar_portal::{SessionBridge, SessionBridgeV2},
     northstar_token_bridge::{instruction::TokenBridgeInstruction, state::ErTokenAccount},
     northstar_zk_types::continuity::{IngressPayloadV2, IngressRecordV2, SessionIdentityV2},
-    solana_account::Account,
+    solana_account::{Account, AccountSharedData, WritableAccount},
+    solana_address_lookup_table_interface::state::{AddressLookupTable, LookupTableMeta},
     solana_genesis_config::GenesisConfig,
     solana_instruction::{AccountMeta, Instruction},
     solana_leader_schedule::SlotLeader,
+    solana_message::{v0, AddressLookupTableAccount, VersionedMessage},
     solana_program_pack::Pack,
     solana_rent::Rent,
-    solana_runtime::{bank_forks::BankForks, genesis_utils::create_genesis_config},
+    solana_runtime::{bank_forks::BankForks, genesis_utils::create_genesis_config_with_leader},
     solana_signer::Signer,
     solana_transaction::Transaction,
     std::{
@@ -23,18 +25,51 @@ use {
     },
 };
 
-fn bank_at_cut(genesis: &GenesisConfig) -> (Arc<Bank>, Arc<RwLock<BankForks>>) {
+mod archive;
+
+fn complete(bank: &Bank) {
+    while !bank.is_complete() {
+        bank.register_tick_for_test(&solana_sha256_hasher::hash(
+            &bank.tick_height().to_le_bytes(),
+        ));
+    }
+    bank.set_block_id(Some(Default::default()));
+    bank.freeze();
+}
+
+fn earlier_bank(
+    genesis: &GenesisConfig,
+    allocations: &BTreeMap<Pubkey, Account>,
+    payer: &Pubkey,
+) -> Bank {
     let root = Arc::new(Bank::new_for_tests(genesis));
-    root.freeze();
-    let mut b = Bank::new_from_parent_ephemeral_isolated(root, SlotLeader::default(), 1);
+    complete(&root);
+    let leader = *root.leader();
+    let parent = Bank::new_from_parent(root, leader, 1);
+    let mut funds = parent.get_account(payer).unwrap();
+    for (key, a) in allocations {
+        assert!(parent.get_account(key).is_none());
+        funds.checked_sub_lamports(a.lamports).unwrap();
+        parent.store_account(key, &AccountSharedData::from(a.clone()));
+    }
+    parent.store_account(payer, &funds);
+    complete(&parent);
+    parent
+}
+
+fn bank_at_cut(parent: Bank) -> (Arc<Bank>, Arc<RwLock<BankForks>>) {
+    let slot = parent.slot() + (1u64 << 40);
+    let mut b =
+        Bank::new_from_parent_ephemeral_isolated(Arc::new(parent), SlotLeader::default(), slot);
     b.configure_er(
         &solana_fee_structure::FeeStructure {
             lamports_per_signature: 0,
             lamports_per_write_lock: 0,
             compute_fee_bins: vec![],
         },
-        150,
+        crate::er_recent_blockhash_max_age_for_slot_duration(crate::DEFAULT_ER_SLOT_DURATION),
     );
+    b.set_tick_height(b.max_tick_height() - b.ticks_per_slot());
     let forks = BankForks::new_rw_arc_ephemeral(b);
     let bank = forks.read().unwrap().root_bank();
     (bank, forks)
@@ -51,9 +86,20 @@ fn account(data: Vec<u8>, owner: Pubkey, executable: bool) -> Account {
 
 #[test]
 fn invariant_v2_audit_reexecutes_pda_signed_calls_on_a_separate_frozen_bank() {
-    let setup = create_genesis_config(1_000_000_000);
+    exercise_cut(&[]);
+}
+
+#[test]
+fn invariant_v2_full_snapshot_reconstructs_the_independent_cpi_withdrawal_cut() {
+    exercise_cut(&[1, 2]);
+}
+
+fn exercise_cut(earlier_withdrawals: &[u64]) {
+    let setup =
+        create_genesis_config_with_leader(100_000_000_000, &Pubkey::new_unique(), 10_000_000_000);
     let payer = setup.mint_keypair;
-    let mut genesis = setup.genesis_config;
+    let genesis = setup.genesis_config;
+    let mut allocations = BTreeMap::new();
     let out = PathBuf::from(std::env::var_os("BPF_OUT_DIR").expect("V2 SBF artifacts required"));
     let bridge = northstar_token_bridge::id();
     let portal = Pubkey::new_unique();
@@ -61,7 +107,7 @@ fn invariant_v2_audit_reexecutes_pda_signed_calls_on_a_separate_frozen_bank() {
     let session = northstar_portal::find_session_pda(&portal).0;
     let identity = SessionIdentityV2 {
         version: 2,
-        l1_genesis: [1; 32],
+        l1_genesis: genesis.hash().to_bytes(),
         portal: portal.to_bytes(),
         session: session.to_bytes(),
         nonce: 1,
@@ -80,6 +126,24 @@ fn invariant_v2_audit_reexecutes_pda_signed_calls_on_a_separate_frozen_bank() {
         Pubkey::find_program_address(&[b"audit-owner", payer.pubkey().as_ref()], &caller);
     let (source, bump) =
         northstar_token_bridge::find_er_token_account_pda(&bridge, &registry, &owner);
+    let table = AddressLookupTableAccount {
+        key: Pubkey::new_unique(),
+        addresses: vec![source, registry, dest],
+    };
+    let table_data = AddressLookupTable {
+        meta: LookupTableMeta::default(),
+        addresses: std::borrow::Cow::Borrowed(&table.addresses),
+    }
+    .serialize_for_tests()
+    .unwrap();
+    allocations.insert(
+        table.key,
+        account(
+            table_data,
+            solana_sdk_ids::address_lookup_table::id(),
+            false,
+        ),
+    );
     let image = std::fs::read(out.join("northstar_token_bridge.so")).unwrap();
     let reviewed = hash_parts(&[&image]);
     for (k, bytes) in [
@@ -93,9 +157,7 @@ fn invariant_v2_audit_reexecutes_pda_signed_calls_on_a_separate_frozen_bank() {
             std::fs::read(out.join("northstar_portal.so")).unwrap(),
         ),
     ] {
-        genesis
-            .accounts
-            .insert(k, account(bytes, bpf_loader::id(), true));
+        allocations.insert(k, account(bytes, bpf_loader::id(), true));
     }
     let frame = SessionBridgeV2 {
         discriminator: SessionBridgeV2::DISCRIMINATOR,
@@ -110,9 +172,7 @@ fn invariant_v2_audit_reexecutes_pda_signed_calls_on_a_separate_frozen_bank() {
             bump: reg_bump,
         },
     };
-    genesis
-        .accounts
-        .insert(registry, account(encode(&frame).unwrap(), portal, false));
+    allocations.insert(registry, account(encode(&frame).unwrap(), portal, false));
     let mut mint_data = vec![0; spl_token_interface::state::Mint::LEN];
     spl_token_interface::state::Mint::pack(
         spl_token_interface::state::Mint {
@@ -123,9 +183,7 @@ fn invariant_v2_audit_reexecutes_pda_signed_calls_on_a_separate_frozen_bank() {
         &mut mint_data,
     )
     .unwrap();
-    genesis
-        .accounts
-        .insert(mint, account(mint_data, token, false));
+    allocations.insert(mint, account(mint_data, token, false));
     let mut peer = vec![0; spl_token_interface::state::Account::LEN];
     spl_token_interface::state::Account::pack(
         spl_token_interface::state::Account {
@@ -137,13 +195,13 @@ fn invariant_v2_audit_reexecutes_pda_signed_calls_on_a_separate_frozen_bank() {
         &mut peer,
     )
     .unwrap();
-    genesis.accounts.insert(dest, account(peer, token, false));
+    allocations.insert(dest, account(peer, token, false));
     let holding = ErTokenAccount {
         discriminator: ErTokenAccount::DISCRIMINATOR,
         session_bridge: registry.to_bytes(),
         mint: mint.to_bytes(),
         owner: owner.to_bytes(),
-        amount: 42,
+        amount: 42 + earlier_withdrawals.iter().sum::<u64>(),
         bump,
     };
     let data = encode(&holding).unwrap();
@@ -168,9 +226,10 @@ fn invariant_v2_audit_reexecutes_pda_signed_calls_on_a_separate_frozen_bank() {
     )
     .unwrap();
     start.apply_ingress(&delegation, &data).unwrap();
-    genesis.accounts.insert(source, holding_account);
-    let (auditor, _a_forks) = bank_at_cut(&genesis);
-    let (producer, _p_forks) = bank_at_cut(&genesis);
+    allocations.insert(source, holding_account);
+    let base = || earlier_bank(&genesis, &allocations, &payer.pubkey());
+    let (auditor, _a_forks) = bank_at_cut(base());
+    let (producer, _p_forks) = bank_at_cut(base());
     // Bootstrap the test cut before either bank has run the withdrawal. No read of producer history.
     let payer_key = payer.pubkey().to_bytes();
     start
@@ -182,34 +241,95 @@ fn invariant_v2_audit_reexecutes_pda_signed_calls_on_a_separate_frozen_bank() {
             )],
         )
         .unwrap();
+    let instruction = |amount| {
+        let mut data = vec![1, owner_bump];
+        data.extend(
+            encode(&TokenBridgeInstruction::StartWithdrawal {
+                amount,
+                decimals: 6,
+            })
+            .unwrap(),
+        );
+        Instruction {
+            program_id: caller,
+            accounts: vec![
+                AccountMeta::new_readonly(bridge, false),
+                AccountMeta::new_readonly(owner, false),
+                AccountMeta::new(source, false),
+                AccountMeta::new_readonly(registry, false),
+                AccountMeta::new_readonly(portal, false),
+                AccountMeta::new_readonly(dest, false),
+                AccountMeta::new_readonly(token, false),
+                AccountMeta::new_readonly(mint, false),
+                AccountMeta::new_readonly(payer.pubkey(), true),
+            ],
+            data,
+        }
+    };
+    let effect = |amount, cumulative_withdrawn| {
+        encode(&SettlementEffectV2::TokenWithdrawal {
+            bridge: bridge.to_bytes(),
+            session_bridge: registry.to_bytes(),
+            account: source.to_bytes(),
+            destination: dest.to_bytes(),
+            amount,
+            decimals: 6,
+            cumulative_withdrawn,
+        })
+        .unwrap()
+    };
+    let mut prefix = vec![];
+    let mut cumulative = 0;
+    for (i, &amount) in earlier_withdrawals.iter().enumerate() {
+        let ix = [instruction(amount)];
+        let prior = if i == 0 {
+            VersionedTransaction::from(Transaction::new_signed_with_payer(
+                &ix,
+                Some(&payer.pubkey()),
+                &[&payer],
+                producer.last_blockhash(),
+            ))
+        } else {
+            let msg = v0::Message::try_compile(
+                &payer.pubkey(),
+                &ix,
+                std::slice::from_ref(&table),
+                producer.last_blockhash(),
+            )
+            .unwrap();
+            assert_eq!(msg.address_table_lookups.len(), 1);
+            assert!(!msg.account_keys.contains(&source));
+            VersionedTransaction::try_new(VersionedMessage::V0(msg), &[&payer]).unwrap()
+        };
+        let prefix_writes = || {
+            let mut keys = [source, payer.pubkey()];
+            keys.sort_unstable();
+            keys.map(|k| {
+                (
+                    k.to_bytes(),
+                    CommittedAccountV2::from_account(&auditor.get_account(&k).unwrap()),
+                )
+            })
+        };
+        let before = prefix_writes();
+        for bank in [&auditor, &producer] {
+            bank.process_transaction_with_metadata(prior.clone())
+                .unwrap()
+                .status
+                .unwrap();
+        }
+        start.apply_execution(&before, &prefix_writes()).unwrap();
+        cumulative += amount;
+        start
+            .apply_settlement_effects(&[effect(amount, cumulative)])
+            .unwrap();
+        prefix.push(bincode::serialize(&prior).unwrap());
+    }
     auditor.freeze();
     let bank_hash = auditor.hash().to_bytes();
     let pre_root = start.root().unwrap();
-    let mut data = vec![1, owner_bump];
-    data.extend(
-        encode(&TokenBridgeInstruction::StartWithdrawal {
-            amount: 3,
-            decimals: 6,
-        })
-        .unwrap(),
-    );
-    let ix = Instruction {
-        program_id: caller,
-        accounts: vec![
-            AccountMeta::new_readonly(bridge, false),
-            AccountMeta::new_readonly(owner, false),
-            AccountMeta::new(source, false),
-            AccountMeta::new_readonly(registry, false),
-            AccountMeta::new_readonly(portal, false),
-            AccountMeta::new_readonly(dest, false),
-            AccountMeta::new_readonly(token, false),
-            AccountMeta::new_readonly(mint, false),
-            AccountMeta::new_readonly(payer.pubkey(), true),
-        ],
-        data,
-    };
     let tx = VersionedTransaction::from(Transaction::new_signed_with_payer(
-        &[ix.clone(), ix],
+        &[instruction(3), instruction(3)],
         Some(&payer.pubkey()),
         &[&payer],
         producer.last_blockhash(),
@@ -291,20 +411,7 @@ fn invariant_v2_audit_reexecutes_pda_signed_calls_on_a_separate_frozen_bank() {
         .into_iter()
         .map(|(k, (a, b))| ((k, a), (k, b)))
         .unzip();
-    let effects = [3, 6]
-        .map(|cumulative_withdrawn| {
-            encode(&SettlementEffectV2::TokenWithdrawal {
-                bridge: bridge.to_bytes(),
-                session_bridge: registry.to_bytes(),
-                account: source.to_bytes(),
-                destination: dest.to_bytes(),
-                amount: 3,
-                decimals: 6,
-                cumulative_withdrawn,
-            })
-            .unwrap()
-        })
-        .to_vec();
+    let effects = [3, 6].map(|delta| effect(3, cumulative + delta)).to_vec();
     let mut end = start.clone();
     end.apply_execution(&pre, &post).unwrap();
     end.apply_settlement_effects(&effects).unwrap();
@@ -346,6 +453,9 @@ fn invariant_v2_audit_reexecutes_pda_signed_calls_on_a_separate_frozen_bank() {
     let verified = observed().unwrap();
     assert_eq!(verified.signature, tx.signatures[0]);
     assert_eq!((verified.withdrawals, verified.cpi_withdrawals), (2, 2));
+    if !prefix.is_empty() {
+        archive::check(&genesis, base(), &prefix, &artifact, &pins, &verified);
+    }
     assert_eq!(observed(), Ok(verified));
     assert!(!auditor.has_signature(&tx.signatures[0]));
     let amount = |b: &Bank| {
