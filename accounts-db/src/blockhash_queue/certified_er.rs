@@ -34,6 +34,11 @@ impl RecentHashEpoch {
         })
     }
 
+    pub fn first_working_slot(&self) -> u64 {
+        // Enrollment rejects u64::MAX.
+        self.anchor_slot.saturating_add(1)
+    }
+
     pub fn max_age(&self) -> usize {
         self.max_age as usize
     }
@@ -46,7 +51,7 @@ impl RecentHashEpoch {
 
     fn hash_at(&self, slot: u64) -> Hash {
         hashv(&[
-            b"northstar/er-cert/recent-blockhash/v1\0",
+            b"northstar/er-cert/recent-blockhash/v2\0",
             &self.anchor_id,
             &self.anchor_slot.to_le_bytes(),
             &self.max_age.to_le_bytes(),
@@ -61,6 +66,25 @@ impl RecentHashEpoch {
                 .saturating_sub(u64::from(self.max_age))
                 .max(self.anchor_slot)..=newest
         })
+    }
+
+    /// Registration timestamps are local. Admission depends on hashes, indexes,
+    /// fees and the durable nonce, all of which must match the epoch schedule.
+    pub fn matches_queue(&self, working_slot: u64, actual: &BlockhashQueue) -> bool {
+        let Some(expected) = self.queue_for_working_slot(working_slot) else {
+            return false;
+        };
+        expected.max_age == actual.max_age
+            && expected.last_hash == actual.last_hash
+            && expected.last_hash_index == actual.last_hash_index
+            && expected.durable_nonce == actual.durable_nonce
+            && expected.hashes.len() == actual.hashes.len()
+            && expected.hashes.iter().all(|(key, entry)| {
+                actual.hashes.get(key).is_some_and(|other| {
+                    entry.hash_index == other.hash_index
+                        && entry.fee_calculator == other.fee_calculator
+                })
+            })
     }
 
     /// Construct only the retained suffix, including age exactly `max_age`.
@@ -100,9 +124,9 @@ mod tests {
         assert_eq!(
             hash.to_bytes(),
             [
-                0x1b, 0xbb, 0xc8, 0x8c, 0x61, 0x9a, 0x89, 0xe6, 0xec, 0x1b, 0xf2, 0x2b, 0xe6, 0xbb,
-                0x60, 0x3a, 0x81, 0xc7, 0xa7, 0x8f, 0x0e, 0xd0, 0xea, 0xcf, 0xd6, 0xf9, 0x19, 0xf0,
-                0x5d, 0xad, 0xc4, 0x35
+                0x6c, 0x80, 0xfc, 0x14, 0x3b, 0xdd, 0x2e, 0xda, 0x26, 0x89, 0x15, 0xf6, 0xed, 0x06,
+                0x5c, 0x52, 0x31, 0xc2, 0x85, 0x24, 0x80, 0x5f, 0x89, 0xe5, 0x35, 0x36, 0x76, 0x90,
+                0xf1, 0x37, 0x9a, 0x08
             ]
         );
         for other in [

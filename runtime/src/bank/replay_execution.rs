@@ -217,6 +217,55 @@ fn disposable_bank(
     Bank::new_for_txn_tests(bank_rc, bank_fields, feature_set, epoch_stakes)
 }
 
+impl Bank {
+    /// Sonic: Replace the inherited transaction history only on the first unused
+    /// disposable child. Later slots must reproduce the queue by replaying ticks.
+    pub fn install_initial_replay_queue(
+        &mut self,
+        epoch: &solana_accounts_db::blockhash_queue::certified_er::RecentHashEpoch,
+    ) -> bool {
+        if self.freeze_started()
+            || self.slot() != epoch.first_working_slot()
+            || self.signature_count() != 0
+            || !self.parent().is_some_and(|p| {
+                p.slot().checked_add(1) == Some(self.slot())
+                    && p.is_complete()
+                    && p.is_frozen()
+                    && p.transaction_count() == self.transaction_count()
+                    && p.max_tick_height() == self.tick_height()
+            })
+        {
+            return false;
+        }
+        let Some(queue) = epoch.queue_for_working_slot(self.slot()) else {
+            return false;
+        };
+        self.configure_er(
+            &solana_fee_structure::FeeStructure {
+                lamports_per_signature: 0,
+                lamports_per_write_lock: 0,
+                compute_fee_bins: vec![],
+            },
+            epoch.max_age(),
+        );
+        *self.blockhash_queue.write().unwrap() = queue;
+        self.update_recent_blockhashes();
+        self.transaction_processor
+            .reset_and_fill_sysvar_cache_entries(self);
+        true
+    }
+
+    /// Sonic: Check the entire transaction-validity window on the private bank.
+    pub fn matches_certified_replay_queue(
+        &self,
+        epoch: &solana_accounts_db::blockhash_queue::certified_er::RecentHashEpoch,
+        working_slot: u64,
+    ) -> bool {
+        self.max_processing_age() == epoch.max_age()
+            && epoch.matches_queue(working_slot, &self.blockhash_queue.read().unwrap())
+    }
+}
+
 /// Sonic: Materialize a fresh, gasless scratch bank for an opt-in epoch. The
 /// accounts, features, stake and working slot must already be authenticated by
 /// the replica; they are not included in a signed-packet batch. `SlotHashes`

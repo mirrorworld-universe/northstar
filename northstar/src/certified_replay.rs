@@ -10,6 +10,7 @@ use {
     },
     borsh::BorshDeserialize,
     northstar_portal::{CheckpointBindingV2, CheckpointBondStatus, CheckpointStatus},
+    northstar_replay_harness::er_replay_receipt::slot_chain::{BankPin, SlotChain},
     northstar_zk_types::continuity::SessionIdentityV2,
     solana_account::ReadableAccount,
     solana_genesis_config::GenesisConfig,
@@ -175,6 +176,21 @@ impl ReplayBootstrap {
             observed_l1_slot: slot,
             state: candidate,
         })
+    }
+
+    /// The epoch enrollment must supply the ER bank pin separately. The L1
+    /// state opening alone cannot establish the ER bank hash or sysvar history.
+    pub fn bind_enrolled_bank(
+        &self,
+        pin: BankPin,
+        enrolled_start_id: Hash32,
+        max_age: u32,
+        full_er_bank: &Bank,
+    ) -> io::Result<SlotChain> {
+        if pin.slot != self.pins.checkpoint.er_slot {
+            return Err(invalid("enrolled bank differs from settled ER slot"));
+        }
+        SlotChain::enroll(pin, enrolled_start_id, max_age, full_er_bank).map_err(io::Error::other)
     }
 
     pub fn pins(&self) -> &BootstrapPins {

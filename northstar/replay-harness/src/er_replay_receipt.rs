@@ -2,6 +2,7 @@
 //! complete batches on an owned, disposable bank. Neither authenticates the bootstrap.
 
 pub mod ordered;
+pub mod slot_chain;
 
 use {
     agave_transaction_view::transaction_view::UnsanitizedTransactionView,
@@ -29,6 +30,7 @@ type Digest = [u8; 32];
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
+    Context,
     Slot,
     Wire,
     Age,
@@ -42,6 +44,9 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Context => {
+                f.write_str("local replay bank does not match the enrolled slot lineage")
+            }
             Self::Slot => f.write_str("not the expected working slot"),
             Self::Wire => f.write_str("invalid signed packet"),
             Self::Age => f.write_str("blockhash outside ER processing window"),
@@ -145,7 +150,7 @@ impl Trace {
         for call in &self.calls {
             hashes.extend(
                 hashv(&[
-                    b"northstar/er-receipt/call/v1\0",
+                    b"northstar/er-receipt/call/v2\0",
                     &[call.depth],
                     &call.program,
                     &(call.accounts.len() as u16).to_le_bytes(),
@@ -158,13 +163,13 @@ impl Trace {
         }
         Receipt {
             wire_hash: hashv(&[
-                b"northstar/er-receipt/wire/v1\0",
+                b"northstar/er-receipt/wire/v2\0",
                 &(wire.len() as u16).to_le_bytes(),
                 wire,
             ])
             .to_bytes(),
             trace_hash: hashv(&[
-                b"northstar/er-receipt/trace/v1\0",
+                b"northstar/er-receipt/trace/v2\0",
                 &(self.calls.len() as u16).to_le_bytes(),
                 &hashes,
             ])
@@ -194,7 +199,7 @@ pub fn successful_batch_root(entries: &[Receipt]) -> Result<Digest, Error> {
         encoded.extend(e.trace_hash);
     }
     Ok(hashv(&[
-        b"northstar/er-receipt/batch/v1\0",
+        b"northstar/er-receipt/batch/v2\0",
         &(entries.len() as u16).to_le_bytes(),
         &encoded,
     ])
@@ -359,16 +364,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn v1_interoperability_vector_and_batch_order() {
+    fn v2_interoperability_vector_and_batch_order() {
         let mut trace = Trace::new();
         trace.push(1, 7, &[9], b"abc", |n| Some([n; 32])).unwrap();
         let entry = trace.receipt(b"fixture:wire");
         assert_eq!(
             successful_batch_root(&[entry]).unwrap(),
             [
-                0xf4, 0x07, 0xd7, 0xe5, 0x07, 0x76, 0x2e, 0xd2, 0x09, 0x13, 0xb5, 0x8f, 0xa9, 0x8c,
-                0xda, 0xb8, 0xc0, 0x6d, 0x54, 0xab, 0x23, 0xdd, 0x77, 0xdb, 0x8b, 0x81, 0xcb, 0x72,
-                0x33, 0x94, 0x26, 0xab
+                0x6a, 0xf7, 0x81, 0x97, 0x57, 0xd2, 0x48, 0xa0, 0x2b, 0xf2, 0xf0, 0xae, 0x30, 0xab,
+                0xe3, 0x53, 0x06, 0xcb, 0x18, 0x03, 0x3c, 0xb9, 0xa8, 0x1c, 0xd2, 0x54, 0xaa, 0x0f,
+                0x48, 0xed, 0x52, 0x9f
             ]
         );
         let other = trace.receipt(b"different");

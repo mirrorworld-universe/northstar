@@ -1,4 +1,4 @@
-//! Ordered, success-only replay for one ER working slot. V1 carries signed packets,
+//! Ordered, success-only replay for one ER working slot. V2 carries signed packets,
 //! not precomputed state changes, execution results, or roots.
 use {
     super::{
@@ -7,7 +7,7 @@ use {
     solana_runtime::{bank::Bank, bank_forks::BankForks},
 };
 
-const TAG: &[u8; 8] = b"NSERPK01";
+const TAG: &[u8; 8] = b"NSERPK02";
 // ContinuityV2 seals a checkpoint at 16 transitions. Do not use the larger
 // generic receipt-codec bound to admit more packets to this profile.
 pub const MAX_PACKETS: usize = 16;
@@ -86,7 +86,6 @@ pub fn replay_on_disposable_bank(
     expected_slot: u64,
     body: &[u8],
 ) -> Result<BatchObservation, Error> {
-    let packets = decode(expected_slot, body)?;
     if scratch.slot() != expected_slot || scratch.freeze_started() {
         return Err(Error::Slot);
     }
@@ -99,10 +98,19 @@ pub fn replay_on_disposable_bank(
     }
     let forks = BankForks::new_rw_arc_ephemeral(scratch);
     let bank = forks.read().unwrap().working_bank();
+    execute_batch(&bank, expected_slot, body)
+}
+
+pub(super) fn execute_batch(
+    bank: &Bank,
+    expected_slot: u64,
+    body: &[u8],
+) -> Result<BatchObservation, Error> {
+    let packets = decode(expected_slot, body)?;
     let mut transactions = Vec::with_capacity(packets.len());
     let mut entries = Vec::with_capacity(packets.len());
     for packet in packets {
-        let obs = execute_success(&bank, expected_slot, packet, ExecutionMode::AdvanceScratch)?;
+        let obs = execute_success(bank, expected_slot, packet, ExecutionMode::AdvanceScratch)?;
         entries.push(obs.receipt);
         transactions.push(obs);
     }
@@ -122,6 +130,9 @@ mod tests {
         let b: &[u8] = b"second";
         let body = encode(42, &[a, b]).unwrap();
         assert_eq!(decode(42, &body).unwrap(), [a, b]);
+        let mut legacy = body.clone();
+        legacy[..8].copy_from_slice(b"NSERPK01");
+        assert_eq!(decode(42, &legacy), Err(Error::Batch));
         assert_ne!(body, encode(42, &[b, a]).unwrap());
         assert_eq!(decode(43, &body), Err(Error::Slot));
         for end in 0..body.len() {
