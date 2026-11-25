@@ -1,15 +1,20 @@
 #[cfg(target_os = "solana")]
 mod accounting;
+#[cfg(not(target_os = "solana"))]
+pub mod audit_match;
 #[cfg(target_os = "solana")]
 mod custody;
 #[cfg(target_os = "solana")]
 mod deposit_credit;
+pub mod entitlement;
 pub mod instruction;
 #[cfg(not(target_os = "solana"))]
 pub mod liability;
 #[cfg(not(target_os = "solana"))]
 pub mod payout_schedule;
 pub mod state;
+#[cfg(not(target_os = "solana"))]
+pub mod trace_origin;
 
 #[cfg(any(target_os = "solana", test))]
 mod portal_abi;

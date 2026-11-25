@@ -1,0 +1,29 @@
+V2 token recipient entitlement: local x86_64 Linux run, 2026-11-24 (+03:00)
+Production, test and proof sources: 12872edc4495ec231efde3912d8fa7b000af4f3d
+Base: abcd457cde95763fca552c792ddaa50b0b3df14f
+
+Pinned Verus 0.2026.11.02.8bf68ee and bundled Z3 4.16.0; whole crate, --no-cheating.
+entitlement: 50 verified, 0 errors; ten controls each gave 49 verified and one expected
+production postcondition failure. The wire suite reproduced 15 verified and eight controls
+with the reusable pre-hash injectivity lemma. The remaining eleven summaries reproduced
+unchanged. Total: 13 suites, 203 verifier counts including rechecked imports, 73 controls.
+These are not 203 distinct financial guarantees. See entitlement.json for exact input hashes.
+
+SBF, platform-tools v1.56, SBPFv0, --locked (size, SHA-256):
+Portal default                   361328  3415a2e1d6292f8ed588f3cea3485c9419bc9424603250083097f3edd082589e
+Bridge default                   108864  b28e3ef9e64a6c33962374f82bc6f44a20cdd54e30d48904a4aca55f820cf928
+Portal checkpoint-continuity-v2  466928  ce9d2f0b8fba5e2bb4824fb291873a49df7932c1f86c9bd6a13b70df9a9885d7
+Bridge checkpoint-continuity-v2  140904  cac7e2f17b485e616abfe36dff8d797040dce13726321967788ed2328b54bb3b
+V2 CPI test fixture                      81cac3ff41505b330d69e19636a926ea458bb329cda2a7a512465866dda2d49c
+
+Northstar default library: 229 passed, six ignored. V2 library filter 'v2': 59 passed, 208
+filtered. Portal: 67 passed and one external-validator test ignored in each profile. Bridge:
+default 3 library and 17 core passed; V2 5 library and 3 accounting core passed (15 legacy core
+tests filtered). Workspace and V2 Clippy passed with -D warnings; cargo +nightly fmt --all passed.
+
+The first-bind bank regression failed on the base before enforcement: the altered destination
+was accepted. It now rejects the altered plans before installation and settles the original
+plan across restart. Two identical CPI requests in one transaction pay twice with separate
+consumed Portal tickets. The PDA-owner bridge test uses a native test controller calling the
+SBF bridge via invoke_signed; the ER CPI test uses the SBF continuity fixture.
+No live-validator deployment, production data, independent audit or binary attestation.

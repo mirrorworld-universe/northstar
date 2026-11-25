@@ -639,12 +639,22 @@ fn process_start_withdrawal(
     }
 
     let mut er_state = load_er_token_account(program_id, er_token_account)?;
-    require_er_account(
-        &er_state,
-        session_bridge.address(),
-        owner.address(),
-        &bridge.mint,
-    )?;
+    use crate::entitlement::{authorized, Source};
+    if !authorized(
+        owner.is_signer(),
+        Source {
+            owner: owner.address().as_array(),
+            registry: session_bridge.address().as_array(),
+            mint: bridge.mint.as_array(),
+        },
+        Source {
+            owner: &er_state.owner,
+            registry: &er_state.session_bridge,
+            mint: &er_state.mint,
+        },
+    ) {
+        return Err(ProgramError::InvalidAccountData);
+    }
     er_state.amount =
         deposit_credit::retire(er_state.amount, amount).ok_or(ProgramError::InsufficientFunds)?;
     store(er_token_account, &er_state)

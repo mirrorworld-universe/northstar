@@ -1,0 +1,44 @@
+{
+  "verus": "0.2026.11.02.8bf68ee",
+  "verus_commit": "8bf68ee741df833ea5d0fe6a2255126fdea87e47",
+  "z3": "Z3 version 4.16.0 - 64 bit",
+  "flags": [
+    "--crate-type",
+    "lib",
+    "--edition=2021",
+    "--no-cheating",
+    "--output-json",
+    "--time-expanded"
+  ],
+  "source_sha256": {
+    "src/audit_match.rs": "815fd9b5aed8127cf15d4e758a1590547234069f8f5a931e1371d0e2a0b123b4",
+    "proofs/cpi_audit.rs": "13c927a7e258ac9ad13dc032277e97cf0fed40de87ae0d0cd58ad36368c01761"
+  },
+  "runs": {
+    "production": {
+      "verdict": "verified",
+      "verified": 5,
+      "errors": 0
+    },
+    "wrong_trace_source": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 4,
+      "errors": 1
+    },
+    "ignore_write_difference": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 4,
+      "errors": 1
+    },
+    "ignore_effect_difference": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 4,
+      "errors": 1
+    },
+    "reject_single_cpi": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 4,
+      "errors": 1
+    }
+  }
+}

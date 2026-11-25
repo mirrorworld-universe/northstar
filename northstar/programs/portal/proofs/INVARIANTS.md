@@ -1,11 +1,14 @@
 # Portal and SPL bridge: verification map
 
-**Local run, 2026-11-21.** Twelve suites passed with zero verifier errors; all 63 controls failed their intended production postcondition. The latest two suites cover [what identifies a payout and what happens after a partial payout](PAYOUTS.md). The [aggregate liability proof and V2 journal gate](LIABILITIES.md) cover backing per vault. The earlier [bond](README.md) and [settlement](SETTLEMENT.md) records describe the component proofs. Suite counts include rechecked imports and are not counts of independent guarantees.
+**Local run, 2026-11-24.** The evidence set covers fifteen suites with zero verifier errors and 86 controls that each failed their intended production postcondition. The [optional CPI auditor](CPI-AUDIT.md) checks a withdrawal step against a fresh SVM execution on an independently pinned pre-state. The [withdrawal provenance proof](PROVENANCE.md) binds recorded token effects to retained calls and distinguishes signed message data from CPI trace evidence. The [recipient entitlement proof](ENTITLEMENT.md) connects a payout to one owner-authorized V2 withdrawal. Earlier suites cover [what identifies a payout and what happens after a partial payout](PAYOUTS.md). The [aggregate liability proof and V2 journal gate](LIABILITIES.md) cover backing per vault. The earlier [bond](README.md) and [settlement](SETTLEMENT.md) records describe the component proofs. Suite counts include rechecked imports and are not counts of independent guarantees.
 
 ## Verification scope
 
 | Suite | Property | Verus / controls |
 | --- | --- | ---: |
+| [CPI audit comparison](CPI-AUDIT.md) | A match requires identical execution, write and effect bytes and at least one observed CPI withdrawal. Re-execution and [offline cut reconstruction](CPI-AUDIT.md#reconstruct-the-bank-from-an-earlier-full-snapshot) are execution-tested, not part of the theorem. | 5 / 4 |
+| [V2 withdrawal provenance](PROVENANCE.md) | Replay reconstructs the signed or invoked withdrawal. Each occurrence preserves its call fields; CPI account visibility descends from its outer instruction. | 65 / 9 |
+| [V2 recipient entitlement](ENTITLEMENT.md) | A sealed plan preserves every authorized request's destination, mint, amount and multiplicity. A matched posting observes exact movement and cannot pay its ticket twice. | 50 / 10 |
 | [Payout wire encoding](PAYOUTS.md#which-payment-do-the-bytes-identify) | The pre-hash bytes distinguish every withdrawal tuple. Authorization and settlement use distinct messages; the bridge CPI preserves the tag and every argument. | 15 / 8 |
 | [V2 payout schedule](PAYOUTS.md#what-if-only-some-transfers-land) | From any paid prefix of a funded, ordered plan for one vault, retry pays no prefix item and posts each remaining counter exactly once in order. | 15 / 4 |
 | [Aggregate liabilities](LIABILITIES.md) | From a complete, balanced starting inventory, deposits, V2 ER execution and matched payouts preserve the sum of spendable, uncredited and unpaid claims. V2 recording and replay reject an unbalanced transaction per vault. | 50 / 10 |
@@ -36,7 +39,7 @@ Use the [pinned Verus setup](README.md#reproduce) with bundled Z3. From the repo
 
 ```bash
 set -eu
-for suite in custody credit batch range prefix liability wire schedule; do
+for suite in custody credit batch range prefix liability wire schedule entitlement provenance audit; do
   python3 northstar/programs/portal/proofs/check.py --suite "$suite" \
     --verus "$VERUS" --logs "target/proofs/$suite"
   cmp "target/proofs/$suite/summary.json" \
@@ -44,7 +47,7 @@ for suite in custody credit batch range prefix liability wire schedule; do
 done
 ```
 
-The [CI matrix](../../../../.github/workflows/verify-portal-bonds.yml) runs all twelve suites under `--no-cheating`. It checks whole-crate results and named functions and compares the proof input hashes and output counts with the recorded summaries. A negative control is accepted only for a specific failed production postcondition, never a compilation error or timeout. The [custody](evidence/extended/run.txt) and [payout](evidence/extended/payouts.txt) records identify the respective program revisions and local SBF artifacts.
+The [CI matrix](../../../../.github/workflows/verify-portal-bonds.yml) runs all fifteen suites under `--no-cheating`. It checks whole-crate results and named functions and compares the proof input hashes and output counts with the recorded summaries. A negative control is accepted only for a specific failed production postcondition, never a compilation error or timeout. The [custody](evidence/extended/run.txt), [payout](evidence/extended/payouts.txt) and [entitlement](evidence/extended/entitlement-run.txt) records identify the respective program revisions and local SBF artifacts.
 
 For execution, use the default and V2 [SBF build and test commands](SETTLEMENT.md#reproduction-and-independent-review). To run the additional 36 V2 bank regressions, first build the test-only CPI fixture into the **same V2 output directory**:
 

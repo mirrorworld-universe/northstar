@@ -2,14 +2,18 @@ use {
     super::*,
     crate::lineage_store_v2::{CheckpointLineageStoreV2, StartupModeV2},
     northstar_token_bridge::state::ErTokenAccount,
+    solana_signer::Signer,
 };
+
+#[path = "provenance_tests.rs"]
+mod provenance;
 
 fn holding(state: &CommittedStateV2, owner: u8, mint: u8, amount: u64) -> (Hash32, ErTokenAccount) {
     let portal = Pubkey::from(state.identity().portal);
     let context = state.identity().commitment(hash_parts).unwrap();
     let mint = Pubkey::from([mint; 32]);
     let registry = northstar_portal::find_session_bridge_v2_pda(&portal, &context, &mint).0;
-    let owner = Pubkey::from([owner; 32]);
+    let owner = solana_keypair::Keypair::new_from_array([owner; 32]).pubkey();
     let (key, bump) = northstar_token_bridge::find_er_token_account_pda(
         &northstar_token_bridge::id(),
         &registry,
@@ -107,10 +111,10 @@ fn execution(
         before: state.opening().unwrap(),
         after: next.opening().unwrap(),
         payload: TransitionPayloadV2::Execution {
-            transaction: vec![1],
+            transaction: test_execution_wire(1).0,
             pre,
             post,
-            execution_result: vec![],
+            execution_result: test_execution_wire(1).1,
             replay: vec![],
         },
         readonly_l1_values: vec![],
@@ -165,7 +169,10 @@ fn liability_replay_requires_an_offset_for_each_vault_and_pending_effect() {
             false,
         ),
     ] {
-        let tx = execution(&state, writes, effects);
+        let mut tx = execution(&state, writes, effects);
+        if valid {
+            provenance::sign(&mut tx, &state, a, t);
+        }
         let mut copy = state.clone();
         assert_eq!(tx.apply(&mut copy).is_ok(), valid, "{label}");
         if !valid {
@@ -220,10 +227,10 @@ fn liability_ingress_credits_only_its_authenticated_budget() {
             after: next.opening().unwrap(),
             payload: TransitionPayloadV2::TokenIngress {
                 record: input,
-                transaction: vec![1],
+                transaction: test_execution_wire(1).0,
                 pre,
                 post,
-                execution_result: vec![],
+                execution_result: test_execution_wire(1).1,
                 replay: vec![],
             },
             ..tx
@@ -234,6 +241,29 @@ fn liability_ingress_credits_only_its_authenticated_budget() {
             assert_eq!(copy, state);
         }
     }
+}
+
+#[test]
+fn invariant_v2_withdrawal_requires_retained_call_evidence() {
+    let mut state = CommittedStateV2::new(identity()).unwrap();
+    let (key, token) = holding(&state, 10, 1, 12);
+    seed_token(&mut state, key, token);
+    let mut record = execution(
+        &state,
+        vec![(key, ErTokenAccount { amount: 9, ..token })],
+        vec![event(key, token, 3)],
+    );
+    let TransitionPayloadV2::Execution { transaction, .. } = &mut record.payload else {
+        unreachable!()
+    };
+    transaction.clear();
+    transaction.push(1); // Nonempty bytes are not evidence of an authorized call.
+    let mut replay = state.clone();
+    assert!(
+        record.apply(&mut replay).is_err(),
+        "withdrawal needs a signed call"
+    );
+    assert_eq!(replay, state);
 }
 
 #[test]

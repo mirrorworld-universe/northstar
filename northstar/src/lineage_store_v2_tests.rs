@@ -126,6 +126,62 @@ fn regression_lineage_store_v2_settlement_plan_is_durable_and_immutable() {
 }
 
 #[test]
+fn invariant_v2_reopen_rechecks_entitlement_in_a_preexisting_capsule() {
+    use solana_pubkey::Pubkey;
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("state");
+    let mut store =
+        CheckpointLineageStoreV2::open(&directory, identity(), None, StartupModeV2::InitializeNew)
+            .unwrap();
+    store.append(transition(store.accepted_state())).unwrap();
+    let artifact =
+        build_checkpoint_artifact_v2(store.accepted_state(), 1, store.unsealed()).unwrap();
+    store
+        .seal([70; 32], 1, borsh::to_vec(&artifact).unwrap())
+        .unwrap();
+    let bridge = Pubkey::new_unique();
+    let registry = Pubkey::new_unique();
+    let mut plan = crate::settlement::SettlementPlan {
+        er_slot: 1,
+        checksum: [0; 32],
+        chunks: vec![],
+        owner_changes: vec![],
+        lamport_changes: vec![],
+        receipt_balances: vec![],
+        token_withdrawals: vec![crate::settlement::TokenWithdrawalSettlement {
+            bridge_program: bridge,
+            session_bridge: registry,
+            er_token_account: Pubkey::new_unique(),
+            vault: northstar_token_bridge::find_token_vault_pda(&bridge, &registry).0,
+            vault_token_account: Pubkey::new_unique(),
+            l1_destination_token_account: Pubkey::new_unique(),
+            mint: Pubkey::new_unique(),
+            token_program: spl_token_interface::id(),
+            amount: 1,
+            withdrawn: 1,
+            decimals: 6,
+        }],
+        unsupported_changes: vec![],
+    };
+    plan.checksum = plan.recomputed_checksum();
+    // Exercise the reader for an older, self-consistent capsule: the artifact has no token effects.
+    let mut retained = store.capsule.clone();
+    retained.sealed.as_mut().unwrap().settlement_plan =
+        Some(borsh::to_vec(&crate::DurableSettlementPlan::from(&plan)).unwrap());
+    store.install(&retained).unwrap();
+    drop(store);
+    let before = std::fs::read(directory.join(CAPSULE_FILE)).unwrap();
+    let error = CheckpointLineageStoreV2::open(&directory, identity(), None, StartupModeV2::Resume)
+        .err()
+        .expect("unmatched plan must not resume");
+    assert!(
+        error.to_string().contains("authorized occurrences"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(directory.join(CAPSULE_FILE)).unwrap(), before);
+}
+
+#[test]
 fn regression_v2_retains_successor_while_only_accepting_sealed_prefix() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("state");
@@ -327,10 +383,10 @@ fn regression_lineage_store_v2_rejects_unsealable_transitions_without_mutation()
         before: opening,
         after: opening,
         payload: TransitionPayloadV2::Execution {
-            transaction: vec![1],
+            transaction: crate::continuity_v2::test_execution_wire(1).0,
             pre: vec![],
             post: vec![],
-            execution_result: vec![],
+            execution_result: crate::continuity_v2::test_execution_wire(1).1,
             replay: vec![0; crate::checkpoint::MAX_TRANSACTION_EFFECT_BYTES_V1],
         },
         readonly_l1_values: vec![],

@@ -16,6 +16,8 @@ use {
     },
 };
 
+mod token_entitlement;
+
 const FORMAT_VERSION: u16 = 3;
 const MAX_CAPSULE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SETTLEMENT_PLAN_BYTES: usize = 1024 * 1024;
@@ -146,7 +148,7 @@ impl LineageCapsuleV2 {
                 return Err(invalid("sealed artifact differs from retained transitions"));
             }
             if let Some(plan) = &sealed.settlement_plan {
-                decode_settlement_plan(plan, sealed.er_slot)?;
+                decode_settlement_plan(plan, sealed)?;
             }
             let mut result = sealed.base.clone();
             for transition in &sealed.transitions {
@@ -169,16 +171,17 @@ impl LineageCapsuleV2 {
 
 fn decode_settlement_plan(
     bytes: &[u8],
-    er_slot: u64,
+    sealed: &SealedCheckpointV2,
 ) -> io::Result<crate::settlement::SettlementPlan> {
     if bytes.is_empty() || bytes.len() > MAX_SETTLEMENT_PLAN_BYTES {
         return Err(invalid("settlement plan exceeds its encoding bound"));
     }
     let durable: crate::DurableSettlementPlan = borsh::from_slice(bytes)?;
     let plan = crate::settlement::SettlementPlan::from(durable);
-    if plan.er_slot != er_slot || plan.recomputed_checksum() != plan.checksum {
+    if plan.er_slot != sealed.er_slot || plan.recomputed_checksum() != plan.checksum {
         return Err(invalid("settlement plan checksum or slot differs"));
     }
+    token_entitlement::validate(&sealed.transitions, &plan.token_withdrawals)?;
     Ok(plan)
 }
 
@@ -542,7 +545,7 @@ impl CheckpointLineageStoreV2 {
             ));
         }
         let bytes = borsh::to_vec(&crate::DurableSettlementPlan::from(plan))?;
-        decode_settlement_plan(&bytes, sealed.er_slot)?;
+        decode_settlement_plan(&bytes, sealed)?;
         if let Some(existing) = &sealed.settlement_plan {
             if existing != &bytes {
                 return Err(invalid("established settlement plan changed"));
@@ -566,7 +569,7 @@ impl CheckpointLineageStoreV2 {
                 sealed
                     .settlement_plan
                     .as_ref()
-                    .map(|bytes| decode_settlement_plan(bytes, sealed.er_slot))
+                    .map(|bytes| decode_settlement_plan(bytes, sealed))
             })
             .transpose()
     }

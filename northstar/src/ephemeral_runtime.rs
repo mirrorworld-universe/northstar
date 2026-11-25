@@ -319,7 +319,7 @@ impl EphemeralRuntime {
     /// side effects (stake-history rebuild, `begin_partitioned_rewards`,
     /// `update_epoch_stakes`, `distribute_partitioned_epoch_rewards`). That
     /// makes it safe for the ER slot to land in an arbitrarily distant epoch.
-    fn er_slot_for(parent: &Bank) -> u64 {
+    pub(crate) fn er_slot_for(parent: &Bank) -> u64 {
         const ER_SLOT_OFFSET: u64 = 1u64 << 40;
         parent.slot().saturating_add(ER_SLOT_OFFSET)
     }
@@ -421,7 +421,7 @@ impl EphemeralRuntime {
         self.retired_bank_forks_pending.load(Ordering::Relaxed)
     }
 
-    fn prepare_initial_working_bank(bank: &Bank) {
+    pub(crate) fn prepare_initial_working_bank(bank: &Bank) {
         let ticks_per_slot = bank.ticks_per_slot();
         bank.set_tick_height(bank.max_tick_height() - ticks_per_slot);
     }
@@ -1205,7 +1205,7 @@ impl EphemeralRuntime {
             .identity()
             .commitment(crate::continuity_v2::hash_parts)
             .map_err(std::io::Error::other)?;
-        let mut expected_tokens = std::collections::BTreeMap::new();
+        let mut has_token_effects = false;
         for transition in store.pending_transitions() {
             for effect in &transition.settlement_effects {
                 match borsh::from_slice::<SettlementEffectV2>(effect)? {
@@ -1237,47 +1237,14 @@ impl EphemeralRuntime {
                             return Ok(false);
                         }
                     }
-                    SettlementEffectV2::TokenWithdrawal {
-                        bridge,
-                        session_bridge,
-                        account,
-                        destination,
-                        amount,
-                        decimals,
-                        ..
-                    } => {
-                        let total = expected_tokens
-                            .entry((bridge, session_bridge, account, destination, decimals))
-                            .or_insert(0u64);
-                        *total = total
-                            .checked_add(amount)
-                            .ok_or_else(|| std::io::Error::other("token effect total overflow"))?;
-                    }
+                    SettlementEffectV2::TokenWithdrawal { .. } => has_token_effects = true,
                 }
             }
         }
+        // The store validates exact occurrences, not just amounts per recipient.
         let plan = store.settlement_plan()?;
-        let mut planned_tokens = std::collections::BTreeMap::new();
-        if let Some(plan) = &plan {
-            for withdrawal in &plan.token_withdrawals {
-                let total = planned_tokens
-                    .entry((
-                        withdrawal.bridge_program.to_bytes(),
-                        withdrawal.session_bridge.to_bytes(),
-                        withdrawal.er_token_account.to_bytes(),
-                        withdrawal.l1_destination_token_account.to_bytes(),
-                        withdrawal.decimals,
-                    ))
-                    .or_insert(0u64);
-                *total = total
-                    .checked_add(withdrawal.amount)
-                    .ok_or_else(|| std::io::Error::other("token payout total overflow"))?;
-            }
-        }
-        if expected_tokens != planned_tokens {
-            return Err(std::io::Error::other(
-                "sealed token payout plan differs from effects",
-            ));
+        if plan.is_none() && has_token_effects {
+            return Err(std::io::Error::other("sealed token payouts have no plan"));
         }
         if let Some(plan) = &plan {
             if !self.token_payouts_complete_v2(

@@ -133,10 +133,22 @@ impl EphemeralTransactionClient {
                 .map_err(|_| solana_transaction::TransactionError::CommitCancelled)?;
             let wire = bincode::serialize(transaction)
                 .map_err(|_| solana_transaction::TransactionError::CommitCancelled)?;
-            let replay = replay
+            let mut replay = replay
                 .get(position)
                 .and_then(Clone::clone)
                 .unwrap_or_default();
+            let mut readonly_l1_values = Vec::new();
+            if ingress.is_none() && status.is_ok() {
+                crate::continuity_v2::token_provenance::capture(
+                    bank,
+                    transaction,
+                    &output.inner,
+                    self.sync_status.latest_l1_slot(),
+                    &mut replay,
+                    &mut readonly_l1_values,
+                )
+                .map_err(|e| self.v2_invalid_transition(e))?;
+            }
             let payload = if let Some(record) = ingress {
                 state
                     .apply_token_ingress_execution(&record, &pre, &post)
@@ -161,7 +173,6 @@ impl EphemeralTransactionClient {
                     replay,
                 }
             };
-            let mut readonly_l1_values = Vec::new();
             if let Some(executed) = processed.executed_transaction() {
                 for (key, value) in &executed.loaded_transaction.accounts {
                     if !state.accounts().contains_key(&key.to_bytes()) && !outputs.contains_key(key)
@@ -179,7 +190,14 @@ impl EphemeralTransactionClient {
             readonly_l1_values.sort_unstable_by_key(|value| value.account);
             readonly_l1_values.dedup_by_key(|value| value.account);
             let settlement_effects = if status.is_ok() && ingress.is_none() {
-                self.v2_settlement_effects(bank, transaction, &output.inner, &mut state)?
+                Self::v2_settlement_effects(
+                    &self.portal_program_id,
+                    bank,
+                    transaction,
+                    &output.inner,
+                    &mut state,
+                )?
+                .0
             } else {
                 vec![]
             };
@@ -302,14 +320,15 @@ impl EphemeralTransactionClient {
         Ok(false)
     }
 
-    fn v2_settlement_effects(
-        &self,
+    pub(crate) fn v2_settlement_effects(
+        portal: &Pubkey,
         bank: &Bank,
         transaction: &VersionedTransaction,
         inner: &[RecordedInnerInstructionV2],
         state: &mut CommittedStateV2,
-    ) -> Result<Vec<Vec<u8>>, solana_transaction::TransactionError> {
+    ) -> Result<(Vec<Vec<u8>>, usize), solana_transaction::TransactionError> {
         use borsh::BorshDeserialize;
+        let mut token_cpis = 0;
         let addresses = Self::load_transaction_addresses(bank, transaction).unwrap_or_default();
         let keys = Self::full_account_keys(transaction, &addresses);
         let mut effects = Vec::new();
@@ -339,7 +358,7 @@ impl EphemeralTransactionClient {
             let Some(program) = keys.get(instruction.program_id_index as usize) else {
                 continue;
             };
-            let effect = if program == &self.portal_program_id
+            let effect = if program == portal
                 && instruction.data.len() == 9
                 && instruction.data[0] == 13
                 && instruction.accounts.len() >= 5
@@ -387,31 +406,34 @@ impl EphemeralTransactionClient {
                         .ok_or(solana_transaction::TransactionError::CommitCancelled)?,
                 }
             } else {
-                let Ok(
-                    northstar_token_bridge::instruction::TokenBridgeInstruction::StartWithdrawal {
-                        amount,
-                        decimals,
-                    },
-                ) = borsh::from_slice(&instruction.data)
+                let Some((amount, decimals)) =
+                    northstar_token_bridge::trace_origin::withdrawal(&instruction.data)
                 else {
                     continue;
                 };
                 if instruction.accounts.len() < 7 {
                     continue;
                 }
-                let (Some(owner), Some(account), Some(bridge), Some(portal), Some(destination)) = (
+                let (
+                    Some(owner),
+                    Some(account),
+                    Some(bridge),
+                    Some(call_portal),
+                    Some(destination),
+                ) = (
                     keys.get(instruction.accounts[0] as usize),
                     keys.get(instruction.accounts[1] as usize),
                     keys.get(instruction.accounts[2] as usize),
                     keys.get(instruction.accounts[3] as usize),
                     keys.get(instruction.accounts[4] as usize),
-                ) else {
+                )
+                else {
                     return Err(solana_transaction::TransactionError::CommitCancelled);
                 };
                 let Some(registration) = bank.get_account(bridge) else {
                     continue;
                 };
-                if registration.owner() != &self.portal_program_id {
+                if registration.owner() != portal {
                     continue;
                 }
                 let Ok(frame) =
@@ -427,7 +449,7 @@ impl EphemeralTransactionClient {
                     .commitment(crate::continuity_v2::hash_parts)
                     .map_err(|_| solana_transaction::TransactionError::CommitCancelled)?;
                 let (expected, bump) = northstar_portal::find_session_bridge_v2_pda(
-                    &self.portal_program_id,
+                    portal,
                     &context,
                     &frame.base.mint,
                 );
@@ -449,31 +471,51 @@ impl EphemeralTransactionClient {
                     northstar_token_bridge::state::ErTokenAccount::try_from_slice(&value.data)
                         .map_err(|_| solana_transaction::TransactionError::CommitCancelled)?;
                 if !registration_state.is_valid()
-                    || registration.owner() != &self.portal_program_id
+                    || registration.owner() != portal
                     || registration_state.bridge_program != *program
-                    || *portal != self.portal_program_id
+                    || *call_portal != *portal
                     || value.owner != program.to_bytes()
                     || !token.is_valid()
-                    || token.owner != owner.to_bytes()
-                    || token.session_bridge != bridge.to_bytes()
-                    || token.mint != registration_state.mint.to_bytes()
                     || keys.get(instruction.accounts[5] as usize)
                         != Some(&registration_state.token_program)
                     || keys.get(instruction.accounts[6] as usize) != Some(&registration_state.mint)
-                    || (top_level
-                        && !transaction
-                            .message
-                            .is_signer(instruction.accounts[0] as usize))
                 {
                     return Err(solana_transaction::TransactionError::CommitCancelled);
                 }
+                use northstar_token_bridge::entitlement::{issue, Intent, Source};
+                // A successful inner bridge call already passed the SVM signer check in
+                // StartWithdrawal. A PDA signer need not sign the outer transaction.
+                let signed = !top_level
+                    || transaction
+                        .message
+                        .is_signer(instruction.accounts[0] as usize);
+                let request = issue(
+                    signed,
+                    owner.as_array(),
+                    Source {
+                        owner: &token.owner,
+                        registry: &token.session_bridge,
+                        mint: &token.mint,
+                    },
+                    Intent {
+                        bridge: program.to_bytes(),
+                        registry: bridge.to_bytes(),
+                        source: account.to_bytes(),
+                        mint: registration_state.mint.to_bytes(),
+                        destination: destination.to_bytes(),
+                        amount,
+                        decimals,
+                    },
+                )
+                .ok_or(solana_transaction::TransactionError::CommitCancelled)?;
+                token_cpis += usize::from(!top_level);
                 SettlementEffectV2::TokenWithdrawal {
-                    bridge: program.to_bytes(),
-                    session_bridge: bridge.to_bytes(),
-                    account: account.to_bytes(),
-                    destination: destination.to_bytes(),
-                    amount,
-                    decimals,
+                    bridge: request.bridge,
+                    session_bridge: request.registry,
+                    account: request.source,
+                    destination: request.destination,
+                    amount: request.amount,
+                    decimals: request.decimals,
                     cumulative_withdrawn: state
                         .withdrawn(account.to_bytes())
                         .checked_add(amount)
@@ -486,10 +528,13 @@ impl EphemeralTransactionClient {
                 .map_err(|_| solana_transaction::TransactionError::CommitCancelled)?;
             state
                 .apply_settlement_effects(std::slice::from_ref(&encoded))
-                .map_err(|error| self.v2_invalid_transition(error))?;
+                .map_err(|error| {
+                    warn!("Invalid settlement effect: {error}");
+                    solana_transaction::TransactionError::CommitCancelled
+                })?;
             effects.push(encoded);
         }
-        Ok(effects)
+        Ok((effects, token_cpis))
     }
 }
 

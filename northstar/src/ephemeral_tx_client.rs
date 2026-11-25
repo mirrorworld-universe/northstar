@@ -1408,7 +1408,7 @@ impl EphemeralTransactionClient {
         }
     }
 
-    fn batch_uses_upgradeable_loader(txs: &[VersionedTransaction]) -> bool {
+    pub(crate) fn batch_uses_upgradeable_loader(txs: &[VersionedTransaction]) -> bool {
         txs.iter().any(|tx| {
             tx.message.instructions().iter().any(|ix| {
                 tx.message

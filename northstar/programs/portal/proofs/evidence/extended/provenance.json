@@ -1,0 +1,79 @@
+{
+  "verus": "0.2026.11.02.8bf68ee",
+  "verus_commit": "8bf68ee741df833ea5d0fe6a2255126fdea87e47",
+  "z3": "Z3 version 4.16.0 - 64 bit",
+  "flags": [
+    "--crate-type",
+    "lib",
+    "--edition=2021",
+    "--no-cheating",
+    "--output-json",
+    "--time-expanded"
+  ],
+  "source_sha256": {
+    "src/trace_origin.rs": "ba96bdafa2236244a549e5c9fc5936371bce862a5219e8230ad32a1b4bbd595a",
+    "proofs/withdrawal_provenance.rs": "fb1cd9c56e09df764034e8631a566d4ed22901766cbac5843defec1e1e87dc7c",
+    "proofs/recipient_entitlement.rs": "ccc8b8902a8febc7ba634cf8bd2b86341897d4daea8a05bddbc4a5d24b8f395c",
+    "src/entitlement.rs": "3fe500c367acf03011dc3cd454617481dd61b2b8bb7126326c320e9bf4b2a765",
+    "proofs/token_accounting.rs": "74777abb8db8f4ab6735ca1b7a72914f14aee86883cdf99a0e1ae549d9b88d4c",
+    "src/accounting.rs": "3a67bb1926a297ff5eae59637fcf7dc1292671c6aea8b948a0ad65da9b6766c2",
+    "proofs/vault_custody.rs": "425d9d4f87026f12df85faac60a41c76e4efb8ad2368b29da3f39295b31894f0",
+    "src/custody.rs": "c0d8b472db112a990adcd632f44e272eae42889d63da1b0821211094e2fdad3a",
+    "../portal/proofs/token_authorization.rs": "f4e6af90b773efd680fa221f6003b834988d2fae373cea40f109c1b55bb6cc33",
+    "../portal/src/withdrawal_auth.rs": "6878e94950de29e2a5d53b07d9074241a528991254ae60a9233bce29c2787dc2",
+    "../portal/proofs/payout_transcript.rs": "0b2f5e2db1f3cf3540f424b7407ceb2af63713a284d938c4877fb0d39ae32a11",
+    "../portal/src/payout_wire.rs": "735a249680c81de94a7d59cee03320e3c24ce762c0616a6aa8e41912771d182d"
+  },
+  "runs": {
+    "production": {
+      "verdict": "verified",
+      "verified": 65,
+      "errors": 0
+    },
+    "wrong_instruction": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 64,
+      "errors": 1
+    },
+    "wrong_amount_digit": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 64,
+      "errors": 1
+    },
+    "wrong_decimal_byte": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 64,
+      "errors": 1
+    },
+    "wrong_source": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 64,
+      "errors": 1
+    },
+    "wrong_destination": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 64,
+      "errors": 1
+    },
+    "unsigned_direct": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 64,
+      "errors": 1
+    },
+    "reject_cpi_authority": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 64,
+      "errors": 1
+    },
+    "reject_immediate_child": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 64,
+      "errors": 1
+    },
+    "unlisted_child_account": {
+      "verdict": "postcondition rejected as expected",
+      "verified": 64,
+      "errors": 1
+    }
+  }
+}
