@@ -6,7 +6,7 @@
 
 | Suite | Property | Verus / controls |
 | --- | --- | ---: |
-| [CPI audit comparison](CPI-AUDIT.md) | A match requires identical execution, write and effect bytes and at least one observed CPI withdrawal. Re-execution is tested separately. | 5 / 4 |
+| [CPI audit comparison](CPI-AUDIT.md) | A match requires identical execution, write and effect bytes and at least one observed CPI withdrawal. Re-execution and [offline cut reconstruction](CPI-AUDIT.md#reconstruct-the-bank-from-an-earlier-full-snapshot) are execution-tested, not part of the theorem. | 5 / 4 |
 | [V2 withdrawal provenance](PROVENANCE.md) | Replay reconstructs the signed or invoked withdrawal. Each occurrence preserves its call fields; CPI account visibility descends from its outer instruction. | 65 / 9 |
 | [V2 recipient entitlement](ENTITLEMENT.md) | A sealed plan preserves every authorized request's destination, mint, amount and multiplicity. A matched posting observes exact movement and cannot pay its ticket twice. | 50 / 10 |
 | [Payout wire encoding](PAYOUTS.md#which-payment-do-the-bytes-identify) | The pre-hash bytes distinguish every withdrawal tuple. Authorization and settlement use distinct messages; the bridge CPI preserves the tag and every argument. | 15 / 8 |

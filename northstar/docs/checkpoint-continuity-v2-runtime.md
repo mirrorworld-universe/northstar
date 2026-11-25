@@ -41,7 +41,9 @@ boundary. A failed persistence operation cancels SVM commit and quarantines the
 runtime. This capture does not itself verify SVM execution or independently
 authenticate arbitrary readonly L1 inputs. The optional [CPI withdrawal audit](../programs/portal/proofs/CPI-AUDIT.md)
 can re-execute a selected transaction against an independently pinned pre-state.
-Checkpoint admission and recovery do not require or invoke it.
+For the first ER slot it can also restore a full snapshot and replay a pinned ordered
+prefix offline. It must match a separate reference hash at the transaction boundary.
+Checkpoint admission and recovery do not require or invoke either path.
 
 ## Durable recovery
 

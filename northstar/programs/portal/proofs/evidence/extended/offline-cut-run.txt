@@ -1,0 +1,31 @@
+Local validation: offline V2 CPI withdrawal cut, 2026-11-25
+Code and regression: 8d8c7d8f2179aafb4d1d22fccfeb95740cab6b91
+
+The fixture creates a full Agave archive for completed slot 1. A separate bank
+constructed from the fixture inputs, without loading the archive, supplies the
+reference cut in the first ER slot. One legacy and one V0 transaction debit a
+PDA-owned holding by 1 and 2. The V0 message loads the holding via its historical
+address table. Replay restores the archived parent with full verification, replays
+the ordered prefix, and matches the separately frozen bank at balance 42. The
+read-only target then reproduces two 3-token CPI debits and cumulative effects 6
+and 9. The producer commits them, ending at 36; the reference stays at 42.
+
+Rejection checks: reordered or omitted prefix, omission even with a newly computed
+prefix digest, repeated signature, target included in prefix, invalid signature,
+wrong genesis, archive digest, archive size, or restored bank hash. The source
+archive remains identical and the private restore directory is cleaned up.
+
+Northstar V2 library filter `v2`: 68 passed, 208 filtered. Default Northstar
+library: 234 passed, 6 ignored. Workspace and V2 Clippy passed with -D warnings;
+nightly workspace formatting and diff whitespace checks passed. The unchanged
+pinned Verus audit comparator reproduced its reviewed summary: 5 verified, 0
+errors; all 4 controls failed the intended postcondition. This result does not
+extend the theorem to the archive loader or SVM.
+
+SBF artifacts used (SHA-256):
+Portal              ce9d2f0b8fba5e2bb4824fb291873a49df7932c1f86c9bd6a13b70df9a9885d7
+Token bridge        cac7e2f17b485e616abfe36dff8d797040dce13726321967788ed2328b54bb3b
+Continuity fixture  070727186043537bce7069c9c4d5011d5a295288cd7f190e7de06b786eeb2b08
+
+Synthetic bank history, actual snapshot loader and SBF execution. No live
+checkpoint, external historical bank, deployed binary or payout was attested.

@@ -7,10 +7,22 @@ A retained inner instruction is not a signature. The optional [step auditor](../
 Call `northstar::withdrawal_audit_v2::audit(bank, artifact, &pins)` with the `checkpoint-continuity-v2` feature. Supply these independently:
 
 - The checkpoint binding and selected step index from the checkpoint under review, and the V2 state root at that step's **pre-state**, including the withdrawal counters.
-- A frozen, isolated bank at precisely that transaction boundary. Pin its slot and bank hash from a trusted reconstruction. Restore the full account set with account-hash verification enabled and **no slot-load limit**, or replay it independently from trusted inputs. Use the correct runtime, features, program cache and historical sysvars. A matching slot alone, an end-of-slot snapshot after the transaction, a current RPC bank, or pins copied from the submitted capsule are not substitutes. The API does not acquire or attest this bank; it rejects the explicit skip-hash configuration.
+- A frozen, isolated bank at precisely that transaction boundary. Pin its slot and bank hash from a trusted reconstruction. Restore the full account set with account-hash verification enabled and **no slot-load limit**, or replay it independently from trusted inputs. Use the correct runtime, features, program cache and historical sysvars. A matching slot alone, an end-of-slot snapshot after the transaction, a current RPC bank, or pins copied from the submitted capsule are not substitutes. The bank-taking API does not acquire this bank; it rejects the explicit skip-hash configuration. For the supported first-slot profile, the archive-taking API below can reconstruct it offline.
 - The reviewed bridge program ID and SHA-256 of its loader-visible code. For the immutable BPF loader, the auditor hashes the program bytes. For the upgradeable loader, it hashes the bytes after the canonical ProgramData header, including padding. An unavailable image or a deployment in the selected slot cannot establish the upgradeable image in use.
 
 `Ok(VerifiedStep)` identifies the signature, step, checkpoint binding, bank hash, and numbers of withdrawals and CPI withdrawals. `Unavailable` means no verdict: for example, a missing or mismatched pin, unresolved historical table, or no observed CPI withdrawal. `Mismatch` means the pinned artifact fails validation or disagrees with the observations under those inputs. Neither failure is a positive audit result or an automatic dispute decision.
+
+## Reconstruct the bank from an earlier full snapshot
+
+[`reconstruction::audit_from_full_snapshot`](../../../src/withdrawal_audit_v2/reconstruction.rs) takes local inputs only. In addition to the `AuditPins` above, supply the genesis config, one named Agave **full** snapshot archive, an auditor-controlled scratch directory, an ordered list of signed prefix transaction bytes, and `ReplayPins`:
+
+- Pin the genesis hash, parent slot and frozen parent **bank hash**. Separately pin the compressed archive's byte length and SHA-256. The snapshot hash in its filename is not the bank hash or the digest of the file. Pinning the file also covers the archived status cache. The loader verifies the accounts and bank, with index checking and no slot-load limit. It reads a private checked copy and never modifies the supplied archive.
+- Pin `ordered_cut_digest(prefix, target)` from an independent transaction log. The digest covers the count, order, length and contents of every signed frame, including the selected target as the last frame. A bank hash alone cannot distinguish two orderings with the same final state. The target comes from the selected checkpoint page; **it must not occur in the prefix**.
+- Pin the bank hash of the **frozen cut immediately before the target** from a separate reference. The reconstruction must match this value, not print a new value for the auditor to trust. The V2 pre-state root and its withdrawal counters remain separate pins; replaying bank transactions does not reconstruct journal metadata.
+
+Supported: one isolated ER root at `parent.slot + 2^40`, default slot duration, zero fees, up to 256 successful recent-blockhash transactions, one at a time. Legacy and V0 prefix transactions are supported; V0 addresses resolve from the reconstructed bank. Only the prefix commits, inside the temporary fork. The target then runs through the existing read-only auditor.
+
+Not supported: incremental-only snapshots, later ER slots, intervening ticks or bank rotations, failed prefix transactions, or history requiring external account injections, delegation overlays or readonly L1 refreshes. Do not omit such inputs or supply a producer's account images as a substitute. A matching independently sourced ordered history and reference cut are required. This is a transaction-boundary replay, not a replay of ER admission policy, PoH, or the complete checkpoint.
 
 ## What the comparison covers
 
@@ -32,7 +44,9 @@ Build the V2 Portal, bridge and continuity fixture SBF artifacts as in the [CI e
 
 ```sh
 BPF_OUT_DIR="$out" TOKEN_BRIDGE_BPF_OUT_DIR="$out" cargo test --locked -p northstar \
-  --features checkpoint-continuity-v2 --lib invariant_v2_audit_reexecutes_pda_signed_calls
+  --features checkpoint-continuity-v2 --lib withdrawal_audit_v2
 ```
 
-See the [local run record](evidence/extended/cpi-audit-run.txt) for artifact hashes and test scope. No production transaction or third-party snapshot was attested in that run.
+The [archive regression](../../../src/withdrawal_audit_v2/tests/archive.rs) restores a real Agave archive generated from test state. A separately constructed reference bank executes the same signed prefix without the archive loader. Both reach the same frozen cut after debits of 1 and 2, then match both CPI withdrawals in the target. One prefix transaction resolves the holding from a historical V0 lookup table. Omitting a transaction still fails the independent cut hash even if the shorter list is re-pinned.
+
+See the [comparator run](evidence/extended/cpi-audit-run.txt) and [reconstruction run](evidence/extended/offline-cut-run.txt). Reconstruction is execution-tested, not a Verus proof of the snapshot loader or the SVM. Neither run attested a live withdrawal.
