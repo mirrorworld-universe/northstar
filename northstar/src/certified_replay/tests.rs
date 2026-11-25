@@ -8,6 +8,8 @@ use {
     std::sync::{Arc, RwLock},
 };
 
+mod single_replica;
+
 const ROOT_SLOT: u64 = 80;
 const ER_SLOT: u64 = (1 << 40) + 17;
 
@@ -31,6 +33,10 @@ fn account(owner: Pubkey, data: Vec<u8>, executable: bool) -> AccountSharedData 
 
 impl Fixture {
     fn new() -> Self {
+        Self::at(ER_SLOT)
+    }
+
+    fn at(er_slot: u64) -> Self {
         let genesis = create_genesis_config(1_000_000_000).genesis_config;
         let portal = Pubkey::new_unique();
         let (session, bump) = northstar_portal::find_session_pda(&portal);
@@ -47,7 +53,7 @@ impl Fixture {
                 validator: Pubkey::new_unique(),
                 settlement_interval_slots: 10,
                 last_settled_l1_slot: 70,
-                last_settled_er_slot: ER_SLOT,
+                last_settled_er_slot: er_slot,
                 settlement_status: SettlementStatus::Idle,
                 settlement_er_slot: 0,
                 settlement_checksum: [0; 32],
@@ -66,11 +72,11 @@ impl Fixture {
         let state = CommittedStateV2::new(identity).unwrap();
         let opening = state.opening().unwrap();
         let state_root = opening.commitment(hash_parts).unwrap();
-        let (address, bump) = northstar_portal::find_checkpoint_pda(&portal, &session, ER_SLOT);
+        let (address, bump) = northstar_portal::find_checkpoint_pda(&portal, &session, er_slot);
         let cp = Checkpoint {
             discriminator: Checkpoint::DISCRIMINATOR,
             session,
-            er_slot: ER_SLOT,
+            er_slot,
             step_count: 1,
             previous_state_root: state_root,
             new_state_root: state_root,
@@ -106,7 +112,7 @@ impl Fixture {
             discriminator: CheckpointCursor::DISCRIMINATOR,
             session,
             latest_finalized_checkpoint: address,
-            latest_finalized_er_slot: ER_SLOT,
+            latest_finalized_er_slot: er_slot,
             latest_finalized_state_root: state_root,
             active_checkpoint: Pubkey::default(),
             active_er_slot: 0,
@@ -130,7 +136,7 @@ impl Fixture {
         let header = CheckpointCommitmentV1 {
             version: 2,
             session,
-            er_slot: ER_SLOT,
+            er_slot,
             step_count: 1,
             previous_state_root: state_root,
             new_state_root: state_root,
@@ -142,7 +148,7 @@ impl Fixture {
         };
         let checkpoint = L1CheckpointHeadV2 {
             checkpoint: address.to_bytes(),
-            er_slot: ER_SLOT,
+            er_slot,
             state_root,
             checkpoint_hash: checkpoint_binding_hash_v2(&header, &opening, &opening).unwrap(),
         };

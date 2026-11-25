@@ -3539,6 +3539,7 @@ dependencies = [
  "solana-reward-info",
  "solana-runtime-transaction",
  "solana-sdk-ids",
+ "solana-sha256-hasher",
  "solana-signer",
  "solana-slot-hashes",
  "solana-stake-interface",

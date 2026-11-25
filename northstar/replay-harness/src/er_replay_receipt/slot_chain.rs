@@ -27,7 +27,6 @@ pub struct BankPin {
 
 pub struct SlotChain {
     pin: BankPin,
-    history: SlotHashes,
     epoch: RecentHashEpoch,
     first: bool,
 }
@@ -106,14 +105,13 @@ impl SlotChain {
         max_age: u32,
         full_bank: &Bank,
     ) -> Result<Self, Error> {
-        let (pin, history) = observe(full_bank)?;
+        let pin = Self::measure(full_bank)?;
         let epoch = RecentHashEpoch::new(start_id, expected.slot, max_age).ok_or(Error::Context)?;
         if pin != expected {
             return Err(Error::Context);
         }
         Ok(Self {
             pin,
-            history,
             epoch,
             first: true,
         })
@@ -137,32 +135,8 @@ impl SlotChain {
     }
 
     fn step(&self, mut scratch: Bank, body: Option<&[u8]>) -> Result<ReplayedSlot, Error> {
-        let parent = scratch.parent().ok_or(Error::Context)?;
         let slot = scratch.slot();
-        if self.pin.slot.checked_add(1) != Some(slot)
-            || scratch.parent_slot() != self.pin.slot
-            || scratch.parent_hash().to_bytes() != self.pin.bank_hash
-            || Self::measure(&parent)? != self.pin
-            || scratch.freeze_started()
-            || scratch.clock().slot != slot
-            || scratch.transaction_count() != parent.transaction_count()
-            || scratch.signature_count() != 0
-            || scratch
-                .accounts()
-                .accounts_db
-                .has_accounts_update_notifier()
-            || scratch.tick_height() != parent.max_tick_height()
-            || !(1..=1024).contains(&scratch.ticks_per_slot())
-            || scratch.tick_height().checked_add(scratch.ticks_per_slot())
-                != Some(scratch.max_tick_height())
-        {
-            return Err(Error::Context);
-        }
-        let (rows, _) = history(&scratch)?;
-        let retain = self.history.len().min(MAX_ENTRIES - 1);
-        if rows.slot_hashes().get(1..) != Some(&self.history[..retain]) {
-            return Err(Error::Context);
-        }
+        let rows = check_child(&scratch, self.pin)?;
         if self.first {
             if !scratch.install_initial_replay_queue(&self.epoch) {
                 return Err(Error::Context);
@@ -170,33 +144,13 @@ impl SlotChain {
         } else if !scratch.matches_certified_replay_queue(&self.epoch, slot) {
             return Err(Error::Context);
         }
-        let forks = BankForks::new_rw_arc_ephemeral(scratch);
-        let bank = forks.read().unwrap().working_bank();
-        let batch = body
-            .map(|bytes| execute_batch(&bank, slot, bytes))
-            .transpose()?;
-        let count = batch.as_ref().map_or(0, |b| b.transactions.len() as u64);
-        if parent.transaction_count().checked_add(count) != Some(bank.transaction_count())
-            || (count == 0 && bank.signature_count() != 0)
-        {
-            return Err(Error::Context);
-        }
         let last = self.epoch.completed_slot_hash(slot).ok_or(Error::Context)?;
-        // Bank registers a recent hash only on the final tick. Do not use the
-        // new bank hash (which depends on this tick) as the transaction hash.
-        for _ in 0..bank.ticks_per_slot() {
-            bank.register_tick_for_test(&last);
-        }
-        if !bank.is_complete()
-            || !bank.matches_certified_replay_queue(
-                &self.epoch,
-                slot.checked_add(1).ok_or(Error::Context)?,
-            )
+        let (bank, batch) = finish_slot(scratch, last, body)?;
+        if !bank
+            .matches_certified_replay_queue(&self.epoch, slot.checked_add(1).ok_or(Error::Context)?)
         {
             return Err(Error::Context);
         }
-        bank.freeze_and_verify_bank_hash()
-            .map_err(|_| Error::Context)?;
         let (pin, final_history) = observe(&bank)?;
         if final_history != rows {
             return Err(Error::Context);
@@ -204,7 +158,6 @@ impl SlotChain {
         Ok(ReplayedSlot {
             next: Self {
                 pin,
-                history: final_history,
                 epoch: self.epoch,
                 first: false,
             },
@@ -212,4 +165,84 @@ impl SlotChain {
             batch,
         })
     }
+}
+
+fn check_child(scratch: &Bank, expected: BankPin) -> Result<SlotHashes, Error> {
+    let parent = scratch.parent().ok_or(Error::Context)?;
+    let (actual, old) = observe(&parent)?;
+    if actual != expected
+        || expected.slot.checked_add(1) != Some(scratch.slot())
+        || scratch.parent_slot() != expected.slot
+        || scratch.parent_hash().to_bytes() != expected.bank_hash
+        || scratch.freeze_started()
+        || scratch.clock().slot != scratch.slot()
+        || scratch.transaction_count() != parent.transaction_count()
+        || scratch.signature_count() != 0
+        || scratch
+            .accounts()
+            .accounts_db
+            .has_accounts_update_notifier()
+        || scratch.tick_height() != parent.max_tick_height()
+        || !(1..=1024).contains(&scratch.ticks_per_slot())
+        || scratch.tick_height().checked_add(scratch.ticks_per_slot())
+            != Some(scratch.max_tick_height())
+    {
+        return Err(Error::Context);
+    }
+    let (rows, _) = history(scratch)?;
+    if rows.slot_hashes().get(1..) != Some(&old[..old.len().min(MAX_ENTRIES - 1)]) {
+        return Err(Error::Context);
+    }
+    Ok(rows)
+}
+
+fn finish_slot(
+    scratch: Bank,
+    final_tick: Hash,
+    body: Option<&[u8]>,
+) -> Result<(Arc<Bank>, Option<BatchObservation>), Error> {
+    let initial = scratch.transaction_count();
+    let forks = BankForks::new_rw_arc_ephemeral(scratch);
+    let bank = forks.read().unwrap().working_bank();
+    let batch = body
+        .map(|bytes| execute_batch(&bank, bank.slot(), bytes))
+        .transpose()?;
+    let count = batch.as_ref().map_or(0, |b| b.transactions.len() as u64);
+    if initial.checked_add(count) != Some(bank.transaction_count())
+        || (count == 0 && bank.signature_count() != 0)
+    {
+        return Err(Error::Context);
+    }
+    // Only the block-boundary tick registers a hash. Other ticks advance height.
+    for _ in 0..bank.ticks_per_slot() {
+        bank.register_tick_for_test(&final_tick);
+    }
+    if !bank.is_complete() || bank.last_blockhash() != final_tick {
+        return Err(Error::Context);
+    }
+    bank.freeze_and_verify_bank_hash()
+        .map_err(|_| Error::Context)?;
+    Ok((bank, batch))
+}
+
+/// Shadow the existing ER tick history on a private full-bank replica. No epoch
+/// schedule, new transaction hash, vote, or certificate is installed or inferred.
+/// `None` means explicitly observed empty, not missing input.
+pub fn replay_recorded_slot(
+    scratch: Bank,
+    parent: BankPin,
+    expected: BankPin,
+    final_tick: Hash,
+    body: Option<&[u8]>,
+) -> Result<(Arc<Bank>, Option<BatchObservation>), Error> {
+    if expected.slot != scratch.slot() || final_tick == Hash::default() {
+        return Err(Error::Context);
+    }
+    let rows = check_child(&scratch, parent)?;
+    let (bank, batch) = finish_slot(scratch, final_tick, body)?;
+    let (actual, after) = observe(&bank)?;
+    if actual != expected || after != rows {
+        return Err(Error::Context);
+    }
+    Ok((bank, batch))
 }

@@ -1,6 +1,8 @@
 //! Bootstrap a shadow replay from a replica's own rooted L1 view. The reviewed
 //! pins and the L1 node must be independent of the ER proposing transactions.
 //! This module has no vote, proof, submission, or validator activation API.
+pub mod shadow;
+
 use {
     crate::{
         checkpoint_v2::MAX_CHECKPOINT_TRANSITIONS_V2,
